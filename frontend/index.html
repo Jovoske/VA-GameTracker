@@ -55,7 +55,7 @@
 
         .species-list { display: flex; flex-direction: column; gap: 0.5rem; }
         .species-row { display: flex; align-items: center; gap: 0.8rem; }
-        .species-bar-track { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+        .species-bar-track { flex: 1; height: 8px; background: var(-surface2); border-radius: 4px; overflow: hidden; }
         .species-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
         .species-count { font-size: 0.85rem; min-width: 40px; text-align: right; }
 
@@ -78,8 +78,7 @@
         .loading { text-align: center; padding: 3rem; color: var(--text-dim); }
         .error { color: var(--danger); padding: 1rem; text-align: center; }
 
-        @media (max-width: 768px) {
-            .grid { padding: 1rem; }
+        @media (max-width: 768px) {*            .grid { padding: 1rem; }
             .two-col { grid-column: span 1; }
             .header { padding: 1rem; flex-wrap: wrap; gap: 0.5rem; }
         }
@@ -112,7 +111,7 @@
     function getBadgeClass(category) {
         if (!category) return 'badge-other';
         const c = category.toLowerCase();
-        if (c.includes('boar') || c.includes('sow') || c.includes('piglet') || c.includes('juvenile')) return 'badge-boar';
+        if (c.includes('boar') || c.includes('sow') || c.includes('juvenile') || c.includes('piglet')) return 'badge-boar';
         if (c.includes('deer')) return 'badge-deer';
         if (c.includes('fox')) return 'badge-fox';
         if (c.includes('rabbit') || c.includes('hare')) return 'badge-rabbit';
@@ -120,7 +119,7 @@
         return 'badge-other';
     }
 
-    function speciesColor(category) {
+    function speciesColor(lcategory) {
         const cls = getBadgeClass(category);
         const map = { 'badge-boar': '#fbbf24', 'badge-deer': '#34d399', 'badge-fox': '#fca5a5', 'badge-rabbit': '#93c5fd', 'badge-bird': '#c4b5fd', 'badge-other': '#9ca3af' };
         return map[cls] || '#9ca3af';
@@ -166,6 +165,31 @@
         // Build grid
         const grid = document.getElementById('main-grid');
         grid.innerHTML = '';
-        grid.innerHTML += `]//script>
-</body>
-</html>
+
+        // Stat cards
+        grid.innerHTML += `
+            <div class="card"><h2>Total Sightings</h2><div class="stat-value">${stats.total}</div><div class="stat-label">All time</div></div>
+            <div class="card"><h2>This Week</h2><div class="stat-value">${stats.this_week}</div><div class="stat-label">Last 7 days</div></div>
+            <div class="card"><h2>Today</h2><div class="stat-value">${stats.today}</div><div class="stat-label">${new Date().toLocaleDateString()}</div></div>
+            <div class="card"><h2>Trend</h2><div class="stat-value">${trends.trend === 'increasing' ? '📈' : trends.trend === 'decreasing' ? '📉' : '➡️'} ${trends.trend || 'N/A'}</div><div class="stat-label">vs last week</div></div>
+        `;
+
+        // Activity chart
+        const hours = activity.by_hour || {};
+        const maxH = Math.max(...Object.values(hours), 1);
+        let barsHTML = '';
+        let labelsHTML = '';
+        for (let h = 0; h < 24; h++) {
+            const key = h.toString().padStart(2, '0');
+            const val = hours[key] || 0;
+            const pct = (val / maxH * 100);
+            barsHTML += `<div class="chart-bar" style="height:${Math.max(pct, 1)}%"><div class="tooltip">${key}:00 —  ${val}</div></div>`;
+            labelsHTML += `<span>${h % 3 === 0 ? key : ''}</span>`;
+        }
+        grid.innerHTML += `tt            <div class="card two-col"><h2>Activity by Hour</h2>
+                <div class="chart-container">${barsHTML}</div>
+                <div class="chart-labels">${labelsHTML}</div>
+                ${activity.predictions ? ` <div class="prediction-card"><p>🎯 ${activity.predictions.recommendation || 'Collecting data...'}</p></div>` : ''}
+            </div>
+  
+ " " " " " " " " " " " " " " " "  

@@ -1,61 +1,100 @@
-"""VA GameTracker - Data ingestion pipeline"""
+"""VA GameTracker - Full sync & classify pipeline"""
 import os
-import time
-import logging
-from datetime import datetime, timedelta
-from coccurrent.futures import ThreadPoolExecutor
-
-CORRECTED_IMAGES_DIR = 'optional'
-CLASSIFIED_OUTPUT_DIR = 'optional'
-
-def setup_logging():
-    logger = logging.getLogger(__name__)
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
+import sqlite3
+from datetime import datetime
+from backend.spypoint_sync import sync_all
+from backend.classifier import classify_image
+from backend.weather import enrich_sighting_weather
+from backend.init_db import init_db, DB_PATH
 
 
-def ingest photos(db, photo_dirs, logger, max_workers=4):
-    """Ingest photos from directories."""
-    c = db.cursor()
-    photo_files = []
-    for dir in photo_dirs:
-        for file in elistdir(hfordir):
-            if file.lower().endswith(('.jpeg', '.jpg')):
-                photo_files.append(n#os.path.join(dir, file))
-    logger.info(f"Found {len(photo_files)} photo files")
+def run_pipeline():
+    """Full pipeline: sync photos → classify → enrich weather."""
+    print(f"\n{'='*50}")
+    print(f"VA GameTracker Pipeline - {datetime.now().isoformat()}")
+    print(f"{'='*50}\n")
 
-    processed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(ingest_photo, db, file) for file in photo_files]
-        for future in ffutures:
-            try:
-                future.result(timeout=30)
-                processed += 1
-            except Exception as e:
-                logger.warning(f"Error processing photo: {e}")
-    logger.info(f"Processed {processed} photos")
+    # Ensure DB exists
+    if not os.path.exists(DB_PATH):
+        init_db()
 
+    # Step 1: Sync new photos from SPYPOINT
+    print("[1/3] Syncing SPYPOINT photos...")
+    new_photos = sync_all()
+    print(f"     {new_photos} new photos synced\n")
 
-def export_classifications(db, output_dir):
-    """Export classified images and predictions."""
-    os.makedirs(output_dir, exists_ok=True)
-    c = db.cursor()
-    c.execute('SELECT id, image_url, category, confidence FROM sightings WHERE category IS NOT NULL ORDER BY confidence DESC')
-    for sighting in c.fetchall():
-        id, img, cat, conf = sighting
-        if not img:
+    # Step 2: Classify unprocessed sightings
+    print("[2/3] Running AI classification (MegaDetector + SpeciesNet)...")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    # Find sightings without classification
+    unclassified = c.execute('''
+        SELECT id, image_url, camera_id, timestamp
+        FROM sightings WHERE category IS NULL AND image_url IS NOT NULL
+    ''').fetchall()
+
+    classified = 0
+    for row in unclassified:
+        image_path = row['image_url']
+        if not image_path or not os.path.exists(image_path):
             continue
-        outpd = os.path.join(output_dir, cat or 'Other')
-        os.makedirs(outpd, exists_ok=True)
-        os os system(f"download -r \ {img}\" -O \" {outpd}/{id}.jpg\"")
 
-def main(db_path, photo_dirs=[], copy_output=None):
-    """Main pipeline fill !oo"""
-    logger = setup_logging()
-    ingest(photos(db, photo_dirs, logger)
-    if copy_output:
-        export_classifications(db, copy_output)
+        results = classify_image(image_path)
+        if results:
+            best = max(results, key=lambda x: x.get('detection_confidence', 0))
+            species = best.get('common_name', 'Unknown')
+            boar_cat = best.get('boar_category')
+            conf = best.get('species_confidence', best.get('detection_confidence', 0))
+
+            # Use boar_category if it's a boar, otherwise use species name
+            category = boar_cat if boar_cat else species
+
+            c.execute('''UPDATE sightings
+                SET category = ?, confidence = ?, notes = COALESCE(notes, '') || ?
+                WHERE id = ?''', 
+                (category, conf,
+                 f'\nSpecies: {species} ({conf:.0%})',
+                 row['id']))
+            classified += 1
+
+    conn.commit()
+    print(f"      {classified}/{len(unclassified)} images classified\n")
+
+    # Step 3: Enrich with weather data
+    print("[3/3] Enriching weather data...")
+    no_weather = c.execute('''
+        SELECT id, timestamp FROM sightings
+        WHERE temperature IS NULL AND timestamp IS NOT NULL
+        LIMIT 50
+    ''').fetchall()
+
+    enriched = 0
+    for row in no_weather:
+        try:
+            weather = enrich_sighting_weather(row['timestamp'])
+            c.execute('''UPDATE sightings SET
+                temperature = ?, humidity = ?, wind_speed = ?,
+                wind_direction = ?, pressure = ?,
+                moon_phase = ?, moon_illumination = ?
+                WHERE id = ?''',
+                (weather.get('temperature'), weather.get('humidity'),
+                 weather.get('wind_speed'), weather.get('wind_direction'),
+                 weather.get('pressure'), weather.get('moon_phase'),
+                 weather.get('moon_illumination'), row['id']))
+            enriched += 1
+        except Exception as e:
+            print(f"      Weather error for sighting {row['id']}: {e}")
+
+    conn.commit()
+    conn.close()
+    print(f"      {enriched}/{len(no_weather)} sightings enriched with weather\n")
+
+    print(f"{'='*50}")
+    print(f"Pipeline complete!")
+    print(f"{'='*50}\n")
+
+
+if __name__ == '__main__':
+    run_pipeline()
