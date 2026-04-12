@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VA GameTracker</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐗</text></svg>">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg: #0f1419; --surface: #1a2332; --surface2: #243042;
+            --accent: #4ade80; --accent2: #22d3ee; --warn: #f59e0b;
+            --danger: #ef4444; --text: #e2e8f0; --text-dim: #94a3b8;
+            --border: #2d3f54;
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 1.4rem; font-weight: 700; }
+        .header h1 span { color: var(--accent); }
+        .header-right { display: flex; gap: 1rem; align-items: center; }
+        .weather-badge { background: var(--surface2); padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; display: flex; gap: 0.5rem; align-items: center; }
+        .sync-btn { background: var(--accent); color: #000; border: none; padding: 0.5rem 1rem; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
+        .sync-btn:hover { opacity: 0.9; } .sync-btn:disabled { opacity: 0.5; }
+
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; padding: 1.5rem 2rem; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; }
+        .card h2 { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .stat-value { font-size: 2rem; font-weight: 700; }
+        .stat-label { font-size: 0.8rem; color: var(--text-dim); }
+        .stat-row { display: flex; justify-content: space-between; padding: 0.3rem 0; }
+
+        .full-width { grid-column: 1 / -1; }
+        .two-col { grid-column: span 2; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th { text-align: left; color: var(--text-dim); padding: 0.5rem; border-bottom: 1px solid var(--border); font-weight: 500; }
+        td { padding: 0.5rem; border-bottom: 1px solid var(--border); }
+        tr:hover { background: var(--surface2); }
+
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+        .badge-boar { background: #854d0e40; color: #fbbf24; }
+        .badge-deer { background: #065f4640; color: #34d399; }
+        .badge-fox { background: #9a342340; color: #fca5a5; }
+        .badge-rabbit { background: #1e3a5f40; color: #93c5fd; }
+        .badge-bird { background: #312e8140; color: #c4b5fd; }
+        .badge-other { background: #374151; color: #9ca3af; }
+
+        .chart-container { height: 200px; display: flex; align-items: flex-end; gap: 2px; padding-top: 1rem; }
+        .chart-bar { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; transition: height 0.3s; position: relative; }
+        .chart-bar:hover { opacity: 0.8; }
+        .chart-bar .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #000; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; white-space: nowrap; }
+        .chart-bar:hover .tooltip { display: block; }
+        .chart-labels { display: flex; gap: 2px; font-size: 0.65rem; color: var(--text-dim); }
+        .chart-labels span { flex: 1; text-align: center; }
+
+        .species-list { display: flex; flex-direction: column; gap: 0.5rem; }
+        .species-row { display: flex; align-items: center; gap: 0.8rem; }
+        .species-bar-track { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+        .species-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+        .species-count { font-size: 0.85rem; min-width: 40px; text-align: right; }
+
+        .camera-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.8rem; }
+        .camera-card { background: var(--surface2); border-radius: 8px; padding: 1rem; }
+        .camera-name { font-weight: 600; margin-bottom: 0.3rem; }
+        .camera-desc { font-size: 0.8rem; color: var(--text-dim); }
+        .camera-stat { font-size: 0.8rem; margin-top: 0.5rem; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 0.3rem; }
+        .dot-active { background: var(--accent); }
+        .dot-stale { background: var(--warn); }
+
+        .moon-display { text-align: center; padding: 0.5rem; }
+        .moon-icon { font-size: 2.5rem; }
+        .moon-label { font-size: 0.85rem; color: var(--text-dim); margin-top: 0.3rem; }
+
+        .prediction-card { background: var(--surface2); border-radius: 8px; padding: 1rem; margin-top: 0.5rem; }
+        .prediction-card p { font-size: 0.85rem; line-height: 1.5; }
+
+        .loading { text-align: center; padding: 3rem; color: var(--text-dim); }
+        .error { color: var(--danger); padding: 1rem; text-align: center; }
+
+        @media (max-width: 768px) {
+            .grid { padding: 1rem; }
+            .two-col { grid-column: span 1; }
+            .header { padding: 1rem; flex-wrap: wrap; gap: 0.5rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🐗 <span>VA</span> GameTracker</h1>
+        <div class="header-right">
+            <div class="weather-badge" id="weather-badge">Loading...</div>
+            <div class="weather-badge" id="moon-badge">🌙</div>
+            <button class="sync-btn" id="sync-btn" onclick="triggerSync()">Sync Cameras</button>
+        </div>
+    </div>
+
+    <div class="grid" id="main-grid">
+        <div class="loading">Loading dashboard...</div>
+    </div>
+
+    <script>
+    const API = window.location.origin + '/api';
+    let dashboardData = null;
+
+    async function fetchJSON(url) {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+    }
+
+    function getBadgeClass(category) {
+        if (!category) return 'badge-other';
+        const c = category.toLowerCase();
+        if (c.includes('boar') || c.includes('sow') || c.includes('piglet') || c.includes('juvenile')) return 'badge-boar';
+        if (c.includes('deer')) return 'badge-deer';
+        if (c.includes('fox')) return 'badge-fox';
+        if (c.includes('rabbit') || c.includes('hare')) return 'badge-rabbit';
+        if (c.includes('eagle') || c.includes('buzzard') || c.includes('bird')) return 'badge-bird';
+        return 'badge-other';
+    }
+
+    function speciesColor(category) {
+        const cls = getBadgeClass(category);
+        const map = { 'badge-boar': '#fbbf24', 'badge-deer': '#34d399', 'badge-fox': '#fca5a5', 'badge-rabbit': '#93c5fd', 'badge-bird': '#c4b5fd', 'badge-other': '#9ca3af' };
+        return map[cls] || '#9ca3af';
+    }
+
+    function timeAgo(ts) {
+        if (!ts) return 'Never';
+        const diff = (Date.now() - new Date(ts).getTime()) / 1000;
+        if (diff < 60) return 'Just now';
+        if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+        if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+        return `${Math.floor(diff/86400)}d ago`;
+    }
+
+    async function loadDashboard() {
+        try {
+            const [dashboard, activity, trends] = await Promise.all([
+                fetchJSON(`${API}/dashboard`),
+                fetchJSON(`${API}/analytics/activity`),
+                fetchJSON(`${API}/analytics/trends`)
+            ]);
+            dashboardData = dashboard;
+            renderDashboard(dashboard, activity, trends);
+        } catch (e) {
+            document.getElementById('main-grid').innerHTML = `<div class="error">Error loading dashboard: ${e.message}<br>API may be starting up. <button onclick="loadDashboard()" class="sync-btn" style="margin-top:1rem">Retry</button></div>`;
+        }
+    }
+
+    function renderDashboard(data, activity, trends) {
+        const { stats, recent_sightings, cameras, species_breakdown, weather } = data;
+
+        // Weather badge
+        if (weather && weather.temperature !== null) {
+            document.getElementById('weather-badge').innerHTML =
+                `🌡️ ${weather.temperature}°C &nbsp; 💨 ${weather.wind_speed || '?'} km/h ${weather.wind_direction || ''} &nbsp; 💧 ${weather.humidity || '?'}%`;
+        }
+        if (weather && weather.moon_phase) {
+            const moonIcons = { 'New Moon': '🌑', 'Waxing Crescent': '🌒', 'First Quarter': '🌓', 'Waxing Gibbous': '🌔', 'Full Moon': '🌕', 'Waning Gibbous': '🌖', 'Last Quarter': '🌗', 'Waning Crescent': '🌘' };
+            document.getElementById('moon-badge').innerHTML =
+                `${moonIcons[weather.moon_phase] || '🌙'} ${weather.moon_phase} (${weather.moon_illumination}%)`;
+        }
+
+        // Build grid
+        const grid = document.getElementById('main-grid');
+        grid.innerHTML = '';
+
+        // Stat cards
+        grid.innerHTML += `
+            <div class="card"><h2>Total Sightings</h2><div class="stat-value">${stats.total}</div><div class="stat-label">All time</div></div>
+            <div class="card"><h2>This Week</h2><div class="stat-value">${stats.this_week}</div><div class="stat-label">Last 7 days</div></div>
+            <div class="card"><h2>Today</h2><div class="stat-value">${stats.today}</div><div class="stat-label">${new Date().toLocaleDateString()}</div></div>
+            <div class="card"><h2>Trend</h2><div class="stat-value">${trends.trend === 'increasing' ? '📈' : trends.trend === 'decreasing' ? '📉' : '➡️'} ${trends.trend || 'N/A'}</div><div class="stat-label">vs last week</div></div>
+        `;
+
+        // Activity chart
+        const hours = activity.by_hour || {};
+        const maxH = Math.max(...Object.values(hours), 1);
+        let barsHTML = '';
+        let labelsHTML = '';
+        for (let h = 0; h < 24; h++) {
+            const key = h.toString().padStart(2, '0');
+            const val = hours[key] || 0;
+            const pct = (val / maxH * 100);
+            barsHTML += `<div class="chart-bar" style="height:${Math.max(pct, 1)}%"><div class="tooltip">${key}:00 $– ${val}</div></div>`;
+            labelsHTML += `<span>${h % 3 === 0 ? key : ''}</span>`;
+        }
+        grid.innerHTML += `
+            <div class="card two-col"><h2>Activity by Hour</h2>
+                <div class="chart-container">${barsHTML}</div>
+                <div class="chart-labels">${labelsHTML}</div>
+                ${activity.predictions ? `<div class="prediction-card"><p>🎯 ${activity.predictions.recommendation || 'Collecting data...'}</p></div>` : ''}
+            </div>
+        `;
+
+        // Species breakdown
+        const maxSpecies = Math.max(...species_breakdown.map(s => s.count), 1);
+        let speciesHTML = species_breakIdown.map(s => `
+            <div class="species-row">
+                <span class="badge ${getBadgeClass(s.category)}" style="min-width:90px;text-align:center">${s.category}</span>
+                <div class="species-bar-track"><div class="species-bar-fill" style="width:${s.count/maxSpecies*100}%;background:${speciesColor(s.category)}"></div></div>
+                <span class="species-count">${s.count}</span>
+            </div>
+        `).join('');
+        grid.innerHTML += `<div class="card"><h2>Species Detected</h2><div class="species-list">${speciesHTML || '<div class="stat-label">No data yet</div>'}</div></div>`;
+
+        // Cameras
+        let camsHTML = cameras.map(c => `
+            <div class="camera-card">
+                <div class="camera-name"><span class="dot ${c.last_sighting && (Date.now() - new Date(c.last_sighting).getTime()) < 864000000 ? 'dot-active' : 'dot-stale'}"></span>${c.name}</div>
+                <div class="camera-desc">${c.description || ''}</div>
+                <div class="camera-stat">${c.sighting_count || 0} sightings • ${timeAgo(c.last_sighting)}</div>
+            </div>
+        `).join('');
+        grid.innerHTML += `
+        <div class="card full-width"><h2>Cameras — Piedras Lisas, Alatoz</h2><div class="camera-grid">${camsHTML}</div></div>`;
+
+        // Recent sightings table
+        let rowsHTML = recent_sightings.slice(0, 15).map(s => `
+            <tr>
+                <td>${s.camera_name || s.camera_id}</td>
+                <td><span class="badge ${getBadgeClass(s.category)}">${s.category || 'Unclassified'}</span></td>
+                <td>${s.confidence ? (s.confidence * 100).toFixed(0) + '%' : '—'}</td>
+                <td>${s.temperature ? s.temperature + '°C' : '—'}</td>
+                <td>${s.moon_phase || '—'}</td>
+                <td>${timeAgo(s.timestamp)}</td>
+            </tr>
+        `).join('');
+        grid.innerHTML += `
+            <div class="card full-width"><h2>Recent Sightings</h2>
+                <table>
+                    <thead><tr><th>Camera</th><th>Species</th><th>Conf.</th><th>Temp</th><th>Moon</th><th>When</th></tr></thead>
+                    <tbody>${rowsHTML || '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">No sightings yet. Sync your cameras!</td></tr>'}</tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    async function triggerSync() {
+        const btn = document.getElementById('sync-btn');
+        btn.disabled = true;
+        btn.textContent = 'Syncing...';
+        try {
+            await fetchJSON(`${API}/sync`);
+            await loadDashboard();
+        } catch (e) {
+            alert('Sync error: ' + e.message);
+        }
+        btn.disabled = false;
+        btn.textContent = 'Sync Cameras';
+    }
+
+    // Load on start, refresh every 5 minutes
+    loadDashboard();
+    setInterval(loadDashboard, 300000);
+    </script>
+</body>
+</html>

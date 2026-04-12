@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: va-gametracker
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: SPYPOINT_USERNAME
+        sync: false
+      - key: SPYPOINT_PASSWORD
+        sync: false
