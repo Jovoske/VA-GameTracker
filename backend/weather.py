@@ -29,6 +29,10 @@ def get_moon_phase(date=None):
     if isinstance(date, str):
         date = datetime.fromisoformat(date.replace('Z', '+00:00'))
 
+    # Strip timezone info to avoid naive/aware mismatch
+    if date.tzinfo is not None:
+        date = date.replace(tzinfo=None)
+
     # Synodic month calculation
     ref = datetime(2000, 1, 6, 18, 14)  # Known new moon
     diff = (date - ref).total_seconds()
@@ -106,8 +110,20 @@ def get_historical_weather(lat=DEFAULT_LAT, lon=DEFAULT_LON, date_str=None):
 
 def enrich_sighting_weather(timestamp, lat=DEFAULT_LAT, lon=DEFAULT_LON):
     """Get weather data for a specific sighting timestamp."""
+    if isinstance(timestamp, str):
+        try:
+            ts = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        except ValueError:
+            ts = datetime.now()
+    else:
+        ts = timestamp
+
+    # Strip timezone for consistent handling
+    if ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+
     weather = get_current_weather(lat, lon)
-    moon = get_moon_phase(datetime.fromisoformat(timestamp) if isinstance(timestamp, str) else timestamp)
+    moon = get_moon_phase(ts)
     weather['moon_phase'] = moon['phase']
     weather['moon_illumination'] = moon['illumination']
     return weather

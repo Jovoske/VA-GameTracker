@@ -112,10 +112,28 @@ def download_photo(url, photo_id):
         return None
 
 
+def ensure_camera_exists(db_conn, camera_id, camera_name):
+    """Auto-create camera entry if it doesn't exist."""
+    c = db_conn.cursor()
+    c.execute('SELECT id FROM cameras WHERE id = ?', (camera_id,))
+    if not c.fetchone():
+        c.execute('INSERT OR IGNORE INTO cameras (id, name, description, active) VALUES (?, ?, ?, 1)',
+                  (camera_id, camera_name, f'SPYPOINT camera {camera_name}'))
+        db_conn.commit()
+        print(f"  Auto-created camera entry: {camera_name} ({camera_id})")
+
+
 def sync_camera(token, camera_info, db_conn):
     """Sync photos from a single camera."""
     camera_id = camera_info.get('id') or camera_info.get('_id', '')
-    camera_name = camera_info.get('name', camera_id)
+    # Try to get human-readable name from config or top-level name
+    config = camera_info.get('config', {})
+    camera_name = config.get('name') or camera_info.get('name', camera_id)
+    print(f"  Camera info keys: {list(camera_info.keys())}")
+    print(f"  Camera name resolved: {camera_name} (id: {camera_id})")
+
+    # Ensure this camera exists in our DB
+    ensure_camera_exists(db_conn, camera_id, camera_name)
 
     print(f"Syncing camera: {camera_name} ({camera_id})")
     photos = get_photos(token, camera_id)
@@ -136,13 +154,11 @@ def sync_camera(token, camera_info, db_conn):
         # Extract timestamp
         ts = photo.get('date') or photo.get('createdAt', datetime.now().isoformat())
 
-        # Map SPYPOINT camera name to our camera IDs
-        mapped_camera = map_camera_name(camera_name)
-
+        # Store with Spypoint camera ID directly
         c.execute('''INSERT INTO sightings
             (camera_id, timestamp, image_url, spypoint_photo_id, notes)
             VALUES (?, ?, ?, ?, ?)''',
-            (mapped_camera, ts, local_path or url, pid,
+            (camera_id, ts, local_path or url, pid,
              f"Auto-synced from SPYPOINT {camera_name}"))
 
         synced += 1
