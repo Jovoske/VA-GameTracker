@@ -242,7 +242,7 @@
         btn.disabled = true;
         btn.textContent = 'Syncing...';
         try {
-            await fetchJSON(`${API}/sync`);
+            await fetch(`${API}/sync`, { method: 'POST' }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
             await loadDashboard();
         } catch (e) {
             alert('Sync error: ' + e.message);
