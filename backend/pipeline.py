@@ -3,7 +3,7 @@ import os
 import sqlite3
 from datetime import datetime
 from backend.spypoint_sync import sync_all
-from backend.classifier import classify_image
+from backend.classifier import classify_from_url, classify_from_spypoint_tags
 from backend.weather import enrich_sighting_weather
 from backend.init_db import init_db, DB_PATH
 
@@ -23,8 +23,8 @@ def run_pipeline():
     new_photos = sync_all()
     print(f"      {new_photos} new photos synced\n")
 
-    # Step 2: Classify unprocessed sightings
-    print("[2/3] Running AI classification (MegaDetector + SpeciesNet)...")
+    # Step 2: Classify unprocessed sightings using iNaturalist API
+    print("[2/3] Classifying species (iNaturalist Vision API)...")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -33,31 +33,31 @@ def run_pipeline():
     unclassified = c.execute('''
         SELECT id, image_url, camera_id, timestamp
         FROM sightings WHERE category IS NULL AND image_url IS NOT NULL
+        LIMIT 50
     ''').fetchall()
 
     classified = 0
     for row in unclassified:
-        image_path = row['image_url']
-        if not image_path or not os.path.exists(image_path):
-            continue
+        image_url = row['image_url']
 
-        results = classify_image(image_path)
-        if results:
-            best = max(results, key=lambda x: x.get('detection_confidence', 0))
-            species = best.get('common_name', 'Unknown')
-            boar_cat = best.get('boar_category')
-            conf = best.get('species_confidence', best.get('detection_confidence', 0))
+        # Try iNaturalist API if we have a CDN URL
+        species = 'Unknown'
+        confidence = 0.0
 
-            # Use boar_category if it's a boar, otherwise use species name
-            category = boar_cat if boar_cat else species
+        if image_url and image_url.startswith('http'):
+            species, confidence = classify_from_url(image_url)
+            if species != 'Unknown':
+                print(f"      #{row['id']}: {species} ({confidence:.0%})")
 
-            c.execute('''UPDATE sightings
-                SET category = ?, confidence = ?, notes = COALESCE(notes, '') || ?
-                WHERE id = ?''',
-                (category, conf,
-                 f'\nSpecies: {species} ({conf:.0%})',
-                 row['id']))
-            classified += 1
+        if species == 'Unknown':
+            # No classification available
+            confidence = 0.0
+
+        c.execute('''UPDATE sightings
+            SET category = ?, confidence = ?
+            WHERE id = ?''',
+            (species, confidence, row['id']))
+        classified += 1
 
     conn.commit()
     print(f"      {classified}/{len(unclassified)} images classified\n")

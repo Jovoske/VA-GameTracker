@@ -1,268 +1,128 @@
 """
-VA GameTracker - AI animal detection & species classification
+VA GameTracker - Species classification using iNaturalist Vision API
 
-Pipeline:
-  1. MegaDetector v5 — detects animals/people/vehicles in camera trap images
-  2. SpeciesNet (Google) — classifies detected animals to species level
-  3. Boar size heuristics — categorizes wild boar by size (Big Boar/Sow/Juvenile/Piglet)
+Uses iNaturalist's free computer vision API to identify species from
+camera trap photos. Lightweight — no local ML models needed.
+Filters results to mammals found in Spain.
 """
-import os
-import json
-from datetime import datetime
+import requests
 
-# ---------- lazy imports (heavy ML libs) ----------
-_md_model = None
-_species_model = None
+# Mammals found in Spain (common name → scientific name)
+SPANISH_MAMMALS = {
+    'Wild Boar': 'Sus scrofa',
+    'Red Deer': 'Cervus elaphus',
+    'Roe Deer': 'Capreolus capreolus',
+    'Fallow Deer': 'Dama dama',
+    'Red Fox': 'Vulpes vulpes',
+    'European Rabbit': 'Oryctolagus cuniculus',
+    'European Hare': 'Lepus europaeus',
+    'Iberian Hare': 'Lepus granatensis',
+    'European Badger': 'Meles meles',
+    'Wildcat': 'Felis silvestris',
+    'Common Genet': 'Genetta genetta',
+    'Mouflon': 'Ovis aries musimon',
+    'Iberian Ibex': 'Capra pyrenaica',
+    'Iberian Lynx': 'Lynx pardinus',
+    'Iberian Wolf': 'Canis lupus signatus',
+    'Brown Bear': 'Ursus arctos',
+    'European Otter': 'Lutra lutra',
+    'Pine Marten': 'Martes martes',
+    'Beech Marten': 'Martes foina',
+    'Least Weasel': 'Mustela nivalis',
+    'European Polecat': 'Mustela putorius',
+    'Egyptian Mongoose': 'Herpestes ichneumon',
+    'European Hedgehog': 'Erinaceus europaeus',
+    'Garden Dormouse': 'Eliomys quercinus',
+    'Red Squirrel': 'Sciurus vulgaris',
+}
+
+# Reverse lookup: scientific name → common name
+SCIENTIFIC_TO_COMMON = {}
+for common, sci in SPANISH_MAMMALS.items():
+    SCIENTIFIC_TO_COMMON[sci.lower()] = common
+    # Also map genus level
+    genus = sci.split()[0].lower()
+    if genus not in SCIENTIFIC_TO_COMMON:
+        SCIENTIFIC_TO_COMMON[genus] = common
+
+# Species we track as priority
+PRIORITY_SPECIES = {v: k for k, v in SPANISH_MAMMALS.items()}
 
 BOAR_CATEGORIES = ['Big Boar', 'Sow', 'Juvenile', 'Piglet']
 
-# Species we care about most on the Piedras Lisas estate
-PRIORITY_SPECIES = {
-    'sus_scrofa': 'Wild Boar',
-    'cervus_elaphus': 'Red Deer',
-    'capreolus_capreolus': 'Roe Deer',
-    'vulpes_vulpes': 'Red Fox',
-    'oryctolagus_cuniculus': 'European Rabbit',
-    'meles_meles': 'European Badger',
-    'felis_silvestris': 'Wildcat',
-    'genetta_genetta': 'Common Genet',
-    'lepus_europaeus': 'European Hare',
-    'aquila_chrysaetos': 'Golden Eagle',
-    'buteo_buteo': 'Common Buzzard',
-}
 
-
-# ──────────────────────────────────────────────
-#  MegaDetector v5
-# ──────────────────────────────────────────────
-def _load_megadetector():
-    """Load MegaDetector v5 model (downloads weights on first run)."""
-    global _md_model
-    if _md_model is not None:
-        return _md_model
-    try:
-        from PytorchWildlife.models import detection as pw_detection
-        _md_model = pw_detection.MegaDetectorV5()
-        print("[classifier] MegaDetector v5 loaded")
-        return _md_model
-    except ImportError:
-        pass
-
-    # fallback: try megadetector pip package
-    try:
-        from megadetector.detection.run_detector import load_detector
-        _md_model = load_detector('MDV5A')
-        print("[classifier] MegaDetector v5 loaded (megadetector pkg)")
-        return _md_model
-    except Exception as e:
-        print(f"[classifier] MegaDetector not available: {e}")
-        return None
-
-
-def detect_animals_megadetector(image_path, confidence_threshold=0.3):
+def classify_from_url(image_url):
     """
-    Run MegaDetector on a single image.
-    Returns list of detections: {bbox, confidence, category}
-    MegaDetector categories: 1=animal, 2=person, 3=vehicle
+    Classify an image using iNaturalist's computer vision API.
+    Returns: (species_name, confidence) or ('Unknown', 0.0)
     """
-    model = _load_megadetector()
-    if model is None:
-        return []
+    if not image_url or not image_url.startswith('http'):
+        return 'Unknown', 0.0
 
     try:
-        # PytorchWildlife API
-        if hasattr(model, 'single_image_detection'):
-            from PytorchWildlife import utils as pw_utils
-            import torch
-            img = pw_utils.load_image(image_path)
-            results = model.single_image_detection(img, det_conf_thres=confidence_threshold)
+        resp = requests.get(
+            'https://api.inaturalist.org/v1/computervision/score_image',
+            params={'image_url': image_url},
+            timeout=15
+        )
+        if resp.status_code != 200:
+            return 'Unknown', 0.0
 
-            detections = []
-            for i, bbox in enumerate(results.get('detections', {}).get('xyxy', [])):
-                cat_id = int(results['detections']['class'][i])
-                conf = float(results['detections']['confidence'][i])
-                if cat_id == 1:  # animal only
-                    x1, y1, x2, y2 = [float(c) for c in bbox]
-                    detections.append({
-                        'bbox': [x1, y1, x2, y2],
-                        'confidence': conf,
-                        'md_category': 'animal',
-                        'width': x2 - x1,
-                        'height': y2 - y1,
-                        'area': (x2 - x1) * (y2 - y1)
-                    })
-            return detections
+        data = resp.json()
+        results = data.get('results', [])
 
-        # megadetector package fallback
-        from megadetector.detection.run_detector import generate_detections
-        result = generate_detections(model, [image_path], confidence_threshold=confidence_threshold)
-        detections = []
-        if result and len(result) > 0:
-            for det in result[0].get('detections', []):
-                if det['category'] == '1':  # animal
-                    x1, y1, w, h = det['bbox']
-                    detections.append({
-                        'bbox': [x1, y1, x1 + w, y1 + h],
-                        'confidence': det['conf'],
-                        'md_category': 'animal',
-                        'width': w,
-                        'height': h,
-                        'area': w * h
-                    })
-        return detections
+        for result in results:
+            taxon = result.get('taxon', {})
+            score = result.get('combined_score', 0)
+            sci_name = (taxon.get('name', '') or '').lower()
+            ancestors = taxon.get('ancestor_ids', [])
+            iconic = taxon.get('iconic_taxon_name', '')
+
+            # Only consider mammals (iconic_taxon_name or class Mammalia id=40151)
+            if iconic != 'Mammalia' and 40151 not in ancestors:
+                continue
+
+            # Check if it matches a Spanish mammal
+            for key, common in SCIENTIFIC_TO_COMMON.items():
+                if key in sci_name or sci_name.startswith(key):
+                    return common, score / 100.0
+
+            # If it's a mammal but not in our list, use the common name
+            common_name = taxon.get('preferred_common_name') or taxon.get('name', 'Unknown Mammal')
+            if score > 20:
+                return common_name, score / 100.0
+
+        return 'Unknown', 0.0
 
     except Exception as e:
-        print(f"[classifier] MegaDetector error: {e}")
-        return []
+        print(f"[classifier] iNaturalist API error: {e}")
+        return 'Unknown', 0.0
 
 
-# ──────────────────────────────────────────────
-#  SpeciesNet (Google camera trap AI)
-# ──────────────────────────────────────────────
-def _load_speciesnet():
-    """Load Google SpeciesNet model."""
-    global _species_model
-    if _species_model is not None:
-        return _species_model
-    try:
-        from speciesnet import SpeciesNet
-        _species_model = SpeciesNet()
-        print("[classifier] SpeciesNet loaded")
-        return _species_model
-    except ImportError:
-        print("[classifier] SpeciesNet not installed (pip install speciesnet)")
-        return None
-    except Exception as e:
-        print(f"[classifier] SpeciesNet load error: {e}")
-        return None
+def classify_from_spypoint_tags(photo_data):
+    """Extract species from Spypoint photo tags as fallback."""
+    tags = photo_data.get('tags', [])
+    tag = photo_data.get('tag')
+    if isinstance(tag, str) and tag:
+        tags = [tag] + (tags if isinstance(tags, list) else [])
+    if isinstance(tags, str):
+        tags = [tags]
+
+    tag_map = {
+        'wild-boar': 'Wild Boar', 'boar': 'Wild Boar',
+        'deer': 'Red Deer', 'red-deer': 'Red Deer',
+        'roe-deer': 'Roe Deer', 'fox': 'Red Fox',
+        'rabbit': 'European Rabbit', 'hare': 'European Hare',
+        'badger': 'European Badger', 'cat': 'Wildcat',
+    }
+    for t in tags:
+        t_lower = t.lower().strip()
+        if t_lower in tag_map:
+            return tag_map[t_lower]
+    return None
 
 
-def classify_species(image_path, detections=None):
-    """
-    Classify species using SpeciesNet.
-    If detections are provided (from MegaDetector), crops are used.
-    Returns list of {species, common_name, confidence}
-    """
-    model = _load_speciesnet()
-    if model is None:
-        return []
-
-    try:
-        # SpeciesNet expects MegaDetector-format input
-        if detections:
-            md_output = {
-                'images': [{
-                    'file': image_path,
-                    'detections': [{
-                        'category': '1',
-                        'conf': d['confidence'],
-                        'bbox': [d['bbox'][0], d['bbox'][1],
-                                 d['bbox'][2] - d['bbox'][0],
-                                 d['bbox'][3] - d['bbox'][1]]
-                    } for d in detections]
-                }]
-            }
-            results = model.predict(md_output)
-        else:
-            results = model.predict([image_path])
-
-        species_results = []
-        if results and 'predictions' in results:
-            for pred in results['predictions']:
-                species_key = pred.get('species', 'unknown')
-                common = PRIORITY_SPECIES.get(species_key, species_key.replace('_', ' ').title())
-                species_results.append({
-                    'species': species_key,
-                    'common_name': common,
-                    'confidence': pred.get('confidence', 0.0)
-                })
-        return species_results
-
-    except Exception as e:
-        print(f"[classifier] SpeciesNet error: {e}")
-        return []
-
-
-# ──────────────────────────────────────────────
-#  Boar size classification (heuristic)
-# ──────────────────────────────────────────────
-def classify_boar_size(detections, image_width=1920, image_height=1080):
-    """Classify wild boar detections by size into Big Boar/Sow/Juvenile/Piglet."""
-    results = []
-    total_area = image_width * image_height
-
-    for det in detections:
-        relative_area = det['area'] / max(total_area, 1)
-        aspect = det['width'] / max(det['height'], 1)
-
-        if relative_area > 0.15:
-            category = 'Big Boar'
-            conf = min(0.85, det['confidence'])
-        elif relative_area > 0.08:
-            category = 'Sow' if aspect > 1.3 else 'Big Boar'
-            conf = min(0.75, det['confidence'])
-        elif relative_area > 0.03:
-            category = 'Juvenile'
-            conf = min(0.70, det['confidence'])
-        else:
-            category = 'Piglet'
-            conf = min(0.65, det['confidence'])
-
-        results.append({
-            'boar_category': category,
-            'boar_confidence': conf,
-            'bbox': det['bbox']
-        })
-    return results
-
-
-# ──────────────────────────────────────────────
-#  Full pipeline
-# ──────────────────────────────────────────────
 def classify_image(image_path):
-    """
-    Full classification pipeline for a single camera trap image.
-    1. MegaDetector → find animals
-    2. SpeciesNet → identify species
-    3. If wild boar → size category
-    Returns list of animal results.
-    """
-    if not os.path.exists(image_path):
-        return []
-
-    # Step 1: Detect animals
-    detections = detect_animals_megadetector(image_path)
-
-    if not detections:
-        # No ML models available or no animals found
-        return [{'species': 'unknown', 'common_name': 'Unknown',
-                 'confidence': 0.0, 'boar_category': None, 'bbox': None}]
-
-    # Step 2: Classify species
-    species = classify_species(image_path, detections)
-
-    # Step 3: Merge detection + species + boar sizing
-    results = []
-    boar_sizes = classify_boar_size(detections)
-
-    for i, det in enumerate(detections):
-        sp = species[i] if i < len(species) else {'species': 'unknown', 'common_name': 'Unknown', 'confidence': 0.0}
-        bs = boar_sizes[i] if i < len(boar_sizes) else {'boar_category': None, 'boar_confidence': 0.0}
-
-        is_boar = sp.get('species', '') in ('sus_scrofa', 'unknown')
-        results.append({
-            'species': sp.get('species', 'unknown'),
-            'common_name': sp.get('common_name', 'Unknown'),
-            'species_confidence': sp.get('confidence', 0.0),
-            'detection_confidence': det['confidence'],
-            'boar_category': bs['boar_category'] if is_boar else None,
-            'boar_confidence': bs.get('boar_confidence', 0.0) if is_boar else None,
-            'bbox': det['bbox']
-        })
-
-    return results
-
-
-def classify_batch(image_paths):
-    """Classify a batch of images."""
-    return {path: classify_image(path) for path in image_paths}
+    """Fallback for local images (no ML models available)."""
+    return [{'species': 'unknown', 'common_name': 'Unknown',
+             'confidence': 0.0, 'boar_category': None, 'bbox': None}]
