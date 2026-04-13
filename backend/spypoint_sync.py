@@ -147,18 +147,17 @@ def sync_camera(token, camera_info, db_conn):
         if c.fetchone():
             continue
 
-        # Download photo
+        # Get CDN URL (don't download — ephemeral storage)
         url = photo_url(photo)
-        local_path = download_photo(url, pid) if url else None
 
         # Extract timestamp
         ts = photo.get('date') or photo.get('createdAt', datetime.now().isoformat())
 
-        # Store with Spypoint camera ID directly
+        # Store with Spypoint camera ID and CDN URL
         c.execute('''INSERT INTO sightings
             (camera_id, timestamp, image_url, spypoint_photo_id, notes)
             VALUES (?, ?, ?, ?, ?)''',
-            (camera_id, ts, local_path or url, pid,
+            (camera_id, ts, url, pid,
              f"Auto-synced from SPYPOINT {camera_name}"))
 
         synced += 1

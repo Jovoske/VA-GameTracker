@@ -78,6 +78,12 @@
         .loading { text-align: center; padding: 3rem; color: var(--text-dim); }
         .error { color: var(--danger); padding: 1rem; text-align: center; }
 
+        .thumb { width: 50px; height: 38px; object-fit: cover; border-radius: 4px; cursor: pointer; background: var(--surface2); }
+        .thumb:hover { opacity: 0.8; }
+        .lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 1000; justify-content: center; align-items: center; cursor: pointer; }
+        .lightbox.active { display: flex; }
+        .lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; }
+
         @media (max-width: 768px) {
             .grid { padding: 1rem; }
             .two-col { grid-column: span 1; }
@@ -98,6 +104,7 @@
     <div class="grid" id="main-grid">
         <div class="loading">Loading dashboard...</div>
     </div>
+    <div class="lightbox" id="lightbox" onclick="this.classList.remove('active')"><img id="lightbox-img" src="" alt="Photo"></div>
 
     <script>
     const API = window.location.origin + '/api';
@@ -217,21 +224,25 @@
         grid.innerHTML += `<div class="card full-width"><h2>Cameras — Piedras Lisas, Alatoz</h2><div class="camera-grid">${camsHTML}</div></div>`;
 
         // Recent sightings table
-        let rowsHTML = recent_sightings.slice(0, 15).map(s => `
-            <tr>
+        let rowsHTML = recent_sightings.slice(0, 20).map(s => {
+            const imgUrl = s.image_url || '';
+            const isUrl = imgUrl.startsWith('http');
+            const thumbHTML = isUrl ? `<img class="thumb" src="${imgUrl}" alt="Photo" onerror="this.style.display='none'" onclick="event.stopPropagation();document.getElementById('lightbox-img').src='${imgUrl}';document.getElementById('lightbox').classList.add('active')">` : '<span style="color:var(--text-dim)">—</span>';
+            return `<tr>
+                <td>${thumbHTML}</td>
                 <td>${s.camera_name || s.camera_id}</td>
                 <td><span class="badge ${getBadgeClass(s.category)}">${s.category || 'Unclassified'}</span></td>
                 <td>${s.confidence ? (s.confidence * 100).toFixed(0) + '%' : '—'}</td>
                 <td>${s.temperature ? s.temperature + '°C' : '—'}</td>
                 <td>${s.moon_phase || '—'}</td>
                 <td>${timeAgo(s.timestamp)}</td>
-            </tr>
-        `).join('');
+            </tr>`;
+        }).join('');
         grid.innerHTML += `
             <div class="card full-width"><h2>Recent Sightings</h2>
                 <table>
-                    <thead><tr><th>Camera</th><th>Species</th><th>Conf.</th><th>Temp</th><th>Moon</th><th>When</th></tr></thead>
-                    <tbody>${rowsHTML || '<tr><td colspan="6" style="text-align:center;color:var(--text-dim)">No sightings yet. Sync your cameras!</td></tr>'}</tbody>
+                    <thead><tr><th>Photo</th><th>Camera</th><th>Species</th><th>Conf.</th><th>Temp</th><th>Moon</th><th>When</th></tr></thead>
+                    <tbody>${rowsHTML || '<tr><td colspan="7" style="text-align:center;color:var(--text-dim)">No sightings yet. Sync your cameras!</td></tr>'}</tbody>
                 </table>
             </div>
         `;
