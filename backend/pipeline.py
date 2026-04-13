@@ -21,7 +21,7 @@ def run_pipeline():
     # Step 1: Sync new photos from SPYPOINT
     print("[1/3] Syncing SPYPOINT photos...")
     new_photos = sync_all()
-    print(f"     {new_photos} new photos synced\n")
+    print(f"      {new_photos} new photos synced\n")
 
     # Step 2: Classify unprocessed sightings
     print("[2/3] Running AI classification (MegaDetector + SpeciesNet)...")
@@ -53,7 +53,7 @@ def run_pipeline():
 
             c.execute('''UPDATE sightings
                 SET category = ?, confidence = ?, notes = COALESCE(notes, '') || ?
-                WHERE id = ?''', 
+                WHERE id = ?''',
                 (category, conf,
                  f'\nSpecies: {species} ({conf:.0%})',
                  row['id']))

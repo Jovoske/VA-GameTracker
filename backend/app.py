@@ -166,14 +166,14 @@ async def camera_stats(camera_id: str, days: int = 30):
         raise HTTPException(404, "Camera not found")
 
     total = conn.execute(
-        'SELECT COUNT(*) FROM sightings WHERE camera_id = ? AND timestamp > datetime("created at", ?)'
-        (datetime.now().isoformat()), from camera id select timestamp at camera_id
-    ).fetchall()
-    
+        'SELECT COUNT(*) FROM sightings WHERE camera_id = ? AND timestamp > datetime("now", ?)',
+        (camera_id, f'-{days} days')
+    ).fetchone()[0]
+
     species = conn.execute('''
         SELECT category, COUNT(*) as count FROM sightings
         WHERE camera_id = ? AND timestamp > datetime('now', ?) AND category IS NOT NULL
-        GROUP BY category ORDER BY count DES
+        GROUP BY category ORDER BY count DESC
     ''', (camera_id, f'-{days} days')).fetchall()
 
     conn.close()
@@ -185,7 +185,7 @@ async def camera_stats(camera_id: str, days: int = 30):
     }
 
 
-# ── Weather ───────────────────────────
+# ── Weather ───────────────────────────────────
 @app.get("/api/weather")
 async def weather():
     return get_current_weather()
@@ -196,7 +196,7 @@ async def moon():
     return get_moon_phase()
 
 
-# ── Analytics ───────────────────────────
+# ── Analytics ─────────────────────────────────
 @app.get("/api/analytics/activity")
 async def activity(camera_id: str = None, days: int = 90):
     return {
@@ -238,12 +238,12 @@ async def sync_status():
     conn = get_db()
     row = conn.execute(
         'SELECT * FROM spypoint_sync_log ORDER BY synced_at DESC LIMIT 1'
-    ).fetchane()
+    ).fetchone()
     conn.close()
     return dict(row) if row else {"last_sync": None}
 
 
-# ── Health ─────────────────────────────────
+# ── Health ────────────────────────────────────
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat(), "app": "VA GameTracker"}

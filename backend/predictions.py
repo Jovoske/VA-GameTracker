@@ -17,7 +17,7 @@ def get_db():
 def activity_by_hour(camera_id=None, species=None, days=90):
     """Sighting counts grouped by hour of day."""
     conn = get_db()
-    query = '''SELECT strftime('%H', timestamp) as hour, COuNT(*) as count
+    query = '''SELECT strftime('%H', timestamp) as hour, COUNT(*) as count
                FROM sightings WHERE timestamp > datetime('now', ?)'''
     params = [f'-{days} days']
     if camera_id:
@@ -106,7 +106,7 @@ def predict_best_times(camera_id=None, days=90):
         'period_breakdown': periods,
         'best_period': best_period,
         'recommendation': f"Best activity during {best_period}. "
-                         f"Peak hours: {', '.join(f'{h:00`' for h, _ in peak)}"
+                         f"Peak hours: {', '.join(f'{h}:00' for h, _ in peak)}"
     }
 
 
@@ -142,7 +142,7 @@ def camera_hotspots(days=30):
 def trend_analysis(camera_id=None, days=90):
     """Weekly trend: is activity increasing or decreasing?"""
     conn = get_db()
-    query = '''SELECT strftime('%Y-%W', timestamp) as week, COuNT(*) as count
+    query = '''SELECT strftime('%Y-%W', timestamp) as week, COUNT(*) as count
                FROM sightings WHERE timestamp > datetime('now', ?)'''
     params = [f'-{days} days']
     if camera_id:

@@ -1,7 +1,12 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-dotenv==1.0.0
-requests==2.31.0
-python-multipart==0.0.6
-Pillow==10.1.0
-numpy==1.26.2
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-dotenv==1.0.1
+requests==2.32.3
+python-multipart==0.0.12
+# MegaDetector + SpeciesNet (optional - heavy ML deps)
+# Uncomment if running with GPU or sufficient RAM:
+# torch>=2.0.0
+# torchvision>=0.15.0
+# PytorchWildlife>=1.0.0
+# speciesnet>=1.0.0
+# ultralytics>=8.0.0

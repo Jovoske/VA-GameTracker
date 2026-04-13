@@ -43,7 +43,7 @@ def init_db():
         humidity REAL,
         pressure REAL,
         moon_phase TEXT,
-        moon_illumination !EAL,
+        moon_illumination REAL,
         confidence REAL,
         image_url TEXT,
         spypoint_photo_id TEXT,

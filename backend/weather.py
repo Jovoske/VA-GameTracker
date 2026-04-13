@@ -93,7 +93,7 @@ def get_historical_weather(lat=DEFAULT_LAT, lon=DEFAULT_LON, date_str=None):
             'longitude': lon,
             'start_date': date_str,
             'end_date': date_str,
-            "hourly': 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,surface_pressure',
+            'hourly': 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,surface_pressure',
             'timezone': 'Europe/Madrid'
         }
         resp = requests.get(url, params=params, timeout=10)

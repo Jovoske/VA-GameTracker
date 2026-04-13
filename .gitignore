@@ -3,7 +3,8 @@ __pycache__/
 .env
 data/
 *.db
+data/images/
 .venv/
+venv/
 *.pt
 *.pth
-downloads/
