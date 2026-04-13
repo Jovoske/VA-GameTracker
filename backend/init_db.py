@@ -61,16 +61,6 @@ def init_db():
         synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    # Insert default cameras for Piedras Lisas estate, Alatoz
-    cameras = [
-        ('PL14', 'PL14', 'South ridge trail', 39.0930, -1.3600, 858),
-        ('PL15B', 'PL15B', 'Oak stand waterhole', 39.0945, -1.3615, 852),
-        ('PL15D', 'PL15D', 'North creek crossing', 39.0960, -1.3590, 845),
-        ('PL19', 'PL19', 'Cornfield edge feeder', 39.0920, -1.3580, 860),
-    ]
-    for cam in cameras:
-        c.execute('INSERT OR IGNORE INTO cameras VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)', cam)
-
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
