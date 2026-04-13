@@ -13,6 +13,10 @@ DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'gametracker.db'
 IMAGE_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'images')
 
 SPYPOINT_API = "https://restapi.spypoint.com/api/v3"
+HEADERS = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+}
 
 
 def get_spypoint_token():
@@ -21,39 +25,34 @@ def get_spypoint_token():
     password = os.getenv('SPYPOINT_PASSWORD')
 
     if not username or not password:
-        print("Error: SPYPOINT_USERNAME and SPYPOINT_PASSWORD must be set in .env")
+        print("Error: SPYPOINT_USERNAME and SPYPOINT_PASSWORD must be set")
         return None
 
     try:
-        resp = requests.post(f"{SPYPOINT_API}/user/login", json={
-            'username': username,
-            'password': password
-        }, timeout=15)
+        resp = requests.post(f"{SPYPOINT_API}/user/login",
+                             json={'username': username, 'password': password},
+                             headers=HEADERS, timeout=15)
         resp.raise_for_status()
         return resp.json().get('token')
     except Exception as e:
         print(f"SPYPOINT login error: {e}")
-        # Try pyspypoint as fallback
-        try:
-            from pyspypoint import SpypointCamera
-            cam = SpypointCamera(username, password)
-            return cam
-        except ImportError:
-            print("Install pyspypoint: pip install pyspypoint")
-        except Exception as e2:
-            print(f"pyspypoint fallback error: {e2}")
         return None
+
+
+def auth_headers(token):
+    """Build authenticated request headers."""
+    return {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {token}'
+    }
 
 
 def get_cameras(token):
     """List SPYPOINT cameras."""
     try:
-        if hasattr(token, 'cameras'):
-            # pyspypoint object
-            return token.cameras()
-
-        headers = {'Authorization': f'Bearer {token}'}
-        resp = requests.get(f"{SPYPOINT_API}/camera", headers=headers, timeout=15)
+        resp = requests.get(f"{SPYPOINT_API}/camera/all",
+                            headers=auth_headers(token), timeout=15)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -64,12 +63,16 @@ def get_cameras(token):
 def get_photos(token, camera_id, limit=50):
     """Get recent photos from a camera."""
     try:
-        if hasattr(token, 'photos'):
-            return token.photos(camera_id, limit=limit)
-
-        headers = {'Authorization': f'Bearer {token}'}
-        resp = requests.get(f"{SPYPOINT_API}/photo", headers=headers,
-                          params={'camera': camera_id, 'limit': limit}, timeout=15)
+        resp = requests.post(f"{SPYPOINT_API}/photo/all",
+                             headers=auth_headers(token),
+                             json={
+                                 'camera': [camera_id],
+                                 'dateEnd': '2100-01-01T00:00:00.000Z',
+                                 'favorite': False,
+                                 'hd': False,
+                                 'limit': limit
+                             },
+                             timeout=15)
         resp.raise_for_status()
         return resp.json().get('photos', [])
     except Exception as e:
@@ -77,8 +80,22 @@ def get_photos(token, camera_id, limit=50):
         return []
 
 
+def photo_url(photo):
+    """Build full photo URL from host/path response."""
+    large = photo.get('large', {})
+    if large.get('host') and large.get('path'):
+        return f"https://{large['host']}/{large['path']}"
+    small = photo.get('small', {})
+    if small.get('host') and small.get('path'):
+        return f"https://{small['host']}/{small['path']}"
+    # Fallback to direct url fields
+    return photo.get('url') or photo.get('originUrl', '')
+
+
 def download_photo(url, photo_id):
     """Download a photo to local storage."""
+    if not url:
+        return None
     os.makedirs(IMAGE_DIR, exist_ok=True)
     filepath = os.path.join(IMAGE_DIR, f"{photo_id}.jpg")
     if os.path.exists(filepath):
@@ -106,18 +123,15 @@ def sync_camera(token, camera_info, db_conn):
     c = db_conn.cursor()
 
     for photo in photos:
-        photo_id = photo.get('id') or photo.get('_id', '')
+        pid = photo.get('id') or photo.get('_id', '')
         # Check if already synced
-        c.execute('SELECT id FROM sightings WHERE spypoint_photo_id = ?', (photo_id,))
+        c.execute('SELECT id FROM sightings WHERE spypoint_photo_id = ?', (pid,))
         if c.fetchone():
             continue
 
         # Download photo
-        photo_url = photo.get('url') or photo.get('originUrl', '')
-        if photo_url:
-            local_path = download_photo(photo_url, photo_id)
-        else:
-            local_path = None
+        url = photo_url(photo)
+        local_path = download_photo(url, pid) if url else None
 
         # Extract timestamp
         ts = photo.get('date') or photo.get('createdAt', datetime.now().isoformat())
@@ -128,7 +142,7 @@ def sync_camera(token, camera_info, db_conn):
         c.execute('''INSERT INTO sightings
             (camera_id, timestamp, image_url, spypoint_photo_id, notes)
             VALUES (?, ?, ?, ?, ?)''',
-            (mapped_camera, ts, local_path or photo_url, photo_id,
+            (mapped_camera, ts, local_path or url, pid,
              f"Auto-synced from SPYPOINT {camera_name}"))
 
         synced += 1
