@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
 from app.core.db import get_db
-from app.models import Camera, Image, SyncLog, User
+from app.models import Camera, Detection, Image, Species, SyncLog, User
 from app.tasks.ai import scan_empty
 from app.tasks.sync import spypoint_backfill, spypoint_sync
 
@@ -116,10 +116,20 @@ def camera_images(
     if not include_empty:
         q = q.where(Image.is_empty_frame.isnot(True))
     rows = db.scalars(q.order_by(Image.captured_at.desc()).limit(limit)).all()
+    ids = [i.id for i in rows]
+    species_map: dict = {}
+    if ids:
+        drows = db.execute(
+            select(Detection.image_id, Species.common_name)
+            .join(Species, Detection.species_id == Species.id)
+            .where(Detection.image_id.in_(ids))
+        ).all()
+        species_map = {img_id: name for img_id, name in drows}
     return [{
         "id": str(i.id),
         "captured_at": i.captured_at,
         "file_url": f"/api/images/{i.id}/file" if i.original_path else None,
+        "species": species_map.get(i.id),
         "is_empty_frame": i.is_empty_frame,
         "reviewed": i.reviewed,
         "animal_conf": i.animal_conf,

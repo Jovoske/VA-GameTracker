@@ -20,6 +20,10 @@ celery.conf.update(
             "task": "app.tasks.ai.scan_empty",
             "schedule": 1200.0,  # every 20 min — flag empties on newly synced photos
         },
+        "classify-species": {
+            "task": "app.tasks.ai.classify_species",
+            "schedule": 1500.0,  # every 25 min — classify newly-kept animal frames
+        },
     },
 )
 

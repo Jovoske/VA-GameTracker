@@ -18,6 +18,7 @@ type Img = {
   is_empty_frame: boolean | null
   reviewed: boolean
   animal_conf: number | null
+  species: string | null
 }
 
 function batteryColor(p: number | null): string {
@@ -203,6 +204,26 @@ export default function Cameras() {
                           }}
                         >
                           {Math.round(im.animal_conf * 100)}%
+                        </div>
+                      )}
+                      {!isEmpty && im.species && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            bottom: 3,
+                            left: 3,
+                            fontSize: 9,
+                            background: 'rgba(0,0,0,0.62)',
+                            color: '#fff',
+                            padding: '1px 5px',
+                            borderRadius: 4,
+                            maxWidth: 92,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {im.species}
                         </div>
                       )}
                     </div>

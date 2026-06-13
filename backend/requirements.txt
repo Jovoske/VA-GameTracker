@@ -18,3 +18,4 @@ astral==3.2
 # AI detection: MegaDetector v6 loaded directly via Ultralytics (no PytorchWildlife —
 # it drags in unused librosa/torchaudio). torch/torchvision installed (CPU) in the Dockerfile.
 ultralytics==8.4.66
+timm

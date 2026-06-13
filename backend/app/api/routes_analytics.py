@@ -9,7 +9,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.db import get_db
 from app.enrichment.astro import moon_phase, solar
-from app.models import Camera, Image, User
+from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -59,6 +59,14 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
     ).all()
     by_camera = [{"name": n, "sightings": int(c)} for n, c in cam_rows]
 
+    sp_rows = db.execute(
+        select(Species.common_name, func.count(Detection.id))
+        .join(Detection, Detection.species_id == Species.id)
+        .group_by(Species.common_name)
+        .order_by(func.count(Detection.id).desc())
+    ).all()
+    by_species = [{"species": n, "count": int(c)} for n, c in sp_rows]
+
     now = datetime.now(timezone.utc)
     phase, illum = moon_phase(now)
     s = solar(settings.estate_lat, settings.estate_lon, now.date())
@@ -70,6 +78,7 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
         },
         "by_hour": hours,
         "by_camera": by_camera,
+        "by_species": by_species,
         "best_window": _best_window(by_hour),
         "tonight": {
             "moon_phase": phase,

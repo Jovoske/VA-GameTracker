@@ -5,6 +5,7 @@ type Overview = {
   totals: { sightings: number; empty: number; nights: number; cameras: number }
   by_hour: { hour: number; count: number }[]
   by_camera: { name: string; sightings: number }[]
+  by_species: { species: string; count: number }[]
   best_window: { start_hour: number; end_hour: number; share_pct: number }
   tonight: {
     moon_phase: string
@@ -57,6 +58,11 @@ export default function Tonight() {
         </div>
         <div style={{ fontSize: 14, marginBottom: 12 }}>
           Hottest camera: <span style={{ fontWeight: 600 }}>{t.most_active_camera ?? '—'}</span>
+          {d.by_species[0] && (
+            <>
+              {' · '}Most seen: <span style={{ fontWeight: 600 }}>{d.by_species[0].species}</span>
+            </>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13, color: 'var(--text-dim)' }}>
           <span>🌙 {t.moon_phase} · {t.moon_illum}% lit</span>
@@ -108,10 +114,33 @@ export default function Tonight() {
         ))}
       </div>
 
+      {d.by_species.length > 0 && (
+        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+          <div style={labelStyle}>SPECIES</div>
+          {d.by_species.slice(0, 8).map((s) => (
+            <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
+              <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${(s.count / Math.max(...d.by_species.map((x) => x.count), 1)) * 100}%`,
+                    height: '100%',
+                    background: 'var(--sand)',
+                  }}
+                />
+              </div>
+              <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>
+                {s.count}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', lineHeight: 1.6 }}>
         {d.totals.sightings} animal sightings · {d.totals.empty} empty frames filtered · {d.totals.nights} nights of data
         <br />
-        Species ID and the full forecast model come next — this is your real activity pattern so far.
+        The full forecast model comes next — this is your real activity pattern so far.
       </div>
     </div>
   )
