@@ -4,6 +4,7 @@ import { getToken } from './api'
 import Layout from './components/Layout'
 import Cameras from './pages/Cameras'
 import Login from './pages/Login'
+import MapPage from './pages/Map'
 import Tonight from './pages/Tonight'
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -23,6 +24,7 @@ export default function App() {
       >
         <Route path="/" element={<Tonight />} />
         <Route path="/cameras" element={<Cameras />} />
+        <Route path="/map" element={<MapPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

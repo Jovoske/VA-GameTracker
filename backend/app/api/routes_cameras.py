@@ -1,7 +1,9 @@
-"""Camera routes — list, latest images, SPYPOINT sync/backfill/scan, hidden-frame review."""
+"""Camera routes — list (with location), images, sync/backfill/scan, review, map placement."""
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from geoalchemy2.functions import ST_X, ST_Y
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -35,11 +37,18 @@ def list_cameras(
                 Image.camera_id == c.id, Image.is_empty_frame.is_(True)
             )
         )
+        coords = db.execute(
+            select(ST_Y(Camera.location), ST_X(Camera.location)).where(Camera.id == c.id)
+        ).first()
+        lat = float(coords[0]) if coords and coords[0] is not None else None
+        lng = float(coords[1]) if coords and coords[1] is not None else None
+        sightings = (count or 0) - (empty or 0)
         out.append({
             "id": str(c.id), "name": c.name, "battery_pct": c.battery_pct,
             "signal_pct": c.signal_pct, "model": c.model, "active": c.active,
             "last_sync_at": c.last_sync_at, "last_capture": last,
-            "image_count": count or 0, "empty_count": empty or 0,
+            "image_count": count or 0, "empty_count": empty or 0, "sightings": sightings,
+            "lat": lat, "lng": lng,
         })
     return out
 
@@ -73,6 +82,26 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
         "status": row.status, "images_downloaded": row.images_downloaded,
         "started_at": row.started_at, "finished_at": row.finished_at, "error": row.error,
     }
+
+
+class LocationBody(BaseModel):
+    lat: float
+    lng: float
+
+
+@router.put("/{camera_id}/location")
+def set_location(
+    camera_id: uuid.UUID,
+    body: LocationBody,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    cam = db.get(Camera, camera_id)
+    if cam is None:
+        raise HTTPException(404, "Camera not found")
+    cam.location = f"SRID=4326;POINT({body.lng} {body.lat})"
+    db.commit()
+    return {"id": str(cam.id), "lat": body.lat, "lng": body.lng}
 
 
 @router.get("/{camera_id}/images")
