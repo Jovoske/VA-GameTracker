@@ -2,7 +2,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import routes_admin, routes_auth, routes_cameras, routes_health, routes_images
+from app.api import (
+    routes_admin,
+    routes_analytics,
+    routes_auth,
+    routes_cameras,
+    routes_health,
+    routes_images,
+)
 from app.core.config import settings
 from app.core.logging import configure_logging
 
@@ -23,4 +30,5 @@ app.include_router(routes_health.router, prefix=API_PREFIX)
 app.include_router(routes_auth.router, prefix=API_PREFIX)
 app.include_router(routes_cameras.router, prefix=API_PREFIX)
 app.include_router(routes_images.router, prefix=API_PREFIX)
+app.include_router(routes_analytics.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)

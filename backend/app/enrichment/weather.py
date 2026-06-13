@@ -32,17 +32,19 @@ _FIELDS = {
 }
 
 
-def weather_at(lat: float, lng: float, when: datetime, tz: str = "Europe/Madrid") -> dict:
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    local = when.astimezone(ZoneInfo(tz))
-    # Archive lags ~5 days; use the forecast endpoint for recent captures.
-    recent = (datetime.now(timezone.utc) - when).days < 5
+# Cache one day's hourly data per (lat, lng, day) so a backfill of many photos from
+# the same camera-day makes a single Open-Meteo call instead of one per photo.
+_DAY_CACHE: dict = {}
+
+
+def _fetch_day_hourly(lat: float, lng: float, day: str, recent: bool, tz: str) -> dict:
+    key = (lat, lng, day, recent, tz)
+    if key in _DAY_CACHE:
+        return _DAY_CACHE[key]
     url = FORECAST_URL if recent else ARCHIVE_URL
     params = {
         "latitude": lat, "longitude": lng, "hourly": HOURLY,
-        "timezone": tz, "start_date": local.date().isoformat(),
-        "end_date": local.date().isoformat(),
+        "timezone": tz, "start_date": day, "end_date": day,
     }
     try:
         resp = httpx.get(url, params=params, timeout=20)
@@ -50,8 +52,22 @@ def weather_at(lat: float, lng: float, when: datetime, tz: str = "Europe/Madrid"
         hourly = resp.json().get("hourly", {})
     except Exception as e:
         log.warning("weather.fetch_failed", error=str(e))
-        return {"source": "unavailable"}
+        return {}  # not cached, so a transient failure is retried later
+    if len(_DAY_CACHE) > 8192:
+        _DAY_CACHE.clear()
+    _DAY_CACHE[key] = hourly
+    return hourly
 
+
+def weather_at(lat: float, lng: float, when: datetime, tz: str = "Europe/Madrid") -> dict:
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    local = when.astimezone(ZoneInfo(tz))
+    # Archive lags ~5 days; use the forecast endpoint for recent captures.
+    recent = (datetime.now(timezone.utc) - when).days < 5
+    hourly = _fetch_day_hourly(round(lat, 4), round(lng, 4), local.date().isoformat(), recent, tz)
+    if not hourly:
+        return {"source": "unavailable"}
     idx = _closest_hour_index(hourly.get("time", []), local)
     if idx is None:
         return {"source": "unavailable"}

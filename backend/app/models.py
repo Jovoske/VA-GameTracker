@@ -100,6 +100,8 @@ class Image(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     is_empty_frame: Mapped[bool | None] = mapped_column(Boolean)
+    animal_conf: Mapped[float | None] = mapped_column(Float)
+    reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (Index("ix_images_camera_captured", "camera_id", "captured_at"),)

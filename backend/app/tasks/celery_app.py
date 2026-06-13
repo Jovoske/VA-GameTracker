@@ -16,8 +16,12 @@ celery.conf.update(
             "task": "app.tasks.sync.spypoint_sync",
             "schedule": float(settings.sync_interval_minutes * 60),
         },
+        "scan-empty": {
+            "task": "app.tasks.ai.scan_empty",
+            "schedule": 1200.0,  # every 20 min — flag empties on newly synced photos
+        },
     },
 )
 
 # Import task modules so they register with the app.
-from app.tasks import sync  # noqa: E402,F401
+from app.tasks import ai, sync  # noqa: E402,F401
