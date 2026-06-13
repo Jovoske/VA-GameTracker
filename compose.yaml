@@ -8,6 +8,7 @@ x-backend: &backend
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-gamesense}:${POSTGRES_PASSWORD:-gamesense}@db:5432/${POSTGRES_DB:-gamesense}
     REDIS_URL: redis://redis:6379/0
   volumes:
+    - ./backend:/app
     - media:/data/media
     - models:/data/models
   depends_on:

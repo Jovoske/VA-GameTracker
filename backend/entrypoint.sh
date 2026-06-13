@@ -15,7 +15,7 @@ migrate_and_seed() {
 case "$1" in
   api)
     migrate_and_seed
-    exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ;;
   worker)
     exec celery -A app.tasks.celery_app.celery worker --loglevel=info

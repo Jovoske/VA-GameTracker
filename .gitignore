@@ -33,3 +33,8 @@ frontend/.vite/
 Thumbs.db
 .idea/
 .vscode/
+
+# Runtime / local artifacts
+backend/celerybeat-schedule*
+.claude/settings.local.json
+_*.py
