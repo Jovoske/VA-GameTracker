@@ -7,86 +7,163 @@ type Overview = {
   by_camera: { name: string; sightings: number }[]
   by_species: { species: string; count: number }[]
   best_window: { start_hour: number; end_hour: number; share_pct: number }
-  tonight: {
-    moon_phase: string
-    moon_illum: number
-    darkness_minutes: number | null
-    most_active_camera: string | null
+}
+
+type Forecast = {
+  verdict: 'GO' | 'MARGINAL' | 'SKIP'
+  confidence: number
+  recommended?: {
+    camera: string
+    species: string
+    runner_up: string | null
+    probability: number
+    best_window: { start_hour: number; end_hour: number }
+    reason: string
   }
+  conditions: {
+    moon_phase: string
+    moon_illum: number | null
+    darkness_minutes: number | null
+    wind_dir_deg: number | null
+    wind_speed_kmh: number | null
+  }
+  factors?: { text: string; impact: string }[]
+  alternates: { camera: string; species: string; verdict: string; probability: number }[]
+  nights_of_data: number
 }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
+const verdictColor = (v: string) =>
+  v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
+const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8]
+const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 
 export default function Tonight() {
   const [d, setD] = useState<Overview | null>(null)
+  const [f, setF] = useState<Forecast | null>(null)
   const [err, setErr] = useState('')
 
   useEffect(() => {
+    api<Forecast>('/forecast/tonight').then(setF).catch((e) => setErr(e.message))
     api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
   }, [])
 
-  if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load analytics: {err}</div>
-  if (!d) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
+  if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
+  if (!f || !d) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
 
+  const c = f.conditions
+  const r = f.recommended
+  const vc = verdictColor(f.verdict)
   const maxH = Math.max(...d.by_hour.map((x) => x.count), 1)
   const maxCam = Math.max(...d.by_camera.map((x) => x.sightings), 1)
+  const maxSp = Math.max(...d.by_species.map((x) => x.count), 1)
   const bw = d.best_window
-  const t = d.tonight
   const inWindow = (hr: number) =>
-    bw.start_hour <= bw.end_hour
-      ? hr >= bw.start_hour && hr < bw.end_hour
-      : hr >= bw.start_hour || hr < bw.end_hour
-
-  const labelStyle = {
-    fontSize: 12,
-    color: 'var(--text-dim)',
-    letterSpacing: '.05em',
-    marginBottom: 12,
-  } as const
+    bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Tonight</div>
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>BEST BET TONIGHT · from {d.totals.sightings} sightings</div>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
-          <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--go)', fontVariantNumeric: 'tabular-nums' }}>
-            {hh(bw.start_hour)}–{hh(bw.end_hour)}
+      {/* ── Verdict hero ───────────────────────────── */}
+      <div className="card" style={{ padding: 18, marginBottom: 14, borderTop: `3px solid ${vc}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div
+            style={{
+              fontSize: 26, fontWeight: 700, letterSpacing: '.02em', color: '#06210C',
+              background: vc, padding: '4px 16px', borderRadius: 'var(--border-radius-md, 10px)',
+            }}
+          >
+            {f.verdict}
           </div>
-          <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>{bw.share_pct}% of all activity</div>
+          <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
+            <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
+              {f.confidence}%
+            </span>{' '}
+            confidence
+          </div>
         </div>
-        <div style={{ fontSize: 14, marginBottom: 12 }}>
-          Hottest camera: <span style={{ fontWeight: 600 }}>{t.most_active_camera ?? '—'}</span>
-          {d.by_species[0] && (
-            <>
-              {' · '}Most seen: <span style={{ fontWeight: 600 }}>{d.by_species[0].species}</span>
-            </>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13, color: 'var(--text-dim)' }}>
-          <span>🌙 {t.moon_phase} · {t.moon_illum}% lit</span>
-          {t.darkness_minutes != null && <span>🌑 {Math.round(t.darkness_minutes / 60)}h of darkness</span>}
+
+        {r && (
+          <>
+            <div style={{ fontSize: 16, fontWeight: 600, marginTop: 12 }}>
+              {r.camera} · {r.species}{' '}
+              <span style={{ color: 'var(--sand)' }}>{Math.round(r.probability * 100)}%</span>
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--text-dim)', marginTop: 2 }}>{r.reason}</div>
+
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13, marginTop: 12 }}>
+              <span style={{ color: 'var(--go)', fontWeight: 600 }}>
+                {hh(r.best_window.start_hour)}–{hh(r.best_window.end_hour)}
+              </span>
+              {c.moon_illum != null && <span style={{ color: 'var(--text-dim)' }}>🌙 {c.moon_illum}%</span>}
+              {c.darkness_minutes != null && (
+                <span style={{ color: 'var(--text-dim)' }}>🌑 {Math.round(c.darkness_minutes / 60)}h</span>
+              )}
+              {c.wind_dir_deg != null && (
+                <span style={{ color: 'var(--text-dim)' }}>
+                  💨 {compass(c.wind_dir_deg)} {Math.round(c.wind_speed_kmh ?? 0)}km/h
+                </span>
+              )}
+            </div>
+
+            {f.factors && f.factors.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 8 }}>
+                  WHY
+                </div>
+                {f.factors.map((fac, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, marginBottom: 6 }}>
+                    <span
+                      style={{
+                        color: fac.impact.startsWith('+') ? 'var(--go)' : 'var(--marginal)',
+                        fontVariantNumeric: 'tabular-nums',
+                        minWidth: 26,
+                      }}
+                    >
+                      {fac.impact}
+                    </span>
+                    <span style={{ flex: 1 }}>{fac.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {f.alternates.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 8 }}>
+              OTHER STANDS
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {f.alternates.map((a) => (
+                <div
+                  key={a.camera}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2)', borderRadius: 8, padding: '8px 11px' }}
+                >
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: verdictColor(a.verdict), flexShrink: 0 }} />
+                  <span style={{ flex: 1, fontSize: 13 }}>
+                    {a.camera} · {a.species}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{Math.round(a.probability * 100)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14 }}>
+          Early forecast from {f.nights_of_data} nights — it sharpens as more accumulate.
         </div>
       </div>
 
+      {/* ── Activity by hour ───────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={labelStyle}>ACTIVITY BY HOUR · local time (peak window in green)</div>
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
           {d.by_hour.map((x) => (
-            <div
-              key={x.hour}
-              title={`${hh(x.hour)} — ${x.count} sightings`}
-              style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}
-            >
-              <div
-                style={{
-                  height: `${(x.count / maxH) * 100}%`,
-                  minHeight: x.count ? 2 : 0,
-                  background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)',
-                  borderRadius: '3px 3px 0 0',
-                }}
-              />
+            <div key={x.hour} title={`${hh(x.hour)} — ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
+              <div style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0' }} />
             </div>
           ))}
         </div>
@@ -99,21 +176,21 @@ export default function Tonight() {
         </div>
       </div>
 
+      {/* ── By camera ──────────────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={labelStyle}>SIGHTINGS BY CAMERA</div>
-        {d.by_camera.map((c) => (
-          <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div style={{ width: 130, fontSize: 13 }}>{c.name}</div>
+        {d.by_camera.map((cam) => (
+          <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+            <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
             <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-              <div style={{ width: `${(c.sightings / maxCam) * 100}%`, height: '100%', background: 'var(--teal)' }} />
+              <div style={{ width: `${(cam.sightings / maxCam) * 100}%`, height: '100%', background: 'var(--teal)' }} />
             </div>
-            <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>
-              {c.sightings}
-            </div>
+            <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{cam.sightings}</div>
           </div>
         ))}
       </div>
 
+      {/* ── By species ─────────────────────────────── */}
       {d.by_species.length > 0 && (
         <div className="card" style={{ padding: 18, marginBottom: 14 }}>
           <div style={labelStyle}>SPECIES</div>
@@ -121,17 +198,9 @@ export default function Tonight() {
             <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
               <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
               <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-                <div
-                  style={{
-                    width: `${(s.count / Math.max(...d.by_species.map((x) => x.count), 1)) * 100}%`,
-                    height: '100%',
-                    background: 'var(--sand)',
-                  }}
-                />
+                <div style={{ width: `${(s.count / maxSp) * 100}%`, height: '100%', background: 'var(--sand)' }} />
               </div>
-              <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>
-                {s.count}
-              </div>
+              <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{s.count}</div>
             </div>
           ))}
         </div>
@@ -139,8 +208,6 @@ export default function Tonight() {
 
       <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', lineHeight: 1.6 }}>
         {d.totals.sightings} animal sightings · {d.totals.empty} empty frames filtered · {d.totals.nights} nights of data
-        <br />
-        The full forecast model comes next — this is your real activity pattern so far.
       </div>
     </div>
   )
