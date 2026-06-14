@@ -44,10 +44,12 @@ export default function Layout() {
         <NavLink to="/insights" style={({ isActive }) => linkStyle(isActive)}>
           Insights
         </NavLink>
+        <NavLink to="/settings" style={({ isActive }) => ({ ...linkStyle(isActive), marginLeft: 'auto' })}>
+          Settings
+        </NavLink>
         <button
           onClick={logout}
           style={{
-            marginLeft: 'auto',
             background: 'none',
             border: '1px solid var(--border)',
             color: 'var(--text-dim)',
