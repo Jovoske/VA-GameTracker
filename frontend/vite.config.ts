@@ -8,6 +8,9 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // Polling is required for Vite's file watcher to see edits across a
+    // Windows -> Docker bind mount (native fs events don't cross it).
+    watch: { usePolling: true, interval: 300 },
     proxy: {
       '/api': { target: apiProxy, changeOrigin: true },
     },
