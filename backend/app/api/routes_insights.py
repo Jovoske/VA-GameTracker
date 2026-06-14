@@ -7,6 +7,7 @@ from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.forecasting.insights import compute_insights
 from app.forecasting.model import class_label
+from app.forecasting.patterns import compute_patterns
 from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/insights", tags=["insights"])
@@ -15,6 +16,12 @@ router = APIRouter(prefix="/insights", tags=["insights"])
 @router.get("")
 def insights(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return compute_insights(db)
+
+
+@router.get("/patterns")
+def patterns(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Behaviour drivers — activity vs weather & moon, estate-wide and per species."""
+    return compute_patterns(db)
 
 
 @router.get("/class")

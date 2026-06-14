@@ -16,6 +16,25 @@ type Insights = {
   correlations: { statement: string; strength: number; sample: number }[]
 }
 type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
+type Driver = {
+  factor: string
+  statement: string
+  effect_pct: number
+  sample_nights: number
+  confidence: number
+  buckets: { label: string; rate: number }[]
+  correlation: number
+}
+type PScope = {
+  key: string
+  label: string
+  drivers: Driver[]
+  active_nights: number
+  total_nights: number
+  avg_per_night: number
+  sightings: number
+}
+type Patterns = { scopes: PScope[]; nights: number; range?: [string, string] }
 
 const verdictColor = (v: string) =>
   v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
@@ -29,9 +48,12 @@ export default function Insights() {
   const [openClass, setOpenClass] = useState<string | null>(null)
   const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
   const [zoom, setZoom] = useState<string | null>(null)
+  const [pat, setPat] = useState<Patterns | null>(null)
+  const [patScope, setPatScope] = useState('all')
 
   useEffect(() => {
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
+    api<Patterns>('/insights/patterns').then(setPat).catch(() => {})
   }, [])
 
   async function openClassImages(label: string) {
@@ -119,6 +141,61 @@ export default function Insights() {
           </div>
         </div>
       )}
+
+      {pat && pat.scopes.length > 0 && (() => {
+        const sc = pat.scopes.find((s) => s.key === patScope) || pat.scopes[0]
+        const maxRate = Math.max(...sc.drivers.flatMap((d) => d.buckets.map((b) => b.rate)), 1)
+        return (
+          <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+            <div style={labelStyle}>BEHAVIOUR DRIVERS · WEATHER &amp; MOON</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+              {pat.scopes.map((s) => (
+                <button
+                  key={s.key}
+                  onClick={() => setPatScope(s.key)}
+                  style={{
+                    fontSize: 12, padding: '4px 10px', borderRadius: 8, cursor: 'pointer',
+                    border: '1px solid var(--border)',
+                    background: s.key === sc.key ? 'var(--surface-2)' : 'transparent',
+                    color: s.key === sc.key ? 'var(--text)' : 'var(--text-dim)',
+                    fontWeight: s.key === sc.key ? 600 : 400,
+                  }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            {sc.drivers.length === 0 && (
+              <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No clear weather/moon driver yet — needs more nights.</div>
+            )}
+            {sc.drivers.map((dr, i) => (
+              <div key={i} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: i < sc.drivers.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)', minWidth: 92 }}>{dr.factor}</span>
+                  <span style={{ fontSize: 14, flex: 1, lineHeight: 1.4 }}>{dr.statement}</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 32 }} title="sightings/night: low → high range of this factor">
+                    {dr.buckets.map((b) => (
+                      <div key={b.label} title={`${b.label}: ${b.rate}/night`} style={{ width: 13, height: `${(b.rate / maxRate) * 100}%`, minHeight: 2, background: 'var(--teal)', borderRadius: '2px 2px 0 0' }} />
+                    ))}
+                  </div>
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ flex: 1, maxWidth: 120, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+                      <div style={{ width: `${dr.confidence * 100}%`, height: '100%', background: 'var(--sand)' }} />
+                    </div>
+                    <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{Math.round(dr.confidence * 100)}% confidence · {dr.sample_nights} nights</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+              {sc.label}: {sc.sightings} sightings over {pat.nights} weather-backtracked nights (avg {sc.avg_per_night}/night). A
+              running calculation — it sharpens as more nights feed in.
+            </div>
+          </div>
+        )
+      })()}
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={labelStyle}>PATTERNS</div>
