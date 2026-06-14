@@ -41,6 +41,9 @@ export default function Layout() {
         <NavLink to="/map" style={({ isActive }) => linkStyle(isActive)}>
           Map
         </NavLink>
+        <NavLink to="/insights" style={({ isActive }) => linkStyle(isActive)}>
+          Insights
+        </NavLink>
         <button
           onClick={logout}
           style={{

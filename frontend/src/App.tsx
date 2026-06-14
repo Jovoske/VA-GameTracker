@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { getToken } from './api'
 import Layout from './components/Layout'
 import Cameras from './pages/Cameras'
+import Insights from './pages/Insights'
 import Login from './pages/Login'
 import MapPage from './pages/Map'
 import Tonight from './pages/Tonight'
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="/" element={<Tonight />} />
         <Route path="/cameras" element={<Cameras />} />
         <Route path="/map" element={<MapPage />} />
+        <Route path="/insights" element={<Insights />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
