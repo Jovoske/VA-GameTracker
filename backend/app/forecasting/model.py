@@ -160,17 +160,19 @@ def _expectations(db: Session, forecasts: list[dict]) -> list[dict]:
 def _tonight_conditions(now: datetime) -> dict:
     phase, illum = moon_phase(now)
     s = solar(settings.estate_lat, settings.estate_lon, now.date())
-    wind_dir = wind_speed = temp = None
+    wind_dir = wind_speed = temp = pressure = cloud = rain = None
     try:
         local_22 = now.astimezone().replace(hour=22, minute=0, second=0, microsecond=0)
         w = weather_at(settings.estate_lat, settings.estate_lon, local_22, tz=_TZ)
         wind_dir, wind_speed, temp = w.get("wind_dir_deg"), w.get("wind_speed_kmh"), w.get("temp_c")
+        pressure, cloud, rain = w.get("pressure_hpa"), w.get("cloud_cover_pct"), w.get("rain_mm")
     except Exception:
         pass
     return {
         "moon_phase": phase, "moon_illum": illum,
         "darkness_minutes": s.get("darkness_minutes"),
         "wind_dir_deg": wind_dir, "wind_speed_kmh": wind_speed, "temp_c": temp,
+        "pressure_hpa": pressure, "cloud_cover_pct": cloud, "rain_mm": rain,
     }
 
 
@@ -183,10 +185,8 @@ def _factors(top: dict, cond: dict) -> list[dict]:
         })
     else:
         out.append({"text": f"No {top['species']} here in the last 7 nights", "impact": "--"})
-    if cond["moon_illum"] is not None and cond["moon_illum"] < 25 and top["nocturnal"]:
-        out.append({"text": f"Dark night ({round(cond['moon_illum'])}% moon) — they move freely", "impact": "++"})
-    elif cond["moon_illum"] is not None and cond["moon_illum"] > 70 and top["nocturnal"]:
-        out.append({"text": f"Bright moon ({round(cond['moon_illum'])}%) — more cautious", "impact": "-"})
+    # Moon/weather are handled by the data-driven tonight drivers (condition_reasons),
+    # so they're not hardcoded here — keeps the "why" consistent with the learned patterns.
     w = top["best_window"]
     out.append({"text": f"Peak window {w['start_hour']:02d}:00–{w['end_hour']:02d}:00", "impact": "++"})
     return out
@@ -207,6 +207,30 @@ def forecast_tonight(db: Session) -> dict:
         return {"verdict": "SKIP", "reason": "No animal data yet.", "nights_of_data": total_nights,
                 "conditions": cond, "alternates": []}
 
+    # Feed tonight's actual conditions back through the learned weather/moon drivers,
+    # so the verdict reflects tonight — not just historical presence. Per species where
+    # we have enough data, else the estate-wide drivers. Conservative + capped.
+    from app.forecasting.patterns import driver_map, tonight_multiplier
+
+    feats = {
+        "moon_illum": cond.get("moon_illum"), "darkness": cond.get("darkness_minutes"),
+        "temp": cond.get("temp_c"), "wind": cond.get("wind_speed_kmh"),
+        "pressure": cond.get("pressure_hpa"), "cloud": cond.get("cloud_cover_pct"),
+        "rain": cond.get("rain_mm"),
+    }
+    try:
+        dmap = driver_map(db)
+    except Exception:
+        dmap = {}
+    for f in forecasts:
+        drivers = dmap.get(f["species_id"]) or dmap.get("all") or []
+        mult, reasons = tonight_multiplier(drivers, feats)
+        f["base_probability"] = f["probability"]
+        f["probability"] = round(max(0.02, min(0.97, f["probability"] * mult)), 2)
+        f["tonight_mult"] = round(mult, 2)
+        f["condition_reasons"] = reasons
+    forecasts.sort(key=lambda f: f["probability"], reverse=True)
+
     top = forecasts[0]
     where = _expectations(db, forecasts)
     top_classes = where[0]["classes"] if where else []
@@ -221,7 +245,7 @@ def forecast_tonight(db: Session) -> dict:
             "reason": f"{top['species']} seen {top['nights_present']} of {total_nights} nights here.",
         },
         "conditions": cond,
-        "factors": _factors(top, cond),
+        "factors": _factors(top, cond) + top.get("condition_reasons", []),
         "where": where,
         "alternates": [
             {"camera": f["camera"], "species": f["species"], "verdict": _verdict(f["probability"]),

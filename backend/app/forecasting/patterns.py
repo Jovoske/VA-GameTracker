@@ -181,6 +181,10 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
             {"label": "high", "rate": round(hi_rate, 1)},
         ],
         "correlation": round(r, 2),
+        # for feeding tonight's conditions back into the forecast:
+        "key": key,
+        "favours_high": hi_rate >= lo_rate,
+        "split": round(pairs[n // 2][0], 2),
     }
 
 
@@ -239,3 +243,36 @@ def compute_patterns(db: Session) -> dict:
             scopes.append(s)
     log.info("patterns.computed", nights=len(dates), scopes=len(scopes))
     return {"scopes": scopes, "nights": len(dates), "range": [dates[0], dates[-1]]}
+
+
+def driver_map(db: Session) -> dict[str, list]:
+    """{scope_key: drivers} — for feeding tonight's conditions back into the forecast."""
+    return {s["key"]: s["drivers"] for s in compute_patterns(db).get("scopes", [])}
+
+
+def tonight_multiplier(drivers: list[dict], feats: dict) -> tuple[float, list[dict]]:
+    """How tonight's actual conditions nudge activity, per the learned drivers.
+
+    Deliberately conservative: each driver moves the odds by only half its historical
+    effect, further scaled by its confidence, and the total is clamped — conditions
+    tilt the verdict, they don't dominate it.
+    """
+    mult = 1.0
+    reasons: list[dict] = []
+    for d in drivers:
+        if d.get("confidence", 0) < 0.25 or d.get("key") not in feats:
+            continue
+        val = feats.get(d["key"])
+        if val is None:
+            continue
+        favourable = (val >= d["split"]) == d["favours_high"]
+        weight = (d["effect_pct"] / 100.0) * d["confidence"] * 0.5
+        if favourable:
+            mult *= 1 + weight
+            reasons.append({"text": f"Tonight favours it — {d['favours']}", "impact": "++" if weight > 0.12 else "+"})
+        else:
+            mult *= 1 - weight
+            reasons.append({"text": f"Tonight's {d['factor'].lower()} works against it", "impact": "-"})
+        if len(reasons) >= 4:
+            break
+    return max(0.6, min(1.5, mult)), reasons
