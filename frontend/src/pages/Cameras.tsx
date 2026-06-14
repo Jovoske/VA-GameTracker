@@ -19,6 +19,28 @@ type Img = {
   reviewed: boolean
   animal_conf: number | null
   species: string | null
+  group_type: string | null
+  group_size: number | null
+  sex: string | null
+}
+
+// Compose species + group composition (+ sex once the vision pass has run) into one label.
+function classLabel(im: Img): string {
+  const sp = im.species || ''
+  const n = im.group_size || 0
+  const sexed = im.sex && im.sex !== 'unknown' ? im.sex : null
+  if (sexed && im.group_type === 'solitary') {
+    if (sp === 'Red Deer') return sexed === 'male' ? 'Stag' : 'Hind'
+    if (sp === 'Wild Boar') return sexed === 'male' ? 'Boar ♂' : 'Sow'
+  }
+  switch (im.group_type) {
+    case 'sow_with_piglets': return `Sow + piglets (${n})`
+    case 'sounder': return `Boar sounder (${n})`
+    case 'hind_with_calf': return `Hind + calf (${n})`
+    case 'herd': return `${sp} herd (${n})`
+    case 'group': return `${sp} (${n})`
+    default: return sp
+  }
 }
 
 function batteryColor(p: number | null): string {
@@ -217,13 +239,13 @@ export default function Cameras() {
                             color: '#fff',
                             padding: '1px 5px',
                             borderRadius: 4,
-                            maxWidth: 92,
+                            maxWidth: 116,
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap',
                           }}
                         >
-                          {im.species}
+                          {classLabel(im)}
                         </div>
                       )}
                     </div>

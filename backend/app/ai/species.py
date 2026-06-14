@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.classifier import classify_crop
 from app.ai.detector import detect_animals
+from app.ai.grouping import group_type
 from app.core.logging import get_logger
 from app.models import Detection, Image, Species
 
@@ -28,9 +29,11 @@ def classify_image(db: Session, image: Image) -> str | None:
         return None
     key, name, conf = result
     _ensure_species(db, key, name)
+    size, gtype = group_type(boxes, key)  # group composition from all boxes in the frame
     db.add(Detection(
         image_id=image.id, species_id=key, species_conf=conf,
         bbox={"xyxy": bbox} if bbox else None,
+        group_size=size, group_type=gtype,
     ))
     return key
 

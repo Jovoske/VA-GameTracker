@@ -117,19 +117,31 @@ def camera_images(
         q = q.where(Image.is_empty_frame.isnot(True))
     rows = db.scalars(q.order_by(Image.captured_at.desc()).limit(limit)).all()
     ids = [i.id for i in rows]
-    species_map: dict = {}
+    det_map: dict = {}
     if ids:
         drows = db.execute(
-            select(Detection.image_id, Species.common_name)
+            select(
+                Detection.image_id, Species.common_name,
+                Detection.group_type, Detection.group_size, Detection.sex,
+            )
             .join(Species, Detection.species_id == Species.id)
             .where(Detection.image_id.in_(ids))
         ).all()
-        species_map = {img_id: name for img_id, name in drows}
+        det_map = {
+            r.image_id: {
+                "species": r.common_name, "group_type": r.group_type,
+                "group_size": r.group_size, "sex": r.sex,
+            }
+            for r in drows
+        }
     return [{
         "id": str(i.id),
         "captured_at": i.captured_at,
         "file_url": f"/api/images/{i.id}/file" if i.original_path else None,
-        "species": species_map.get(i.id),
+        "species": det_map.get(i.id, {}).get("species"),
+        "group_type": det_map.get(i.id, {}).get("group_type"),
+        "group_size": det_map.get(i.id, {}).get("group_size"),
+        "sex": det_map.get(i.id, {}).get("sex"),
         "is_empty_frame": i.is_empty_frame,
         "reviewed": i.reviewed,
         "animal_conf": i.animal_conf,
