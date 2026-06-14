@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.enrichment.astro import moon_phase, solar
-from app.forecasting.model import _best_window, _verdict, forecast_tonight
+from app.forecasting.model import _best_window, _verdict, class_label, forecast_tonight
 from app.models import Camera, Detection, EnvSnapshot, Image, Species
 
 _TZ = settings.estate_timezone
@@ -152,6 +152,39 @@ def _correlations(db: Session) -> list[dict]:
     return out
 
 
+def _composition(db: Session) -> list[dict]:
+    """Herd makeup: stags vs hinds, sows-with-piglets vs sounders, and where each concentrates."""
+    rows = db.execute(
+        select(
+            Detection.species_id, Species.common_name, Detection.sex,
+            Detection.group_type, Camera.name, func.count(Detection.id),
+        )
+        .join(Image, Image.id == Detection.image_id)
+        .join(Species, Species.id == Detection.species_id)
+        .join(Camera, Camera.id == Image.camera_id)
+        .group_by(
+            Detection.species_id, Species.common_name, Detection.sex,
+            Detection.group_type, Camera.name,
+        )
+    ).all()
+    totals: dict[str, int] = {}
+    where: dict[str, dict[str, int]] = {}
+    for sp, cn, sex, gt, cam, c in rows:
+        lbl = class_label(sp, cn, sex, gt)
+        totals[lbl] = totals.get(lbl, 0) + int(c)
+        where.setdefault(lbl, {})[cam] = where.setdefault(lbl, {}).get(cam, 0) + int(c)
+    items = []
+    for lbl, cnt in sorted(totals.items(), key=lambda kv: -kv[1]):
+        cams = where.get(lbl, {})
+        top_cam = max(cams.items(), key=lambda kv: kv[1])[0] if cams else None
+        items.append({"label": lbl, "count": cnt, "top_camera": top_cam})
+    return items
+
+
 def compute_insights(db: Session) -> dict:
     base = forecast_tonight(db)
-    return {"outlook": _outlook(db, base), "correlations": _correlations(db)}
+    return {
+        "outlook": _outlook(db, base),
+        "composition": _composition(db),
+        "correlations": _correlations(db),
+    }

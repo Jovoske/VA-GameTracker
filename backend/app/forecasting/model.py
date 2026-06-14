@@ -109,6 +109,54 @@ def _camera_forecast(db: Session, cam: Camera, total_nights: int, now: datetime)
     }
 
 
+def class_label(species_id: str | None, common_name: str | None, sex: str | None, group_type: str | None) -> str:
+    """Human class from species + sex + group composition (mirrors the gallery chip)."""
+    if species_id == "red_deer":
+        if group_type == "hind_with_calf":
+            return "Hind + calf"
+        if sex == "male":
+            return "Stag"
+        if sex == "female":
+            return "Hind"
+        return "Red deer (herd)" if group_type == "herd" else "Red deer"
+    if species_id == "wild_boar":
+        if group_type == "sow_with_piglets":
+            return "Sow + piglets"
+        if sex == "male":
+            return "Boar"
+        if sex == "female":
+            return "Sow"
+        return "Sounder" if group_type == "sounder" else "Wild boar"
+    return common_name or (species_id or "Animal")
+
+
+def _expectations(db: Session, forecasts: list[dict]) -> list[dict]:
+    """Per forecasted camera: which classes (stag/hind/sow+piglets/…) to expect there."""
+    out = []
+    for f in forecasts:
+        rows = db.execute(
+            select(
+                Detection.species_id, Species.common_name, Detection.sex,
+                Detection.group_type, func.count(Detection.id),
+            )
+            .join(Image, Image.id == Detection.image_id)
+            .join(Species, Species.id == Detection.species_id)
+            .where(Image.camera_id == f["camera_id"])
+            .group_by(Detection.species_id, Species.common_name, Detection.sex, Detection.group_type)
+        ).all()
+        agg: dict[str, int] = {}
+        for sp, cn, sex, gt, c in rows:
+            agg[class_label(sp, cn, sex, gt)] = agg.get(class_label(sp, cn, sex, gt), 0) + int(c)
+        classes = sorted(agg.items(), key=lambda kv: -kv[1])[:4]
+        out.append({
+            "camera": f["camera"], "camera_id": f["camera_id"],
+            "verdict": _verdict(f["probability"]), "probability": f["probability"],
+            "best_window": f["best_window"],
+            "classes": [{"label": lbl, "count": n} for lbl, n in classes],
+        })
+    return out
+
+
 def _tonight_conditions(now: datetime) -> dict:
     phase, illum = moon_phase(now)
     s = solar(settings.estate_lat, settings.estate_lon, now.date())
@@ -160,16 +208,21 @@ def forecast_tonight(db: Session) -> dict:
                 "conditions": cond, "alternates": []}
 
     top = forecasts[0]
+    where = _expectations(db, forecasts)
+    top_classes = where[0]["classes"] if where else []
     return {
         "verdict": _verdict(top["probability"]),
         "confidence": top["confidence"],
         "recommended": {
             "camera": top["camera"], "species": top["species"], "runner_up": top["runner_up"],
             "probability": top["probability"], "best_window": top["best_window"],
+            "expect": top_classes[0]["label"] if top_classes else top["species"],
+            "classes": top_classes,
             "reason": f"{top['species']} seen {top['nights_present']} of {total_nights} nights here.",
         },
         "conditions": cond,
         "factors": _factors(top, cond),
+        "where": where,
         "alternates": [
             {"camera": f["camera"], "species": f["species"], "verdict": _verdict(f["probability"]),
              "probability": f["probability"]}

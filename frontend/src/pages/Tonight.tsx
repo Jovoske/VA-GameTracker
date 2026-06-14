@@ -9,6 +9,7 @@ type Overview = {
   best_window: { start_hour: number; end_hour: number; share_pct: number }
 }
 
+type ClassCount = { label: string; count: number }
 type Forecast = {
   verdict: 'GO' | 'MARGINAL' | 'SKIP'
   confidence: number
@@ -18,6 +19,8 @@ type Forecast = {
     runner_up: string | null
     probability: number
     best_window: { start_hour: number; end_hour: number }
+    expect?: string
+    classes?: ClassCount[]
     reason: string
   }
   conditions: {
@@ -28,6 +31,13 @@ type Forecast = {
     wind_speed_kmh: number | null
   }
   factors?: { text: string; impact: string }[]
+  where?: {
+    camera: string
+    verdict: string
+    probability: number
+    best_window: { start_hour: number; end_hour: number }
+    classes: ClassCount[]
+  }[]
   alternates: { camera: string; species: string; verdict: string; probability: number }[]
   nights_of_data: number
 }
@@ -118,6 +128,16 @@ export default function Tonight() {
             </div>
             <div style={{ fontSize: 13, color: 'var(--text-dim)', marginTop: 2 }}>{r.reason}</div>
 
+            {r.classes && r.classes.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                {r.classes.map((cl) => (
+                  <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 6, padding: '2px 8px' }}>
+                    {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13, marginTop: 12 }}>
               <span style={{ color: 'var(--go)', fontWeight: 600 }}>
                 {hh(r.best_window.start_hour)}–{hh(r.best_window.end_hour)}
@@ -182,6 +202,38 @@ export default function Tonight() {
           Early forecast from {f.nights_of_data} nights — it sharpens as more accumulate.
         </div>
       </div>
+
+      {/* ── What to expect, by stand ───────────────── */}
+      {f.where && f.where.length > 0 && (
+        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+          <div style={labelStyle}>WHAT TO EXPECT · BY STAND</div>
+          {f.where.map((w) => (
+            <div key={w.camera} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: verdictColor(w.verdict), marginTop: 6, flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>{w.camera}</span>
+                  <span style={{ fontSize: 12, color: verdictColor(w.verdict), fontWeight: 600 }}>{w.verdict}</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+                    {hh(w.best_window.start_hour)}–{hh(w.best_window.end_hour)}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
+                  {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>—</span>}
+                  {w.classes.map((cl) => (
+                    <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 6, padding: '2px 8px' }}>
+                      {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+            Classes seen at each stand — stags vs hinds, sows with piglets — from sexed &amp; grouped sightings.
+          </div>
+        </div>
+      )}
 
       {/* ── Activity by hour ───────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>

@@ -12,6 +12,7 @@ type Insights = {
     probability: number | null
     verdict: string
   }[]
+  composition: { label: string; count: number; top_camera: string | null }[]
   correlations: { statement: string; strength: number; sample: number }[]
 }
 
@@ -70,6 +71,30 @@ export default function Insights() {
           ))}
         </div>
       </div>
+
+      {d.composition && d.composition.length > 0 && (
+        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+          <div style={labelStyle}>HERD MAKEUP · WHERE</div>
+          {(() => {
+            const max = Math.max(...d.composition.map((x) => x.count), 1)
+            return d.composition.slice(0, 8).map((x) => (
+              <div key={x.label} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <div style={{ width: 104, fontSize: 13 }}>{x.label}</div>
+                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ width: `${(x.count / max) * 100}%`, height: '100%', background: 'var(--teal)' }} />
+                </div>
+                <div style={{ width: 28, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{x.count}</div>
+                <div style={{ width: 92, fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={x.top_camera ?? ''}>
+                  {x.top_camera}
+                </div>
+              </div>
+            ))
+          })()}
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+            Stags vs hinds, sows with piglets vs sounders — and the stand each favours.
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={labelStyle}>PATTERNS</div>
