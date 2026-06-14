@@ -22,6 +22,19 @@ export default function Admin() {
   const [status, setStatus] = useState<Status | null>(null)
   const [check, setCheck] = useState<Check | null>(null)
   const [checking, setChecking] = useState(false)
+  const [sexMsg, setSexMsg] = useState('')
+  const [sexBusy, setSexBusy] = useState(false)
+
+  async function runSexPass() {
+    setSexBusy(true)
+    try {
+      const r = await api<{ note?: string }>('/admin/sex-pass', { method: 'POST' })
+      setSexMsg(r.note || 'Started.')
+    } catch (e) {
+      setSexMsg((e as Error).message)
+    }
+    setSexBusy(false)
+  }
 
   useEffect(() => {
     api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
@@ -91,6 +104,23 @@ export default function Admin() {
             )}
           </div>
         )}
+      </div>
+
+      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+        <div style={labelStyle}>AI LABELLING</div>
+        <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
+          Identify sex on red deer (stag / hind) and wild boar using cloud vision. Uses your
+          ANTHROPIC_API_KEY and costs a little API credit per photo; only un-sexed animals are processed.
+        </div>
+        <button
+          className="btn"
+          style={{ width: 'auto', padding: '8px 14px' }}
+          onClick={runSexPass}
+          disabled={sexBusy}
+        >
+          {sexBusy ? 'Starting…' : 'Identify deer / boar sex'}
+        </button>
+        {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
       </div>
 
       {status && (

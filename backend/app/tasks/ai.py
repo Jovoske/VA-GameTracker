@@ -36,3 +36,16 @@ def reid() -> dict:
         result = reid_recompute(db)
     log.info("reid.done", **result)
     return result
+
+
+@celery.task(name="app.tasks.ai.sex_pass")
+def sex_pass() -> dict:
+    """On-demand cloud-vision sex pass: stag/hind + boar sex (costs API credit per call)."""
+    from app.ai.vision_sex import sex_unclassified
+
+    out: dict = {}
+    with SessionLocal() as db:
+        for sp in ("red_deer", "wild_boar"):
+            out[sp] = sex_unclassified(db, sp)
+    log.info("sex_pass.done", **{k: v.get("processed") for k, v in out.items()})
+    return out

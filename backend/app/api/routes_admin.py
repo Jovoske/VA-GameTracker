@@ -4,10 +4,11 @@ The update *check* runs anywhere (GitHub API). Auto-applying an update (git pull
 migrate + restart) is deployment-specific and belongs to the host/server per
 docs/08-git-update.md, so here we surface the version delta + the exact command.
 """
+import os
 import re
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,28 @@ from app.version import __version__
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 _REPO = "Jovoske/VA-GameTracker"
+
+
+def _run_sex_pass() -> None:
+    # Runs in the api process, which has reliable network — the Celery worker's DNS
+    # can drop intermittently (same flakiness that breaks SPYPOINT sync).
+    from app.ai.vision_sex import sex_unclassified
+    from app.core.db import SessionLocal
+
+    with SessionLocal() as db:
+        for sp in ("red_deer", "wild_boar"):
+            sex_unclassified(db, sp)
+
+
+@router.post("/sex-pass")
+def sex_pass(
+    background: BackgroundTasks, _: User = Depends(get_current_admin)
+) -> dict:
+    """Kick off the cloud-vision sex pass (stag/hind + boar sex). Needs ANTHROPIC_API_KEY."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(400, "Set ANTHROPIC_API_KEY in .env to enable sex identification")
+    background.add_task(_run_sex_pass)
+    return {"status": "started", "note": "Labels appear in Cameras over a few minutes."}
 
 
 @router.get("/version")

@@ -55,6 +55,23 @@ class SexCall(BaseModel):
     cues: str
 
 
+# Forced tool use is the version-independent way to get structured output from the SDK.
+_TOOL = {
+    "name": "record_sex",
+    "description": "Record the sex / class judgment for the single animal in the photo.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "sex": {"type": "string", "enum": ["male", "female", "unknown"]},
+            "label": {"type": "string", "description": "stag/hind, boar/sow, or unknown"},
+            "confidence": {"type": "number", "description": "0..1, how sure you are"},
+            "cues": {"type": "string", "description": "exactly what you saw"},
+        },
+        "required": ["sex", "label", "confidence", "cues"],
+    },
+}
+
+
 def _b64_crop(image_path: str, bbox: list[float] | None) -> str:
     """Padded JPEG crop (extra headroom for antlers), base64-encoded."""
     from PIL import Image as PILImage
@@ -85,9 +102,11 @@ def classify_sex(image_path: str, bbox: list[float] | None, species_key: str | N
     import anthropic
 
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
-    resp = client.messages.parse(
+    resp = client.messages.create(
         model=MODEL,
         max_tokens=1024,
+        tools=[_TOOL],
+        tool_choice={"type": "tool", "name": "record_sex"},
         messages=[{
             "role": "user",
             "content": [
@@ -98,9 +117,11 @@ def classify_sex(image_path: str, bbox: list[float] | None, species_key: str | N
                 {"type": "text", "text": prompt},
             ],
         }],
-        output_format=SexCall,
     )
-    return resp.parsed_output
+    for block in resp.content:
+        if block.type == "tool_use":
+            return SexCall(**block.input)
+    return None
 
 
 def _bbox_of(det: Detection) -> list[float] | None:
