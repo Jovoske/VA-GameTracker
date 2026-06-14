@@ -32,6 +32,8 @@ type Forecast = {
   nights_of_data: number
 }
 
+type Alert = { type: string; severity: string; title: string; text: string }
+
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
 const verdictColor = (v: string) =>
   v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
@@ -41,11 +43,13 @@ const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05
 export default function Tonight() {
   const [d, setD] = useState<Overview | null>(null)
   const [f, setF] = useState<Forecast | null>(null)
+  const [alerts, setAlerts] = useState<Alert[]>([])
   const [err, setErr] = useState('')
 
   useEffect(() => {
     api<Forecast>('/forecast/tonight').then(setF).catch((e) => setErr(e.message))
     api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
+    api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
   }, [])
 
   if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
@@ -64,6 +68,28 @@ export default function Tonight() {
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Tonight</div>
+
+      {alerts.length > 0 && (
+        <div className="card" style={{ padding: 14, marginBottom: 14 }}>
+          <div style={labelStyle}>ALERTS</div>
+          {alerts.map((a, i) => {
+            const col =
+              a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
+            return (
+              <div
+                key={i}
+                style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: i < alerts.length - 1 ? 10 : 0 }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: col, marginTop: 5, flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{a.title}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{a.text}</div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* ── Verdict hero ───────────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 14, borderTop: `3px solid ${vc}` }}>

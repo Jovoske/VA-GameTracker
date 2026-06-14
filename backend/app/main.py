@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
     routes_admin,
+    routes_alerts,
     routes_analytics,
     routes_auth,
     routes_cameras,
@@ -34,6 +35,7 @@ app.include_router(routes_auth.router, prefix=API_PREFIX)
 app.include_router(routes_cameras.router, prefix=API_PREFIX)
 app.include_router(routes_images.router, prefix=API_PREFIX)
 app.include_router(routes_analytics.router, prefix=API_PREFIX)
+app.include_router(routes_alerts.router, prefix=API_PREFIX)
 app.include_router(routes_forecast.router, prefix=API_PREFIX)
 app.include_router(routes_insights.router, prefix=API_PREFIX)
 app.include_router(routes_estate.router, prefix=API_PREFIX)
