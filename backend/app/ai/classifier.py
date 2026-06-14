@@ -2,6 +2,10 @@
 
 The class list is the DeepFaune v1.3 (v3 checkpoint) order, validated against
 real estate frames (wild boar at index 32). Weights mirror from HuggingFace.
+
+The same backbone also yields a 1024-dim pre-logits embedding per crop
+(`embed_crop`), which the re-ID clustering uses to group sightings into
+candidate individuals.
 """
 from __future__ import annotations
 
@@ -90,22 +94,44 @@ def _get_model():
     return _model
 
 
-def classify_crop(image_path: str, bbox: list[float] | None) -> tuple[str, str, float] | None:
-    """Return (species_key, common_name, confidence) for the animal crop, or None."""
+def _input_tensor(image_path: str, bbox: list[float] | None):
+    """Crop → 182px → ImageNet-normalized [1,3,H,W] tensor (shared by classify + embed)."""
     import numpy as np
     import torch
-    import torch.nn.functional as F
     from PIL import Image as PILImage
 
-    model = _get_model()
+    _get_model()  # ensures _mean / _std are populated
     img = PILImage.open(image_path).convert("RGB")
     if bbox:
         img = img.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
     img = img.resize((CROP_SIZE, CROP_SIZE))
     t = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
-    t = (t - _mean) / _std
+    return ((t - _mean) / _std).unsqueeze(0)
+
+
+def classify_crop(image_path: str, bbox: list[float] | None) -> tuple[str, str, float] | None:
+    """Return (species_key, common_name, confidence) for the animal crop, or None."""
+    import torch
+    import torch.nn.functional as F
+
+    model = _get_model()
+    t = _input_tensor(image_path, bbox)
     with torch.no_grad():
-        probs = F.softmax(model(t.unsqueeze(0)), dim=1)[0]
+        probs = F.softmax(model(t), dim=1)[0]
     idx = int(torch.argmax(probs))
     name = DEEPFAUNE_CLASSES[idx]
     return species_key(name), common_name(name), round(float(probs[idx]), 4)
+
+
+def embed_crop(image_path: str, bbox: list[float] | None) -> list[float]:
+    """1024-dim L2-normalized DINOv2 embedding of the crop (cosine-ready, for re-ID)."""
+    import torch
+    import torch.nn.functional as F
+
+    model = _get_model()
+    t = _input_tensor(image_path, bbox)
+    with torch.no_grad():
+        feats = model.forward_features(t)
+        pooled = model.forward_head(feats, pre_logits=True)[0]  # pre-classifier features
+        emb = F.normalize(pooled, dim=0)
+    return emb.tolist()

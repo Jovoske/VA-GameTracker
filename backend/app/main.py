@@ -6,6 +6,7 @@ from app.api import (
     routes_admin,
     routes_alerts,
     routes_analytics,
+    routes_animals,
     routes_auth,
     routes_cameras,
     routes_estate,
@@ -39,4 +40,5 @@ app.include_router(routes_alerts.router, prefix=API_PREFIX)
 app.include_router(routes_forecast.router, prefix=API_PREFIX)
 app.include_router(routes_insights.router, prefix=API_PREFIX)
 app.include_router(routes_estate.router, prefix=API_PREFIX)
+app.include_router(routes_animals.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)

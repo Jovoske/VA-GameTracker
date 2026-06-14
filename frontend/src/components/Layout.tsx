@@ -44,6 +44,9 @@ export default function Layout() {
         <NavLink to="/insights" style={({ isActive }) => linkStyle(isActive)}>
           Insights
         </NavLink>
+        <NavLink to="/animals" style={({ isActive }) => linkStyle(isActive)}>
+          Animals
+        </NavLink>
         <NavLink to="/settings" style={({ isActive }) => ({ ...linkStyle(isActive), marginLeft: 'auto' })}>
           Settings
         </NavLink>

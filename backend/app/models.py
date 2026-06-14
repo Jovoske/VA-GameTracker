@@ -122,7 +122,7 @@ class Detection(Base):
     group_size: Mapped[int | None] = mapped_column(Integer)
     group_type: Mapped[str | None] = mapped_column(String)
     bbox: Mapped[dict | None] = mapped_column(JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(512))
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))  # DINOv2-L, for re-ID
     model_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("model_runs.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
