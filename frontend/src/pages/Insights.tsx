@@ -15,6 +15,7 @@ type Insights = {
   composition: { label: string; count: number; top_camera: string | null }[]
   correlations: { statement: string; strength: number; sample: number }[]
 }
+type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
 
 const verdictColor = (v: string) =>
   v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
@@ -25,10 +26,27 @@ const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05
 export default function Insights() {
   const [d, setD] = useState<Insights | null>(null)
   const [err, setErr] = useState('')
+  const [openClass, setOpenClass] = useState<string | null>(null)
+  const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
+  const [zoom, setZoom] = useState<string | null>(null)
 
   useEffect(() => {
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
   }, [])
+
+  async function openClassImages(label: string) {
+    setOpenClass(label)
+    setClassImgs(null)
+    try {
+      setClassImgs(await api<ClassImg[]>('/insights/class?label=' + encodeURIComponent(label)))
+    } catch {
+      setClassImgs([])
+    }
+  }
+  function closeClass() {
+    setOpenClass(null)
+    setClassImgs(null)
+  }
 
   if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
   if (!d) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
@@ -78,15 +96,21 @@ export default function Insights() {
           {(() => {
             const max = Math.max(...d.composition.map((x) => x.count), 1)
             return d.composition.slice(0, 8).map((x) => (
-              <div key={x.label} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                <div style={{ width: 104, fontSize: 13 }}>{x.label}</div>
+              <div
+                key={x.label}
+                onClick={() => openClassImages(x.label)}
+                title={`View the ${x.count} ${x.label} photos`}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, cursor: 'pointer' }}
+              >
+                <div style={{ width: 100, fontSize: 13 }}>{x.label}</div>
                 <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
                   <div style={{ width: `${(x.count / max) * 100}%`, height: '100%', background: 'var(--teal)' }} />
                 </div>
                 <div style={{ width: 28, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{x.count}</div>
-                <div style={{ width: 92, fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={x.top_camera ?? ''}>
+                <div style={{ width: 88, fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={x.top_camera ?? ''}>
                   {x.top_camera}
                 </div>
+                <span style={{ color: 'var(--text-dim)', fontSize: 15, lineHeight: 1 }}>›</span>
               </div>
             ))
           })()}
@@ -124,6 +148,62 @@ export default function Insights() {
       <div style={{ color: 'var(--text-dim)', fontSize: 11, textAlign: 'center' }}>
         Early patterns from ~1 month of data — they firm up over the season.
       </div>
+
+      {openClass && (
+        <div
+          onClick={closeClass}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 50, display: 'flex', padding: 16 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="card"
+            style={{ padding: 0, maxWidth: 760, width: '100%', margin: 'auto', overflow: 'hidden', display: 'flex', flexDirection: 'column', maxHeight: '90vh' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+              <span style={{ fontWeight: 700, fontSize: 15 }}>{openClass}</span>
+              <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+                {classImgs ? `${classImgs.length} sighting${classImgs.length === 1 ? '' : 's'}` : 'loading…'}
+              </span>
+              <button
+                onClick={closeClass}
+                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
+              >
+                Close
+              </button>
+            </div>
+            <div style={{ overflowY: 'auto', padding: 12 }}>
+              {!classImgs && <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading…</div>}
+              {classImgs && classImgs.length === 0 && (
+                <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>No photos.</div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
+                {classImgs?.map((im) => (
+                  <div
+                    key={im.image_id}
+                    onClick={() => setZoom(im.file_url)}
+                    style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
+                  >
+                    <img src={im.file_url} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
+                    <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.camera}</span>
+                      <span>{new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {zoom && (
+        <div
+          onClick={() => setZoom(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+        >
+          <img src={zoom} alt="" style={{ maxWidth: '94vw', maxHeight: '94vh', borderRadius: 10 }} />
+        </div>
+      )}
     </div>
   )
 }
