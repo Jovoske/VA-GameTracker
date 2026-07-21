@@ -30,6 +30,19 @@ The API is at **http://localhost:8000** (interactive docs at `/docs`).
 
 Edit `.env` (created from `.env.example` on first run) to set your SPYPOINT credentials and secrets.
 
+## Hosting on a server (Db01)
+
+The same stack runs 24/7 on a Linux server with a production overlay — frontend built and
+served by Caddy (automatic HTTPS with a domain), closed ports, auto-restart, and the full
+photo archive on a big disk:
+
+```bash
+cp .env.production.example .env   # fill in secrets
+docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+```
+
+Full clean-server-to-running-app runbook: [`docs/10-db01-deploy.md`](docs/10-db01-deploy.md).
+
 ---
 
 ## What works today (Milestone 0)

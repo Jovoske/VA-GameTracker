@@ -15,7 +15,10 @@ migrate_and_seed() {
 case "$1" in
   api)
     migrate_and_seed
-    exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # Live reload in dev; disabled in production (compose.prod.yaml sets UVICORN_RELOAD=0).
+    RELOAD_FLAG=""
+    [ "${UVICORN_RELOAD:-1}" = "1" ] && RELOAD_FLAG="--reload"
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8000 $RELOAD_FLAG
     ;;
   worker)
     exec celery -A app.tasks.celery_app.celery worker --loglevel=info

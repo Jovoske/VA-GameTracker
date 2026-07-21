@@ -1,0 +1,20 @@
+# Edge config for the production frontend container.
+# DOMAIN is always set by compose.prod.yaml: ":80" for plain HTTP (LAN /
+# Tailscale / Cloudflare Tunnel mode), or a real domain for automatic HTTPS
+# with a Let's Encrypt certificate.
+{$DOMAIN::80} {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	# The service worker must never be cached, or updates would take a day to land.
+	header /sw.js Cache-Control "no-cache"
+}
