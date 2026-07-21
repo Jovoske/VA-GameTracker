@@ -28,6 +28,9 @@ C: has **~24 GB free**, so 12 months of originals can't live on the laptop. Reso
 
 ## Phase 2 — Server (Linux VPS / dedicated / home server)
 
+> **Implemented:** `compose.prod.yaml` + `.env.production.example` + the step-by-step
+> runbook in [`10-db01-deploy.md`](10-db01-deploy.md) (target server: **Db01**).
+
 - **Same `compose.yaml`.** Differences are external: a `.env.production`, real volume mounts (big disk for media, separate for Postgres), and a front edge.
 - Add **Caddy** (or nginx) reverse proxy with automatic TLS; expose only 80/443.
 - **Backups:** nightly `pg_dump` + media `rsync`/snapshot to a second location; documented restore.

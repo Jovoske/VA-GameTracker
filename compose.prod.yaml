@@ -1,0 +1,73 @@
+# Production overlay — Phase 2 (Db01 / any Linux server).
+#
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+#
+# Differences from the dev stack, all external to the code (docs/07-deployment.md):
+#   - frontend is a production build (vite build) served by Caddy, which also
+#     reverse-proxies /api and terminates HTTPS when DOMAIN is set
+#   - no live-source bind mounts, no uvicorn --reload
+#   - only the web ports are published; Postgres/Redis/API stay internal
+#   - everything restarts automatically after a reboot or crash
+#   - media lives on a host path you choose (MEDIA_PATH) — the big-disk archive
+#
+# Requires Docker Compose >= 2.24 (for the !override tag).
+
+name: gamesense
+
+services:
+  db:
+    restart: unless-stopped
+    ports: !override []
+
+  redis:
+    restart: unless-stopped
+    ports: !override []
+
+  api:
+    restart: unless-stopped
+    ports: !override []
+    environment:
+      UVICORN_RELOAD: "0"
+    volumes: !override
+      - media:/data/media
+      - models:/data/models
+
+  worker:
+    restart: unless-stopped
+    volumes: !override
+      - media:/data/media
+      - models:/data/models
+
+  beat:
+    restart: unless-stopped
+    volumes: !override
+      - media:/data/media
+      - models:/data/models
+
+  frontend:
+    restart: unless-stopped
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    environment:
+      # Empty DOMAIN in .env falls back to plain HTTP on :80 (compose treats
+      # empty as unset with :-), so Caddy always gets a valid site address.
+      DOMAIN: ${DOMAIN:-:80}
+    ports: !override
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes: !override
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  # The photo archive on a disk of your choosing (MEDIA_RETENTION_DAYS >= 365).
+  # Create the directory first: sudo mkdir -p <MEDIA_PATH>
+  media:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MEDIA_PATH:?set MEDIA_PATH in .env to the big-disk folder for the photo archive}
+  caddy_data:
+  caddy_config:
