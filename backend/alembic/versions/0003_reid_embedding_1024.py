@@ -4,35 +4,21 @@ Revision ID: 0003_reid_embedding
 Revises: 0002_image_review
 Create Date: 2026-06-14
 
-The DeepFaune backbone (vit_large_patch14_dinov2) emits 1024-dim features; the
-initial schema created the column at 512. No embeddings were ever stored, so we
-drop and recreate the column (and its HNSW cosine index) at the correct width.
+The DeepFaune backbone (vit_large_patch14_dinov2) emits 1024-dim features. On the
+native build the embedding column is a plain JSONB list created by 0001, so there
+is no fixed-width pgvector column to widen — this migration is now a no-op kept
+only to preserve alembic history.
 """
-import sqlalchemy as sa
-from alembic import op
-from pgvector.sqlalchemy import Vector
 
 revision = "0003_reid_embedding"
 down_revision = "0002_image_review"
 branch_labels = None
 depends_on = None
 
-_IDX = "ix_detections_embedding_hnsw"
-
-
-def _recreate(dim: int) -> None:
-    op.drop_index(_IDX, table_name="detections")
-    op.drop_column("detections", "embedding")
-    op.add_column("detections", sa.Column("embedding", Vector(dim), nullable=True))
-    op.create_index(
-        _IDX, "detections", ["embedding"],
-        postgresql_using="hnsw", postgresql_ops={"embedding": "vector_cosine_ops"},
-    )
-
 
 def upgrade() -> None:
-    _recreate(1024)
+    pass  # no-op: embedding is JSONB now (pgvector dropped for the native build)
 
 
 def downgrade() -> None:
-    _recreate(512)
+    pass  # no-op: embedding is JSONB now (pgvector dropped for the native build)

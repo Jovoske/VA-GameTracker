@@ -42,3 +42,20 @@ app.include_router(routes_insights.router, prefix=API_PREFIX)
 app.include_router(routes_estate.router, prefix=API_PREFIX)
 app.include_router(routes_animals.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)
+
+import os
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+
+_DIST = os.environ.get("FRONTEND_DIST", "")
+if _DIST and os.path.isdir(_DIST):
+    _assets = os.path.join(_DIST, "assets")
+    if os.path.isdir(_assets):
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    @app.get("/{full_path:path}")
+    def _spa(full_path: str):
+        candidate = os.path.join(_DIST, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_DIST, "index.html"))

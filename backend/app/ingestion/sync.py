@@ -44,7 +44,8 @@ def upsert_camera(db: Session, estate_id, cam: SpypointCamera) -> Camera:
     if cam.model:
         row.model = cam.model
     if cam.lat is not None and cam.lng is not None:
-        row.location = f"SRID=4326;POINT({cam.lng} {cam.lat})"
+        row.lat = cam.lat
+        row.lon = cam.lng
     row.last_sync_at = datetime.now(timezone.utc)
     db.flush()
     return row

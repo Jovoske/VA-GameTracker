@@ -2,7 +2,6 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from geoalchemy2.functions import ST_X, ST_Y
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -38,7 +37,7 @@ def list_cameras(
             )
         )
         coords = db.execute(
-            select(ST_Y(Camera.location), ST_X(Camera.location)).where(Camera.id == c.id)
+            select(Camera.lat, Camera.lon).where(Camera.id == c.id)
         ).first()
         lat = float(coords[0]) if coords and coords[0] is not None else None
         lng = float(coords[1]) if coords and coords[1] is not None else None
@@ -99,7 +98,8 @@ def set_location(
     cam = db.get(Camera, camera_id)
     if cam is None:
         raise HTTPException(404, "Camera not found")
-    cam.location = f"SRID=4326;POINT({body.lng} {body.lat})"
+    cam.lat = body.lat
+    cam.lon = body.lng
     db.commit()
     return {"id": str(cam.id), "lat": body.lat, "lng": body.lng}
 

@@ -18,7 +18,8 @@ def seed() -> None:
             estate = Estate(
                 name=settings.estate_name,
                 timezone=settings.estate_timezone,
-                centroid=f"SRID=4326;POINT({settings.estate_lon} {settings.estate_lat})",
+                lat=settings.estate_lat,
+                lon=settings.estate_lon,
             )
             db.add(estate)
             db.flush()

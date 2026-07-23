@@ -2,9 +2,6 @@
 import uuid
 from datetime import date, datetime, time
 
-from geoalchemy2 import Geometry
-from geoalchemy2.elements import WKBElement
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
     Boolean,
@@ -34,7 +31,8 @@ class Estate(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     name: Mapped[str] = mapped_column(String, nullable=False)
     timezone: Mapped[str] = mapped_column(String, nullable=False, default="Europe/Madrid")
-    centroid: Mapped[WKBElement | None] = mapped_column(Geometry("POINT", srid=4326))
+    lat: Mapped[float | None] = mapped_column(Float)
+    lon: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -55,7 +53,8 @@ class Camera(Base):
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
     spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    location: Mapped[WKBElement | None] = mapped_column(Geometry("POINT", srid=4326))
+    lat: Mapped[float | None] = mapped_column(Float)
+    lon: Mapped[float | None] = mapped_column(Float)
     altitude_m: Mapped[float | None] = mapped_column(Float)
     model: Mapped[str | None] = mapped_column(String)
     battery_pct: Mapped[int | None] = mapped_column(Integer)
@@ -71,7 +70,8 @@ class Stand(Base):
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
     camera_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("cameras.id"))
     name: Mapped[str] = mapped_column(String, nullable=False)
-    location: Mapped[WKBElement | None] = mapped_column(Geometry("POINT", srid=4326))
+    lat: Mapped[float | None] = mapped_column(Float)
+    lon: Mapped[float | None] = mapped_column(Float)
     shooting_dirs_deg: Mapped[list[int] | None] = mapped_column(ARRAY(Integer))
     approach_dirs_deg: Mapped[list[int] | None] = mapped_column(ARRAY(Integer))
     notes: Mapped[str | None] = mapped_column(Text)
@@ -122,7 +122,7 @@ class Detection(Base):
     group_size: Mapped[int | None] = mapped_column(Integer)
     group_type: Mapped[str | None] = mapped_column(String)
     bbox: Mapped[dict | None] = mapped_column(JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024))  # DINOv2-L, for re-ID
+    embedding: Mapped[list[float] | None] = mapped_column(JSONB)  # DINOv2-L embedding stored as a JSON list (no pgvector)
     model_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("model_runs.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
@@ -130,12 +130,6 @@ class Detection(Base):
         CheckConstraint(
             "age_class IN ('juvenile','young_adult','mature_adult','old','unknown')",
             name="age_valid",
-        ),
-        Index(
-            "ix_detections_embedding_hnsw",
-            "embedding",
-            postgresql_using="hnsw",
-            postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
 

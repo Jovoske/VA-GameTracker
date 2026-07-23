@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import timezone
 from zoneinfo import ZoneInfo
 
-from geoalchemy2.functions import ST_X, ST_Y
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,7 +15,7 @@ from app.models import Camera, EnvSnapshot, Image
 
 def _camera_coords(db: Session, camera_id) -> tuple[float, float]:
     row = db.execute(
-        select(ST_Y(Camera.location), ST_X(Camera.location)).where(Camera.id == camera_id)
+        select(Camera.lat, Camera.lon).where(Camera.id == camera_id)
     ).first()
     if row and row[0] is not None and row[1] is not None:
         return float(row[0]), float(row[1])
