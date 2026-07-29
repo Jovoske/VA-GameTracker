@@ -17,6 +17,7 @@ from sqlalchemy import (
     Time,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -130,7 +131,11 @@ class Image(Base):
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (Index("ix_images_camera_captured", "camera_id", "captured_at"),)
+    __table_args__ = (
+        Index("ix_images_camera_captured", "camera_id", "captured_at"),
+        # camera-first index is useless for global min/max/date_trunc scans
+        Index("ix_images_captured_at", text("captured_at DESC")),
+    )
 
 
 class Detection(Base):
@@ -157,6 +162,9 @@ class Detection(Base):
             "age_class IN ('juvenile','young_adult','mature_adult','old','unknown')",
             name="age_valid",
         ),
+        # image_id is the join in essentially every query in the app and was unindexed.
+        Index("ix_detections_image_id", "image_id"),
+        Index("ix_detections_species_image", "species_id", "image_id"),
     )
 
 
@@ -213,6 +221,44 @@ class EnvSnapshot(Base):
     nautical_twilight_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     darkness_minutes: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (UniqueConstraint("camera_id", "observed_at", name="uq_env_camera_time"),)
+
+
+class CameraNight(Base):
+    """Whether a camera was actually watching on a given night — the denominator.
+
+    Without this, a flat battery, a lost signal, a web across the lens and an
+    unprocessed backlog all look identical to "no animals here", and every rate in
+    the product silently divides by a night that never happened.
+
+    exposure_state:
+      CONFIRMED    — frames exist inside the night window and have been processed.
+      PRESUMED_UP  — no frames, but frames exist either side; admitted as a true zero.
+      UNPROCESSED  — frames exist but haven't been through the detector yet. NULL:
+                     counting these as zero animals is the backlog artefact.
+      UNKNOWN      — anything else. NULL, and the excluded count is reported.
+    """
+
+    __tablename__ = "camera_nights"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cameras.id"), nullable=False)
+    night: Mapped[date] = mapped_column(Date, nullable=False)
+    exposure_state: Mapped[str] = mapped_column(String, nullable=False)
+    frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    empty_frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("camera_id", "night", name="uq_camera_night"),
+        CheckConstraint(
+            "exposure_state IN ('CONFIRMED','PRESUMED_UP','UNPROCESSED','UNKNOWN')",
+            name="exposure_state_valid",
+        ),
+        Index("ix_camera_nights_night", "night"),
+    )
+
+    @property
+    def counts_as_observed(self) -> bool:
+        """Only these two states may contribute a denominator or a true zero."""
+        return self.exposure_state in ("CONFIRMED", "PRESUMED_UP")
 
 
 class Forecast(Base):

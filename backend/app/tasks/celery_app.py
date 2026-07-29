@@ -24,8 +24,15 @@ celery.conf.update(
             "task": "app.tasks.ai.classify_species",
             "schedule": 1500.0,  # every 25 min — classify newly-kept animal frames
         },
+        "recompute-exposure": {
+            # The denominator. Runs after the classifier has had a chance at the
+            # night's frames, so nights settle from UNPROCESSED to CONFIRMED rather
+            # than being counted as empty.
+            "task": "app.tasks.exposure.recompute_exposure",
+            "schedule": 3600.0,
+        },
     },
 )
 
 # Import task modules so they register with the app.
-from app.tasks import ai, sync  # noqa: E402,F401
+from app.tasks import ai, exposure, sync  # noqa: E402,F401

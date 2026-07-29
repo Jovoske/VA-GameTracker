@@ -11,8 +11,10 @@ type Overview = {
 
 type ClassCount = { label: string; count: number }
 type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
+type Changed = { kind: string; camera: string | null; text: string }
 type Forecast = {
   verdict: Verdict
+  changed?: Changed
   recommended?: {
     camera: string
     species: string
@@ -144,6 +146,33 @@ export default function Tonight() {
             <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.45 }}>
               {r.caveat}
             </div>
+
+            {/* The one comparison a hunter cannot make from memory. Never blank:
+                a decision aid that goes silent teaches the user that silence means
+                broken, so "nothing changed" is said out loud. */}
+            {f.changed?.text && (
+              <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    letterSpacing: '.06em',
+                    color: 'var(--text-dim)',
+                    flexShrink: 0,
+                  }}
+                >
+                  CHANGED
+                </span>
+                <span
+                  style={{
+                    fontSize: 14,
+                    lineHeight: 1.45,
+                    color: f.changed.kind === 'camera_down' ? 'var(--marginal)' : 'var(--text)',
+                  }}
+                >
+                  {f.changed.text}
+                </span>
+              </div>
+            )}
 
             {r.classes && r.classes.length > 0 && (
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>

@@ -14,10 +14,13 @@ from sqlalchemy import Integer, cast, extract, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
+from app.forecasting.changes import whats_changed
 from app.enrichment.weather import weather_at
 from app.models import Camera, Detection, Image, Species
 
+log = get_logger(__name__)
 _TZ = settings.estate_timezone
 
 
@@ -259,8 +262,14 @@ def forecast_tonight(db: Session) -> dict:
     top = forecasts[0]
     where = _expectations(db, forecasts)
     top_classes = where[0]["classes"] if where else []
+    try:
+        changed = whats_changed(db)
+    except Exception as e:  # never let the extra line break the verdict
+        log.warning("changed.failed", error=str(e))
+        changed = {"kind": "none", "camera": None, "text": ""}
     return {
         "verdict": _verdict(top["probability"], top["camera_nights"]),
+        "changed": changed,
         "recommended": {
             "camera": top["camera"], "species": top["species"], "runner_up": top["runner_up"],
             "probability": top["probability"], "best_window": top["best_window"],
