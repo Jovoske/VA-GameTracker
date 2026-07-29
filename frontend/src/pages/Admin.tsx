@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import ManageAccess from '../components/ManageAccess'
 
 type Status = {
   cameras: number
@@ -122,6 +123,8 @@ export default function Admin() {
         </button>
         {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
       </div>
+
+      <ManageAccess />
 
       {status && (
         <div className="card" style={{ padding: 18 }}>
