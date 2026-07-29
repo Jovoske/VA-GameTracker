@@ -10,9 +10,9 @@ type Overview = {
 }
 
 type ClassCount = { label: string; count: number }
+type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
 type Forecast = {
-  verdict: 'GO' | 'MARGINAL' | 'SKIP'
-  confidence: number
+  verdict: Verdict
   recommended?: {
     camera: string
     species: string
@@ -21,7 +21,10 @@ type Forecast = {
     best_window: { start_hour: number; end_hour: number }
     expect?: string
     classes?: ClassCount[]
+    nights_present: number
+    camera_nights: number
     reason: string
+    caveat: string
   }
   conditions: {
     moon_phase: string
@@ -33,20 +36,40 @@ type Forecast = {
   factors?: { text: string; impact: string }[]
   where?: {
     camera: string
-    verdict: string
+    verdict: Verdict
     probability: number
+    nights_present: number
+    camera_nights: number
     best_window: { start_hour: number; end_hour: number }
     classes: ClassCount[]
   }[]
-  alternates: { camera: string; species: string; verdict: string; probability: number }[]
+  alternates: {
+    camera: string
+    species: string
+    verdict: Verdict
+    nights_present: number
+    camera_nights: number
+  }[]
   nights_of_data: number
 }
 
 type Alert = { type: string; severity: string; title: string; text: string }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
-const verdictColor = (v: string) =>
-  v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
+
+// Verdict states are carried by WORD and SHAPE; colour is a redundant third
+// channel. Measured contrast between the old --go and --marginal was 1.12:1 — the
+// three states were effectively isoluminant — and under a red headlamp green reads
+// near-black while red reads white, so a colour-only dot inverts its meaning in
+// exactly the conditions this app is used in.
+const VERDICTS: Record<Verdict, { label: string; glyph: string; color: string }> = {
+  BEST_ODDS: { label: 'BEST ODDS', glyph: '▲', color: 'var(--v-best)' },
+  WORTH_A_LOOK: { label: 'WORTH A LOOK', glyph: '◐', color: 'var(--v-look)' },
+  QUIET: { label: 'QUIET', glyph: '○', color: 'var(--v-quiet)' },
+  NO_DATA: { label: 'NO DATA', glyph: '▨', color: 'var(--v-quiet)' },
+}
+const verdictOf = (v: string) => VERDICTS[(v as Verdict)] ?? VERDICTS.NO_DATA
+const verdictColor = (v: string) => verdictOf(v).color
 const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8]
 const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 
@@ -103,30 +126,24 @@ export default function Tonight() {
 
       {/* ── Verdict hero ───────────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 14, borderTop: `3px solid ${vc}` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <div
-            style={{
-              fontSize: 26, fontWeight: 700, letterSpacing: '.02em', color: '#06210C',
-              background: vc, padding: '4px 16px', borderRadius: 'var(--border-radius-md, 10px)',
-            }}
-          >
-            {f.verdict}
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
-            <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
-              {f.confidence}%
-            </span>{' '}
-            confidence
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 22, color: vc, lineHeight: 1 }}>{verdictOf(f.verdict).glyph}</span>
+          <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: '.02em' }}>
+            {verdictOf(f.verdict).label}
+            {r && <span style={{ color: 'var(--text-dim)' }}> · {r.camera}</span>}
           </div>
         </div>
 
         {r && (
           <>
-            <div style={{ fontSize: 16, fontWeight: 600, marginTop: 12 }}>
-              {r.camera} · {r.species}{' '}
-              <span style={{ color: 'var(--sand)' }}>{Math.round(r.probability * 100)}%</span>
+            <div style={{ fontSize: 16, fontWeight: 600, marginTop: 12 }}>{r.species}</div>
+            {/* Natural frequency, reference class inside the sentence. No percentage:
+                a percentage reads as "my chance of a shot tonight", which is not what
+                was measured. */}
+            <div style={{ fontSize: 14, marginTop: 4, lineHeight: 1.45 }}>{r.reason}</div>
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.45 }}>
+              {r.caveat}
             </div>
-            <div style={{ fontSize: 13, color: 'var(--text-dim)', marginTop: 2 }}>{r.reason}</div>
 
             {r.classes && r.classes.length > 0 && (
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
@@ -188,11 +205,16 @@ export default function Tonight() {
                   key={a.camera}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2)', borderRadius: 8, padding: '8px 11px' }}
                 >
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: verdictColor(a.verdict), flexShrink: 0 }} />
+                  <span style={{ color: verdictColor(a.verdict), fontSize: 13, width: 14, flexShrink: 0 }}>
+                    {verdictOf(a.verdict).glyph}
+                  </span>
                   <span style={{ flex: 1, fontSize: 13 }}>
                     {a.camera} · {a.species}
                   </span>
-                  <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{Math.round(a.probability * 100)}%</span>
+                  {/* A fraction, not a percentage — the sample size is visible. */}
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
+                    {a.nights_present}/{a.camera_nights} nights
+                  </span>
                 </div>
               ))}
             </div>
@@ -213,7 +235,9 @@ export default function Tonight() {
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                   <span style={{ fontSize: 14, fontWeight: 600 }}>{w.camera}</span>
-                  <span style={{ fontSize: 12, color: verdictColor(w.verdict), fontWeight: 600 }}>{w.verdict}</span>
+                  <span style={{ fontSize: 12, color: verdictColor(w.verdict), fontWeight: 600 }}>
+                    {verdictOf(w.verdict).glyph} {verdictOf(w.verdict).label}
+                  </span>
                   <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
                     {hh(w.best_window.start_hour)}–{hh(w.best_window.end_hour)}
                   </span>

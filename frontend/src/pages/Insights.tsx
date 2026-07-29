@@ -7,10 +7,8 @@ type Insights = {
     moon_phase: string
     moon_illum: number
     darkness_minutes: number | null
-    camera: string | null
-    species: string | null
-    probability: number | null
-    verdict: string
+    sunset: string | null
+    civil_twilight_end: string | null
   }[]
   composition: { label: string; count: number; top_camera: string | null }[]
   correlations: { statement: string; strength: number; sample: number }[]
@@ -36,8 +34,6 @@ type PScope = {
 }
 type Patterns = { scopes: PScope[]; nights: number; range?: [string, string] }
 
-const verdictColor = (v: string) =>
-  v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
 const dayName = (iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
 const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
@@ -78,7 +74,7 @@ export default function Insights() {
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Insights</div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>7-NIGHT OUTLOOK</div>
+        <div style={labelStyle}>NEXT 7 NIGHTS · SUN &amp; MOON</div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
           {d.outlook.map((o) => (
             <div
@@ -89,26 +85,31 @@ export default function Insights() {
                 padding: '8px 4px',
                 borderRadius: 8,
                 background: 'var(--surface-2)',
-                borderTop: `2px solid ${verdictColor(o.verdict)}`,
               }}
             >
               <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
                 {dayName(o.date)} {dayNum(o.date)}
               </div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: verdictColor(o.verdict), margin: '4px 0' }}>
-                {o.verdict}
-              </div>
-              <div style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {o.species ?? '—'}
-              </div>
-              <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                {o.probability != null ? Math.round(o.probability * 100) + '%' : '–'}
+              <div style={{ fontSize: 14, margin: '4px 0' }}>🌙</div>
+              <div style={{ fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                {Math.round(o.moon_illum)}%
               </div>
               <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3 }}>
-                🌙 {Math.round(o.moon_illum)}%
+                {o.civil_twilight_end
+                  ? new Date(o.civil_twilight_end).toLocaleTimeString(undefined, {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })
+                  : '–'}
               </div>
             </div>
           ))}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.5 }}>
+          Moon illumination and last light only. This used to show a per-night verdict and
+          percentage, but they were tonight's single number repeated seven times with a moon
+          nudge — not a forecast. A real multi-night forecast needs a model scored against
+          what actually happened.
         </div>
       </div>
 
