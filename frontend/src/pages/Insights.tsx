@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, authedImageUrl } from '../api'
 
 type Insights = {
   outlook: {
@@ -257,10 +257,10 @@ export default function Insights() {
                 {classImgs?.map((im) => (
                   <div
                     key={im.image_id}
-                    onClick={() => setZoom(im.file_url)}
+                    onClick={() => setZoom(authedImageUrl(im.file_url))}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
-                    <img src={im.file_url} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
+                    <img src={authedImageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.camera}</span>
                       <span>{new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>

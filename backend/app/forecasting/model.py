@@ -8,6 +8,7 @@ how sure it is and why, and never claims certainty. The factors feed the card's
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, cast, extract, func, select
 from sqlalchemy.orm import Session
@@ -162,7 +163,12 @@ def _tonight_conditions(now: datetime) -> dict:
     s = solar(settings.estate_lat, settings.estate_lon, now.date())
     wind_dir = wind_speed = temp = pressure = cloud = rain = None
     try:
-        local_22 = now.astimezone().replace(hour=22, minute=0, second=0, microsecond=0)
+        # `now` is UTC and containers set no TZ, so .astimezone() was a no-op: this
+        # sampled 22:00 UTC, which is midnight the following day in Madrid. Anchor
+        # explicitly to the estate's timezone instead of the process's.
+        local_22 = now.astimezone(ZoneInfo(_TZ)).replace(
+            hour=22, minute=0, second=0, microsecond=0
+        )
         w = weather_at(settings.estate_lat, settings.estate_lon, local_22, tz=_TZ)
         wind_dir, wind_speed, temp = w.get("wind_dir_deg"), w.get("wind_speed_kmh"), w.get("temp_c")
         pressure, cloud, rain = w.get("pressure_hpa"), w.get("cloud_cover_pct"), w.get("rain_mm")

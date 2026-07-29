@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, authedImageUrl } from '../api'
 
 type Camera = {
   id: string
@@ -175,8 +175,8 @@ export default function Cameras() {
                   return (
                     <div key={im.id} style={{ position: 'relative', flexShrink: 0 }}>
                       <img
-                        src={im.file_url as string}
-                        onClick={() => setZoom(im.file_url)}
+                        src={authedImageUrl(im.file_url)}
+                        onClick={() => setZoom(authedImageUrl(im.file_url))}
                         style={{
                           height: 74,
                           width: 100,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
+import { api, authedImageUrl } from '../api'
 
 type Animal = {
   id: string
@@ -167,7 +167,7 @@ export default function Animals() {
                 <div style={{ position: 'relative', height: 110, background: 'var(--surface-2)' }}>
                   {a.thumb_image_id && (
                     <img
-                      src={`/api/images/${a.thumb_image_id}/file`}
+                      src={authedImageUrl(`/api/images/${a.thumb_image_id}/file`)}
                       loading="lazy"
                       alt={a.label}
                       style={{ width: '100%', height: '100%', objectFit: 'cover' }}

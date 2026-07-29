@@ -37,6 +37,7 @@ export default function MapPage() {
   const placingRef = useRef<string | null>(null)
   const [cameras, setCameras] = useState<Camera[]>([])
   const [placing, setPlacing] = useState<string | null>(null)
+  const [error, setError] = useState('')
 
   function renderMarkers(cams: Camera[]) {
     const map = mapRef.current
@@ -52,7 +53,10 @@ export default function MapPage() {
         `border:2px solid #fff;box-shadow:0 0 12px rgba(63,185,80,.85);cursor:pointer;` +
         `display:flex;align-items:center;justify-content:center;color:#06210C;font-size:10px;font-weight:700`
       el.textContent = String(c.sightings)
-      const marker = new maplibregl.Marker({ element: el, draggable: true })
+      // Draggable ONLY while this camera is explicitly being repositioned. It used
+      // to be always-on with a swallowed error, so a pan that happened to start on
+      // a marker silently and irreversibly rewrote that camera's coordinates.
+      const marker = new maplibregl.Marker({ element: el, draggable: placingRef.current === c.id })
         .setLngLat([c.lng as number, c.lat as number])
         .setPopup(
           new maplibregl.Popup({ offset: 22 }).setHTML(
@@ -62,10 +66,23 @@ export default function MapPage() {
         .addTo(map)
       marker.on('dragend', () => {
         const ll = marker.getLngLat()
+        const previous = { lat: c.lat, lng: c.lng }
         api(`/cameras/${c.id}/location`, {
           method: 'PUT',
           body: JSON.stringify({ lat: ll.lat, lng: ll.lng }),
-        }).catch(() => {})
+        })
+          .then(() => {
+            placingRef.current = null
+            setPlacing(null)
+            load()
+          })
+          .catch((e) => {
+            // Never fail silently on a write: put the pin back and say so.
+            if (previous.lat != null && previous.lng != null) {
+              marker.setLngLat([previous.lng, previous.lat])
+            }
+            setError(`Couldn't move ${c.name}: ${e.message}`)
+          })
       })
       markers.current[c.id] = marker
     })
@@ -125,6 +142,23 @@ export default function MapPage() {
   return (
     <div style={{ position: 'relative' }}>
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Map</div>
+      {error && (
+        <div
+          onClick={() => setError('')}
+          style={{
+            marginBottom: 10,
+            padding: '8px 12px',
+            borderRadius: 8,
+            fontSize: 13,
+            background: 'var(--surface-2)',
+            border: '1px solid var(--skip)',
+            color: 'var(--text)',
+            cursor: 'pointer',
+          }}
+        >
+          {error}
+        </div>
+      )}
       <div
         ref={mapEl}
         style={{

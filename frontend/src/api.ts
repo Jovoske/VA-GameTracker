@@ -9,6 +9,19 @@ export function setToken(token: string | null): void {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
+/** Add the session token to an <img> src.
+ *
+ * Image bytes are behind authentication now — trail cameras photograph people, not
+ * only animals — but an <img> tag cannot send an Authorization header, so the token
+ * rides in the query string instead.
+ */
+export function authedImageUrl(url: string | null | undefined): string {
+  if (!url) return ''
+  const token = getToken()
+  if (!token) return url
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('Content-Type', 'application/json')

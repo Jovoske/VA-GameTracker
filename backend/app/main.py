@@ -57,9 +57,15 @@ if _DIST and os.path.isdir(_DIST):
     if os.path.isdir(_assets):
         app.mount("/assets", StaticFiles(directory=_assets), name="assets")
 
+    _DIST_REAL = os.path.realpath(_DIST)
+
     @app.get("/{full_path:path}")
     def _spa(full_path: str):
-        candidate = os.path.join(_DIST, full_path)
-        if full_path and os.path.isfile(candidate):
+        # os.path.join() happily walks out of the directory: a request for
+        # ..%2f..%2fetc/passwd resolved to a real file and was served. Resolve the
+        # candidate and confirm it is still inside the dist root before returning it.
+        candidate = os.path.realpath(os.path.join(_DIST_REAL, full_path))
+        inside = candidate == _DIST_REAL or candidate.startswith(_DIST_REAL + os.sep)
+        if full_path and inside and os.path.isfile(candidate):
             return FileResponse(candidate)
-        return FileResponse(os.path.join(_DIST, "index.html"))
+        return FileResponse(os.path.join(_DIST_REAL, "index.html"))

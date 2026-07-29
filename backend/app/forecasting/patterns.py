@@ -15,7 +15,7 @@ import math
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -106,7 +106,11 @@ def _overnight_weather(lat: float, lon: float, start: date, end: date) -> dict[s
 
 
 def _nightly_activity(db: Session) -> tuple[list[str], dict]:
-    night = func.date(func.timezone(_TZ, Image.captured_at))
+    # A "night" runs 18:00 -> 06:00, and _overnight_weather keys it by the EVENING
+    # date. Bucketing detections by calendar date instead put everything after
+    # midnight -- the bulk of nocturnal activity -- against the *following* night's
+    # weather. Shifting back 6h before taking the date puts both on the same key.
+    night = func.date(func.timezone(_TZ, Image.captured_at) - text("interval '6 hours'"))
     lo, hi = db.execute(select(func.min(night), func.max(night))).one()
     if lo is None:
         return [], {}
