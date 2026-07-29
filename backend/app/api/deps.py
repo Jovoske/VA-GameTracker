@@ -23,7 +23,14 @@ def get_current_user(
     except jwt.PyJWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
 
-    user = db.get(User, uuid.UUID(subject)) if subject else None
+    # A token whose subject is not a UUID is a bad token, not a server fault:
+    # uuid.UUID() raises ValueError, which surfaced as a 500 instead of a 401.
+    try:
+        user_id = uuid.UUID(subject) if subject else None
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token subject")
+
+    user = db.get(User, user_id) if user_id else None
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
     return user

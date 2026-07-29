@@ -47,11 +47,34 @@ class User(Base):
     __table_args__ = (CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),)
 
 
+class SpypointAccount(Base):
+    """A SPYPOINT login. Cameras on an estate may be split across several.
+
+    The password is encrypted (not hashed) because it must be replayed to SPYPOINT.
+    """
+
+    __tablename__ = "spypoint_accounts"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
+    label: Mapped[str] = mapped_column(String, nullable=False)
+    username: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    password_enc: Mapped[str | None] = mapped_column(String)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Camera(Base):
     __tablename__ = "cameras"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
-    spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
+    spypoint_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("spypoint_accounts.id")
+    )
+    # Unique per account, not globally: two accounts can legitimately expose
+    # different cameras that happen to share an upstream id.
+    spypoint_id: Mapped[str | None] = mapped_column(String)
     name: Mapped[str] = mapped_column(String, nullable=False)
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
@@ -62,6 +85,9 @@ class Camera(Base):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("spypoint_account_id", "spypoint_id", name="uq_camera_account_spypoint"),
+    )
 
 
 class Stand(Base):
