@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_admin, get_current_user
 from app.core.config import settings
 from app.core.db import get_db
+from app.forecasting.inference import dark_exit, suggest_approach_arcs
 from app.forecasting.wind import assess, shooting_arcs_conflict
 from app.models import Camera, Estate, Sit, Stand, User
 
@@ -281,3 +282,29 @@ def start_sit(
     db.commit()
     stand = db.get(Stand, sit.stand_id)
     return _sit_out(sit, stand.name if stand else None)
+
+
+@router.get("/stands/{stand_id}/suggested-arcs")
+def suggested_arcs(
+    stand_id: uuid.UUID, _: User = Depends(get_current_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Propose approach bearings from cross-camera movement, for confirmation.
+
+    Never written automatically: a guessed arc becomes confident wind advice, and
+    confident wrong advice costs more trust than an honest "yours to solve".
+    """
+    stand = db.get(Stand, stand_id)
+    if stand is None:
+        raise HTTPException(404, "Stand not found")
+    return suggest_approach_arcs(db, stand)
+
+
+@router.get("/stands/{stand_id}/dark-exit")
+def stand_dark_exit(
+    stand_id: uuid.UUID, _: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> dict:
+    """When to walk out. Stands die from how you leave them, not how you arrive."""
+    stand = db.get(Stand, stand_id)
+    if stand is None:
+        raise HTTPException(404, "Stand not found")
+    return dark_exit(db, stand)

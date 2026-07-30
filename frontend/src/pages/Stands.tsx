@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
+import { flushSitQueue } from './SitMode'
 
 /**
  * Stands — claim one for tonight, then report what came of it.
@@ -52,6 +54,7 @@ const OUTCOMES: [string, string][] = [
 ]
 
 export default function Stands() {
+  const nav = useNavigate()
   const [stands, setStands] = useState<Stand[] | null>(null)
   const [sits, setSits] = useState<Sit[]>([])
   const [me, setMe] = useState<Me | null>(null)
@@ -70,7 +73,8 @@ export default function Stands() {
   }
 
   useEffect(() => {
-    load()
+    // Drain anything Sit Mode recorded while out of signal.
+    flushSitQueue().finally(load)
   }, [])
 
   async function run(fn: () => Promise<unknown>, ok = '') {
@@ -146,12 +150,17 @@ export default function Stands() {
                   {sit.outcome !== 'unreported' ? ` · ${sit.outcome.replace(/_/g, ' ')}` : ''}
                 </div>
 
-                {!sit.started_at && sit.outcome === 'unreported' && (
+                {sit.outcome === 'unreported' && (
                   <button
                     style={{ ...btn, width: '100%' }}
-                    onClick={() => run(() => api(`/sits/${sit.id}/start`, { method: 'POST' }))}
+                    onClick={async () => {
+                      if (!sit.started_at) {
+                        await api(`/sits/${sit.id}/start`, { method: 'POST' }).catch(() => {})
+                      }
+                      nav(`/sit/${sit.id}`)
+                    }}
                   >
-                    Start sit
+                    {sit.started_at ? 'Back to sit mode' : 'Start sit'}
                   </button>
                 )}
 

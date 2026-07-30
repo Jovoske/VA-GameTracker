@@ -8,6 +8,7 @@ import Cameras from './pages/Cameras'
 import Insights from './pages/Insights'
 import Login from './pages/Login'
 import MapPage from './pages/Map'
+import SitMode from './pages/SitMode'
 import Stands from './pages/Stands'
 import Tonight from './pages/Tonight'
 
@@ -19,6 +20,14 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route
+        path="/sit/:sitId"
+        element={
+          <RequireAuth>
+            <SitMode />
+          </RequireAuth>
+        }
+      />
       <Route
         element={
           <RequireAuth>
