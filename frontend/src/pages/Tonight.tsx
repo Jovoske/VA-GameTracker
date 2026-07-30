@@ -12,9 +12,11 @@ type Overview = {
 type ClassCount = { label: string; count: number }
 type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
 type Changed = { kind: string; camera: string | null; text: string }
+type Wind = { status: string; text: string; is_advice: boolean }
 type Forecast = {
   verdict: Verdict
   changed?: Changed
+  wind?: Wind
   recommended?: {
     camera: string
     species: string
@@ -146,6 +148,26 @@ export default function Tonight() {
             <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.45 }}>
               {r.caveat}
             </div>
+
+            {/* Wind, with its competence boundary stated. Dimmed when the app is
+                declining to call it, so "too light to call" never reads like advice. */}
+            {f.wind?.text && (
+              <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span style={{ fontSize: 10, letterSpacing: '.06em', color: 'var(--text-dim)', flexShrink: 0 }}>
+                  WIND
+                </span>
+                <span
+                  style={{
+                    fontSize: 14,
+                    lineHeight: 1.45,
+                    color: f.wind.status === 'scent_carries' ? 'var(--v-look)' : 'var(--text)',
+                    opacity: f.wind.is_advice ? 1 : 0.7,
+                  }}
+                >
+                  {f.wind.text}
+                </span>
+              </div>
+            )}
 
             {/* The one comparison a hunter cannot make from memory. Never blank:
                 a decision aid that goes silent teaches the user that silence means

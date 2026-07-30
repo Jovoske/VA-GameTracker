@@ -31,8 +31,19 @@ def _server_reachable(dsn: str) -> bool:
         return False
 
 
+_DB_UP = _server_reachable(ADMIN_DSN)
+
+# Skipping keeps the suite runnable anywhere, but a silent skip is indistinguishable
+# from a pass at a glance — a whole file can go green while testing nothing. Set
+# GAMESENSE_REQUIRE_DB=1 in CI so a missing database is a loud failure instead.
+if os.environ.get("GAMESENSE_REQUIRE_DB") == "1" and not _DB_UP:
+    raise RuntimeError(
+        f"GAMESENSE_REQUIRE_DB=1 but no PostgreSQL reachable at {ADMIN_DSN}. "
+        "Refusing to report a green suite that skipped every database test."
+    )
+
 requires_db = pytest.mark.skipif(
-    not _server_reachable(ADMIN_DSN),
+    not _DB_UP,
     reason="no test PostgreSQL reachable (set GAMESENSE_TEST_DSN)",
 )
 

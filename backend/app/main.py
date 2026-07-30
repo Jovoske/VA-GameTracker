@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import (
     routes_admin,
     routes_spypoint_accounts,
+    routes_stands,
     routes_users,
     routes_alerts,
     routes_analytics,
@@ -46,6 +47,7 @@ app.include_router(routes_animals.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)
 app.include_router(routes_users.router, prefix=API_PREFIX)
 app.include_router(routes_spypoint_accounts.router, prefix=API_PREFIX)
+app.include_router(routes_stands.router, prefix=API_PREFIX)
 
 import os
 from fastapi.staticfiles import StaticFiles

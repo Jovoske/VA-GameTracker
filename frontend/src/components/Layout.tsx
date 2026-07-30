@@ -38,6 +38,9 @@ export default function Layout() {
         <NavLink to="/cameras" style={({ isActive }) => linkStyle(isActive)}>
           Cameras
         </NavLink>
+        <NavLink to="/stands" style={({ isActive }) => linkStyle(isActive)}>
+          Stands
+        </NavLink>
         <NavLink to="/map" style={({ isActive }) => linkStyle(isActive)}>
           Map
         </NavLink>

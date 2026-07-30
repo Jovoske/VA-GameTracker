@@ -7,6 +7,7 @@ how sure it is and why, and never claims certainty. The factors feed the card's
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,8 +18,9 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
 from app.forecasting.changes import whats_changed
+from app.forecasting.wind import assess
 from app.enrichment.weather import weather_at
-from app.models import Camera, Detection, Image, Species
+from app.models import Camera, Detection, Image, Species, Stand
 
 log = get_logger(__name__)
 _TZ = settings.estate_timezone
@@ -267,9 +269,27 @@ def forecast_tonight(db: Session) -> dict:
     except Exception as e:  # never let the extra line break the verdict
         log.warning("changed.failed", error=str(e))
         changed = {"kind": "none", "camera": None, "text": ""}
+    # Wind is deterministic geometry against the stand linked to the top camera —
+    # not a fitted coefficient. It states its own competence boundary rather than
+    # producing a confident bearing on a calm night a single grid point cannot see.
+    stand = db.scalar(select(Stand).where(Stand.camera_id == uuid.UUID(top["camera_id"])))
+    alt = forecasts[1]["camera"] if len(forecasts) > 1 else None
+    wind_verdict = assess(
+        stand_name=stand.name if stand else top["camera"],
+        wind_dir_deg=cond.get("wind_dir_deg"),
+        wind_speed_kmh=cond.get("wind_speed_kmh"),
+        approach_dirs_deg=stand.approach_dirs_deg if stand else None,
+        alternative_stand=alt,
+    )
+
     return {
         "verdict": _verdict(top["probability"], top["camera_nights"]),
         "changed": changed,
+        "wind": {
+            "status": wind_verdict.status,
+            "text": wind_verdict.text,
+            "is_advice": wind_verdict.is_advice,
+        },
         "recommended": {
             "camera": top["camera"], "species": top["species"], "runner_up": top["runner_up"],
             "probability": top["probability"], "best_window": top["best_window"],

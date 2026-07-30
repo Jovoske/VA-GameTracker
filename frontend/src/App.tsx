@@ -8,6 +8,7 @@ import Cameras from './pages/Cameras'
 import Insights from './pages/Insights'
 import Login from './pages/Login'
 import MapPage from './pages/Map'
+import Stands from './pages/Stands'
 import Tonight from './pages/Tonight'
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -27,6 +28,7 @@ export default function App() {
       >
         <Route path="/" element={<Tonight />} />
         <Route path="/cameras" element={<Cameras />} />
+        <Route path="/stands" element={<Stands />} />
         <Route path="/map" element={<MapPage />} />
         <Route path="/insights" element={<Insights />} />
         <Route path="/animals" element={<Animals />} />

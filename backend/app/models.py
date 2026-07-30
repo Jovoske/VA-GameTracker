@@ -104,6 +104,44 @@ class Stand(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
 
+class Sit(Base):
+    """A claimed stand for a night, and what came of it.
+
+    The claim is written *before* the sit, at 18:00, because claiming has a selfish
+    payoff — you claim to get the wind verdict and to find out whether anyone else
+    is on that ridge. That is why this row exists even when nobody ever reports an
+    outcome, and it is what makes hunting pressure measurable at all.
+
+    `outcome` is never silently 'nothing': a sit nobody reported on is UNREPORTED.
+    Conflating "I saw nothing" with "I didn't say" would poison the only ground
+    truth this system will ever have.
+    """
+
+    __tablename__ = "sits"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    stand_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stands.id"), nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    night: Mapped[date] = mapped_column(Date, nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="unreported")
+    species_seen: Mapped[str | None] = mapped_column(String)
+    # What the app told them about the wind, kept verbatim so the advice can later
+    # be scored against what actually happened instead of quietly rewritten.
+    wind_status: Mapped[str | None] = mapped_column(String)
+    wind_text: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('unreported','nothing','seen','shootable_no_shot','shot','cancelled')",
+            name="outcome_valid",
+        ),
+        Index("ix_sits_night", "night"),
+        Index("ix_sits_stand_night", "stand_id", "night"),
+    )
+
+
 class Species(Base):
     __tablename__ = "species"
     id: Mapped[str] = mapped_column(String, primary_key=True)  # 'sus_scrofa'
