@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { ageLabel, api, apiCached } from '../api'
 
 type Overview = {
   totals: { sightings: number; empty: number; nights: number; cameras: number }
@@ -13,10 +13,12 @@ type ClassCount = { label: string; count: number }
 type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
 type Changed = { kind: string; camera: string | null; text: string }
 type Wind = { status: string; text: string; is_advice: boolean }
+type Calibration = { available: boolean; n_evaluated: number; statement?: string; beats_baseline?: boolean }
 type Forecast = {
   verdict: Verdict
   changed?: Changed
   wind?: Wind
+  calibration?: Calibration
   recommended?: {
     camera: string
     species: string
@@ -82,29 +84,55 @@ export default function Tonight() {
   const [f, setF] = useState<Forecast | null>(null)
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [err, setErr] = useState('')
+  const [planAt, setPlanAt] = useState<string | null>(null)
 
   useEffect(() => {
-    api<Forecast>('/forecast/tonight').then(setF).catch((e) => setErr(e.message))
+    // Paint from the last good plan first; refresh underneath. A hunter in a
+    // valley with no bars gets the verdict, clearly labelled with its age.
+    apiCached<Forecast>('/forecast/tonight')
+      .then(({ data, at }) => {
+        setF(data)
+        setPlanAt(at)
+      })
+      .catch((e) => setErr(e.message))
     api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
   }, [])
 
   if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
-  if (!f || !d) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
+  if (!f) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
 
   const c = f.conditions
   const r = f.recommended
   const vc = verdictColor(f.verdict)
-  const maxH = Math.max(...d.by_hour.map((x) => x.count), 1)
-  const maxCam = Math.max(...d.by_camera.map((x) => x.sightings), 1)
-  const maxSp = Math.max(...d.by_species.map((x) => x.count), 1)
-  const bw = d.best_window
+  const maxH = Math.max(...(d?.by_hour ?? []).map((x) => x.count), 1)
+  const maxCam = Math.max(...(d?.by_camera ?? []).map((x) => x.sightings), 1)
+  const maxSp = Math.max(...(d?.by_species ?? []).map((x) => x.count), 1)
+  const bw = d?.best_window ?? { start_hour: 0, end_hour: 0, share_pct: 0 }
   const inWindow = (hr: number) =>
     bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Tonight</div>
+
+      {/* Age of what you are reading. In decision-support the freshness of the
+          data IS data; a stale plan presented as current is the failure mode. */}
+      {planAt && (
+        <div
+          style={{
+            fontSize: 12,
+            padding: '7px 12px',
+            marginBottom: 12,
+            borderRadius: 8,
+            background: 'var(--surface-2)',
+            color: 'var(--text-dim)',
+            border: `1px solid ${Date.now() - new Date(planAt).getTime() > 12 * 3600e3 ? 'var(--v-look)' : 'var(--border)'}`,
+          }}
+        >
+          Plan from {ageLabel(planAt)}
+        </div>
+      )}
 
       {alerts.length > 0 && (
         <div className="card" style={{ padding: 14, marginBottom: 14 }}>
@@ -310,58 +338,73 @@ export default function Tonight() {
         </div>
       )}
 
-      {/* ── Activity by hour ───────────────────────── */}
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>ACTIVITY BY HOUR · local time (peak window in green)</div>
-        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
-          {d.by_hour.map((x) => (
-            <div key={x.hour} title={`${hh(x.hour)} — ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
-              <div style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0' }} />
-            </div>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 2, marginTop: 4 }}>
-          {d.by_hour.map((x) => (
-            <div key={x.hour} style={{ flex: 1, textAlign: 'center', fontSize: 9, color: 'var(--text-dim)' }}>
-              {x.hour % 6 === 0 ? x.hour : ''}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ── By camera ──────────────────────────────── */}
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>SIGHTINGS BY CAMERA</div>
-        {d.by_camera.map((cam) => (
-          <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
-            <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-              <div style={{ width: `${(cam.sightings / maxCam) * 100}%`, height: '100%', background: 'var(--teal)' }} />
-            </div>
-            <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{cam.sightings}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* ── By species ─────────────────────────────── */}
-      {d.by_species.length > 0 && (
-        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-          <div style={labelStyle}>SPECIES</div>
-          {d.by_species.slice(0, 8).map((s) => (
-            <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-              <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
-              <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-                <div style={{ width: `${(s.count / maxSp) * 100}%`, height: '100%', background: 'var(--sand)' }} />
-              </div>
-              <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{s.count}</div>
-            </div>
-          ))}
+      {/* Track record: what replaced the invented confidence figure. It is a
+          measured hit rate against camera-nights, and it is withheld entirely
+          until there is enough scored history for it to mean anything. */}
+      {f.calibration?.statement && (
+        <div className="card" style={{ padding: 14, marginBottom: 14 }}>
+          <div style={labelStyle}>TRACK RECORD</div>
+          <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>
         </div>
       )}
 
-      <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', lineHeight: 1.6 }}>
-        {d.totals.sightings} animal sightings · {d.totals.empty} empty frames filtered · {d.totals.nights} nights of data
-      </div>
+      {d && (
+        <>
+        {/* ── Activity by hour ───────────────────────── */}
+        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+          <div style={labelStyle}>ACTIVITY BY HOUR · local time (peak window in green)</div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
+            {d.by_hour.map((x) => (
+              <div key={x.hour} title={`${hh(x.hour)} — ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
+                <div style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0' }} />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 2, marginTop: 4 }}>
+            {d.by_hour.map((x) => (
+              <div key={x.hour} style={{ flex: 1, textAlign: 'center', fontSize: 9, color: 'var(--text-dim)' }}>
+                {x.hour % 6 === 0 ? x.hour : ''}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── By camera ──────────────────────────────── */}
+        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+          <div style={labelStyle}>SIGHTINGS BY CAMERA</div>
+          {d.by_camera.map((cam) => (
+            <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
+              <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ width: `${(cam.sightings / maxCam) * 100}%`, height: '100%', background: 'var(--teal)' }} />
+              </div>
+              <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{cam.sightings}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── By species ─────────────────────────────── */}
+        {d.by_species.length > 0 && (
+          <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+            <div style={labelStyle}>SPECIES</div>
+            {d.by_species.slice(0, 8).map((s) => (
+              <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
+                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ width: `${(s.count / maxSp) * 100}%`, height: '100%', background: 'var(--sand)' }} />
+                </div>
+                <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{s.count}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', lineHeight: 1.6 }}>
+          {d.totals.sightings} animal sightings · {d.totals.empty} empty frames filtered · {d.totals.nights} nights of data
+        </div>
+        </>
+      )}
+
     </div>
   )
 }

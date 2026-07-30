@@ -1,5 +1,6 @@
 """Celery application + beat schedule."""
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -24,6 +25,17 @@ celery.conf.update(
             "task": "app.tasks.ai.classify_species",
             "schedule": 1500.0,  # every 25 min — classify newly-kept animal frames
         },
+        "persist-forecast": {
+            # Record the claim before the night it is about, so it cannot be
+            # rewritten after the fact.
+            "task": "app.tasks.scoring.persist_forecast",
+            "schedule": crontab(hour=16, minute=0),
+        },
+        "score-yesterday": {
+            # Grade it the next morning, once the night's frames have synced.
+            "task": "app.tasks.scoring.score_yesterday",
+            "schedule": crontab(hour=9, minute=0),
+        },
         "recompute-exposure": {
             # The denominator. Runs after the classifier has had a chance at the
             # night's frames, so nights settle from UNPROCESSED to CONFIRMED rather
@@ -35,4 +47,4 @@ celery.conf.update(
 )
 
 # Import task modules so they register with the app.
-from app.tasks import ai, exposure, sync  # noqa: E402,F401
+from app.tasks import ai, exposure, scoring, sync  # noqa: E402,F401

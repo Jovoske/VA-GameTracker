@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
 from app.forecasting.changes import whats_changed
+from app.forecasting.scoring import calibration
 from app.forecasting.wind import assess
 from app.enrichment.weather import weather_at
 from app.models import Camera, Detection, Image, Species, Stand
@@ -30,10 +31,19 @@ def _local_hour(col):
     return cast(extract("hour", func.timezone(_TZ, col)), Integer)
 
 
-def _best_window(by_hour: dict[int, int]) -> dict:
+# Hours a person can realistically sit an evening stand. Searching all 24 returned
+# windows like 03:00-06:00: genuinely where the camera activity peaked, and
+# genuinely useless as a recommendation, because nobody is sitting then. The
+# constraint is what a hunter can do, not what the sensor saw.
+SITTABLE_HOURS = tuple(range(16, 24)) + (0, 1)
+
+
+def _best_window(by_hour: dict[int, int], *, sittable_only: bool = True) -> dict:
+    """Best 3-hour block. Restricted to hours somebody could actually be there."""
     total = sum(by_hour.values()) or 1
-    best_start, best_sum = 0, -1
-    for start in range(24):
+    starts = SITTABLE_HOURS if sittable_only else tuple(range(24))
+    best_start, best_sum = starts[0], -1
+    for start in starts:
         block = sum(by_hour.get((start + d) % 24, 0) for d in range(3))
         if block > best_sum:
             best_start, best_sum = start, block
@@ -192,6 +202,7 @@ def _expectations(db: Session, forecasts: list[dict]) -> list[dict]:
         classes = sorted(agg.items(), key=lambda kv: -kv[1])[:4]
         out.append({
             "camera": f["camera"], "camera_id": f["camera_id"],
+            "species_id": f["species_id"],  # needed to score the claim against outcomes
             "verdict": _verdict(f["probability"], f["camera_nights"]),
             "probability": f["probability"],
             "nights_present": f["nights_present"], "camera_nights": f["camera_nights"],
@@ -282,9 +293,18 @@ def forecast_tonight(db: Session) -> dict:
         alternative_stand=alt,
     )
 
+    try:
+        track_record = calibration(db)
+    except Exception as e:
+        log.warning("calibration.failed", error=str(e))
+        track_record = {"available": False, "n_evaluated": 0}
+
     return {
         "verdict": _verdict(top["probability"], top["camera_nights"]),
         "changed": changed,
+        # The honest replacement for the deleted confidence figure: not how much
+        # data went in, but how often this model has actually been right.
+        "calibration": track_record,
         "wind": {
             "status": wind_verdict.status,
             "text": wind_verdict.text,
