@@ -20,6 +20,8 @@ Three products, in decreasing order of how much they can be trusted:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -98,13 +100,17 @@ def approach_bearings(db: Session, lat: float | None, lon: float | None) -> list
 def stand_wind_report(
     db: Session, *, stand_name: str, lat: float | None, lon: float | None,
     wind_dir_deg: float | None, wind_speed_kmh: float | None,
+    cloud_pct: float | None = None, when: datetime | None = None,
 ) -> dict:
     """Tonight's verdict for one position, using bedding as the thing to protect.
 
-    Mirrors wind.assess()'s honesty rules — it defers below the light-wind threshold
-    and says nothing useful when there is no bedding drawn — but reports *which*
-    bedding is compromised, which is what makes it actionable on a map.
+    When the forecast is too light to mean anything, the slope is consulted instead:
+    on a clear calm evening cold air drains downhill and takes the hunter's scent
+    with it, which is a far more useful answer than "read it at the truck". The
+    refusal is kept for the cases that genuinely cannot be called — flat ground,
+    heavy cloud, or no terrain loaded.
     """
+    from app.forecasting import thermal
     from app.forecasting.wind import LIGHT_WIND_KMH, compass
 
     zones = [z for z in bedding_zones(db) if _zone_point(z)]
@@ -118,16 +124,25 @@ def stand_wind_report(
     if wind_dir_deg is None or wind_speed_kmh is None:
         return {"status": "no_wind_data", "text": "No wind forecast for tonight — check it yourself."}
 
-    scent_bearing = (wind_dir_deg + 180.0) % 360.0
-    if wind_speed_kmh < LIGHT_WIND_KMH:
+    reg = thermal.regime(
+        db, lat=lat, lon=lon, when=when or datetime.now(timezone.utc),
+        wind_dir_deg=wind_dir_deg, wind_speed_kmh=wind_speed_kmh, cloud_pct=cloud_pct,
+    )
+    source = reg["source"]
+    if source == "unknown":
         return {
             "status": "too_light",
-            "scent_bearing": round(scent_bearing),
+            "source": "unknown",
+            "scent_bearing": round((wind_dir_deg + 180.0) % 360.0),
             "text": (
                 f"Wind {compass(wind_dir_deg)} {round(wind_speed_kmh)} km/h — too light to call. "
-                "Thermals will decide this one; read them at the truck."
+                + (reg.get("text") or "Thermals will decide this one; read them at the truck.")
             ),
         }
+
+    eff_dir = float(reg["wind_dir_deg"])
+    eff_speed = float(reg["wind_speed_kmh"])
+    scent_bearing = (eff_dir + 180.0) % 360.0
 
     hits = []
     for z in zones:
@@ -136,15 +151,26 @@ def stand_wind_report(
             hits.append({"zone": z.name, "zone_id": str(z.id), "distance_m": round(dist)})
     hits.sort(key=lambda h: h["distance_m"])
 
+    # Lead with the drainage explanation when the slope is what is driving the air,
+    # so nobody reads a thermal verdict as if it came from the forecast.
+    if source == "synoptic":
+        lead = f"Wind {compass(eff_dir)} {round(eff_speed)} km/h"
+    else:
+        lead = f"Forecast calm — {'drainage' if source == 'katabatic' else 'upslope flow'} {compass(scent_bearing)}"
+
     if hits:
         first = hits[0]
         return {
             "status": "scent_carries",
+            "source": source,
+            "confidence": reg.get("confidence"),
             "scent_bearing": round(scent_bearing),
+            "slope": reg.get("slope"),
             "hit_zones": hits,
             "text": (
-                f"Wind {compass(wind_dir_deg)} {round(wind_speed_kmh)} km/h — your scent runs "
-                f"{compass(scent_bearing)} into {first['zone']}, {first['distance_m']} m away."
+                f"{lead} — your scent runs {compass(scent_bearing)} into {first['zone']}, "
+                f"{first['distance_m']} m away."
+                + (f" {reg['text']}" if source != "synoptic" and reg.get("text") else "")
             ),
         }
     nearest = min(
@@ -152,18 +178,22 @@ def stand_wind_report(
     )
     return {
         "status": "clean",
+        "source": source,
+        "confidence": reg.get("confidence"),
         "scent_bearing": round(scent_bearing),
+        "slope": reg.get("slope"),
         "hit_zones": [],
         "text": (
-            f"Wind {compass(wind_dir_deg)} {round(wind_speed_kmh)} km/h — clean. Scent goes "
-            f"{compass(scent_bearing)}, away from bedding "
+            f"{lead} — clean. Scent goes {compass(scent_bearing)}, away from bedding "
             f"({round(nearest)} m to the nearest)."
+            + (f" {reg['text']}" if source != "synoptic" and reg.get("text") else "")
         ),
     }
 
 
 def safe_ground(
-    db: Session, *, wind_dir_deg: float | None, wind_speed_kmh: float | None, steps: int = 26
+    db: Session, *, wind_dir_deg: float | None, wind_speed_kmh: float | None, steps: int = 26,
+    cloud_pct: float | None = None, when: datetime | None = None,
 ) -> dict:
     """Grid of ground where scent would not reach bedding tonight.
 
@@ -176,12 +206,29 @@ def safe_ground(
         return {"status": "no_bedding", "cells": [], "note": "Draw bedding to see this."}
     if wind_dir_deg is None or wind_speed_kmh is None:
         return {"status": "no_wind_data", "cells": [], "note": "No wind forecast for tonight."}
-    if wind_speed_kmh < 8.0:
+
+    # Under a real wind every cell shares one scent bearing. Under drainage they do
+    # not: air follows the fall line, which differs across the estate, so each cell
+    # is evaluated against its own slope.
+    from app.forecasting import thermal
+    from app.terrain import get_grid, slope_at
+
+    at = when or datetime.now(timezone.utc)
+    # Probe the regime once, at the first bedding area, to decide which wind is
+    # running tonight. Each cell then gets its own bearing below.
+    probe_lat, probe_lon = _zone_point(zones[0])
+    probe = thermal.regime(
+        db, lat=probe_lat, lon=probe_lon, when=at,
+        wind_dir_deg=wind_dir_deg, wind_speed_kmh=wind_speed_kmh, cloud_pct=cloud_pct,
+    )
+    mode = probe["source"]
+    if mode == "unknown":
         return {
             "status": "too_light",
             "cells": [],
-            "note": "Wind too light to map — thermals decide on an evening like this.",
+            "note": probe.get("text") or "Wind too light to map — thermals decide on an evening like this.",
         }
+    tgrid = get_grid(db) if mode != "synoptic" else None
 
     b = geo.bounds([z.polygon for z in zones])
     if b is None:
@@ -194,7 +241,7 @@ def safe_ground(
     min_lat, max_lat = min_lat - pad_lat, max_lat + pad_lat
     min_lon, max_lon = min_lon - pad_lon, max_lon + pad_lon
 
-    scent_bearing = (wind_dir_deg + 180.0) % 360.0
+    uniform_bearing = (float(probe["wind_dir_deg"]) + 180.0) % 360.0
     cells = []
     for i in range(steps):
         for j in range(steps):
@@ -206,17 +253,39 @@ def safe_ground(
             near = min(geo.distance_to_polygon_m(z.polygon, lat, lon) for z in zones)
             if near > SCENT_RANGE_M * 1.5:
                 continue  # too far away to be a decision about this bedding
-            hit = any(scent_hits_zone(lat, lon, z, scent_bearing)[0] for z in zones)
+
+            if tgrid is not None:
+                # Drainage: scent follows this cell's own fall line, not one bearing
+                # for the whole estate. Cells with no slope get no verdict rather
+                # than a borrowed one.
+                sl = slope_at(tgrid, lat, lon)
+                if sl is None or sl.get("downhill_deg") is None:
+                    continue
+                cell_bearing = float(sl["downhill_deg"])
+            else:
+                cell_bearing = uniform_bearing
+
+            hit = any(scent_hits_zone(lat, lon, z, cell_bearing)[0] for z in zones)
             cells.append({"lat": round(lat, 6), "lon": round(lon, 6),
-                          "safe": not hit, "nearest_m": round(near)})
+                          "safe": not hit, "nearest_m": round(near),
+                          "bearing": round(cell_bearing)})
+
+    note = (
+        "Geometry only — this knows nothing about cover, access or a safe backstop. "
+        "It narrows where to look; it does not pick the seat."
+    )
+    if mode != "synoptic":
+        note = (
+            "Forecast is calm, so this follows the ground: each square uses its own "
+            "fall line, because cold air drains downhill after dark. A ~90 m terrain "
+            "model sees the hillside, not the gully you are sitting in."
+        )
     return {
         "status": "ok",
-        "scent_bearing": round(scent_bearing),
+        "source": mode,
+        "scent_bearing": round(uniform_bearing),
         "cells": cells,
-        "note": (
-            "Geometry only — this knows nothing about terrain, cover, access or a safe "
-            "backstop. It narrows where to look; it does not pick the seat."
-        ),
+        "note": note,
     }
 
 

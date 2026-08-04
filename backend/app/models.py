@@ -108,6 +108,24 @@ class Stand(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
 
+class TerrainGrid(Base):
+    """Cached elevation grid for the estate — the ground never moves, so fetch once.
+
+    Stored as one row with a flat elevation array rather than a point per row: it is
+    read whole every time (to interpolate and to take slope differences), and 625
+    rows to answer one question is a lot of round trips for a static surface.
+    """
+    __tablename__ = "terrain_grid"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    min_lat: Mapped[float] = mapped_column(Float, nullable=False)
+    min_lon: Mapped[float] = mapped_column(Float, nullable=False)
+    max_lat: Mapped[float] = mapped_column(Float, nullable=False)
+    max_lon: Mapped[float] = mapped_column(Float, nullable=False)
+    steps: Mapped[int] = mapped_column(Integer, nullable=False)
+    elevations: Mapped[list[float]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Zone(Base):
     """Ground the hunter knows and the cameras cannot see — chiefly bedding.
 

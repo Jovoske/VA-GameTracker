@@ -47,13 +47,23 @@ type Route = {
   detections: number
   avg_hour: number | null
 }
+type Airflow = {
+  source: 'synoptic' | 'katabatic' | 'anabatic' | 'unknown'
+  wind_dir_deg: number | null
+  wind_speed_kmh: number | null
+  confidence?: string | null
+  slope?: { downhill_deg: number | null; slope_pct: number; elevation_m: number } | null
+  text?: string | null
+}
 type MapTonight = {
   conditions: { wind_dir_deg: number | null; wind_speed_kmh: number | null }
+  airflow: Airflow
   zones: Zone[]
   stands: StandOut[]
   safe_ground: SafeGround
   routes: Route[]
   scent_range_m: number
+  terrain_loaded: boolean
 }
 
 const STYLE = {
@@ -368,15 +378,43 @@ export default function MapPage() {
   const unplaced = cameras.filter((c) => c.lat == null || c.lng == null)
   const cond = data?.conditions
   const sg = data?.safe_ground
+  const air = data?.airflow
 
   return (
     <div style={{ position: 'relative' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 18, fontWeight: 700 }}>Map</div>
-        {cond?.wind_dir_deg != null && (
+        {air && air.source === 'synoptic' && cond?.wind_dir_deg != null && (
           <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
             Tonight: wind {compass(cond.wind_dir_deg)} {Math.round(cond.wind_speed_kmh ?? 0)} km/h
           </div>
+        )}
+        {air && (air.source === 'katabatic' || air.source === 'anabatic') && air.slope?.downhill_deg != null && (
+          <div style={{ fontSize: 13, color: 'var(--sand)' }}>
+            Calm — {air.source === 'katabatic' ? 'drainage' : 'upslope'}{' '}
+            {compass(air.source === 'katabatic' ? air.slope.downhill_deg : (air.slope.downhill_deg + 180) % 360)}
+            {' '}~{air.wind_speed_kmh} km/h
+          </div>
+        )}
+        {air && air.source === 'unknown' && (
+          <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>Tonight: too calm to call</div>
+        )}
+        {data && !data.terrain_loaded && (
+          <button
+            onClick={async () => {
+              setBusy('Loading terrain…')
+              try {
+                const r = await api<{ relief_m: number }>('/terrain/refresh', { method: 'POST' })
+                window.alert(`Terrain loaded — ${r.relief_m} m of relief. Drainage advice is on.`)
+                await load()
+              } catch (e) { window.alert((e as Error).message) }
+              setBusy('')
+            }}
+            style={{
+              background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--sand)',
+              borderRadius: 8, padding: '5px 10px', cursor: 'pointer', fontSize: 12,
+            }}
+          >Load terrain</button>
         )}
         <button
           onClick={drawing ? finishDraw : startDraw}
@@ -444,10 +482,11 @@ export default function MapPage() {
           <div style={{ color: 'var(--text-dim)' }}>
             {data.zones.length === 0
               ? 'No bedding drawn yet — draw an area and the wind advice turns on.'
-              : sg?.status === 'ok'
-                ? sg.note
-                : sg?.note || 'Wind too light to map tonight.'}
+              : sg?.note || 'Wind too light to map tonight.'}
           </div>
+          {air?.text && air.source !== 'synoptic' && (
+            <div style={{ color: 'var(--sand)', marginTop: 5 }}>{air.text}</div>
+          )}
         </div>
       )}
 

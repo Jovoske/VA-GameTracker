@@ -14,6 +14,7 @@ from app.core.db import get_db
 from app.core.logging import get_logger
 from app.forecasting import bedding
 from app.models import Estate, Stand, User, Zone
+from app.terrain import get_grid
 
 router = APIRouter(tags=["zones"])
 log = get_logger(__name__)
@@ -131,6 +132,8 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
         log.warning("map.conditions_failed", error=str(e))
         cond = {}
     wdir, wspd = cond.get("wind_dir_deg"), cond.get("wind_speed_kmh")
+    cloud = cond.get("cloud_cover_pct")
+    now = datetime.now(timezone.utc)
 
     zones = [_zone_out(z) for z in db.scalars(select(Zone).order_by(Zone.name)).all()]
 
@@ -138,7 +141,7 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
     for s in db.scalars(select(Stand).order_by(Stand.name)).all():
         report = bedding.stand_wind_report(
             db, stand_name=s.name, lat=s.lat, lon=s.lon,
-            wind_dir_deg=wdir, wind_speed_kmh=wspd,
+            wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud, when=now,
         )
         stands.append({
             "id": str(s.id),
@@ -151,15 +154,56 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
             "approaches": bedding.approach_bearings(db, s.lat, s.lon),
         })
 
+    # What the air is actually doing at the estate centre — the headline the map
+    # shows, so a calm evening reads "drainage NW" rather than a useless "calm".
+    from app.core.config import settings as _s
+    from app.forecasting import thermal
+
+    reg = thermal.regime(
+        db, lat=_s.estate_lat, lon=_s.estate_lon, when=now,
+        wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud,
+    )
     return {
         "conditions": {
             "wind_dir_deg": wdir,
             "wind_speed_kmh": wspd,
+            "cloud_cover_pct": cloud,
             "moon_illum": cond.get("moon_illum"),
+        },
+        "airflow": {
+            "source": reg["source"],
+            "wind_dir_deg": reg.get("wind_dir_deg"),
+            "wind_speed_kmh": reg.get("wind_speed_kmh"),
+            "confidence": reg.get("confidence"),
+            "slope": reg.get("slope"),
+            "text": reg.get("text"),
         },
         "zones": zones,
         "stands": stands,
-        "safe_ground": bedding.safe_ground(db, wind_dir_deg=wdir, wind_speed_kmh=wspd),
+        "safe_ground": bedding.safe_ground(
+            db, wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud, when=now
+        ),
         "routes": bedding.routes(db),
         "scent_range_m": bedding.SCENT_RANGE_M,
+        "terrain_loaded": get_grid(db) is not None,
+    }
+
+
+@router.post("/terrain/refresh")
+def refresh_terrain(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Download the elevation grid for the estate. One-off; the ground does not move."""
+    from app.core.config import settings as _s
+    from app.terrain import fetch_grid
+
+    try:
+        grid = fetch_grid(db, _s.estate_lat, _s.estate_lon, force=True)
+    except Exception as e:
+        raise HTTPException(502, f"Elevation service failed: {e}")
+    els = grid.elevations
+    return {
+        "points": len(els),
+        "min_m": round(min(els)),
+        "max_m": round(max(els)),
+        "relief_m": round(max(els) - min(els)),
+        "note": "Terrain loaded — drainage advice now works on calm evenings.",
     }
