@@ -15,7 +15,35 @@ type Check = {
   update_command?: string
   error?: string
 }
+type Species = {
+  id: string
+  common_name: string
+  huntable: boolean
+  is_priority: boolean
+  detections: number
+}
+type Me = { id: string; email: string; role: string }
+type UserRow = { id: string; email: string; role: string; is_you: boolean }
+type CamAccount = {
+  id: string
+  label: string
+  username: string
+  owner: string | null
+  active: boolean
+  cameras: number
+  can_remove: boolean
+}
 const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
+const smallBtn = {
+  background: 'var(--surface-2)',
+  border: '1px solid var(--border)',
+  color: 'var(--text-dim)',
+  borderRadius: 8,
+  padding: '5px 10px',
+  fontSize: 12,
+  cursor: 'pointer',
+  flexShrink: 0,
+} as const
 
 export default function Admin() {
   const [version, setVersion] = useState('')
@@ -24,6 +52,18 @@ export default function Admin() {
   const [checking, setChecking] = useState(false)
   const [sexMsg, setSexMsg] = useState('')
   const [sexBusy, setSexBusy] = useState(false)
+  const [species, setSpecies] = useState<Species[]>([])
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [me, setMe] = useState<Me | null>(null)
+  const [users, setUsers] = useState<UserRow[]>([])
+  const [newUser, setNewUser] = useState({ email: '', password: '', role: 'member' })
+  const [userMsg, setUserMsg] = useState('')
+  const [accounts, setAccounts] = useState<CamAccount[]>([])
+  const [newAcct, setNewAcct] = useState({ username: '', password: '', label: '' })
+  const [acctMsg, setAcctMsg] = useState('')
+  const [acctBusy, setAcctBusy] = useState(false)
+  const [pw, setPw] = useState({ current: '', next: '' })
+  const [pwMsg, setPwMsg] = useState('')
 
   async function runSexPass() {
     setSexBusy(true)
@@ -39,7 +79,93 @@ export default function Admin() {
   useEffect(() => {
     api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
     api<Status>('/admin/status').then(setStatus).catch(() => {})
+    api<Species[]>('/species').then(setSpecies).catch(() => {})
+    api<Me>('/auth/me').then(setMe).catch(() => {})
+    api<UserRow[]>('/users').then(setUsers).catch(() => {})
+    api<CamAccount[]>('/camera-accounts').then(setAccounts).catch(() => {})
   }, [])
+
+  async function addUser() {
+    setUserMsg('')
+    try {
+      await api('/users', { method: 'POST', body: JSON.stringify(newUser) })
+      setNewUser({ email: '', password: '', role: 'member' })
+      setUsers(await api<UserRow[]>('/users'))
+      setUserMsg('Added ✓')
+    } catch (e) {
+      setUserMsg((e as Error).message)
+    }
+  }
+
+  async function delUser(u: UserRow) {
+    if (!window.confirm(`Remove ${u.email}? They will no longer be able to sign in.`)) return
+    setUserMsg('')
+    try {
+      await api(`/users/${u.id}`, { method: 'DELETE' })
+      setUsers(await api<UserRow[]>('/users'))
+    } catch (e) {
+      setUserMsg((e as Error).message)
+    }
+  }
+
+  async function addAccount() {
+    setAcctMsg('')
+    setAcctBusy(true)
+    try {
+      const r = await api<{ note?: string }>('/camera-accounts', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: newAcct.username,
+          password: newAcct.password,
+          label: newAcct.label || null,
+        }),
+      })
+      setNewAcct({ username: '', password: '', label: '' })
+      setAccounts(await api<CamAccount[]>('/camera-accounts'))
+      setAcctMsg(r.note || 'Connected ✓')
+    } catch (e) {
+      setAcctMsg((e as Error).message)
+    }
+    setAcctBusy(false)
+  }
+
+  async function delAccount(a: CamAccount) {
+    if (!window.confirm(`Disconnect ${a.label}? Its photos stay, but new ones stop syncing.`)) return
+    setAcctMsg('')
+    try {
+      await api(`/camera-accounts/${a.id}`, { method: 'DELETE' })
+      setAccounts(await api<CamAccount[]>('/camera-accounts'))
+    } catch (e) {
+      setAcctMsg((e as Error).message)
+    }
+  }
+
+  async function changePw() {
+    setPwMsg('')
+    try {
+      await api('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: pw.current, new_password: pw.next }),
+      })
+      setPw({ current: '', next: '' })
+      setPwMsg('Password changed ✓')
+    } catch (e) {
+      setPwMsg((e as Error).message)
+    }
+  }
+
+  async function toggleSpecies(s: Species) {
+    const next = !s.huntable
+    setSavingId(s.id)
+    setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, huntable: next } : x)))
+    try {
+      await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ huntable: next }) })
+    } catch {
+      // revert on failure
+      setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, huntable: !next } : x)))
+    }
+    setSavingId(null)
+  }
 
   async function checkUpdates() {
     setChecking(true)
@@ -60,9 +186,171 @@ export default function Admin() {
       ]
     : []
 
+  const onCount = species.filter((s) => s.huntable).length
+
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Settings</div>
+
+      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <div style={labelStyle}>HUNTING ADVICE</div>
+          {species.length > 0 && (
+            <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+              {onCount} of {species.length} shown
+            </div>
+          )}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
+          Choose which animals appear in Tonight's recommendation and the outlook. Turn off
+          anything out of season or that you don't hunt — for example ibex when it's closed, or
+          rabbits. The stats keep tracking every species regardless; this only shapes the advice.
+        </div>
+        {species.length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
+        ) : (
+          species.map((s) => (
+            <div
+              key={s.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 0',
+                borderTop: '1px solid var(--border)',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, color: s.huntable ? 'var(--text)' : 'var(--text-dim)' }}>
+                  {s.common_name}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
+                  {s.detections} sighting{s.detections === 1 ? '' : 's'}
+                </div>
+              </div>
+              <button
+                onClick={() => toggleSpecies(s)}
+                disabled={savingId === s.id}
+                aria-pressed={s.huntable}
+                title={s.huntable ? 'Shown in advice — click to hide' : 'Hidden from advice — click to show'}
+                style={{
+                  width: 46,
+                  height: 26,
+                  borderRadius: 13,
+                  border: 'none',
+                  cursor: savingId === s.id ? 'default' : 'pointer',
+                  background: s.huntable ? 'var(--go)' : 'var(--surface-2)',
+                  position: 'relative',
+                  transition: 'background .15s',
+                  flexShrink: 0,
+                  opacity: savingId === s.id ? 0.6 : 1,
+                }}
+              >
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: 3,
+                    left: s.huntable ? 23 : 3,
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    background: '#fff',
+                    transition: 'left .15s',
+                  }}
+                />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+        <div style={labelStyle}>CAMERA ACCOUNTS</div>
+        <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
+          Connect a SPYPOINT account and its cameras join the estate — photos, AI detection and
+          forecasts included. Guests can add their own account here.
+        </div>
+        {accounts.map((a) => (
+          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderTop: '1px solid var(--border)' }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 14 }}>{a.label}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.owner ? ` · added by ${a.owner}` : ''}
+              </div>
+            </div>
+            {a.can_remove && (
+              <button onClick={() => delAccount(a)} style={smallBtn}>Disconnect</button>
+            )}
+          </div>
+        ))}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+          <input className="input" placeholder="SPYPOINT email" value={newAcct.username}
+            onChange={(e) => setNewAcct({ ...newAcct, username: e.target.value })} autoComplete="off" />
+          <input className="input" placeholder="SPYPOINT password" type="password" value={newAcct.password}
+            onChange={(e) => setNewAcct({ ...newAcct, password: e.target.value })} autoComplete="new-password" />
+          <input className="input" placeholder="Label (e.g. 'Marco's cameras') — optional" value={newAcct.label}
+            onChange={(e) => setNewAcct({ ...newAcct, label: e.target.value })} />
+          <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
+            onClick={addAccount} disabled={acctBusy || !newAcct.username || !newAcct.password}>
+            {acctBusy ? 'Checking with SPYPOINT…' : 'Connect account'}
+          </button>
+        </div>
+        {acctMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
+      </div>
+
+      {me?.role === 'admin' && (
+        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+          <div style={labelStyle}>PEOPLE</div>
+          <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
+            Who can sign in. Guests get "member" — they see everything and can connect their own
+            cameras, but can't change settings or manage people.
+          </div>
+          {users.map((u) => (
+            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderTop: '1px solid var(--border)' }}>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {u.email}{u.is_you ? ' (you)' : ''}
+              </div>
+              <span style={{ fontSize: 11, color: u.role === 'admin' ? 'var(--sand)' : 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 6, padding: '1px 7px' }}>
+                {u.role}
+              </span>
+              {!u.is_you && <button onClick={() => delUser(u)} style={smallBtn}>Remove</button>}
+            </div>
+          ))}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+            <input className="input" placeholder="Guest email (their login name)" value={newUser.email}
+              onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} autoComplete="off" />
+            <input className="input" placeholder="Password for them (min 8 chars)" value={newUser.password}
+              onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} autoComplete="new-password" />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <select className="input" style={{ width: 130 }} value={newUser.role}
+                onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
+                <option value="member">member</option>
+                <option value="admin">admin</option>
+              </select>
+              <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
+                onClick={addUser} disabled={!newUser.email || newUser.password.length < 8}>
+                Add person
+              </button>
+            </div>
+          </div>
+          {userMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{userMsg}</div>}
+        </div>
+      )}
+
+      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+        <div style={labelStyle}>CHANGE PASSWORD</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <input className="input" placeholder="Current password" type="password" value={pw.current}
+            onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
+          <input className="input" placeholder="New password (min 8 chars)" type="password" value={pw.next}
+            onChange={(e) => setPw({ ...pw, next: e.target.value })} autoComplete="new-password" />
+          <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
+            onClick={changePw} disabled={!pw.current || pw.next.length < 8}>
+            Change password
+          </button>
+        </div>
+        {pwMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
+      </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={labelStyle}>VERSION</div>

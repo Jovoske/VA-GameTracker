@@ -8,12 +8,15 @@ from app.api import (
     routes_analytics,
     routes_animals,
     routes_auth,
+    routes_camera_accounts,
     routes_cameras,
     routes_estate,
     routes_forecast,
     routes_health,
     routes_images,
     routes_insights,
+    routes_species,
+    routes_users,
 )
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -42,6 +45,9 @@ app.include_router(routes_insights.router, prefix=API_PREFIX)
 app.include_router(routes_estate.router, prefix=API_PREFIX)
 app.include_router(routes_animals.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)
+app.include_router(routes_species.router, prefix=API_PREFIX)
+app.include_router(routes_users.router, prefix=API_PREFIX)
+app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
 
 import os
 from fastapi.staticfiles import StaticFiles
