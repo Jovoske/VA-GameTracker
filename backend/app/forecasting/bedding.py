@@ -151,12 +151,32 @@ def stand_wind_report(
             hits.append({"zone": z.name, "zone_id": str(z.id), "distance_m": round(dist)})
     hits.sort(key=lambda h: h["distance_m"])
 
-    # Lead with the drainage explanation when the slope is what is driving the air,
-    # so nobody reads a thermal verdict as if it came from the forecast.
+    # Name what is moving the air before what it does, so a slope-driven verdict is
+    # never mistaken for a forecast one — but say it once. The regime module's own
+    # sentence is for the map headline; repeating it here read as a stutter.
+    slope_pct = (reg.get("slope") or {}).get("slope_pct")
     if source == "synoptic":
         lead = f"Wind {compass(eff_dir)} {round(eff_speed)} km/h"
+    elif source == "katabatic":
+        lead = (
+            f"Forecast calm, so the slope decides — cold air drains "
+            f"{compass(scent_bearing)} at ~{round(eff_speed, 1)} km/h"
+            + (f" ({slope_pct}% fall)" if slope_pct else "")
+        )
     else:
-        lead = f"Forecast calm — {'drainage' if source == 'katabatic' else 'upslope flow'} {compass(scent_bearing)}"
+        lead = (
+            f"Calm and sunny — air is drawn upslope {compass(scent_bearing)} "
+            f"at ~{round(eff_speed, 1)} km/h"
+        )
+
+    # A drainage call is only as good as the conditions holding; dusk is when it turns.
+    caveat = ""
+    if source != "synoptic":
+        caveat = (
+            " It reverses around dusk, so check it on the ground."
+            if reg.get("confidence") == "low"
+            else " A ~90 m terrain model sees the hillside, not your gully."
+        )
 
     if hits:
         first = hits[0]
@@ -168,9 +188,11 @@ def stand_wind_report(
             "slope": reg.get("slope"),
             "hit_zones": hits,
             "text": (
-                f"{lead} — your scent runs {compass(scent_bearing)} into {first['zone']}, "
-                f"{first['distance_m']} m away."
-                + (f" {reg['text']}" if source != "synoptic" and reg.get("text") else "")
+                f"{lead}, carrying your scent into {first['zone']} "
+                f"{first['distance_m']} m away.{caveat}"
+                if source != "synoptic"
+                else f"{lead} — your scent runs {compass(scent_bearing)} into "
+                     f"{first['zone']}, {first['distance_m']} m away."
             ),
         }
     nearest = min(
@@ -184,9 +206,10 @@ def stand_wind_report(
         "slope": reg.get("slope"),
         "hit_zones": [],
         "text": (
-            f"{lead} — clean. Scent goes {compass(scent_bearing)}, away from bedding "
-            f"({round(nearest)} m to the nearest)."
-            + (f" {reg['text']}" if source != "synoptic" and reg.get("text") else "")
+            f"{lead}, away from bedding ({round(nearest)} m to the nearest).{caveat}"
+            if source != "synoptic"
+            else f"{lead} — clean. Scent goes {compass(scent_bearing)}, away from "
+                 f"bedding ({round(nearest)} m to the nearest)."
         ),
     }
 
