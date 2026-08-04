@@ -1,4 +1,4 @@
-# Register the GameSense scheduled tasks on Db01. Idempotent — safe to re-run.
+# Register the GameSense scheduled tasks on Db01. Idempotent - safe to re-run.
 #
 # The native build has no Celery: every recurring job is a Windows scheduled task
 # driving `pipeline.py`. Two of them are new and the estate needs them, because
@@ -26,7 +26,7 @@ function Register-GameSenseTask($name, $mode, $at, $description) {
     $trigger = New-ScheduledTaskTrigger -Daily -At $at
     # SYSTEM, matching GameSense-Update: the service account owns the data directory.
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    # Missed runs matter here — a night that is never claimed can never be scored,
+    # Missed runs matter here - a night that is never claimed can never be scored,
     # and the gap is invisible afterwards.
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
         -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries `
@@ -57,6 +57,7 @@ $pgDump = $null
 $override = (Select-String -Path "$work\.env" -Pattern '^PGDUMP=' -EA SilentlyContinue |
              Select-Object -First 1).Line -replace '^PGDUMP=', ''
 foreach ($cand in @($override, (Get-Command pg_dump.exe -EA SilentlyContinue).Source,
+                    'C:\GameSense\pg\pgsql\bin\pg_dump.exe',
                     'C:\GameSense\tools\pgsql\bin\pg_dump.exe')) {
     if ($cand -and (Test-Path $cand)) { $pgDump = $cand; break }
 }
@@ -66,8 +67,8 @@ if (-not $pgDump) {
               Select-Object -First 1 -ExpandProperty FullName
 }
 
-if (-not $m.Success) { Write-Warning 'DATABASE_URL in backend\.env did not parse — deploys will refuse to migrate.' }
-elseif (-not $pgDump) { Write-Warning 'pg_dump.exe not found — deploys will refuse to migrate. Set PGDUMP=<full path> in backend\.env.' }
+if (-not $m.Success) { Write-Warning 'DATABASE_URL in backend\.env did not parse - deploys will refuse to migrate.' }
+elseif (-not $pgDump) { Write-Warning 'pg_dump.exe not found - deploys will refuse to migrate. Set PGDUMP=<full path> in backend\.env.' }
 else {
     Write-Host "  pg_dump: $pgDump"
     Write-Host ("  target : {0}@{1}:{2}/{3}" -f $m.Groups['u'].Value, $m.Groups['h'].Value,
@@ -79,7 +80,7 @@ else {
     $rc = $LASTEXITCODE
     $env:PGPASSWORD = ''
     if ($rc -eq 0) { Write-Host '  backup preflight OK' }
-    else { Write-Warning "pg_dump exited $rc — deploys will refuse to migrate until this works." }
+    else { Write-Warning "pg_dump exited $rc - deploys will refuse to migrate until this works." }
     Remove-Item "$env:TEMP\gamesense-preflight.sql" -EA SilentlyContinue
 }
 

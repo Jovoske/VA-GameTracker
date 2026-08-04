@@ -39,7 +39,7 @@ $before = (& $git rev-parse HEAD).Trim()
 & $git fetch --quiet origin main *> "$logs\update-git.log"
 $after = (& $git rev-parse origin/main).Trim()
 
-if ($before -eq $after) { exit 0 }   # already current — the common case, stay quiet
+if ($before -eq $after) { exit 0 }   # already current - the common case, stay quiet
 
 Note "update: $($before.Substring(0,7)) -> $($after.Substring(0,7))"
 & $git reset --hard origin/main --quiet *>> "$logs\update-git.log"   # deploy-only; no local edits
@@ -90,6 +90,7 @@ $override = (Select-String -Path "$repo\backend\.env" -Pattern '^PGDUMP=' -EA Si
 foreach ($cand in @(
     $override,
     (Get-Command pg_dump.exe -EA SilentlyContinue).Source,
+    'C:\GameSense\pg\pgsql\bin\pg_dump.exe',      # where the EDB zip actually unpacks on Db01
     'C:\GameSense\tools\pgsql\bin\pg_dump.exe'
 )) {
     if ($cand -and (Test-Path $cand)) { $pgDump = $cand; break }
@@ -125,7 +126,7 @@ Get-ChildItem $dumps -Filter 'gamesense-*.dump' |
 
 # Migrations are idempotent; run every update so the schema can never lag the code.
 # If they fail, roll the code back rather than restart into a schema mismatch. The
-# schema itself must be restored by hand from the dump above — deliberately manual,
+# schema itself must be restored by hand from the dump above - deliberately manual,
 # because an automatic restore can destroy rows written since the backup.
 $env:PYTHONPATH = "$repo\backend"
 Push-Location "$repo\backend"
