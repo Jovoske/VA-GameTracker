@@ -48,21 +48,21 @@ class User(Base):
     __table_args__ = (CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),)
 
 
-class SpypointAccount(Base):
-    """A SPYPOINT login. Cameras on an estate may be split across several.
+class CameraAccount(Base):
+    """An extra SPYPOINT login whose cameras feed this estate (guests' own accounts).
 
-    The password is encrypted (not hashed) because it must be replayed to SPYPOINT.
+    The primary account stays in .env; these are added at runtime via Settings. The
+    SPYPOINT password is encrypted at rest (Fernet, key derived from JWT_SECRET).
     """
-
-    __tablename__ = "spypoint_accounts"
+    __tablename__ = "camera_accounts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
-    label: Mapped[str] = mapped_column(String, nullable=False)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    label: Mapped[str | None] = mapped_column(String)
     username: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    password_enc: Mapped[str | None] = mapped_column(String)
+    password_enc: Mapped[str] = mapped_column(String, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -70,12 +70,9 @@ class Camera(Base):
     __tablename__ = "cameras"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
-    spypoint_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("spypoint_accounts.id")
-    )
-    # Unique per account, not globally: two accounts can legitimately expose
-    # different cameras that happen to share an upstream id.
-    spypoint_id: Mapped[str | None] = mapped_column(String)
+    # Which extra SPYPOINT account this camera came from (NULL = the primary .env account).
+    account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("camera_accounts.id"))
+    spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
@@ -84,11 +81,18 @@ class Camera(Base):
     battery_pct: Mapped[int | None] = mapped_column(Integer)
     signal_pct: Mapped[int | None] = mapped_column(Integer)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Camera health (from SPYPOINT) — surfaced on the Cameras page and used to keep a dead
+    # or out-of-credits camera from being read as "no animals" in the forecast.
+    last_report_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    battery_level: Mapped[str | None] = mapped_column(String)
+    sd_used_mb: Mapped[int | None] = mapped_column(Integer)
+    sd_total_mb: Mapped[int | None] = mapped_column(Integer)
+    photo_count: Mapped[int | None] = mapped_column(Integer)
+    photo_limit: Mapped[int | None] = mapped_column(Integer)
+    plan_name: Mapped[str | None] = mapped_column(String)
+    cycle_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (
-        UniqueConstraint("spypoint_account_id", "spypoint_id", name="uq_camera_account_spypoint"),
-    )
 
 
 class Stand(Base):
@@ -104,44 +108,6 @@ class Stand(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
 
-class Sit(Base):
-    """A claimed stand for a night, and what came of it.
-
-    The claim is written *before* the sit, at 18:00, because claiming has a selfish
-    payoff — you claim to get the wind verdict and to find out whether anyone else
-    is on that ridge. That is why this row exists even when nobody ever reports an
-    outcome, and it is what makes hunting pressure measurable at all.
-
-    `outcome` is never silently 'nothing': a sit nobody reported on is UNREPORTED.
-    Conflating "I saw nothing" with "I didn't say" would poison the only ground
-    truth this system will ever have.
-    """
-
-    __tablename__ = "sits"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
-    stand_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stands.id"), nullable=False)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
-    night: Mapped[date] = mapped_column(Date, nullable=False)
-    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    outcome: Mapped[str] = mapped_column(String, nullable=False, default="unreported")
-    species_seen: Mapped[str | None] = mapped_column(String)
-    # What the app told them about the wind, kept verbatim so the advice can later
-    # be scored against what actually happened instead of quietly rewritten.
-    wind_status: Mapped[str | None] = mapped_column(String)
-    wind_text: Mapped[str | None] = mapped_column(Text)
-    notes: Mapped[str | None] = mapped_column(Text)
-    __table_args__ = (
-        CheckConstraint(
-            "outcome IN ('unreported','nothing','seen','shootable_no_shot','shot','cancelled')",
-            name="outcome_valid",
-        ),
-        Index("ix_sits_night", "night"),
-        Index("ix_sits_stand_night", "stand_id", "night"),
-    )
-
-
 class Species(Base):
     __tablename__ = "species"
     id: Mapped[str] = mapped_column(String, primary_key=True)  # 'sus_scrofa'
@@ -150,6 +116,11 @@ class Species(Base):
     icon: Mapped[str | None] = mapped_column(String)
     color: Mapped[str | None] = mapped_column(String)
     is_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Whether this species appears in hunting advice (Tonight recommendation + outlook).
+    # Stats and tracking always cover every species regardless of this flag.
+    huntable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
 
 
 class Image(Base):
@@ -186,6 +157,10 @@ class Detection(Base):
     species_conf: Mapped[float | None] = mapped_column(Float)
     sex: Mapped[str] = mapped_column(String, default="unknown")
     sex_conf: Mapped[float | None] = mapped_column(Float)
+    # Cloud-vision sex pass bookkeeping. Without these, a crop the model can't judge stays
+    # sex='unknown' and gets re-sent (and re-billed) on every scheduled run, forever.
+    sex_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sex_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     age_class: Mapped[str] = mapped_column(String, default="unknown")
     age_conf: Mapped[float | None] = mapped_column(Float)
     group_size: Mapped[int | None] = mapped_column(Integer)
@@ -200,7 +175,7 @@ class Detection(Base):
             "age_class IN ('juvenile','young_adult','mature_adult','old','unknown')",
             name="age_valid",
         ),
-        # image_id is the join in essentially every query in the app and was unindexed.
+        # image_id is the join in essentially every query in the app.
         Index("ix_detections_image_id", "image_id"),
         Index("ix_detections_species_image", "species_id", "image_id"),
     )
@@ -259,44 +234,6 @@ class EnvSnapshot(Base):
     nautical_twilight_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     darkness_minutes: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (UniqueConstraint("camera_id", "observed_at", name="uq_env_camera_time"),)
-
-
-class CameraNight(Base):
-    """Whether a camera was actually watching on a given night — the denominator.
-
-    Without this, a flat battery, a lost signal, a web across the lens and an
-    unprocessed backlog all look identical to "no animals here", and every rate in
-    the product silently divides by a night that never happened.
-
-    exposure_state:
-      CONFIRMED    — frames exist inside the night window and have been processed.
-      PRESUMED_UP  — no frames, but frames exist either side; admitted as a true zero.
-      UNPROCESSED  — frames exist but haven't been through the detector yet. NULL:
-                     counting these as zero animals is the backlog artefact.
-      UNKNOWN      — anything else. NULL, and the excluded count is reported.
-    """
-
-    __tablename__ = "camera_nights"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
-    camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cameras.id"), nullable=False)
-    night: Mapped[date] = mapped_column(Date, nullable=False)
-    exposure_state: Mapped[str] = mapped_column(String, nullable=False)
-    frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    empty_frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (
-        UniqueConstraint("camera_id", "night", name="uq_camera_night"),
-        CheckConstraint(
-            "exposure_state IN ('CONFIRMED','PRESUMED_UP','UNPROCESSED','UNKNOWN')",
-            name="exposure_state_valid",
-        ),
-        Index("ix_camera_nights_night", "night"),
-    )
-
-    @property
-    def counts_as_observed(self) -> bool:
-        """Only these two states may contribute a denominator or a true zero."""
-        return self.exposure_state in ("CONFIRMED", "PRESUMED_UP")
 
 
 class Forecast(Base):
@@ -359,3 +296,80 @@ class SyncLog(Base):
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CameraNight(Base):
+    """Whether a camera was actually watching on a given night — the denominator.
+
+    Without this, a flat battery, a lost signal, an exhausted photo-credit quota and
+    an unprocessed classification backlog all look identical to "no animals here",
+    and every rate in the product silently divides by a night that never happened.
+
+    exposure_state:
+      CONFIRMED    — frames exist inside the night window and have been processed.
+      PRESUMED_UP  — no frames, but frames exist either side; admitted as a true zero.
+      UNPROCESSED  — frames exist but have not been through the detector yet. NULL:
+                     counting these as zero animals is the backlog artefact.
+      UNKNOWN      — anything else, including nights the camera was out of photo
+                     credits. NULL, and the excluded count is reported.
+    """
+
+    __tablename__ = "camera_nights"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cameras.id"), nullable=False)
+    night: Mapped[date] = mapped_column(Date, nullable=False)
+    exposure_state: Mapped[str] = mapped_column(String, nullable=False)
+    frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    empty_frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("camera_id", "night", name="uq_camera_night"),
+        CheckConstraint(
+            "exposure_state IN ('CONFIRMED','PRESUMED_UP','UNPROCESSED','UNKNOWN')",
+            name="exposure_state_valid",
+        ),
+        Index("ix_camera_nights_night", "night"),
+    )
+
+    @property
+    def counts_as_observed(self) -> bool:
+        """Only these two states may contribute a denominator or a true zero."""
+        return self.exposure_state in ("CONFIRMED", "PRESUMED_UP")
+
+
+class Sit(Base):
+    """A claimed stand for a night, and what came of it.
+
+    The claim is written *before* the sit, at 18:00, because claiming has a selfish
+    payoff — you claim to get the wind verdict and to find out whether anyone else
+    is on that ridge. That is why this row exists even when nobody ever reports an
+    outcome, and it is what makes hunting pressure measurable at all.
+
+    `outcome` is never silently 'nothing': a sit nobody reported on is UNREPORTED.
+    Conflating "I saw nothing" with "I didn't say" would poison the only ground
+    truth this system will ever have.
+    """
+
+    __tablename__ = "sits"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    stand_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stands.id"), nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    night: Mapped[date] = mapped_column(Date, nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="unreported")
+    species_seen: Mapped[str | None] = mapped_column(String)
+    # What the app told them about the wind, kept verbatim so the advice can later
+    # be scored against what actually happened instead of quietly rewritten.
+    wind_status: Mapped[str | None] = mapped_column(String)
+    wind_text: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('unreported','nothing','seen','shootable_no_shot','shot','cancelled')",
+            name="outcome_valid",
+        ),
+        Index("ix_sits_night", "night"),
+        Index("ix_sits_stand_night", "stand_id", "night"),
+    )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import io
+from datetime import datetime, timezone
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -22,7 +23,11 @@ from app.models import Detection, Image
 
 log = get_logger(__name__)
 
-MODEL = "claude-opus-4-8"  # best vision / high-res perception; one-time labelling pass
+MODEL = "claude-opus-5"  # best vision / high-res perception; one-time labelling pass
+# Each crop gets at most this many cloud calls. A crop the model can't judge (rump only,
+# too dark) will not become judgeable on a retry — without this cap the pass re-billed the
+# same ambiguous photos on every scheduled run. Raise it only when changing model/prompt.
+MAX_SEX_ATTEMPTS = 1
 _DEER = {"red_deer", "roe_deer", "fallow_deer"}
 _BOAR = {"wild_boar"}
 
@@ -152,28 +157,39 @@ def sample(db: Session, species_key: str, n: int = 12) -> list[dict]:
 
 
 def sex_unclassified(db: Session, species_key: str, *, limit: int = 500) -> dict:
-    """Store sex + sex_conf for detections of a species that don't have it yet."""
+    """Store sex + sex_conf for detections of a species that haven't been checked yet.
+
+    Every crop is marked as attempted whatever the answer, so an inconclusive result is
+    remembered instead of being re-sent (and re-billed) on the next scheduled run.
+    """
     rows = db.execute(
         select(Detection, Image)
         .join(Image, Detection.image_id == Image.id)
         .where(
             Detection.species_id == species_key,
             Detection.sex == "unknown",
+            Detection.sex_attempts < MAX_SEX_ATTEMPTS,
             Image.original_path.isnot(None),
         )
         .limit(limit)
     ).all()
     counts: dict[str, int] = {}
+    undetermined = 0
     for i, (det, img) in enumerate(rows, 1):
+        # Count the attempt up-front: a crash mid-call must not leave it retryable forever.
+        det.sex_attempts = (det.sex_attempts or 0) + 1
+        det.sex_checked_at = datetime.now(timezone.utc)
         try:
             r = classify_sex(img.original_path, _bbox_of(det), species_key)
             if r and r.sex != "unknown":
                 det.sex, det.sex_conf = r.sex, round(r.confidence, 4)
                 counts[r.label] = counts.get(r.label, 0) + 1
+            else:
+                undetermined += 1
         except Exception as e:
             log.warning("vision_sex.failed", detection=str(det.id), error=str(e))
         if i % 20 == 0:
             db.commit()
     db.commit()
-    log.info("vision_sex.done", species=species_key, **counts)
-    return {"processed": len(rows), "by_label": counts}
+    log.info("vision_sex.done", species=species_key, undetermined=undetermined, **counts)
+    return {"processed": len(rows), "undetermined": undetermined, "by_label": counts}

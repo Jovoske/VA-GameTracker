@@ -25,23 +25,25 @@ celery.conf.update(
             "task": "app.tasks.ai.classify_species",
             "schedule": 1500.0,  # every 25 min — classify newly-kept animal frames
         },
-        "persist-forecast": {
-            # Record the claim before the night it is about, so it cannot be
-            # rewritten after the fact.
-            "task": "app.tasks.scoring.persist_forecast",
-            "schedule": crontab(hour=16, minute=0),
-        },
-        "score-yesterday": {
-            # Grade it the next morning, once the night's frames have synced.
-            "task": "app.tasks.scoring.score_yesterday",
-            "schedule": crontab(hour=9, minute=0),
-        },
+        # Exposure is the denominator under every statistic in the app, and it moves
+        # as photos arrive and the classifier drains its backlog. Recompute hourly so
+        # "10 of 44 nights this camera was watching" is true when it is read.
         "recompute-exposure": {
-            # The denominator. Runs after the classifier has had a chance at the
-            # night's frames, so nights settle from UNPROCESSED to CONFIRMED rather
-            # than being counted as empty.
             "task": "app.tasks.exposure.recompute_exposure",
             "schedule": 3600.0,
+        },
+        # Record tonight's claim BEFORE the night happens. A forecast that is only
+        # ever read after the fact can never be scored, which is how the old
+        # confidence figure survived so long without anyone checking it.
+        "persist-forecast": {
+            "task": "app.tasks.scoring.persist_forecast",
+            "schedule": crontab(hour=17, minute=0),
+        },
+        # Grade yesterday's claims once the night's photos have synced and been
+        # classified. Late morning leaves room for both.
+        "score-yesterday": {
+            "task": "app.tasks.scoring.score_yesterday",
+            "schedule": crontab(hour=11, minute=0),
         },
     },
 )

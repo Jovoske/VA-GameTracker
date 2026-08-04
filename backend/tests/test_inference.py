@@ -23,7 +23,7 @@ def test_bearing_points_the_right_way():
 def estate(db_session):
     e = Estate(name="E", timezone="Europe/Madrid", lat=39.0, lon=-1.3)
     db_session.add(e)
-    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True))
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True, huntable=True))
     db_session.flush()
     return e
 

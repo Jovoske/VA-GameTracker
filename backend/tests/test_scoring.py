@@ -43,7 +43,7 @@ def cam(db_session):
     db_session.flush()
     c = Camera(estate_id=estate.id, name="Puente", active=True)
     db_session.add(c)
-    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True))
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True, huntable=True))
     db_session.flush()
     return c
 
@@ -58,7 +58,7 @@ def _forecast_payload(cam, prob=0.7):
                 "verdict": "BEST_ODDS",
                 "probability": prob,
                 "nights_present": 11,
-                "camera_nights": 30,
+                "active_nights": 30,
                 "best_window": {"start_hour": 20, "end_hour": 23},
             }
         ]

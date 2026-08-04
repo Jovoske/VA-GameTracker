@@ -5,6 +5,7 @@ Each test pins a bug that was silently wrong in production rather than loud.
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -153,3 +154,52 @@ def test_spa_path_traversal_is_blocked(tmp_path, monkeypatch):
     assert resolve("app.js") is not None          # legitimate asset still served
     assert resolve("../secret.txt") is None       # traversal refused
     assert resolve("../../etc/passwd") is None
+
+
+# ── trail-camera photos are no longer world-readable ────────────────────────
+
+
+@requires_db
+def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_session, tmp_path):
+    """`/images/{id}/file` used to serve anyone who held the UUID.
+
+    Trail cameras photograph people as well as animals. The endpoint now demands a
+    token — and because an <img> tag cannot set an Authorization header, it must
+    accept `?token=` too, which is what the frontend's `imageUrl()` sends.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.core.db import get_db
+    from app.core.security import create_access_token
+    from app.main import app
+    from app.models import Camera, Estate, Image
+
+    photo = tmp_path / "frame.jpg"
+    photo.write_bytes(b"\xff\xd8\xff\xd9")
+
+    estate = Estate(name="E", timezone="Europe/Madrid", lat=39.0, lon=-1.3)
+    db_session.add(estate)
+    db_session.flush()
+    cam = Camera(estate_id=estate.id, name="Ridge", spypoint_id="c1")
+    db_session.add(cam)
+    db_session.flush()
+    img = Image(
+        camera_id=cam.id,
+        captured_at=datetime(2025, 10, 4, 22, 0, tzinfo=timezone.utc),
+        original_path=str(photo),
+    )
+    db_session.add(img)
+    db_session.commit()
+
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        client = TestClient(app)
+        url = f"/api/images/{img.id}/file"
+        assert client.get(url).status_code == 401, "an unauthenticated photo fetch must be refused"
+        assert client.get(f"{url}?token=not-a-jwt").status_code == 401
+
+        token = create_access_token(str(uuid.uuid4()))
+        assert client.get(f"{url}?token={token}").status_code == 200
+        assert client.get(url, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_db, None)

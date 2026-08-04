@@ -1,18 +1,58 @@
 """Camera routes — list (with location), images, sync/backfill/scan, review, map placement."""
+import time
 import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
+from app.core.config import settings
 from app.core.db import get_db
+from app.health import camera_health
 from app.models import Camera, Detection, Image, Species, SyncLog, User
-from app.tasks.ai import scan_empty
-from app.tasks.sync import spypoint_backfill, spypoint_sync
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
+
+
+# ── native-build task runner ─────────────────────────────────
+# The Docker build queued these to Celery; the native build has no broker, so they run
+# as FastAPI background tasks in the api process. The same lock file the scheduled
+# pipeline uses keeps a button press from overlapping the 15-min sync.
+def _lock_path() -> Path:
+    return Path(settings.models_root).parent / "pipeline.lock"
+
+
+def _pipeline_busy() -> bool:
+    p = _lock_path()
+    return p.exists() and (time.time() - p.stat().st_mtime) < 3 * 3600
+
+
+def _run_locked(work) -> None:
+    lock = _lock_path()
+    try:
+        lock.write_text(f"api {int(time.time())}")
+        from app.core.db import SessionLocal
+
+        with SessionLocal() as db:
+            work(db)
+    finally:
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _sync_work(db: Session) -> None:
+    from app.ai.empty_filter import scan_unprocessed
+    from app.ai.species import classify_unclassified
+    from app.ingestion.sync import sync_all
+
+    sync_all(db)
+    scan_unprocessed(db)
+    classify_unclassified(db)
 
 
 @router.get("")
@@ -44,32 +84,61 @@ def list_cameras(
         sightings = (count or 0) - (empty or 0)
         out.append({
             "id": str(c.id), "name": c.name, "battery_pct": c.battery_pct,
+            "battery_level": c.battery_level,
             "signal_pct": c.signal_pct, "model": c.model, "active": c.active,
             "last_sync_at": c.last_sync_at, "last_capture": last,
+            "last_report_at": c.last_report_at,
+            "photo_count": c.photo_count, "photo_limit": c.photo_limit,
+            "plan_name": c.plan_name, "cycle_end": c.cycle_end,
+            "sd_used_mb": c.sd_used_mb, "sd_total_mb": c.sd_total_mb,
             "image_count": count or 0, "empty_count": empty or 0, "sightings": sightings,
             "lat": lat, "lng": lng,
+            "health": camera_health(c),
         })
     return out
 
 
 @router.post("/sync")
-def trigger_sync(_: User = Depends(get_current_admin)) -> dict:
-    task = spypoint_sync.delay()
-    return {"status": "queued", "task_id": task.id}
+def trigger_sync(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+    if _pipeline_busy():
+        return {"status": "busy", "note": "A sync is already running — new photos will appear shortly."}
+    background.add_task(_run_locked, _sync_work)
+    return {"status": "started"}
 
 
 @router.post("/backfill")
 def trigger_backfill(
-    months: int = Query(13, ge=1, le=24), _: User = Depends(get_current_admin)
+    background: BackgroundTasks,
+    months: int = Query(13, ge=1, le=24),
+    _: User = Depends(get_current_admin),
 ) -> dict:
-    task = spypoint_backfill.delay(months)
-    return {"status": "queued", "task_id": task.id, "months": months}
+    if _pipeline_busy():
+        return {"status": "busy", "note": "The pipeline is already running — try again later."}
+
+    def work(db: Session) -> None:
+        from app.ingestion.sync import backfill_all
+
+        backfill_all(db, months=months)
+        _sync_work(db)
+
+    background.add_task(_run_locked, work)
+    return {"status": "started", "months": months}
 
 
 @router.post("/scan")
-def trigger_scan(_: User = Depends(get_current_admin)) -> dict:
-    task = scan_empty.delay()
-    return {"status": "queued", "task_id": task.id}
+def trigger_scan(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+    if _pipeline_busy():
+        return {"status": "busy", "note": "The pipeline is already running — try again later."}
+
+    def work(db: Session) -> None:
+        from app.ai.empty_filter import scan_unprocessed
+        from app.ai.species import classify_unclassified
+
+        scan_unprocessed(db)
+        classify_unclassified(db)
+
+    background.add_task(_run_locked, work)
+    return {"status": "started"}
 
 
 @router.get("/sync/status")

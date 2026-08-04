@@ -66,12 +66,6 @@ start.bat    Windows launcher
 - **Migrations:** generated against the running Postgres — `alembic revision --autogenerate -m "..."`.
 - Secrets live in `.env` (gitignored). Never commit real credentials.
 
-## Product review & redesign
-
-A cross-functional expert review of the app as it stands — with a verified defect register, a
-rebuilt recommendation engine, redesigned screens, and a prioritised implementation plan — is in
-[`docs/redesign/`](docs/redesign/00-executive-summary.md).
-
 ## Roadmap
 
 - **M1** — real SPYPOINT sync (image download, battery/signal, pagination) + correct weather/moon/solar enrichment.

@@ -13,12 +13,11 @@ config = context.config
 # The URL comes from app settings in normal operation. A caller (the test suite, or
 # `alembic -x db_url=...`) may point migrations at a different database instead — we
 # must not clobber an explicitly supplied URL, or migrations become untestable.
-_explicit_url = context.get_x_argument(as_dictionary=True).get("db_url") or (
+_explicit = context.get_x_argument(as_dictionary=True).get("db_url") or (
     config.get_main_option("sqlalchemy.url", None) or ""
 ).strip()
-DB_URL = _explicit_url or settings.database_url
+DB_URL = _explicit or settings.database_url
 config.set_main_option("sqlalchemy.url", DB_URL)
-
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 

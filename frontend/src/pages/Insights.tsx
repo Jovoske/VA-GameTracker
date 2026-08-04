@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { api, authedImageUrl } from '../api'
+import { api, imageUrl } from '../api'
+import { useRefetchOnReturn } from '../hooks'
 
 type Insights = {
   outlook: {
@@ -34,8 +35,10 @@ type PScope = {
 }
 type Patterns = { scopes: PScope[]; nights: number; range?: [string, string] }
 
-const dayName = (iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
+const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
+const clock = (iso: string | null) =>
+  iso ? new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '–'
 const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 
 export default function Insights() {
@@ -47,10 +50,12 @@ export default function Insights() {
   const [pat, setPat] = useState<Patterns | null>(null)
   const [patScope, setPatScope] = useState('all')
 
-  useEffect(() => {
+  function load() {
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
     api<Patterns>('/insights/patterns').then(setPat).catch(() => {})
-  }, [])
+  }
+  useEffect(load, [])
+  useRefetchOnReturn(load, 120_000)
 
   async function openClassImages(label: string) {
     setOpenClass(label)
@@ -79,6 +84,7 @@ export default function Insights() {
           {d.outlook.map((o) => (
             <div
               key={o.date}
+              title={`${o.moon_phase} · last light ${clock(o.civil_twilight_end)}`}
               style={{
                 flex: '1 0 68px',
                 textAlign: 'center',
@@ -95,21 +101,15 @@ export default function Insights() {
                 {Math.round(o.moon_illum)}%
               </div>
               <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3 }}>
-                {o.civil_twilight_end
-                  ? new Date(o.civil_twilight_end).toLocaleTimeString(undefined, {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })
-                  : '–'}
+                {clock(o.civil_twilight_end)}
               </div>
             </div>
           ))}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.5 }}>
-          Moon illumination and last light only. This used to show a per-night verdict and
-          percentage, but they were tonight's single number repeated seven times with a moon
-          nudge — not a forecast. A real multi-night forecast needs a model scored against
-          what actually happened.
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.45 }}>
+          Moon illumination and last shootable light. No odds here on purpose — a night seven
+          days out can't be called until the forecast has been scored against what the cameras
+          actually saw. Tonight's call lives on the Tonight tab.
         </div>
       </div>
 
@@ -173,7 +173,21 @@ export default function Insights() {
               <div key={i} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: i < sc.drivers.length - 1 ? '1px solid var(--border)' : 'none' }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-dim)', minWidth: 92 }}>{dr.factor}</span>
-                  <span style={{ fontSize: 14, flex: 1, lineHeight: 1.4 }}>{dr.statement}</span>
+                  <span style={{ fontSize: 14, flex: 1, lineHeight: 1.4 }}>
+                    {dr.statement}
+                    {dr.confidence < 0.4 && (
+                      <span
+                        title="Weak signal so far — treat as a hint, not a rule"
+                        style={{
+                          marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: '.03em',
+                          color: 'var(--sand)', border: '1px solid var(--border)',
+                          borderRadius: 5, padding: '1px 6px', verticalAlign: 'middle',
+                        }}
+                      >
+                        EARLY SIGNAL
+                      </span>
+                    )}
+                  </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 32 }} title="sightings/night: low → high range of this factor">
@@ -258,10 +272,10 @@ export default function Insights() {
                 {classImgs?.map((im) => (
                   <div
                     key={im.image_id}
-                    onClick={() => setZoom(authedImageUrl(im.file_url))}
+                    onClick={() => setZoom(imageUrl(im.file_url))}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
-                    <img src={authedImageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
+                    <img src={imageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.camera}</span>
                       <span>{new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>

@@ -17,9 +17,6 @@ from app.core.db import get_db
 from app.models import Camera, Detection, Image, SyncLog, User
 from app.version import __version__
 
-from app.forecasting.diagnostics import detection_radius_vs_temperature
-from app.forecasting.exposure import recompute_camera_nights
-
 router = APIRouter(prefix="/admin", tags=["admin"])
 _REPO = "Jovoske/VA-GameTracker"
 
@@ -71,7 +68,9 @@ def version_check(_: User = Depends(get_current_admin)) -> dict:
         "current": current,
         "latest": latest,
         "update_available": bool(lat_t and lat_t > cur_t),
-        "update_command": "git pull && docker compose up -d --build",
+        # The server pulls from GitHub itself (deploy/update.ps1, every 10 min), so an
+        # update needs nothing on the host — it only has to be pushed.
+        "update_command": "Push to main — the server pulls and applies it within 10 minutes.",
     }
 
 
@@ -87,23 +86,3 @@ def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) 
             {"status": last.status, "at": last.finished_at} if last else None
         ),
     }
-
-
-@router.get("/diagnostics/detection-radius")
-def detection_radius(
-    _: User = Depends(get_current_admin), db: Session = Depends(get_db)
-) -> dict:
-    """Does apparent detection distance shrink as it warms?
-
-    If it does, "cooler nights are busier" is the PIR sensor's range collapsing, not
-    the animals moving — and temperature must not be used as an activity driver.
-    """
-    return detection_radius_vs_temperature(db)
-
-
-@router.post("/exposure/recompute")
-def recompute_exposure_now(
-    _: User = Depends(get_current_admin), db: Session = Depends(get_db)
-) -> dict:
-    """Rebuild the camera-night exposure table. Idempotent."""
-    return recompute_camera_nights(db)

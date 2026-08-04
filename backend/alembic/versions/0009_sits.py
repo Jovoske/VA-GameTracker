@@ -1,7 +1,7 @@
 """stand claims and sit outcomes
 
-Revision ID: 0007_sits
-Revises: 0006_camera_nights
+Revision ID: 0009_sits
+Revises: 0008_camera_nights
 Create Date: 2026-07-29
 
 Purely additive. `stands` already existed as dead schema and is finally given a
@@ -10,8 +10,8 @@ write path; this adds the register of who claimed what, and what came of it.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0007_sits"
-down_revision = "0006_camera_nights"
+revision = "0009_sits"
+down_revision = "0008_camera_nights"
 branch_labels = None
 depends_on = None
 

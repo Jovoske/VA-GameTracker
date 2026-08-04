@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.enrichment.astro import moon_phase, solar
-from app.forecasting.model import _best_window, _verdict, class_label, forecast_tonight
+from app.forecasting.model import _best_window, class_label
 from app.models import Camera, Detection, EnvSnapshot, Image, Species
 
 _TZ = settings.estate_timezone
@@ -37,16 +37,16 @@ def _det_env():
     )
 
 
-def _outlook(db: Session, base: dict, days: int = 7) -> list[dict]:
+def _outlook(days: int = 7) -> list[dict]:
     """Sun and moon for the coming nights. Deliberately carries no forecast.
 
     This used to copy tonight's probability into all seven days and nudge it by
-    ±0.05 on moon illumination, then render seven cards with per-day verdicts and
+    +/-0.05 on moon illumination, then render seven cards with per-day verdicts and
     percentages. It was one number wearing a costume — and its hardcoded moon
-    direction could contradict the app's own learned moon driver on an adjacent
-    tab. Predicting a specific night a week out needs a covariate model that has
-    been scored against outcomes; until that exists, an almanac is the honest
-    thing to show.
+    direction could contradict the app's own learned moon driver on an adjacent tab.
+    Predicting a specific night a week out needs a covariate model that has been
+    scored against outcomes; until that exists, an almanac is the honest thing to
+    show.
     """
     now = datetime.now(timezone.utc)
     out = []
@@ -63,7 +63,6 @@ def _outlook(db: Session, base: dict, days: int = 7) -> list[dict]:
             "civil_twilight_end": s.get("civil_twilight_end"),
         })
     return out
-
 
 def _correlations(db: Session) -> list[dict]:
     out: list[dict] = []
@@ -180,9 +179,8 @@ def _composition(db: Session) -> list[dict]:
 
 
 def compute_insights(db: Session) -> dict:
-    base = forecast_tonight(db)
     return {
-        "outlook": _outlook(db, base),
+        "outlook": _outlook(),
         "composition": _composition(db),
         "correlations": _correlations(db),
     }

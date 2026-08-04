@@ -2,22 +2,23 @@
 import os
 import uuid
 
-import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+import jwt
+from fastapi import status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from app.api.deps import get_current_user
-from app.core.db import get_db
 from app.core.security import decode_token
+from app.core.db import get_db
 from app.models import Image, User
 
 router = APIRouter(prefix="/images", tags=["images"])
 
-# auto_error=False so a missing header falls through to the ?token= fallback
-# rather than 403-ing before we can check it.
+# auto_error=False so a missing header falls through to the ?token= fallback.
 _optional_bearer = HTTPBearer(auto_error=False)
 
 
@@ -28,18 +29,11 @@ def image_file(
     creds: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
 ) -> FileResponse:
-    """Serve a stored frame. Requires a valid session.
-
-    An <img> tag cannot send an Authorization header, which is why this endpoint was
-    previously open to anyone who could guess or obtain a UUID — and trail cameras
-    photograph people, not just animals. The token may therefore arrive either as a
-    normal bearer header or as a ?token= query parameter.
-
-    Query-string tokens can leak through proxy logs and Referer headers, so this is a
-    deliberate trade rather than a clean win: for a self-hosted estate it is a large
-    improvement over no authentication at all. Short-lived per-image signed URLs are
-    the better long-term answer.
-    """
+    # Trail cameras photograph people, not only animals, so this is no longer open
+    # to anyone holding a UUID. An <img> tag cannot send an Authorization header, so
+    # the token may arrive as ?token= instead. Query-string tokens can leak via proxy
+    # logs and Referer, so this is a deliberate trade rather than a clean win;
+    # short-lived per-image signed URLs remain the better answer.
     raw = (creds.credentials if creds else None) or token
     if not raw:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")

@@ -9,23 +9,50 @@ export function setToken(token: string | null): void {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
-/** Add the session token to an <img> src.
+/** Authenticated URL for a photo.
  *
- * Image bytes are behind authentication now — trail cameras photograph people, not
- * only animals — but an <img> tag cannot send an Authorization header, so the token
- * rides in the query string instead.
+ * `/api/images/{id}/file` used to be open to anyone holding the UUID. Trail cameras
+ * photograph people as well as animals, so it now requires a token — and an <img>
+ * tag cannot send an Authorization header, so the token rides in the query string.
+ * Every photo `src` in the app must go through here or it renders as a broken image.
  */
-export function authedImageUrl(url: string | null | undefined): string {
-  if (!url) return ''
+export function imageUrl(path: string): string {
   const token = getToken()
-  if (!token) return url
-  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+  if (!token) return path
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+}
+
+export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers)
+  headers.set('Content-Type', 'application/json')
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  const resp = await fetch(`/api${path}`, { ...options, headers })
+
+  // An expired or revoked session is not a data-loading failure — showing it as one
+  // leaves the user staring at a red error with no way forward. Clear the dead token
+  // and send them to sign in. Only when we actually sent a token: a 401 without one is
+  // a failed login attempt, which the login form reports itself.
+  if (resp.status === 401 && token) {
+    setToken(null)
+    if (!window.location.pathname.startsWith('/login')) {
+      window.location.assign('/login?expired=1')
+    }
+    throw new Error('Session expired — please sign in again')
+  }
+
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => ({}))
+    throw new Error(detail.detail || `HTTP ${resp.status}`)
+  }
+  return resp.json() as Promise<T>
 }
 
 /** Last-good copy of a GET response, so the plan survives a dead valley.
  *
  * The service worker replays cached API responses, but only for an installed PWA
- * that has the worker running. This is the belt to that braces: a plain
+ * that already has the worker running. This is the belt to that braces: a plain
  * localStorage copy the page can paint from immediately, before any network call
  * resolves, with the age attached so the UI never implies it is current.
  */
@@ -70,20 +97,6 @@ export function ageLabel(iso: string): string {
   const hrs = Math.round(mins / 60)
   if (hrs < 24) return `${hrs} h ago`
   return `${Math.round(hrs / 24)} d ago`
-}
-
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers)
-  headers.set('Content-Type', 'application/json')
-  const token = getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-
-  const resp = await fetch(`/api${path}`, { ...options, headers })
-  if (!resp.ok) {
-    const detail = await resp.json().catch(() => ({}))
-    throw new Error(detail.detail || `HTTP ${resp.status}`)
-  }
-  return resp.json() as Promise<T>
 }
 
 export async function login(email: string, password: string): Promise<void> {

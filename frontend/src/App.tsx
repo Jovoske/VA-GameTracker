@@ -8,9 +8,9 @@ import Cameras from './pages/Cameras'
 import Insights from './pages/Insights'
 import Login from './pages/Login'
 import MapPage from './pages/Map'
+import Tonight from './pages/Tonight'
 import SitMode from './pages/SitMode'
 import Stands from './pages/Stands'
-import Tonight from './pages/Tonight'
 
 function RequireAuth({ children }: { children: ReactNode }) {
   return getToken() ? <>{children}</> : <Navigate to="/login" replace />

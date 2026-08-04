@@ -45,6 +45,11 @@ NIGHT_SHIFT = text("interval '6 hours'")
 # convention, not a measurement, so it is named here rather than buried.
 VISIT_GAP = timedelta(minutes=30)
 
+# How far back from the end of an exhausted billing cycle to treat nights as
+# known-blind. Conservative: better to exclude a few real nights than to record a
+# throttled camera's silence as an observation of absence.
+CREDIT_BLIND_DAYS = 7
+
 
 def night_expr(col=Image.captured_at):
     """SQL expression for the night an image belongs to."""
@@ -93,10 +98,28 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
     first, last = rows[0].night, rows[-1].night
     observed = sorted(by_night)
 
+    # SPYPOINT reports each camera's photo-credit usage and billing cycle. A camera
+    # that hit its monthly limit stopped *sending*, not necessarily stopped seeing —
+    # so nights inside an exhausted cycle are known-blind rather than known-empty.
+    # This is telemetry we could not infer from the frame stream alone.
+    exhausted_from: date | None = None
+    if (
+        cam.photo_count is not None
+        and cam.photo_limit
+        and cam.photo_count >= cam.photo_limit
+    ):
+        # Credits are consumed over the cycle; treat the tail of it as suspect.
+        exhausted_from = (
+            (cam.cycle_end.date() - timedelta(days=CREDIT_BLIND_DAYS))
+            if cam.cycle_end
+            else (last - timedelta(days=CREDIT_BLIND_DAYS))
+        )
+
     states: dict[date, tuple[str, int, int]] = {}
     cur = first
     while cur <= last:
         row = by_night.get(cur)
+        out_of_credits = exhausted_from is not None and cur >= exhausted_from
         if row is None:
             # No frames at all. If the camera produced frames on both sides it was
             # almost certainly up and simply saw nothing — a real zero. Otherwise we
@@ -109,6 +132,12 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
             # Frames exist but the detector has not seen them. Counting this as
             # "no animals" is the backlog artefact; it is not an observation yet.
             states[cur] = ("UNPROCESSED", int(row.frames), int(row.empty))
+        elif out_of_credits:
+            # SPYPOINT telemetry says this camera hit its monthly photo limit and
+            # stopped sending. It may well have been triggered by animals it could
+            # not transmit, so the few frames we did get are not a fair sample of
+            # the night. Known-blind, not known-empty.
+            states[cur] = ("UNKNOWN", int(row.frames), int(row.empty))
         else:
             states[cur] = ("CONFIRMED", int(row.frames), int(row.empty))
         cur += timedelta(days=1)

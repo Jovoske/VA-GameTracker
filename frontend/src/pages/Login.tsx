@@ -4,6 +4,7 @@ import { login } from '../api'
 
 export default function Login() {
   const nav = useNavigate()
+  const expired = new URLSearchParams(window.location.search).has('expired')
   const [email, setEmail] = useState('admin@gamesense.local')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -32,6 +33,22 @@ export default function Login() {
         <div style={{ color: 'var(--text-dim)', fontSize: 13, marginBottom: 20 }}>
           Turn your trail cameras into a hunting forecast.
         </div>
+
+        {expired && (
+          <div
+            style={{
+              fontSize: 13,
+              color: 'var(--sand)',
+              background: 'var(--surface-2)',
+              borderRadius: 8,
+              padding: '8px 11px',
+              marginBottom: 16,
+              lineHeight: 1.45,
+            }}
+          >
+            Your session expired — please sign in again.
+          </div>
+        )}
 
         <label style={{ fontSize: 12, color: 'var(--text-dim)' }}>Email</label>
         <input

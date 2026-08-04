@@ -60,7 +60,7 @@ robocopy over the admin share:
 - Backend → `\\Db01\c$\GameSense\app\backend`, then `Restart-Service GameSenseAPI`
 - Frontend → build on the laptop (`vite build`; **Node is not installed on Db01**),
   copy `frontend\dist` → `\\Db01\c$\GameSense\web`
-- Migrations → `alembic upgrade head` on Db01 (**currently at 0007**)
+- Migrations → `alembic upgrade head` on Db01 (**0009_sits** after this branch)
 - Remote admin via `Invoke-Command -ComputerName Db01 { ... }` (WinRM)
 
 ## Stack
@@ -84,35 +84,39 @@ React 18 + TypeScript + Vite · MapLibre GL.
 
 ---
 
-## Divergence from this repository (verified 2026-07-30)
+## Divergence from this repository — resolved 2026-08-04
 
-Production is **not** built from any branch on GitHub. Recorded here so the next
-person does not assume otherwise.
+Production ran ahead of every GitHub branch for a while. The gap has now been
+closed on `claude/redesign-on-v0.21`, which is based on `main` at **v0.21.0** —
+the release that carries the production work (`camera_accounts`,
+`detections.sex_attempts`, photo-credit alerts). Recorded here because the
+resolution constrains what future work may do.
 
-| | GitHub | Production |
+### What was divergent, and how it was settled
+
+| | Was | Now |
 |---|---|---|
-| Version | `main` and the redesign branch are **v0.17.0** | **v0.20.1** |
-| Multi-account table | `spypoint_accounts` (redesign branch) | `camera_accounts` |
-| `detections.sex_attempts` | absent | present |
-| Photo-credit alerts | absent from every branch | present |
-| Alembic head | `0007_sits` (redesign branch) | `0007` — **different migration** |
+| Version | GitHub v0.17.0 vs production v0.20.1 | both on v0.21.0 |
+| Multi-account table | `spypoint_accounts` (redesign) vs `camera_accounts` (prod) | **`camera_accounts` kept**; the redesign's duplicate was dropped |
+| `detections.sex_attempts` | redesign branch only had it absent | kept from production |
+| Photo-credit alerts | production only | kept, and now also feed camera exposure |
+| Alembic head | two conflicting `0004`–`0007` chains | production's chain kept; redesign work renumbered to `0008_camera_nights`, `0009_sits` |
 
-Three GitHub branches exist and none matches production: `main` (`ce6384e`),
-`claude/app-hosting-status-07kqr0` (stale — still targets PostGIS + pgvector,
-contradicting the vanilla-PostgreSQL decision above), and
-`claude/hunting-companion-redesign-6w8z1h`.
+The redesign's `spypoint_accounts` table and its migrations were discarded
+rather than merged: production's `camera_accounts` already had Fernet-encrypted
+passwords and live rows behind it, and only one of the two could survive.
 
-**Consequences before any merge:**
+### Rules this leaves behind
 
-1. **Revision-ID collision.** Both the redesign branch and production define
-   revisions `0004`–`0007` with different content. Running `alembic upgrade head`
-   after a naive merge will either fail on duplicate IDs or produce divergent
-   heads.
-2. **Duplicate feature, two schemas.** Multi-SPYPOINT accounts were built twice
-   and independently — `spypoint_accounts` vs `camera_accounts`, both with
-   Fernet-encrypted passwords. Only one can survive.
-3. **The same bug was fixed twice.** The presence-rate denominator (per-camera
-   active nights rather than the estate-wide range) exists in both.
-4. **Unversioned production code.** The photo-credit work exists only on Db01 or
-   the operator's laptop. A `git pull`-style deploy would destroy it. Commit it
-   before merging anything.
+1. **`JWT_SECRET` must never be rotated casually.** It signs sessions *and*
+   derives the Fernet key for `camera_accounts.password_enc`. Changing it logs
+   every user out **and** makes every stored SPYPOINT password undecryptable.
+2. **`0001` runs `create_all()` against the current ORM**, so every later
+   revision must be idempotent — `IF NOT EXISTS`, or an explicit no-op — or
+   fresh installs break. `backend/tests/test_migrations.py` enforces this, and
+   also asserts that a session issued *before* an upgrade still validates after
+   it.
+3. **Migrations are additive only** against the live database. Nothing in the
+   `0008`/`0009` chain drops or rewrites a column.
+4. `claude/app-hosting-status-07kqr0` is stale — it still targets PostGIS +
+   pgvector, contradicting the vanilla-PostgreSQL decision above. Do not merge it.

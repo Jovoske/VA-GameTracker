@@ -1,7 +1,7 @@
 """camera exposure per night
 
-Revision ID: 0006_camera_nights
-Revises: 0005_spypoint_accounts
+Revision ID: 0008_camera_nights
+Revises: 0007_sex_attempts
 Create Date: 2026-07-29
 
 Adds the denominator. Purely additive: a new table, no existing column touched.
@@ -11,8 +11,8 @@ and harmless — callers fall back to the old behaviour until it is filled.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0006_camera_nights"
-down_revision = "0005_spypoint_accounts"
+revision = "0008_camera_nights"
+down_revision = "0007_sex_attempts"
 branch_labels = None
 depends_on = None
 
@@ -39,13 +39,19 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_camera_nights")),
         sa.UniqueConstraint("camera_id", "night", name="uq_camera_night"),
     )
-    op.create_index("ix_camera_nights_night", "camera_nights", ["night"], unique=False)
-
-    # Indexes the analytics path has always needed. detections.image_id is the join
-    # in essentially every query in the app and was unindexed.
-    op.create_index(op.f("ix_detections_image_id"), "detections", ["image_id"], unique=False)
-    op.create_index("ix_detections_species_image", "detections", ["species_id", "image_id"], unique=False)
-    op.create_index("ix_images_captured_at", "images", [sa.text("captured_at DESC")], unique=False)
+    # Idempotent index creation, matching this project's convention: 0001 runs
+    # create_all() against the current ORM, so a fresh database already has anything
+    # declared on the models, while an existing database does not.
+    op.execute("CREATE INDEX IF NOT EXISTS ix_camera_nights_night ON camera_nights (night)")
+    # detections.image_id is the join in essentially every query and was unindexed.
+    op.execute("CREATE INDEX IF NOT EXISTS ix_detections_image_id ON detections (image_id)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_detections_species_image "
+        "ON detections (species_id, image_id)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_images_captured_at ON images (captured_at DESC)"
+    )
 
 
 def downgrade() -> None:

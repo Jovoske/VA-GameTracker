@@ -4,19 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
     routes_admin,
-    routes_spypoint_accounts,
-    routes_stands,
-    routes_users,
     routes_alerts,
     routes_analytics,
     routes_animals,
     routes_auth,
+    routes_camera_accounts,
     routes_cameras,
     routes_estate,
     routes_forecast,
     routes_health,
     routes_images,
     routes_insights,
+    routes_species,
+    routes_stands,
+    routes_users,
 )
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -45,9 +46,10 @@ app.include_router(routes_insights.router, prefix=API_PREFIX)
 app.include_router(routes_estate.router, prefix=API_PREFIX)
 app.include_router(routes_animals.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)
+app.include_router(routes_species.router, prefix=API_PREFIX)
 app.include_router(routes_users.router, prefix=API_PREFIX)
-app.include_router(routes_spypoint_accounts.router, prefix=API_PREFIX)
 app.include_router(routes_stands.router, prefix=API_PREFIX)
+app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
 
 import os
 from fastapi.staticfiles import StaticFiles
@@ -59,15 +61,14 @@ if _DIST and os.path.isdir(_DIST):
     if os.path.isdir(_assets):
         app.mount("/assets", StaticFiles(directory=_assets), name="assets")
 
-    _DIST_REAL = os.path.realpath(_DIST)
-
     @app.get("/{full_path:path}")
     def _spa(full_path: str):
         # os.path.join() happily walks out of the directory: a request for
         # ..%2f..%2fetc/passwd resolved to a real file and was served. Resolve the
-        # candidate and confirm it is still inside the dist root before returning it.
-        candidate = os.path.realpath(os.path.join(_DIST_REAL, full_path))
-        inside = candidate == _DIST_REAL or candidate.startswith(_DIST_REAL + os.sep)
+        # candidate and confirm it is still inside the dist root.
+        _root = os.path.realpath(_DIST)
+        candidate = os.path.realpath(os.path.join(_root, full_path))
+        inside = candidate == _root or candidate.startswith(_root + os.sep)
         if full_path and inside and os.path.isfile(candidate):
             return FileResponse(candidate)
-        return FileResponse(os.path.join(_DIST_REAL, "index.html"))
+        return FileResponse(os.path.join(_DIST, "index.html"))

@@ -28,7 +28,7 @@ def estate_and_camera(db_session):
     db_session.flush()
     cam = Camera(estate_id=estate.id, name="Puente", active=True)
     db_session.add(cam)
-    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True))
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True, huntable=True))
     db_session.flush()
     return estate, cam
 

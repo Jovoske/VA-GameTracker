@@ -22,7 +22,7 @@ def cam(db_session):
     db_session.flush()
     c = Camera(estate_id=estate.id, name="Puente", active=True)
     db_session.add(c)
-    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True))
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True, huntable=True))
     db_session.flush()
     return c
 
