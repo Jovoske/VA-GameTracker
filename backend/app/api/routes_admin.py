@@ -68,7 +68,7 @@ def version_check(_: User = Depends(get_current_admin)) -> dict:
         "current": current,
         "latest": latest,
         "update_available": bool(lat_t and lat_t > cur_t),
-        "update_command": "git pull && docker compose up -d --build",
+        "update_command": "From the dev machine: copy the new code to \\\\Db01\\c$\\GameSense\\app, then Restart-Service GameSenseAPI",
     }
 
 
