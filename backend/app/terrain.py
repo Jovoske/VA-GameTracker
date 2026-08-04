@@ -13,6 +13,7 @@ downstream of this reports a tendency rather than a certainty.
 from __future__ import annotations
 
 import math
+import time
 
 import httpx
 from sqlalchemy import select
@@ -26,10 +27,40 @@ log = get_logger(__name__)
 ELEVATION_API = "https://api.open-meteo.com/v1/elevation"
 MAX_POINTS_PER_CALL = 100  # Open-Meteo's documented limit
 
-# ~200 m posts over a 5 km box. Finer than this buys nothing: the underlying DEM is
-# ~90 m, and a hand-placed stand is not located to better than that anyway.
-GRID_STEPS = 25
+# ~250 m posts over a 5 km box, in 4 requests. Finer than this buys nothing: the
+# underlying DEM is ~90 m, a hand-placed stand is not located to better than that,
+# and drainage is a hillside-scale phenomenon rather than a per-boulder one.
+GRID_STEPS = 20
 BOX_KM = 5.0
+
+# Open-Meteo is free and unauthenticated, so it is rate limited and we should be
+# polite: pace the chunks and back off rather than hammering it.
+CHUNK_PAUSE_S = 1.5
+MAX_RETRIES = 4
+
+
+def _get_elevations(lats: list[float], lons: list[float]) -> list[float]:
+    """One elevation request, retrying politely through rate limits."""
+    params = {
+        "latitude": ",".join(f"{v:.5f}" for v in lats),
+        "longitude": ",".join(f"{v:.5f}" for v in lons),
+    }
+    delay = 3.0
+    for attempt in range(MAX_RETRIES):
+        r = httpx.get(ELEVATION_API, params=params, timeout=45)
+        if r.status_code == 429:
+            if attempt == MAX_RETRIES - 1:
+                raise RuntimeError(
+                    "Elevation service is rate limiting us. It is free and shared — "
+                    "wait a few minutes and load the terrain again."
+                )
+            log.info("terrain.rate_limited", attempt=attempt + 1, sleeping=delay)
+            time.sleep(delay)
+            delay *= 2
+            continue
+        r.raise_for_status()
+        return [float(v) for v in r.json().get("elevation", [])]
+    return []
 
 
 def _deg_per_km(lat: float) -> tuple[float, float]:
@@ -57,18 +88,14 @@ def fetch_grid(db: Session, centre_lat: float, centre_lon: float, *, force: bool
 
     elevations: list[float] = []
     for start in range(0, len(lats), MAX_POINTS_PER_CALL):
-        chunk_lat = lats[start:start + MAX_POINTS_PER_CALL]
-        chunk_lon = lons[start:start + MAX_POINTS_PER_CALL]
-        r = httpx.get(
-            ELEVATION_API,
-            params={
-                "latitude": ",".join(f"{v:.5f}" for v in chunk_lat),
-                "longitude": ",".join(f"{v:.5f}" for v in chunk_lon),
-            },
-            timeout=45,
+        if start:
+            time.sleep(CHUNK_PAUSE_S)
+        elevations.extend(
+            _get_elevations(
+                lats[start:start + MAX_POINTS_PER_CALL],
+                lons[start:start + MAX_POINTS_PER_CALL],
+            )
         )
-        r.raise_for_status()
-        elevations.extend(float(v) for v in r.json().get("elevation", []))
 
     if len(elevations) != len(lats):
         raise RuntimeError(f"elevation API returned {len(elevations)} of {len(lats)} points")
