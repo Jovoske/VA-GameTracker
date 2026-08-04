@@ -1,5 +1,15 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useEffect } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { setToken } from '../api'
+
+const TABS = [
+  { to: '/', label: 'Tonight', ico: '🌙', end: true },
+  { to: '/cameras', label: 'Cameras', ico: '📷' },
+  { to: '/map', label: 'Map', ico: '🗺️' },
+  { to: '/insights', label: 'Insights', ico: '📈' },
+  { to: '/animals', label: 'Animals', ico: '🦌' },
+  { to: '/settings', label: 'Settings', ico: '⚙️' },
+]
 
 const linkStyle = (isActive: boolean) => ({
   padding: '8px 12px',
@@ -12,6 +22,13 @@ const linkStyle = (isActive: boolean) => ({
 
 export default function Layout() {
   const nav = useNavigate()
+  const loc = useLocation()
+
+  // Browser-tab / app-switcher title follows the page.
+  useEffect(() => {
+    const t = TABS.find((x) => (x.end ? loc.pathname === '/' : loc.pathname.startsWith(x.to)))
+    document.title = t ? `GameSense · ${t.label}` : 'GameSense'
+  }, [loc.pathname])
 
   function logout() {
     setToken(null)
@@ -29,30 +46,23 @@ export default function Layout() {
           borderBottom: '1px solid var(--border)',
         }}
       >
-        <div style={{ fontWeight: 700, fontSize: 16, marginRight: 6 }}>
+        <div style={{ fontWeight: 700, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap' }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
         </div>
-        <NavLink to="/" end style={({ isActive }) => linkStyle(isActive)}>
-          Tonight
-        </NavLink>
-        <NavLink to="/cameras" style={({ isActive }) => linkStyle(isActive)}>
-          Cameras
-        </NavLink>
-        <NavLink to="/map" style={({ isActive }) => linkStyle(isActive)}>
-          Map
-        </NavLink>
-        <NavLink to="/insights" style={({ isActive }) => linkStyle(isActive)}>
-          Insights
-        </NavLink>
-        <NavLink to="/animals" style={({ isActive }) => linkStyle(isActive)}>
-          Animals
-        </NavLink>
-        <NavLink to="/settings" style={({ isActive }) => ({ ...linkStyle(isActive), marginLeft: 'auto' })}>
-          Settings
-        </NavLink>
+
+        {/* Desktop / tablet: links in the header. On phones the bottom tab bar takes over. */}
+        <nav className="topnav">
+          {TABS.map((t) => (
+            <NavLink key={t.to} to={t.to} end={t.end} style={({ isActive }) => linkStyle(isActive)}>
+              {t.label}
+            </NavLink>
+          ))}
+        </nav>
+
         <button
           onClick={logout}
           style={{
+            marginLeft: 'auto',
             background: 'none',
             border: '1px solid var(--border)',
             color: 'var(--text-dim)',
@@ -60,14 +70,26 @@ export default function Layout() {
             padding: '6px 10px',
             cursor: 'pointer',
             fontSize: 13,
+            whiteSpace: 'nowrap',
           }}
         >
           Sign out
         </button>
       </header>
-      <main style={{ padding: 16 }}>
+
+      <main className="page" style={{ padding: 16 }}>
         <Outlet />
       </main>
+
+      {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
+      <nav className="tabbar">
+        {TABS.map((t) => (
+          <NavLink key={t.to} to={t.to} end={t.end} className={({ isActive }) => (isActive ? 'active' : '')}>
+            <span className="ico" aria-hidden="true">{t.ico}</span>
+            {t.label}
+          </NavLink>
+        ))}
+      </nav>
     </div>
   )
 }

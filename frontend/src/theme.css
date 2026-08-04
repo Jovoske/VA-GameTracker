@@ -58,3 +58,53 @@ button { font-family: inherit; }
   cursor: pointer;
 }
 .btn:disabled { opacity: 0.6; cursor: default; }
+
+/* ── navigation: top links on desktop, bottom tab bar on phones ── */
+.topnav { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.tabbar { display: none; }
+
+@media (max-width: 640px) {
+  .topnav { display: none; }
+  .tabbar {
+    display: flex;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 40;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 6px max(8px, env(safe-area-inset-left))
+             calc(6px + env(safe-area-inset-bottom))
+             max(8px, env(safe-area-inset-right));
+  }
+  .tabbar a {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 5px 0 3px;
+    border-radius: 8px;
+    font-size: 10px;
+    color: var(--text-dim);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tabbar a.active { color: var(--go); }
+  .tabbar .ico { font-size: 19px; line-height: 1; }
+  main.page { padding-bottom: 86px; }
+}
+
+/* photo lightbox */
+.lb-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 46px; height: 64px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 26px;
+  cursor: pointer;
+}
+.lb-nav:disabled { opacity: 0.25; cursor: default; }
