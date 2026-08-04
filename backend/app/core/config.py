@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # Security
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 10080  # 7 days
+    access_token_expire_minutes: int = 43200  # 30 days — a field app shouldn't log you out weekly
 
     # Initial admin + estate (seeded on first start)
     admin_email: str = "admin@gamesense.local"

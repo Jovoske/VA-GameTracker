@@ -59,9 +59,25 @@ button { font-family: inherit; }
 }
 .btn:disabled { opacity: 0.6; cursor: default; }
 
-/* ── navigation: top links on desktop, bottom tab bar on phones ── */
+/* ── navigation: top links on desktop, bottom tab bar on phones ──
+   On an iOS home-screen app the page renders UNDER the status bar and the home
+   indicator (viewport-fit=cover + black-translucent), so the chrome has to pad
+   itself out of their way or it becomes invisible and untappable. */
+.appbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;              /* stays reachable instead of scrolling away */
+  top: 0;
+  z-index: 30;
+  padding: 12px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+  padding-top: max(12px, env(safe-area-inset-top));
+}
 .topnav { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .tabbar { display: none; }
+main.page { padding: 16px; }
 
 @media (max-width: 640px) {
   .topnav { display: none; }
@@ -90,7 +106,10 @@ button { font-family: inherit; }
   }
   .tabbar a.active { color: var(--go); }
   .tabbar .ico { font-size: 19px; line-height: 1; }
-  main.page { padding-bottom: 86px; }
+  /* clear the bar itself plus whatever the home indicator reserves */
+  main.page { padding-bottom: calc(74px + env(safe-area-inset-bottom)); }
+  /* the sign-out button lives in Settings on a phone — the header is too tight */
+  .appbar .signout { display: none; }
 }
 
 /* photo lightbox */

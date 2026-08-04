@@ -37,15 +37,7 @@ export default function Layout() {
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto', minHeight: '100%' }}>
-      <header
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '12px 16px',
-          borderBottom: '1px solid var(--border)',
-        }}
-      >
+      <header className="appbar">
         <div style={{ fontWeight: 700, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap' }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
         </div>
@@ -61,6 +53,7 @@ export default function Layout() {
 
         <button
           onClick={logout}
+          className="signout"
           style={{
             marginLeft: 'auto',
             background: 'none',

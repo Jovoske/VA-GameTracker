@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { useNavigate } from 'react-router-dom'
+import { api, setToken } from '../api'
 
 type Status = {
   cameras: number
@@ -46,6 +47,7 @@ const smallBtn = {
 } as const
 
 export default function Admin() {
+  const nav = useNavigate()
   const [version, setVersion] = useState('')
   const [status, setStatus] = useState<Status | null>(null)
   const [check, setCheck] = useState<Check | null>(null)
@@ -409,6 +411,24 @@ export default function Admin() {
           {sexBusy ? 'Starting…' : 'Identify deer / boar sex'}
         </button>
         {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
+      </div>
+
+      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+        <div style={labelStyle}>ACCOUNT</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 13, color: 'var(--text-dim)', flex: 1, minWidth: 0 }}>
+            Signed in as <span style={{ color: 'var(--text)' }}>{me?.email ?? '…'}</span>
+          </div>
+          <button
+            onClick={() => {
+              setToken(null)
+              nav('/login')
+            }}
+            style={{ ...smallBtn, padding: '9px 16px', fontSize: 14 }}
+          >
+            Sign out
+          </button>
+        </div>
       </div>
 
       {status && (
