@@ -17,6 +17,7 @@ from sqlalchemy import (
     Time,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -47,10 +48,30 @@ class User(Base):
     __table_args__ = (CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),)
 
 
+class CameraAccount(Base):
+    """An extra SPYPOINT login whose cameras feed this estate (guests' own accounts).
+
+    The primary account stays in .env; these are added at runtime via Settings. The
+    SPYPOINT password is encrypted at rest (Fernet, key derived from JWT_SECRET).
+    """
+    __tablename__ = "camera_accounts"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    label: Mapped[str | None] = mapped_column(String)
+    username: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    password_enc: Mapped[str] = mapped_column(String, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Camera(Base):
     __tablename__ = "cameras"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
+    # Which extra SPYPOINT account this camera came from (NULL = the primary .env account).
+    account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("camera_accounts.id"))
     spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     lat: Mapped[float | None] = mapped_column(Float)
@@ -60,6 +81,16 @@ class Camera(Base):
     battery_pct: Mapped[int | None] = mapped_column(Integer)
     signal_pct: Mapped[int | None] = mapped_column(Integer)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Camera health (from SPYPOINT) — surfaced on the Cameras page and used to keep a dead
+    # or out-of-credits camera from being read as "no animals" in the forecast.
+    last_report_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    battery_level: Mapped[str | None] = mapped_column(String)
+    sd_used_mb: Mapped[int | None] = mapped_column(Integer)
+    sd_total_mb: Mapped[int | None] = mapped_column(Integer)
+    photo_count: Mapped[int | None] = mapped_column(Integer)
+    photo_limit: Mapped[int | None] = mapped_column(Integer)
+    plan_name: Mapped[str | None] = mapped_column(String)
+    cycle_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -85,6 +116,11 @@ class Species(Base):
     icon: Mapped[str | None] = mapped_column(String)
     color: Mapped[str | None] = mapped_column(String)
     is_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Whether this species appears in hunting advice (Tonight recommendation + outlook).
+    # Stats and tracking always cover every species regardless of this flag.
+    huntable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
 
 
 class Image(Base):
@@ -117,6 +153,10 @@ class Detection(Base):
     species_conf: Mapped[float | None] = mapped_column(Float)
     sex: Mapped[str] = mapped_column(String, default="unknown")
     sex_conf: Mapped[float | None] = mapped_column(Float)
+    # Cloud-vision sex pass bookkeeping. Without these, a crop the model can't judge stays
+    # sex='unknown' and gets re-sent (and re-billed) on every scheduled run, forever.
+    sex_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sex_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     age_class: Mapped[str] = mapped_column(String, default="unknown")
     age_conf: Mapped[float | None] = mapped_column(Float)
     group_size: Mapped[int | None] = mapped_column(Integer)

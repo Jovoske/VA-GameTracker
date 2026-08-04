@@ -32,6 +32,14 @@ class SpypointCamera:
     lat: float | None = None
     lng: float | None = None
     model: str | None = None
+    last_report_at: datetime | None = None
+    battery_level: str | None = None
+    sd_used_mb: int | None = None
+    sd_total_mb: int | None = None
+    photo_count: int | None = None
+    photo_limit: int | None = None
+    plan_name: str | None = None
+    cycle_end: datetime | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -87,6 +95,50 @@ def _extract_battery(status: dict) -> int | None:
             return _to_int(batteries[active])
         return _to_int(max(batteries))
     return _to_int(status.get("batteryPercentage"), status.get("battery"))
+
+
+def _extract_battery_level(status: dict) -> str | None:
+    """Coarse battery level (high/medium/low) from the active power source."""
+    active = status.get("activePowerSource")
+    sources = status.get("powerSources")
+    if isinstance(sources, list) and sources:
+        idx = active if isinstance(active, int) and 0 <= active < len(sources) else 0
+        level = (sources[idx] or {}).get("level")
+        if isinstance(level, str):
+            return level
+    return None
+
+
+def _extract_memory(status: dict) -> tuple[int | None, int | None]:
+    """SD card (used_mb, total_mb) from status.memory {used, size}."""
+    mem = status.get("memory")
+    if isinstance(mem, dict):
+        return _to_int(mem.get("used")), _to_int(mem.get("size"))
+    return None, None
+
+
+def _parse_dt_opt(value: Any) -> datetime | None:
+    """Like _parse_dt but returns None (not now()) when absent/unparseable."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _extract_subscription(cam: dict) -> dict:
+    """Photo-credit usage for the current billing cycle (SPYPOINT plan)."""
+    subs = cam.get("subscriptions")
+    s = subs[0] if isinstance(subs, list) and subs else {}
+    s = s if isinstance(s, dict) else {}
+    plan = s.get("plan") if isinstance(s.get("plan"), dict) else {}
+    return {
+        "photo_count": _to_int(s.get("photoCount")),
+        "photo_limit": _to_int(s.get("photoLimit"), plan.get("photoCountPerMonth")),
+        "plan_name": plan.get("name"),
+        "cycle_end": _parse_dt_opt(s.get("endDateBillingCycle") or s.get("monthEndBillingCycle")),
+    }
 
 
 def _extract_coords(cam: dict) -> tuple[float | None, float | None]:
@@ -185,9 +237,17 @@ class SpypointClient:
         signal = _extract_signal(status.get("signal"))
         lat, lng = _extract_coords(status if status.get("coordinates") else cam)
         model = status.get("model") or config.get("model") or cam.get("model")
+        sd_used, sd_total = _extract_memory(status)
+        sub = _extract_subscription(cam)
         return SpypointCamera(
             spypoint_id=cid, name=name, battery_pct=battery, signal_pct=signal,
-            lat=lat, lng=lng, model=model, raw=cam,
+            lat=lat, lng=lng, model=model,
+            last_report_at=_parse_dt_opt(status.get("lastUpdate")),
+            battery_level=_extract_battery_level(status),
+            sd_used_mb=sd_used, sd_total_mb=sd_total,
+            photo_count=sub["photo_count"], photo_limit=sub["photo_limit"],
+            plan_name=sub["plan_name"], cycle_end=sub["cycle_end"],
+            raw=cam,
         )
 
     # ── photos ──────────────────────────────────────────────

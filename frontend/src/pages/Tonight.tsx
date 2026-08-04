@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { useRefetchOnReturn } from '../hooks'
 
 type Overview = {
   totals: { sightings: number; empty: number; nights: number; cameras: number }
@@ -39,6 +40,7 @@ type Forecast = {
     classes: ClassCount[]
   }[]
   alternates: { camera: string; species: string; verdict: string; probability: number }[]
+  alerts?: { camera: string; status: string; detail: string }[]
   nights_of_data: number
 }
 
@@ -49,6 +51,8 @@ const verdictColor = (v: string) =>
   v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
 const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8]
 const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
+const impactColor = (impact: string) =>
+  impact.startsWith('+') ? 'var(--go)' : impact === '•' ? 'var(--text-dim)' : 'var(--marginal)'
 
 export default function Tonight() {
   const [d, setD] = useState<Overview | null>(null)
@@ -56,11 +60,13 @@ export default function Tonight() {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [err, setErr] = useState('')
 
-  useEffect(() => {
+  function load() {
     api<Forecast>('/forecast/tonight').then(setF).catch((e) => setErr(e.message))
     api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
-  }, [])
+  }
+  useEffect(load, [])
+  useRefetchOnReturn(load)
 
   if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
   if (!f || !d) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
@@ -119,6 +125,9 @@ export default function Tonight() {
             confidence
           </div>
         </div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
+          GO — worth going out tonight · MARGINAL — could go either way · SKIP — long odds
+        </div>
 
         {r && (
           <>
@@ -162,7 +171,7 @@ export default function Tonight() {
                   <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, marginBottom: 6 }}>
                     <span
                       style={{
-                        color: fac.impact.startsWith('+') ? 'var(--go)' : 'var(--marginal)',
+                        color: impactColor(fac.impact),
                         fontVariantNumeric: 'tabular-nums',
                         minWidth: 26,
                       }}

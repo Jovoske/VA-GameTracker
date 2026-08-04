@@ -20,12 +20,17 @@ PRIORITY = {"wild_boar", "red_deer", "roe_deer", "fallow_deer", "fox", "mouflon"
 def _ago(dt: datetime | None, now: datetime) -> str:
     if dt is None:
         return "unknown"
+    return _dur(dt, now) + " ago"
+
+
+def _dur(dt: datetime, now: datetime) -> str:
+    """Bare duration ("9d", "5h", "32m") for phrases like 'quiet for 9d'."""
     s = (now - dt).total_seconds()
     if s < 3600:
-        return f"{int(s // 60)}m ago"
+        return f"{int(s // 60)}m"
     if s < 86400:
-        return f"{int(s // 3600)}h ago"
-    return f"{int(s // 86400)}d ago"
+        return f"{int(s // 3600)}h"
+    return f"{int(s // 86400)}d"
 
 
 def compute_alerts(db: Session) -> list[dict]:
@@ -60,19 +65,45 @@ def compute_alerts(db: Session) -> list[dict]:
             "text": f"{int(cnt)} sighting{'s' if cnt != 1 else ''} in 48h, latest {_ago(last, now)}.",
         })
 
-    # 3. Pattern break — a usually-active camera gone quiet
+    # 3. Camera health — a camera that can't send photos is a fault, never a "pattern".
+    from app.health import camera_health
+
+    cams = db.scalars(select(Camera)).all()
+    health = {c.id: camera_health(c, now) for c in cams}
+    for c in cams:
+        h = health[c.id]
+        if h["status"] == "out_of_credits":
+            reset_on = f"{c.cycle_end.day} {c.cycle_end.strftime('%b')}" if c.cycle_end else "next cycle"
+            reset = f" Resets {reset_on}."
+            alerts.append({
+                "type": "camera", "severity": "warn", "title": f"{c.name} out of photo credits",
+                "text": f"Hit its monthly limit ({c.photo_count}/{c.photo_limit}) and stopped sending.{reset}",
+            })
+        elif h["status"] == "offline":
+            alerts.append({
+                "type": "camera", "severity": "warn", "title": f"{c.name} offline",
+                "text": f"{h['detail']} — check battery and signal on your next visit.",
+            })
+        elif h["status"] == "low_battery":
+            alerts.append({
+                "type": "camera", "severity": "warn", "title": f"{c.name} battery low",
+                "text": f"{c.battery_pct}% left — bring batteries on your next visit.",
+            })
+
+    # 4. Pattern break — a HEALTHY camera gone quiet (only then is silence meaningful)
     cam_rows = db.execute(
-        select(Camera.name, func.count(Detection.id), func.max(Image.captured_at))
+        select(Camera.id, Camera.name, func.count(Detection.id), func.max(Image.captured_at))
         .select_from(Detection)
         .join(Image, Image.id == Detection.image_id)
         .join(Camera, Camera.id == Image.camera_id)
-        .group_by(Camera.name)
+        .group_by(Camera.id, Camera.name)
     ).all()
-    for name, cnt, last in cam_rows:
-        if int(cnt) >= 15 and last and last < now - timedelta(days=3):
+    for cid, name, cnt, last in cam_rows:
+        producing = health.get(cid, {}).get("producing", True)
+        if producing and int(cnt) >= 15 and last and last < now - timedelta(days=3):
             alerts.append({
                 "type": "quiet", "severity": "warn", "title": f"{name} quiet",
-                "text": f"No animals for {_ago(last, now)} — unusual for this camera.",
+                "text": f"No animals in {_dur(last, now)} — unusual for this camera.",
             })
 
     return alerts

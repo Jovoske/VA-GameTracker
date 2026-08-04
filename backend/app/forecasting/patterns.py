@@ -168,9 +168,15 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
     confidence = round(min(0.85, min(1.0, n / 45) * min(1.0, abs(r) * 1.6)), 2)
     if confidence < 0.15:
         return None
+    # Phrase big effects as a multiple ("~2.5× the activity") — "+248%" reads like a
+    # statistics bug to a human, and at these sample sizes it half is.
+    if effect >= 100:
+        statement = f"~{(1 + effect / 100):.1f}× the activity on {desc}."
+    else:
+        statement = f"~{round(effect)}% more activity on {desc}."
     return {
         "factor": label,
-        "statement": f"~{round(effect)}% more activity on {desc}.",
+        "statement": statement,
         "effect_pct": round(effect),
         "favours": desc,
         "sample_nights": n,
@@ -250,29 +256,37 @@ def driver_map(db: Session) -> dict[str, list]:
     return {s["key"]: s["drivers"] for s in compute_patterns(db).get("scopes", [])}
 
 
+# With ~1 season of collinear data, weather/moon signals are weak and easily contradictory.
+# Only state the few that clear a real confidence bar, show at most the two strongest, and
+# never let one small-sample driver dominate the odds.
+TONIGHT_MIN_CONF = 0.40
+TONIGHT_MAX_REASONS = 2
+
+
 def tonight_multiplier(drivers: list[dict], feats: dict) -> tuple[float, list[dict]]:
     """How tonight's actual conditions nudge activity, per the learned drivers.
 
-    Deliberately conservative: each driver moves the odds by only half its historical
-    effect, further scaled by its confidence, and the total is clamped — conditions
-    tilt the verdict, they don't dominate it.
+    Deliberately conservative: each driver moves the odds by at most half its (capped)
+    effect, scaled by confidence, and the total is clamped — conditions tilt the verdict,
+    they don't dominate it. Only the top TONIGHT_MAX_REASONS confident drivers are shown, so
+    the "why" stays a couple of clear signals rather than a wall of noisy, contradictory ones.
     """
     mult = 1.0
     reasons: list[dict] = []
+    # drivers arrive sorted by effect × confidence, so the first that qualify are the strongest.
     for d in drivers:
-        if d.get("confidence", 0) < 0.25 or d.get("key") not in feats:
+        if d.get("confidence", 0) < TONIGHT_MIN_CONF or d.get("key") not in feats:
             continue
         val = feats.get(d["key"])
         if val is None:
             continue
         favourable = (val >= d["split"]) == d["favours_high"]
-        weight = (d["effect_pct"] / 100.0) * d["confidence"] * 0.5
-        if favourable:
-            mult *= 1 + weight
-            reasons.append({"text": f"Tonight favours it — {d['favours']}", "impact": "++" if weight > 0.12 else "+"})
-        else:
-            mult *= 1 - weight
-            reasons.append({"text": f"Tonight's {d['factor'].lower()} works against it", "impact": "-"})
-        if len(reasons) >= 4:
-            break
+        # cap the per-driver effect at 100% so a noisy small-sample driver can't slam the odds.
+        weight = min(1.0, d["effect_pct"] / 100.0) * d["confidence"] * 0.5
+        mult *= (1 + weight) if favourable else (1 - weight)
+        if len(reasons) < TONIGHT_MAX_REASONS:
+            if favourable:
+                reasons.append({"text": f"Tonight favours it — {d['favours']}", "impact": "++" if weight > 0.12 else "+"})
+            else:
+                reasons.append({"text": f"Tonight's {d['factor'].lower()} works against it", "impact": "-"})
     return max(0.6, min(1.5, mult)), reasons
