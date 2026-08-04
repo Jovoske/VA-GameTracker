@@ -21,3 +21,5 @@ ultralytics==8.4.66
 timm
 # Cloud vision for sex/class (stag vs hind, boar sex) — opt-in, needs ANTHROPIC_API_KEY.
 anthropic==0.69.0
+# Encrypt guest SPYPOINT passwords at rest (Fernet, key derived from JWT_SECRET).
+cryptography==44.0.0
