@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { useRefetchOnReturn } from '../hooks'
 
 type Insights = {
   outlook: {
@@ -51,10 +52,12 @@ export default function Insights() {
   const [pat, setPat] = useState<Patterns | null>(null)
   const [patScope, setPatScope] = useState('all')
 
-  useEffect(() => {
+  function load() {
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
     api<Patterns>('/insights/patterns').then(setPat).catch(() => {})
-  }, [])
+  }
+  useEffect(load, [])
+  useRefetchOnReturn(load, 120_000)
 
   async function openClassImages(label: string) {
     setOpenClass(label)
@@ -172,7 +175,21 @@ export default function Insights() {
               <div key={i} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: i < sc.drivers.length - 1 ? '1px solid var(--border)' : 'none' }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-dim)', minWidth: 92 }}>{dr.factor}</span>
-                  <span style={{ fontSize: 14, flex: 1, lineHeight: 1.4 }}>{dr.statement}</span>
+                  <span style={{ fontSize: 14, flex: 1, lineHeight: 1.4 }}>
+                    {dr.statement}
+                    {dr.confidence < 0.4 && (
+                      <span
+                        title="Weak signal so far — treat as a hint, not a rule"
+                        style={{
+                          marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: '.03em',
+                          color: 'var(--sand)', border: '1px solid var(--border)',
+                          borderRadius: 5, padding: '1px 6px', verticalAlign: 'middle',
+                        }}
+                      >
+                        EARLY SIGNAL
+                      </span>
+                    )}
+                  </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 32 }} title="sightings/night: low → high range of this factor">

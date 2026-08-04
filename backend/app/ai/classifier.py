@@ -40,8 +40,14 @@ def species_key(name: str) -> str:
     return name.replace(" ", "_")
 
 
+# DeepFaune's "lagomorph" is the taxonomic order (rabbits + hares); on this estate it is
+# shown simply as "Rabbit". Keep the model class / species key as "lagomorph"; only the
+# human-facing name is overridden.
+_NAME_OVERRIDES = {"lagomorph": "Rabbit"}
+
+
 def common_name(name: str) -> str:
-    return name.title()
+    return _NAME_OVERRIDES.get(name, name.title())
 
 
 _model = None
