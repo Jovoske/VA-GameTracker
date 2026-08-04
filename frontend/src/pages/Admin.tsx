@@ -372,7 +372,7 @@ export default function Admin() {
                 <div style={{ color: 'var(--go)' }}>
                   Update available: {check.latest} (you have {check.current})
                 </div>
-                <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>To update, run on the host:</div>
+                <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>Deployment is automatic:</div>
                 <code
                   style={{
                     display: 'block',

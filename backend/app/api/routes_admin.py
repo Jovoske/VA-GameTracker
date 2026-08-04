@@ -68,7 +68,9 @@ def version_check(_: User = Depends(get_current_admin)) -> dict:
         "current": current,
         "latest": latest,
         "update_available": bool(lat_t and lat_t > cur_t),
-        "update_command": "From the dev machine: copy the new code to \\\\Db01\\c$\\GameSense\\app, then Restart-Service GameSenseAPI",
+        # The server pulls from GitHub itself (deploy/update.ps1, every 10 min), so an
+        # update needs nothing on the host — it only has to be pushed.
+        "update_command": "Push to main — the server pulls and applies it within 10 minutes.",
     }
 
 
