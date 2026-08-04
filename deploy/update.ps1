@@ -81,11 +81,25 @@ $dump = Join-Path $dumps ("gamesense-{0}.dump" -f (Get-Date -Format 'yyyyMMdd-HH
 $dbUrl = (Select-String -Path "$repo\backend\.env" -Pattern '^DATABASE_URL=' -EA SilentlyContinue |
           Select-Object -First 1).Line -replace '^DATABASE_URL=', ''
 $m = [regex]::Match($dbUrl, '://(?<u>[^:]+):(?<p>[^@]+)@(?<h>[^:/]+):(?<port>\d+)/(?<db>[^?]+)')
-$pgDump = @(
-    'C:\Program Files\PostgreSQL\16\bin\pg_dump.exe',
-    'C:\Program Files\PostgreSQL\17\bin\pg_dump.exe',
+# Find pg_dump rather than assume a path: the installed major version moves, and a
+# wrong guess here would mean discovering there is no backup at the worst moment.
+# PGDUMP in .env overrides everything, for an install that is somewhere unusual.
+$pgDump = $null
+$override = (Select-String -Path "$repo\backend\.env" -Pattern '^PGDUMP=' -EA SilentlyContinue |
+             Select-Object -First 1).Line -replace '^PGDUMP=', ''
+foreach ($cand in @(
+    $override,
+    (Get-Command pg_dump.exe -EA SilentlyContinue).Source,
     'C:\GameSense\tools\pgsql\bin\pg_dump.exe'
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
+)) {
+    if ($cand -and (Test-Path $cand)) { $pgDump = $cand; break }
+}
+if (-not $pgDump) {
+    # Newest major version wins, so an upgraded server keeps working untouched.
+    $pgDump = Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin\pg_dump.exe' -EA SilentlyContinue |
+              Sort-Object { [int]($_.Directory.Parent.Name) } -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+}
 
 if (-not $m.Success -or -not $pgDump) {
     # Refuse rather than migrate blind. A deploy that stops here is visible and

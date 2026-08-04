@@ -58,6 +58,7 @@ type Forecast = {
     active_nights: number
   }[]
   alerts?: { camera: string; status: string; detail: string }[]
+  exposure?: { excluded_nights: number; note: string }
   nights_of_data: number
 }
 
@@ -311,8 +312,11 @@ export default function Tonight() {
             </div>
           </div>
         )}
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14, lineHeight: 1.5 }}>
           Early forecast from {f.nights_of_data} nights — it sharpens as more accumulate.
+          {/* An exclusion nobody is told about is indistinguishable from the bug it
+              replaced, so the count is stated rather than quietly applied. */}
+          {f.exposure?.note && <> {f.exposure.note}</>}
         </div>
       </div>
 

@@ -84,6 +84,51 @@ def list_stands(
     return [_stand_out(s, claims.get(s.id)) for s in rows]
 
 
+@router.post("/stands/bootstrap")
+def bootstrap_stands(
+    _: User = Depends(get_current_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Create a stand for every camera that has none, at the camera's position.
+
+    Until a stand exists, the Stands tab is empty and Sit Mode has nothing to open,
+    so the estate has to be typed in by hand before any of it works. A camera is not
+    a stand — the camera watches the ground, the hunter sits somewhere near it — so
+    these are a starting point to be dragged and renamed, not an answer.
+
+    Approach arcs are left NULL deliberately. A guessed arc becomes confident wind
+    advice, which is the exact failure the wind module exists to refuse; the app
+    stays silent on wind until somebody sets them or the inference has enough
+    sequences to suggest one.
+
+    Idempotent: cameras that already have a stand are skipped.
+    """
+    estate = db.scalar(select(Estate).order_by(Estate.created_at))
+    if estate is None:
+        raise HTTPException(400, "No estate configured yet")
+
+    taken = {s.camera_id for s in db.scalars(select(Stand)).all() if s.camera_id}
+    created = []
+    for cam in db.scalars(select(Camera).order_by(Camera.name)).all():
+        if cam.id in taken:
+            continue
+        stand = Stand(
+            estate_id=estate.id, camera_id=cam.id, name=f"{cam.name} stand",
+            lat=cam.lat, lon=cam.lon,
+        )
+        db.add(stand)
+        created.append(stand)
+    db.commit()
+    return {
+        "created": [s.name for s in created],
+        "skipped": len(taken),
+        "note": (
+            "Positions copied from the cameras — drag each stand to where you "
+            "actually sit. Approach arcs are unset, so wind advice stays quiet "
+            "until you set them."
+        ),
+    }
+
+
 @router.post("/stands", status_code=201)
 def create_stand(
     body: StandIn, _: User = Depends(get_current_admin), db: Session = Depends(get_db)

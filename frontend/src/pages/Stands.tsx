@@ -88,6 +88,19 @@ export default function Stands() {
     }
   }
 
+  async function bootstrap() {
+    await run(async () => {
+      const r = await api<{ created: string[]; note: string }>('/stands/bootstrap', {
+        method: 'POST',
+      })
+      setMsg(
+        r.created.length
+          ? `Created ${r.created.length} stand${r.created.length === 1 ? '' : 's'}. ${r.note}`
+          : 'Every camera already has a stand.',
+      )
+    })
+  }
+
   if (!stands) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
 
   const sitFor = (standId: string) => sits.find((s) => s.stand_id === standId)
@@ -113,6 +126,20 @@ export default function Stands() {
           go; stands exist where a bullet can safely stop. Add one below, then record its
           approach bearings (where animals come from) so the wind check has something to work
           with. Until then the app will say so rather than guess.
+          <button
+            onClick={bootstrap}
+            style={{
+              display: 'block', marginTop: 12, background: 'var(--surface-2)',
+              color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8,
+              padding: '8px 12px', cursor: 'pointer', fontSize: 13,
+            }}
+          >
+            Start me off — one per camera
+          </button>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
+            Places a stand at each camera so you have something to drag, rather than typing
+            the estate in from scratch. Arcs stay unset, so wind advice stays quiet.
+          </div>
         </div>
       )}
 

@@ -187,3 +187,47 @@ def test_a_herd_in_one_frame_is_not_one_animal(db_session, estate_and_camera):
     assert row["frames"] == 1
     assert row["visits"] == 1
     assert row["animals"] == 12
+
+
+@requires_db
+def test_excluded_nights_are_reported_not_hidden(db_session, monkeypatch):
+    """An exclusion nobody is told about is indistinguishable from the bug it replaced.
+
+    The whole point of the exposure table is that a night the camera could not
+    vouch for is left out rather than averaged in as "no animals". If the app
+    never says how many it left out, the user cannot tell a quiet wood from a
+    dead camera — which is exactly the confusion this replaced.
+    """
+    import app.forecasting.model as model
+    from app.forecasting.model import forecast_tonight
+
+    monkeypatch.setattr(model, "_tonight_conditions", lambda now: {"moon_phase": "New Moon"})
+
+    estate = Estate(name="E", timezone="Europe/Madrid", lat=39.0, lon=-1.3)
+    db_session.add(estate)
+    db_session.flush()
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", huntable=True))
+    cam = Camera(estate_id=estate.id, name="Ridge")
+    db_session.add(cam)
+    db_session.flush()
+
+    base = datetime(2025, 10, 1, 21, 0, tzinfo=timezone.utc)
+    for i in range(6):
+        img = Image(
+            camera_id=cam.id,
+            captured_at=base + timedelta(days=i),
+            # The last two nights are still queued for the classifier, so they are
+            # not observations yet.
+            processed_at=None if i >= 4 else base + timedelta(days=i),
+        )
+        db_session.add(img)
+        db_session.flush()
+        if i < 4:
+            db_session.add(Detection(image_id=img.id, species_id="wild_boar"))
+    db_session.commit()
+    recompute_camera_nights(db_session)
+
+    out = forecast_tonight(db_session)
+    assert out["exposure"]["excluded_nights"] == 2
+    assert "2 nights left out" in out["exposure"]["note"]
+    assert "not counted either way" in out["exposure"]["note"]

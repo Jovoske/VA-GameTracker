@@ -19,6 +19,7 @@ from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
 from app.enrichment.weather import weather_at
 from app.forecasting.changes import whats_changed
+from app.forecasting.exposure import excluded_nights
 from app.forecasting.scoring import calibration
 from app.forecasting.wind import assess
 from app.models import Camera, Detection, Image, Species, Stand
@@ -321,7 +322,24 @@ def forecast_tonight(db: Session) -> dict:
         log.warning("calibration.failed", error=str(e))
         track_record = {"available": False, "n_evaluated": 0}
 
+    # Nights deliberately not counted — camera down, out of credits, or frames the
+    # classifier has not reached. The whole point of the exposure table is that these
+    # are excluded rather than silently averaged in as "no animals", and an exclusion
+    # nobody is told about is indistinguishable from the bug it replaced.
+    try:
+        skipped = excluded_nights(db)
+    except Exception as e:
+        log.warning("exposure.count_failed", error=str(e))
+        skipped = 0
+
     return {
+        "exposure": {
+            "excluded_nights": skipped,
+            "note": (
+                f"{skipped} night{'s' if skipped != 1 else ''} left out — the cameras "
+                "could not vouch for them, so they are not counted either way."
+            ) if skipped else "",
+        },
         "verdict": _verdict(top["probability"], top["active_nights"]),
         "changed": changed,
         "calibration": track_record,

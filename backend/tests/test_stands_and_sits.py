@@ -208,3 +208,61 @@ def test_invalid_outcome_is_rejected(client, admin):
     sit = client.post("/api/sits", json={"stand_id": s["id"]}, headers=headers).json()
     r = client.patch(f"/api/sits/{sit['id']}", json={"outcome": "maybe"}, headers=headers)
     assert r.status_code == 422
+
+
+# ── bootstrap ───────────────────────────────────────────────────────────────
+
+
+@requires_db
+def test_bootstrap_creates_one_stand_per_camera_without_guessing_arcs(client, admin, db_session):
+    """A guessed arc becomes confident wind advice — the exact thing wind refuses to do.
+
+    So bootstrap copies positions, which are a fact, and leaves approach bearings
+    unset, which are not.
+    """
+    from app.models import Camera
+
+    e = db_session.scalar(select(Estate))
+    db_session.add_all([
+        Camera(estate_id=e.id, name="Ridge", lat=39.10, lon=-1.36),
+        Camera(estate_id=e.id, name="Vineyard", lat=39.11, lon=-1.35),
+    ])
+    db_session.commit()
+    _, headers = admin
+
+    r = client.post("/api/stands/bootstrap", headers=headers)
+    assert r.status_code == 200, r.text
+    assert sorted(r.json()["created"]) == ["Ridge stand", "Vineyard stand"]
+
+    stands = {s.name: s for s in db_session.scalars(select(Stand)).all()}
+    assert stands["Ridge stand"].lat == 39.10
+    assert stands["Ridge stand"].approach_dirs_deg is None, "arcs must never be guessed"
+    assert client.get("/api/stands", headers=headers).json()[0]["has_geometry"] is False
+
+
+@requires_db
+def test_bootstrap_is_idempotent_and_never_touches_an_existing_stand(client, admin, db_session):
+    from app.models import Camera
+
+    e = db_session.scalar(select(Estate))
+    cam = Camera(estate_id=e.id, name="Ridge", lat=39.10, lon=-1.36)
+    db_session.add(cam)
+    db_session.commit()
+    _, headers = admin
+
+    # A stand the user has already placed and given arcs to.
+    mine = _stand(client, headers, "My hide", camera_id=str(cam.id), approach_dirs_deg=[45])
+
+    r = client.post("/api/stands/bootstrap", headers=headers)
+    assert r.json()["created"] == [], "a camera that already has a stand is skipped"
+    assert db_session.query(Stand).count() == 1
+
+    again = client.get("/api/stands", headers=headers).json()
+    assert again[0]["name"] == "My hide" and again[0]["approach_dirs_deg"] == [45]
+    assert again[0]["id"] == mine["id"]
+
+
+@requires_db
+def test_bootstrap_is_admin_only(client, db_session, estate):
+    _, viewer = _user(db_session, estate, "viewer@estate.local", role="viewer")
+    assert client.post("/api/stands/bootstrap", headers=viewer).status_code == 403
