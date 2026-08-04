@@ -108,6 +108,30 @@ class Stand(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
 
+class Zone(Base):
+    """Ground the hunter knows and the cameras cannot see — chiefly bedding.
+
+    The wind module can only speak when it knows which way animals approach, and
+    nobody can realistically type in "they come from 235 degrees". Drawing where
+    they lie up turns that bearing into derived geometry rather than a guess.
+
+    Stored as a GeoJSON Polygon in JSONB: PostGIS was dropped for the native build,
+    and estate-scale geometry is simple enough to do in Python (see app/geo.py).
+    """
+    __tablename__ = "zones"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="bedding")
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    polygon: Mapped[dict] = mapped_column(JSONB, nullable=False)  # GeoJSON Polygon
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        CheckConstraint("kind IN ('bedding','feeding','water','no_go')", name="zone_kind_valid"),
+    )
+
+
 class Species(Base):
     __tablename__ = "species"
     id: Mapped[str] = mapped_column(String, primary_key=True)  # 'sus_scrofa'

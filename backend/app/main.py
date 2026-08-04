@@ -18,6 +18,7 @@ from app.api import (
     routes_species,
     routes_stands,
     routes_users,
+    routes_zones,
 )
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -50,6 +51,7 @@ app.include_router(routes_species.router, prefix=API_PREFIX)
 app.include_router(routes_users.router, prefix=API_PREFIX)
 app.include_router(routes_stands.router, prefix=API_PREFIX)
 app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
+app.include_router(routes_zones.router, prefix=API_PREFIX)
 
 import os
 from fastapi.staticfiles import StaticFiles
