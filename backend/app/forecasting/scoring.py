@@ -51,7 +51,12 @@ MIN_EVALUATED = 30  # below this, a hit rate is noise and is not shown
 
 
 def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) -> ModelRun:
-    """Write tonight's claims so they can be scored tomorrow."""
+    """Write tonight's claims so they can be scored tomorrow.
+
+    Append-only: a re-run records a *new* claim rather than editing the old one, so
+    the app can never quietly rewrite what it said. Scoring deduplicates — see
+    `_claims_for`.
+    """
     target = target or date.today()
     run = ModelRun(
         kind="forecast",
@@ -71,15 +76,6 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
         cam_id = cameras.get(entry["camera"])
         if cam_id is None:
             continue
-        existing = db.scalar(
-            select(Forecast).where(
-                Forecast.camera_id == cam_id,
-                Forecast.target_date == target,
-                Forecast.model_run_id == run.id,
-            )
-        )
-        if existing:
-            continue
         w = entry.get("best_window") or {}
         db.add(
             Forecast(
@@ -92,7 +88,7 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
                 factors={
                     "verdict": entry.get("verdict"),
                     "nights_present": entry.get("nights_present"),
-                    "camera_nights": entry.get("camera_nights"),
+                    "active_nights": entry.get("active_nights"),
                 },
                 model_run_id=run.id,
             )
@@ -117,11 +113,28 @@ def _detected(db: Session, camera_id, species_id, night: date) -> bool:
     return bool(db.scalar(q) or 0)
 
 
+def _claims_for(rows: list[Forecast]) -> list[Forecast]:
+    """One claim per camera-night: the earliest, which is the one made before the night.
+
+    Persistence is append-only, and the scheduler can fire twice. Scoring every row
+    would count one camera-night as several independent observations — inflating
+    `n_evaluated` past the threshold that gates the hit rate, and weighting whichever
+    night the job happened to double-run. The first claim is the one that was on the
+    screen when the hunter decided; a claim written after dark is not a forecast.
+    """
+    first: dict[tuple, Forecast] = {}
+    for fc in sorted(rows, key=lambda f: (f.generated_at is None, f.generated_at)):
+        first.setdefault((fc.camera_id, fc.target_date, fc.species_id), fc)
+    return list(first.values())
+
+
 def evaluate_night(db: Session, *, night: date | None = None) -> dict:
     """Score the forecasts made for `night` against what the cameras recorded."""
     night = night or (date.today() - timedelta(days=1))
 
-    rows = db.scalars(select(Forecast).where(Forecast.target_date == night)).all()
+    rows = _claims_for(
+        list(db.scalars(select(Forecast).where(Forecast.target_date == night)).all())
+    )
     if not rows:
         return {"night": night.isoformat(), "evaluated": 0, "reason": "no forecasts for that night"}
 

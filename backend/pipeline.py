@@ -6,6 +6,8 @@ Scheduler instead. Three modes:
     python pipeline.py sync       # SPYPOINT incremental sync + local AI (free) — every 15 min
     python pipeline.py backfill   # initial SPYPOINT pull (BACKFILL_MONTHS) + local AI — one-off
     python pipeline.py sex        # cloud vision stag/hind + boar/sow pass (costs API credit) — hourly
+    python pipeline.py plan       # record tonight's claims before the night — daily, ~17:00
+    python pipeline.py score      # grade last night's claims against the cameras — daily, ~11:00
 
 A lock file serialises every mode: the long initial backfill, the 15-min sync and the
 hourly sex pass share one database and load the CPU models into memory, so they must never
@@ -59,6 +61,29 @@ def _run(mode: str) -> None:
             from app.ai.species import classify_unclassified
             log.info("pipeline.scan", result=scan_unprocessed(db))
             log.info("pipeline.species", result=classify_unclassified(db))
+            # Exposure is the denominator under every statistic in the app, and it
+            # only becomes knowable once the frames are classified — an unprocessed
+            # night is not an observation yet. So it runs here, after the AI pass,
+            # rather than on its own timer.
+            from app.forecasting.exposure import recompute_camera_nights
+            log.info("pipeline.exposure", result=recompute_camera_nights(db))
+
+        if mode == "plan":
+            # Record what the app is claiming BEFORE the night happens. A forecast
+            # only ever read after the fact can never be scored, which is how the
+            # old confidence figure survived so long without anyone checking it.
+            from app.forecasting.model import forecast_tonight
+            from app.forecasting.scoring import persist_tonight
+            run = persist_tonight(db, forecast_tonight(db))
+            log.info("pipeline.plan", model_run=str(run.id), **(run.metrics or {}))
+
+        if mode == "score":
+            # Exposure first: a night the camera cannot vouch for must be excluded,
+            # not counted as a miss, and that decision reads the exposure table.
+            from app.forecasting.exposure import recompute_camera_nights
+            from app.forecasting.scoring import evaluate_night
+            recompute_camera_nights(db)
+            log.info("pipeline.score", result=evaluate_night(db))
 
         if mode == "sex":
             if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -72,8 +97,8 @@ def _run(mode: str) -> None:
 
 def main() -> None:
     mode = sys.argv[1] if len(sys.argv) > 1 else "sync"
-    if mode not in ("sync", "backfill", "sex"):
-        print(f"unknown mode: {mode!r} (use sync|backfill|sex)")
+    if mode not in ("sync", "backfill", "sex", "plan", "score"):
+        print(f"unknown mode: {mode!r} (use sync|backfill|sex|plan|score)")
         sys.exit(2)
     if _locked():
         log.info("pipeline.skip_locked", mode=mode)

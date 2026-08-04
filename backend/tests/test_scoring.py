@@ -236,3 +236,29 @@ def test_a_useless_model_does_not_claim_skill(db_session, cam):
     assert cal["available"] is True
     assert cal["skill_vs_climatology"] <= 0
     assert cal["beats_baseline"] is False
+
+
+@requires_db
+def test_a_double_run_is_recorded_twice_but_scored_once(db_session, cam):
+    """The scheduler can fire twice. History stays append-only; the sample does not.
+
+    Scoring every row would count one camera-night as several independent
+    observations — inflating n_evaluated past the threshold that gates the hit
+    rate, and weighting whichever night the job happened to double-run.
+    """
+    persist_tonight(db_session, _forecast_payload(cam, prob=0.7), target=NIGHT)
+    persist_tonight(db_session, _forecast_payload(cam, prob=0.2), target=NIGHT)
+    assert db_session.query(Forecast).count() == 2, "history must stay append-only"
+
+    _frame(db_session, cam, datetime(2025, 11, 1, 21, 0, tzinfo=timezone.utc), animal=True)
+    db_session.commit()
+    recompute_camera_nights(db_session)
+
+    res = evaluate_night(db_session, night=NIGHT)
+    assert res["evaluated"] == 1, "one camera-night is one observation"
+    assert db_session.query(ForecastOutcome).count() == 1
+
+    # The claim that was scored is the one made first — the one on the screen
+    # before the night, not a revision written after dark.
+    scored = db_session.scalar(select(ForecastOutcome))
+    assert db_session.get(Forecast, scored.forecast_id).probability == pytest.approx(0.7)
