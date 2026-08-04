@@ -3,6 +3,16 @@
   --surface: #161D1A;
   --surface-2: #1E2723;
   --go: #3FB950;
+  /* Verdict states. Word + shape carry the meaning; these are a redundant channel.
+     Measured contrast between --go and --marginal was 1.12:1 — the states were
+     effectively isoluminant — and under a red headlamp green reads near-black
+     while red reads white, so a colour-only cue inverts in exactly the conditions
+     this app is used in. --skip red is retired from verdicts and reserved for
+     safety refusals, so that when red does appear it still means "stop". */
+  --v-best: #6FCB7F;
+  --v-look: #F0C674;
+  --v-quiet: #8A9A92;
+  --alert: #E5A0FF;
   --marginal: #E3A008;
   --skip: #E5534B;
   --teal: #3FB9B0;

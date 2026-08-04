@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, imageUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 
 type Insights = {
@@ -8,10 +8,8 @@ type Insights = {
     moon_phase: string
     moon_illum: number
     darkness_minutes: number | null
-    camera: string | null
-    species: string | null
-    probability: number | null
-    verdict: string
+    sunset: string | null
+    civil_twilight_end: string | null
   }[]
   composition: { label: string; count: number; top_camera: string | null }[]
   correlations: { statement: string; strength: number; sample: number }[]
@@ -37,10 +35,10 @@ type PScope = {
 }
 type Patterns = { scopes: PScope[]; nights: number; range?: [string, string] }
 
-const verdictColor = (v: string) =>
-  v === 'GO' ? 'var(--go)' : v === 'MARGINAL' ? 'var(--marginal)' : 'var(--skip)'
-const dayName = (iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
+const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
+const clock = (iso: string | null) =>
+  iso ? new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '–'
 const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 
 export default function Insights() {
@@ -81,37 +79,37 @@ export default function Insights() {
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Insights</div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>7-NIGHT OUTLOOK</div>
+        <div style={labelStyle}>NEXT 7 NIGHTS · SUN &amp; MOON</div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
           {d.outlook.map((o) => (
             <div
               key={o.date}
+              title={`${o.moon_phase} · last light ${clock(o.civil_twilight_end)}`}
               style={{
                 flex: '1 0 68px',
                 textAlign: 'center',
                 padding: '8px 4px',
                 borderRadius: 8,
                 background: 'var(--surface-2)',
-                borderTop: `2px solid ${verdictColor(o.verdict)}`,
               }}
             >
               <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
                 {dayName(o.date)} {dayNum(o.date)}
               </div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: verdictColor(o.verdict), margin: '4px 0' }}>
-                {o.verdict}
-              </div>
-              <div style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {o.species ?? '—'}
-              </div>
-              <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                {o.probability != null ? Math.round(o.probability * 100) + '%' : '–'}
+              <div style={{ fontSize: 14, margin: '4px 0' }}>🌙</div>
+              <div style={{ fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                {Math.round(o.moon_illum)}%
               </div>
               <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3 }}>
-                🌙 {Math.round(o.moon_illum)}%
+                {clock(o.civil_twilight_end)}
               </div>
             </div>
           ))}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.45 }}>
+          Moon illumination and last shootable light. No odds here on purpose — a night seven
+          days out can't be called until the forecast has been scored against what the cameras
+          actually saw. Tonight's call lives on the Tonight tab.
         </div>
       </div>
 
@@ -274,10 +272,10 @@ export default function Insights() {
                 {classImgs?.map((im) => (
                   <div
                     key={im.image_id}
-                    onClick={() => setZoom(im.file_url)}
+                    onClick={() => setZoom(imageUrl(im.file_url))}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
-                    <img src={im.file_url} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
+                    <img src={imageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.camera}</span>
                       <span>{new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>

@@ -16,6 +16,7 @@ from app.api import (
     routes_images,
     routes_insights,
     routes_species,
+    routes_stands,
     routes_users,
 )
 from app.core.config import settings
@@ -47,6 +48,7 @@ app.include_router(routes_animals.router, prefix=API_PREFIX)
 app.include_router(routes_admin.router, prefix=API_PREFIX)
 app.include_router(routes_species.router, prefix=API_PREFIX)
 app.include_router(routes_users.router, prefix=API_PREFIX)
+app.include_router(routes_stands.router, prefix=API_PREFIX)
 app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
 
 import os
@@ -61,7 +63,12 @@ if _DIST and os.path.isdir(_DIST):
 
     @app.get("/{full_path:path}")
     def _spa(full_path: str):
-        candidate = os.path.join(_DIST, full_path)
-        if full_path and os.path.isfile(candidate):
+        # os.path.join() happily walks out of the directory: a request for
+        # ..%2f..%2fetc/passwd resolved to a real file and was served. Resolve the
+        # candidate and confirm it is still inside the dist root.
+        _root = os.path.realpath(_DIST)
+        candidate = os.path.realpath(os.path.join(_root, full_path))
+        inside = candidate == _root or candidate.startswith(_root + os.sep)
+        if full_path and inside and os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse(os.path.join(_DIST, "index.html"))

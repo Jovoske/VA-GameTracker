@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
+import { api, imageUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 
 type SpeciesRow = {
@@ -181,7 +181,7 @@ export default function Animals() {
             >
               {sp.thumb_image_id && (
                 <img
-                  src={`/api/images/${sp.thumb_image_id}/file`}
+                  src={imageUrl(`/api/images/${sp.thumb_image_id}/file`)}
                   loading="lazy"
                   alt={sp.name}
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
@@ -303,7 +303,7 @@ export default function Animals() {
                 <div style={{ position: 'relative', height: 110, background: 'var(--surface-2)' }}>
                   {a.thumb_image_id && (
                     <img
-                      src={`/api/images/${a.thumb_image_id}/file`}
+                      src={imageUrl(`/api/images/${a.thumb_image_id}/file`)}
                       loading="lazy"
                       alt={a.label}
                       style={{ width: '100%', height: '100%', objectFit: 'cover' }}
@@ -407,7 +407,7 @@ export default function Animals() {
                     onClick={() => setZoom(im)}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
-                    <img src={im.file_url} loading="lazy" alt={im.label} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
+                    <img src={imageUrl(im.file_url)} loading="lazy" alt={im.label} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.label}</span>
                       <span style={{ flexShrink: 0 }}>
@@ -428,7 +428,7 @@ export default function Animals() {
           onClick={() => setZoom(null)}
           style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 60, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
         >
-          <img src={zoom.file_url} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 10 }} />
+          <img src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 10 }} />
           <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
             <b>{zoom.camera}</b>
             <span>{zoom.label}</span>
