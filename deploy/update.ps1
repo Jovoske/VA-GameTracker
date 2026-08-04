@@ -69,8 +69,64 @@ if ($changed -match '(?m)^frontend/') {
     }
 }
 
+# Back up before touching the schema. Rolling the code back cannot roll a migration
+# back, so without this a half-applied migration leaves the estate's only copy of a
+# season of sightings in whatever state alembic stopped in. Keep the last 7.
+$dumps = 'C:\GameSense\backups'
+New-Item -ItemType Directory -Force -Path $dumps *> $null
+$dump = Join-Path $dumps ("gamesense-{0}.dump" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+# Connection details come from the same DATABASE_URL the app uses, so the backup can
+# never quietly dump a different database than the one about to be migrated.
+$dbUrl = (Select-String -Path "$repo\backend\.env" -Pattern '^DATABASE_URL=' -EA SilentlyContinue |
+          Select-Object -First 1).Line -replace '^DATABASE_URL=', ''
+$m = [regex]::Match($dbUrl, '://(?<u>[^:]+):(?<p>[^@]+)@(?<h>[^:/]+):(?<port>\d+)/(?<db>[^?]+)')
+# Find pg_dump rather than assume a path: the installed major version moves, and a
+# wrong guess here would mean discovering there is no backup at the worst moment.
+# PGDUMP in .env overrides everything, for an install that is somewhere unusual.
+$pgDump = $null
+$override = (Select-String -Path "$repo\backend\.env" -Pattern '^PGDUMP=' -EA SilentlyContinue |
+             Select-Object -First 1).Line -replace '^PGDUMP=', ''
+foreach ($cand in @(
+    $override,
+    (Get-Command pg_dump.exe -EA SilentlyContinue).Source,
+    'C:\GameSense\tools\pgsql\bin\pg_dump.exe'
+)) {
+    if ($cand -and (Test-Path $cand)) { $pgDump = $cand; break }
+}
+if (-not $pgDump) {
+    # Newest major version wins, so an upgraded server keeps working untouched.
+    $pgDump = Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin\pg_dump.exe' -EA SilentlyContinue |
+              Sort-Object { [int]($_.Directory.Parent.Name) } -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+}
+
+if (-not $m.Success -or -not $pgDump) {
+    # Refuse rather than migrate blind. A deploy that stops here is visible and
+    # recoverable; a half-applied migration with no backup is neither.
+    Note "ERROR: cannot back up (DATABASE_URL parsed=$($m.Success), pg_dump found=$([bool]$pgDump)) - not migrating, rolling code back"
+    & $git reset --hard $before --quiet *>> "$logs\update-git.log"
+    exit 1
+}
+
+$env:PGPASSWORD = [uri]::UnescapeDataString($m.Groups['p'].Value)
+& $pgDump -h $m.Groups['h'].Value -p $m.Groups['port'].Value -U $m.Groups['u'].Value `
+          -d $m.Groups['db'].Value -Fc -f $dump *> "$logs\update-dump.log"
+$dumped = $LASTEXITCODE
+$env:PGPASSWORD = ''
+if ($dumped -ne 0 -or -not (Test-Path $dump)) {
+    Note 'ERROR: pg_dump failed - not migrating, rolling code back (see update-dump.log)'
+    & $git reset --hard $before --quiet *>> "$logs\update-git.log"
+    exit 1
+}
+Note ("backup: {0} ({1:N1} MB)" -f (Split-Path $dump -Leaf), ((Get-Item $dump).Length / 1MB))
+Get-ChildItem $dumps -Filter 'gamesense-*.dump' |
+    Sort-Object LastWriteTime -Descending | Select-Object -Skip 7 | Remove-Item -Force
+
 # Migrations are idempotent; run every update so the schema can never lag the code.
-# If they fail, roll the code back rather than restart into a schema mismatch.
+# If they fail, roll the code back rather than restart into a schema mismatch. The
+# schema itself must be restored by hand from the dump above — deliberately manual,
+# because an automatic restore can destroy rows written since the backup.
 $env:PYTHONPATH = "$repo\backend"
 Push-Location "$repo\backend"
 & "$venv\alembic.exe" upgrade head *> "$logs\update-alembic.log"

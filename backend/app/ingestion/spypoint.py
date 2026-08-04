@@ -157,13 +157,22 @@ def _extract_coords(cam: dict) -> tuple[float | None, float | None]:
     return None, None
 
 
-def _parse_dt(value: Any) -> datetime:
-    if value:
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc)
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse a SPYPOINT timestamp, or None if it cannot be trusted.
+
+    This used to fall back to datetime.now(), silently stamping a photo with the
+    moment it happened to sync. Every number in the product is a function of *when*
+    an animal was seen — hour histograms, peak windows, which night a detection
+    belongs to — so an invented timestamp corrupts all of them. A photo with no
+    usable capture time is dropped and logged: missing data is recoverable,
+    invented data is not.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _extract_tags(photo: dict) -> list[str]:
@@ -264,17 +273,30 @@ class SpypointClient:
         data = self._request("POST", "/photo/all", json=body).json()
         photos = data.get("photos", []) if isinstance(data, dict) else []
         result = []
+        skipped = 0
         for p in photos:
             pid = str(p.get("id") or p.get("_id") or "")
+            # originDate is when the camera fired; `date` is closer to when SPYPOINT
+            # received it. Cellular cameras batch-upload when signal returns, so
+            # preferring `date` can manufacture a dawn "peak window" out of a late
+            # delivery. Capture time first, receipt time only as a fallback.
+            captured_at = _parse_dt(
+                p.get("originDate") or p.get("date") or p.get("createdAt")
+            )
+            if captured_at is None:
+                skipped += 1
+                continue
             result.append(
                 SpypointPhoto(
                     spypoint_id=pid,
-                    captured_at=_parse_dt(p.get("date") or p.get("originDate") or p.get("createdAt")),
+                    captured_at=captured_at,
                     url=self.photo_url(p),
                     tags=_extract_tags(p),
                     raw=p,
                 )
             )
+        if skipped:
+            log.warning("spypoint.photos_without_timestamp", camera=camera_id, skipped=skipped)
         return result
 
     @staticmethod

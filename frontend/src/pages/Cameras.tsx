@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, imageUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 
 type Health = {
@@ -286,7 +286,7 @@ export default function Cameras() {
                   return (
                     <div key={im.id} style={{ position: 'relative', flexShrink: 0 }}>
                       <img
-                        src={im.file_url as string}
+                        src={imageUrl(im.file_url as string)}
                         alt={im.species || 'trail-camera photo'}
                         onClick={() => setZoom({ list: imgs, idx: imgs.indexOf(im), cam: c.name })}
                         style={{
@@ -392,7 +392,7 @@ export default function Cameras() {
             }}
           >
             <img
-              src={im.file_url as string}
+              src={imageUrl(im.file_url as string)}
               alt={what}
               onClick={(e) => e.stopPropagation()}
               style={{ maxWidth: '94vw', maxHeight: '80vh', borderRadius: 10 }}

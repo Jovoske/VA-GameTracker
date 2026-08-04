@@ -4,6 +4,7 @@ import { setToken } from '../api'
 
 const TABS = [
   { to: '/', label: 'Tonight', ico: '🌙', end: true },
+  { to: '/stands', label: 'Stands', ico: '🎯' },
   { to: '/cameras', label: 'Cameras', ico: '📷' },
   { to: '/map', label: 'Map', ico: '🗺️' },
   { to: '/insights', label: 'Insights', ico: '📈' },

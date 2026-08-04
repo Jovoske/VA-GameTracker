@@ -7,15 +7,24 @@ how sure it is and why, and never claims certainty. The factors feed the card's
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, cast, extract, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
 from app.enrichment.weather import weather_at
-from app.models import Camera, Detection, Image, Species
+from app.forecasting.changes import whats_changed
+from app.forecasting.exposure import excluded_nights
+from app.forecasting.scoring import calibration
+from app.forecasting.wind import assess
+from app.models import Camera, Detection, Image, Species, Stand
+
+log = get_logger(__name__)
 
 _TZ = settings.estate_timezone
 
@@ -24,10 +33,19 @@ def _local_hour(col):
     return cast(extract("hour", func.timezone(_TZ, col)), Integer)
 
 
-def _best_window(by_hour: dict[int, int]) -> dict:
+# Hours a person can realistically sit an evening stand. Searching all 24 returned
+# windows like 03:00-06:00: genuinely where camera activity peaked, and genuinely
+# useless as a recommendation, because nobody is sitting then. The constraint is
+# what a hunter can do, not what the sensor saw.
+SITTABLE_HOURS = tuple(range(16, 24)) + (0, 1)
+
+
+def _best_window(by_hour: dict[int, int], *, sittable_only: bool = True) -> dict:
+    """Best 3-hour block, restricted to hours somebody could actually be there."""
     total = sum(by_hour.values()) or 1
-    best_start, best_sum = 0, -1
-    for start in range(24):
+    starts = SITTABLE_HOURS if sittable_only else tuple(range(24))
+    best_start, best_sum = starts[0], -1
+    for start in starts:
         block = sum(by_hour.get((start + d) % 24, 0) for d in range(3))
         if block > best_sum:
             best_start, best_sum = start, block
@@ -35,12 +53,28 @@ def _best_window(by_hour: dict[int, int]) -> dict:
             "share_pct": round(best_sum / total * 100)}
 
 
-def _verdict(prob: float) -> str:
+MIN_NIGHTS_TO_JUDGE = 15
+
+
+def _verdict(prob: float, active_nights: int | None = None) -> str:
+    """Describe the ground, don't instruct the hunter.
+
+    GO/MARGINAL/SKIP read as commands, which turns every blank evening into a broken
+    promise and hands the hunter someone to blame. These labels state what the camera
+    has seen and leave the decision where it belongs.
+
+    NO_DATA is a distinct state, not a bad one: a camera with too few watched nights
+    is a hardware report, and calling that "QUIET" claims knowledge of the ground we
+    do not have. Note this keys on nights WATCHED, so a camera that is merely out of
+    photo credits keeps its historical ranking rather than disappearing.
+    """
+    if active_nights is not None and active_nights < MIN_NIGHTS_TO_JUDGE:
+        return "NO_DATA"
     if prob >= 0.5:
-        return "GO"
+        return "BEST_ODDS"
     if prob >= 0.2:
-        return "MARGINAL"
-    return "SKIP"
+        return "WORTH_A_LOOK"
+    return "QUIET"
 
 
 def _is_nocturnal(window: dict) -> bool:
@@ -107,14 +141,13 @@ def _camera_forecast(db: Session, cam: Camera, now: datetime, *, producing: bool
         elif recent_nights == 0:
             prob = max(0.02, prob - 0.15)
 
-    confidence = round(min(90, 30 + nights_present * 2))  # capped — never certain
     return {
         "camera": cam.name, "camera_id": str(cam.id),
         "species": sp_name, "species_id": species_id, "runner_up": runner_up,
         "probability": round(prob, 2), "presence": round(presence, 2),
         "nights_present": nights_present, "recent_nights": recent_nights,
         "active_nights": active_nights, "producing": producing,
-        "best_window": window, "confidence": confidence,
+        "best_window": window,
         "nocturnal": _is_nocturnal(window),
     }
 
@@ -160,7 +193,10 @@ def _expectations(db: Session, forecasts: list[dict]) -> list[dict]:
         classes = sorted(agg.items(), key=lambda kv: -kv[1])[:4]
         out.append({
             "camera": f["camera"], "camera_id": f["camera_id"],
-            "verdict": _verdict(f["probability"]), "probability": f["probability"],
+            "species_id": f["species_id"],  # needed to score the claim later
+            "verdict": _verdict(f["probability"], f["active_nights"]),
+            "probability": f["probability"],
+            "nights_present": f["nights_present"], "active_nights": f["active_nights"],
             "best_window": f["best_window"],
             "classes": [{"label": lbl, "count": n} for lbl, n in classes],
         })
@@ -172,7 +208,11 @@ def _tonight_conditions(now: datetime) -> dict:
     s = solar(settings.estate_lat, settings.estate_lon, now.date())
     wind_dir = wind_speed = temp = pressure = cloud = rain = None
     try:
-        local_22 = now.astimezone().replace(hour=22, minute=0, second=0, microsecond=0)
+        # `now` is UTC and the service sets no TZ, so .astimezone() was a no-op:
+        # this sampled 22:00 UTC, which is midnight the following day in Madrid.
+        local_22 = now.astimezone(ZoneInfo(_TZ)).replace(
+            hour=22, minute=0, second=0, microsecond=0
+        )
         w = weather_at(settings.estate_lat, settings.estate_lon, local_22, tz=_TZ)
         wind_dir, wind_speed, temp = w.get("wind_dir_deg"), w.get("wind_speed_kmh"), w.get("temp_c")
         pressure, cloud, rain = w.get("pressure_hpa"), w.get("cloud_cover_pct"), w.get("rain_mm")
@@ -235,52 +275,104 @@ def forecast_tonight(db: Session) -> dict:
     cond = _tonight_conditions(now)
     if not forecasts:
         reason = "No animal data from reporting cameras." if alerts else "No animal data yet."
-        return {"verdict": "SKIP", "reason": reason, "nights_of_data": total_nights,
+        # NO_DATA, not SKIP: we have nothing to say about the ground, which is not the
+        # same as telling somebody their evening isn't worth having.
+        return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": total_nights,
                 "conditions": cond, "alternates": [], "alerts": alerts}
 
-    # Feed tonight's actual conditions back through the learned weather/moon drivers,
-    # so the verdict reflects tonight — not just historical presence. Per species where
-    # we have enough data, else the estate-wide drivers. Conservative + capped.
-    from app.forecasting.patterns import driver_map, tonight_multiplier
-
-    feats = {
-        "moon_illum": cond.get("moon_illum"), "darkness": cond.get("darkness_minutes"),
-        "temp": cond.get("temp_c"), "wind": cond.get("wind_speed_kmh"),
-        "pressure": cond.get("pressure_hpa"), "cloud": cond.get("cloud_cover_pct"),
-        "rain": cond.get("rain_mm"),
-    }
-    try:
-        dmap = driver_map(db)
-    except Exception:
-        dmap = {}
-    for f in forecasts:
-        drivers = dmap.get(f["species_id"]) or dmap.get("all") or []
-        mult, reasons = tonight_multiplier(drivers, feats)
-        f["base_probability"] = f["probability"]
-        f["probability"] = round(max(0.02, min(0.97, f["probability"] * mult)), 2)
-        f["tonight_mult"] = round(mult, 2)
-        f["condition_reasons"] = reasons
+    # The learned weather/moon "drivers" used to be multiplied into this number.
+    # They were removed after a null simulation run against the real _driver() code:
+    # on counts generated to be independent of every covariate, it still found at
+    # least one "driver" in 97.8-99.8% of runs, at a median reported effect of
+    # 46-108% against an advertised MIN_EFFECT floor of 15. Those coefficients were
+    # moving the headline verdict. Tonight's conditions are still shown as facts;
+    # they no longer silently move the ranking.
     forecasts.sort(key=lambda f: f["probability"], reverse=True)
 
     top = forecasts[0]
     where = _expectations(db, forecasts)
     top_classes = where[0]["classes"] if where else []
+
+    # One line of news beats a wall of unchanged numbers. A hunter who opened the app
+    # yesterday needs to know what moved, not to re-read what didn't.
+    try:
+        changed = whats_changed(db)
+    except Exception as e:  # never let the extra line break the verdict
+        log.warning("changed.failed", error=str(e))
+        changed = {"kind": "none", "camera": None, "text": ""}
+
+    # Wind is deterministic geometry against the stand linked to the top camera — not a
+    # fitted coefficient. It states its own competence boundary rather than producing a
+    # confident bearing on a calm night that a single weather grid point cannot see.
+    stand = db.scalar(select(Stand).where(Stand.camera_id == uuid.UUID(top["camera_id"])))
+    alt = forecasts[1]["camera"] if len(forecasts) > 1 else None
+    wind_verdict = assess(
+        stand_name=stand.name if stand else top["camera"],
+        wind_dir_deg=cond.get("wind_dir_deg"),
+        wind_speed_kmh=cond.get("wind_speed_kmh"),
+        approach_dirs_deg=stand.approach_dirs_deg if stand else None,
+        alternative_stand=alt,
+    )
+
+    # The honest replacement for the deleted confidence figure: not how much data went
+    # in, but how often this model has actually been right when it was checked.
+    try:
+        track_record = calibration(db)
+    except Exception as e:
+        log.warning("calibration.failed", error=str(e))
+        track_record = {"available": False, "n_evaluated": 0}
+
+    # Nights deliberately not counted — camera down, out of credits, or frames the
+    # classifier has not reached. The whole point of the exposure table is that these
+    # are excluded rather than silently averaged in as "no animals", and an exclusion
+    # nobody is told about is indistinguishable from the bug it replaced.
+    try:
+        skipped = excluded_nights(db)
+    except Exception as e:
+        log.warning("exposure.count_failed", error=str(e))
+        skipped = 0
+
     return {
-        "verdict": _verdict(top["probability"]),
-        "confidence": top["confidence"],
+        "exposure": {
+            "excluded_nights": skipped,
+            "note": (
+                f"{skipped} night{'s' if skipped != 1 else ''} left out — the cameras "
+                "could not vouch for them, so they are not counted either way."
+            ) if skipped else "",
+        },
+        "verdict": _verdict(top["probability"], top["active_nights"]),
+        "changed": changed,
+        "calibration": track_record,
+        "wind": {
+            "status": wind_verdict.status,
+            "text": wind_verdict.text,
+            "is_advice": wind_verdict.is_advice,
+        },
         "recommended": {
             "camera": top["camera"], "species": top["species"], "runner_up": top["runner_up"],
             "probability": top["probability"], "best_window": top["best_window"],
             "expect": top_classes[0]["label"] if top_classes else top["species"],
             "classes": top_classes,
-            "reason": f"{top['species']} seen on {top['nights_present']} of {top['active_nights']} nights this camera was watching.",
+            "nights_present": top["nights_present"], "active_nights": top["active_nights"],
+            "reason": (
+                f"{top['species']} seen on {top['nights_present']} of "
+                f"{top['active_nights']} nights this camera was watching."
+            ),
+            # The reference class belongs in the sentence, not a footnote: a bare
+            # percentage reads as "my chance of a shot tonight", which is not what
+            # was measured.
+            "caveat": (
+                "That is what the camera sees over a whole night. You'll be there "
+                "for part of it, and the wind is yours to solve."
+            ),
         },
         "conditions": cond,
-        "factors": _factors(top, cond) + top.get("condition_reasons", []),
+        "factors": _factors(top, cond),
         "where": where,
         "alternates": [
-            {"camera": f["camera"], "species": f["species"], "verdict": _verdict(f["probability"]),
-             "probability": f["probability"]}
+            {"camera": f["camera"], "species": f["species"],
+             "verdict": _verdict(f["probability"], f["active_nights"]),
+             "nights_present": f["nights_present"], "active_nights": f["active_nights"]}
             for f in forecasts[1:3]
         ],
         "alerts": alerts,
