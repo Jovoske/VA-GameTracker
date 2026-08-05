@@ -52,13 +52,43 @@ def _zone_point(z: Zone) -> tuple[float, float] | None:
     return geo.centroid(z.polygon)
 
 
+def scent_geometry(speed_kmh: float, source: str, confidence: str | None = None) -> dict:
+    """How far and how wide the plume reaches, given the air that is moving it.
+
+    A fixed cone was drawn the same in a gale and a drift, which flattered both. Two
+    honest dependencies:
+
+    - **Range grows with speed.** Faster air pushes scent further before it dilutes
+      below the point a deer reacts to.
+    - **Width grows with uncertainty.** A steady strong wind holds a tight line;
+      light air wanders, and drainage meanders with the ground it is running over,
+      so both deserve a wider cone than a confident forecast does.
+
+    Returned to the client as well as used for the hit test, so the shape drawn on
+    the map is exactly the shape that was tested — a cone that looked narrower than
+    the test would quietly excuse a stand the app had already condemned.
+    """
+    range_m = max(350.0, min(1100.0, 300.0 + speed_kmh * 40.0))
+    if source != "synoptic":
+        half = 32.0          # drainage follows the ground, not a straight line
+    elif speed_kmh >= 20:
+        half = 16.0
+    elif speed_kmh >= 12:
+        half = 20.0
+    else:
+        half = 28.0
+    if confidence == "low":
+        half += 8.0          # dusk reversal, or a regime still turning over
+    return {"range_m": round(range_m), "half_deg": round(min(half, 45.0), 1)}
+
+
 def scent_hits_zone(
-    lat: float, lon: float, zone: Zone, scent_bearing: float, *, max_range: float = SCENT_RANGE_M
+    lat: float, lon: float, zone: Zone, scent_bearing: float, *,
+    max_range: float = SCENT_RANGE_M, half_deg: float = SCENT_CONE_DEG / 2.0,
 ) -> tuple[bool, float]:
     """Does scent from (lat, lon) drift into this zone? Returns (hit, distance_m).
 
-    The cone is centred on where the scent goes, half-width SCENT_CONE_DEG/2. Being
-    inside the polygon counts as a hit at any wind — you are in their bedroom.
+    Being inside the polygon counts as a hit at any wind — you are in their bedroom.
     """
     pt = _zone_point(zone)
     if pt is None:
@@ -69,7 +99,7 @@ def scent_hits_zone(
     if dist > max_range:
         return (False, dist)
     to_zone = geo.bearing(lat, lon, pt[0], pt[1])
-    return (geo.angular_distance(to_zone, scent_bearing) <= SCENT_CONE_DEG / 2.0, dist)
+    return (geo.angular_distance(to_zone, scent_bearing) <= half_deg, dist)
 
 
 def approach_bearings(db: Session, lat: float | None, lon: float | None) -> list[dict]:
@@ -143,10 +173,14 @@ def stand_wind_report(
     eff_dir = float(reg["wind_dir_deg"])
     eff_speed = float(reg["wind_speed_kmh"])
     scent_bearing = (eff_dir + 180.0) % 360.0
+    geom = scent_geometry(eff_speed, source, reg.get("confidence"))
 
     hits = []
     for z in zones:
-        hit, dist = scent_hits_zone(lat, lon, z, scent_bearing)
+        hit, dist = scent_hits_zone(
+            lat, lon, z, scent_bearing,
+            max_range=geom["range_m"], half_deg=geom["half_deg"],
+        )
         if hit:
             hits.append({"zone": z.name, "zone_id": str(z.id), "distance_m": round(dist)})
     hits.sort(key=lambda h: h["distance_m"])
@@ -185,6 +219,9 @@ def stand_wind_report(
             "source": source,
             "confidence": reg.get("confidence"),
             "scent_bearing": round(scent_bearing),
+            "speed_kmh": round(eff_speed, 1),
+            "range_m": geom["range_m"],
+            "half_deg": geom["half_deg"],
             "slope": reg.get("slope"),
             "hit_zones": hits,
             "text": (
@@ -203,6 +240,9 @@ def stand_wind_report(
         "source": source,
         "confidence": reg.get("confidence"),
         "scent_bearing": round(scent_bearing),
+        "speed_kmh": round(eff_speed, 1),
+        "range_m": geom["range_m"],
+        "half_deg": geom["half_deg"],
         "slope": reg.get("slope"),
         "hit_zones": [],
         "text": (
@@ -265,6 +305,9 @@ def safe_ground(
     min_lon, max_lon = min_lon - pad_lon, max_lon + pad_lon
 
     uniform_bearing = (float(probe["wind_dir_deg"]) + 180.0) % 360.0
+    # Same plume shape the stand verdicts use, so the shading and the markers can
+    # never tell different stories about the same evening.
+    geom = scent_geometry(float(probe["wind_speed_kmh"]), mode, probe.get("confidence"))
     cells = []
     for i in range(steps):
         for j in range(steps):
@@ -274,7 +317,7 @@ def safe_ground(
             if inside:
                 continue  # standing in the bedding is not a "spot", safe or otherwise
             near = min(geo.distance_to_polygon_m(z.polygon, lat, lon) for z in zones)
-            if near > SCENT_RANGE_M * 1.5:
+            if near > geom["range_m"] * 1.5:
                 continue  # too far away to be a decision about this bedding
 
             if tgrid is not None:

@@ -63,6 +63,7 @@ type Forecast = {
 }
 
 type Alert = { type: string; severity: string; title: string; text: string }
+type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detections: number }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
 
@@ -89,10 +90,23 @@ export default function Tonight() {
   const [err, setErr] = useState('')
   const [planAt, setPlanAt] = useState<string | null>(null)
 
-  function load() {
+  // Which quarry the verdict is ranked for. Empty = every species left on in
+  // Settings, which is the old behaviour and stays the default. Kept in
+  // localStorage because it is a standing preference, not a per-visit choice.
+  const [species, setSpecies] = useState<SpeciesOpt[]>([])
+  const [picked, setPicked] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('gs_species_filter') || '[]')
+    } catch {
+      return []
+    }
+  })
+
+  function load(sel: string[] = picked) {
+    const q = sel.length ? `?species=${encodeURIComponent(sel.join(','))}` : ''
     // Paint from the last good plan first; refresh underneath. A hunter in a valley
     // with no bars still gets the verdict, clearly labelled with its age.
-    apiCached<Forecast>('/forecast/tonight')
+    apiCached<Forecast>(`/forecast/tonight${q}`)
       .then(({ data, at }) => {
         setF(data)
         setPlanAt(at)
@@ -101,8 +115,21 @@ export default function Tonight() {
     api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
   }
-  useEffect(load, [])
-  useRefetchOnReturn(load)
+  useEffect(() => {
+    load()
+    api<SpeciesOpt[]>('/species')
+      .then((all) => setSpecies(all.filter((s) => s.huntable && s.detections > 0)))
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  useRefetchOnReturn(() => load())
+
+  function toggleSpecies(id: string) {
+    const next = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]
+    setPicked(next)
+    localStorage.setItem('gs_species_filter', JSON.stringify(next))
+    load(next)
+  }
 
   if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
   if (!f) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
@@ -120,6 +147,49 @@ export default function Tonight() {
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Tonight</div>
+
+      {/* What are you after? Ranking the ground by the commonest animal on it is the
+          wrong answer when you have come out for boar. Chips list only species left
+          on in Settings that the cameras have actually recorded. */}
+      {species.length > 1 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
+          <button
+            onClick={() => {
+              setPicked([])
+              localStorage.setItem('gs_species_filter', '[]')
+              load([])
+            }}
+            style={{
+              fontSize: 12, borderRadius: 999, padding: '5px 12px', cursor: 'pointer',
+              border: '1px solid var(--border)',
+              background: picked.length === 0 ? 'var(--go)' : 'transparent',
+              color: picked.length === 0 ? '#06210C' : 'var(--text-dim)',
+              fontWeight: picked.length === 0 ? 700 : 400,
+            }}
+          >
+            Anything
+          </button>
+          {species.map((s) => {
+            const on = picked.includes(s.id)
+            return (
+              <button
+                key={s.id}
+                onClick={() => toggleSpecies(s.id)}
+                title={`${s.detections} sightings`}
+                style={{
+                  fontSize: 12, borderRadius: 999, padding: '5px 12px', cursor: 'pointer',
+                  border: '1px solid var(--border)',
+                  background: on ? 'var(--go)' : 'transparent',
+                  color: on ? '#06210C' : 'var(--text-dim)',
+                  fontWeight: on ? 700 : 400,
+                }}
+              >
+                {s.common_name}
+              </button>
+            )
+          })}
+        </div>
+      )}
 
       {/* Age of what you are reading. In decision support the freshness of the data
           IS data; a stale plan presented as current is the failure mode. */}

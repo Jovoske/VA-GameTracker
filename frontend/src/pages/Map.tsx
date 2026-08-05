@@ -23,6 +23,10 @@ type WindReport = {
   status: string
   text: string
   scent_bearing?: number
+  speed_kmh?: number
+  range_m?: number
+  half_deg?: number
+  source?: string
   hit_zones?: { zone: string; distance_m: number }[]
 }
 type StandOut = {
@@ -139,24 +143,51 @@ export default function MapPage() {
       })),
     })
 
-    // scent cones from each stand
+    // Scent cones. Drawn as nested wedges rather than one flat wash: the overlap
+    // concentrates near the stand and thins out with distance, which is what a plume
+    // actually does — and makes the thing impossible to miss at a glance.
+    const BANDS = 5
     const cones: GeoJSON.Feature[] = []
+    const spines: GeoJSON.Feature[] = []
+    const heads: GeoJSON.Feature[] = []
     if (show.cones) {
       for (const s of d.stands) {
         const sb = s.wind.scent_bearing
         if (s.lat == null || s.lon == null || sb == null) continue
-        const r = d.scent_range_m
-        const ring: [number, number][] = [[s.lon, s.lat]]
-        for (let a = -22.5; a <= 22.5; a += 4.5) ring.push(offset(s.lat, s.lon, sb + a, r))
-        ring.push([s.lon, s.lat])
-        cones.push({
+        const r = s.wind.range_m ?? d.scent_range_m
+        const half = s.wind.half_deg ?? 22.5
+        const step = Math.max(2, half / 6)
+        for (let b = 1; b <= BANDS; b++) {
+          const rr = (r * b) / BANDS
+          const ring: [number, number][] = [[s.lon, s.lat]]
+          for (let a = -half; a <= half; a += step) ring.push(offset(s.lat, s.lon, sb + a, rr))
+          ring.push(offset(s.lat, s.lon, sb + half, rr))
+          ring.push([s.lon, s.lat])
+          cones.push({
+            type: 'Feature',
+            properties: { status: s.wind.status, band: b },
+            geometry: { type: 'Polygon', coordinates: [ring] },
+          })
+        }
+        // Centreline: the thing that gets animated, so the map shows air *moving*.
+        spines.push({
           type: 'Feature',
-          properties: { status: s.wind.status, name: s.name },
-          geometry: { type: 'Polygon', coordinates: [ring] },
+          properties: { status: s.wind.status },
+          geometry: {
+            type: 'LineString',
+            coordinates: [[s.lon, s.lat], offset(s.lat, s.lon, sb, r)],
+          },
+        })
+        heads.push({
+          type: 'Feature',
+          properties: { status: s.wind.status, rot: sb, label: `${Math.round(s.wind.speed_kmh ?? 0)} km/h` },
+          geometry: { type: 'Point', coordinates: offset(s.lat, s.lon, sb, r * 0.82) },
         })
       }
     }
     setSrc('cones', { type: 'FeatureCollection', features: cones })
+    setSrc('spines', { type: 'FeatureCollection', features: spines })
+    setSrc('heads', { type: 'FeatureCollection', features: heads })
 
     // inferred bedding -> camera links
     setSrc('routes', {
@@ -237,6 +268,27 @@ export default function MapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show])
 
+  // Drift the dash pattern along the centreline so the cone reads as air on the
+  // move. MapLibre has no dash-offset to animate, so cycle the pattern instead —
+  // and pace it by wind speed, so a gale visibly runs and a drainage flow creeps.
+  useEffect(() => {
+    if (!show.cones) return
+    const DASHES: [number, number, number][] = [
+      [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5],
+      [2, 4, 1], [2.5, 4, 0.5], [3, 4, 0],
+    ]
+    const speed = data?.airflow?.wind_speed_kmh ?? 6
+    const period = Math.max(45, 220 - speed * 7)   // faster wind, faster drift
+    let i = 0
+    const t = window.setInterval(() => {
+      const map = mapRef.current
+      if (!map || !map.getLayer('spines-line')) return
+      map.setPaintProperty('spines-line', 'line-dasharray', DASHES[i % DASHES.length])
+      i++
+    }, period)
+    return () => window.clearInterval(t)
+  }, [show.cones, data?.airflow?.wind_speed_kmh])
+
   // ── drawing ─────────────────────────────────────────────────
   function updateDraft() {
     const pts = draftRef.current
@@ -297,7 +349,7 @@ export default function MapPage() {
 
     map.on('load', () => {
       map.resize()
-      for (const id of ['safe', 'zones', 'cones', 'routes', 'draft']) {
+      for (const id of ['safe', 'zones', 'cones', 'spines', 'heads', 'routes', 'draft']) {
         map.addSource(id, { type: 'geojson', data: empty })
       }
       // Safe ground sits under everything: it is context, not an instruction.
@@ -309,11 +361,45 @@ export default function MapPage() {
           'circle-opacity': 0.22, 'circle-blur': 1,
         },
       })
+      // Nested bands stack up near the stand and thin out downwind.
       map.addLayer({
         id: 'cones-fill', type: 'fill', source: 'cones',
         paint: {
           'fill-color': ['case', ['==', ['get', 'status'], 'clean'], '#3FB950', '#E5534B'],
-          'fill-opacity': 0.13,
+          'fill-opacity': 0.11,
+        },
+      })
+      map.addLayer({
+        id: 'cones-edge', type: 'line', source: 'cones',
+        filter: ['==', ['get', 'band'], 5],
+        paint: {
+          'line-color': ['case', ['==', ['get', 'status'], 'clean'], '#3FB950', '#E5534B'],
+          'line-width': 1.5, 'line-opacity': 0.55,
+        },
+      })
+      // Animated centreline — the dash pattern is cycled below so the air reads as
+      // moving rather than as a static wedge.
+      map.addLayer({
+        id: 'spines-line', type: 'line', source: 'spines',
+        paint: {
+          'line-color': ['case', ['==', ['get', 'status'], 'clean'], '#8FE39A', '#FF8A80'],
+          'line-width': 3,
+          'line-opacity': 0.9,
+          'line-dasharray': [0, 4, 3],
+        },
+      })
+      map.addLayer({
+        id: 'heads-sym', type: 'symbol', source: 'heads',
+        layout: {
+          'text-field': '➤',
+          'text-size': 22,
+          'text-rotate': ['get', 'rot'],
+          'text-rotation-alignment': 'map',
+          'text-allow-overlap': true,
+        },
+        paint: {
+          'text-color': ['case', ['==', ['get', 'status'], 'clean'], '#8FE39A', '#FF8A80'],
+          'text-halo-color': '#000', 'text-halo-width': 1.2,
         },
       })
       map.addLayer({

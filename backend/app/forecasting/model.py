@@ -82,8 +82,16 @@ def _is_nocturnal(window: dict) -> bool:
     return h >= 20 or h <= 5
 
 
-def _camera_forecast(db: Session, cam: Camera, now: datetime, *, producing: bool = True) -> dict | None:
-    rows = db.execute(
+def _camera_forecast(
+    db: Session, cam: Camera, now: datetime, *, producing: bool = True,
+    species_ids: list[str] | None = None,
+) -> dict | None:
+    """Best huntable species at this camera tonight.
+
+    `species_ids` narrows it to what the hunter is actually after: asking for boar
+    should rank the ground by boar, not by whatever happens to be commonest there.
+    """
+    q = (
         select(
             Detection.species_id,
             Species.common_name,
@@ -93,7 +101,11 @@ def _camera_forecast(db: Session, cam: Camera, now: datetime, *, producing: bool
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
         .where(Image.camera_id == cam.id, Species.huntable.is_(True))
-        .group_by(Detection.species_id, Species.common_name)
+    )
+    if species_ids:
+        q = q.where(Detection.species_id.in_(species_ids))
+    rows = db.execute(
+        q.group_by(Detection.species_id, Species.common_name)
         .order_by(func.count(Detection.id).desc())
     ).all()
     if not rows:
@@ -173,11 +185,13 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
     return common_name or (species_id or "Animal")
 
 
-def _expectations(db: Session, forecasts: list[dict]) -> list[dict]:
+def _expectations(
+    db: Session, forecasts: list[dict], species_ids: list[str] | None = None
+) -> list[dict]:
     """Per forecasted camera: which classes (stag/hind/sow+piglets/…) to expect there."""
     out = []
     for f in forecasts:
-        rows = db.execute(
+        q = (
             select(
                 Detection.species_id, Species.common_name, Detection.sex,
                 Detection.group_type, func.count(Detection.id),
@@ -185,7 +199,15 @@ def _expectations(db: Session, forecasts: list[dict]) -> list[dict]:
             .join(Image, Image.id == Detection.image_id)
             .join(Species, Species.id == Detection.species_id)
             .where(Image.camera_id == f["camera_id"], Species.huntable.is_(True))
-            .group_by(Detection.species_id, Species.common_name, Detection.sex, Detection.group_type)
+        )
+        if species_ids:
+            # Asked for boar, be shown boar: listing every class at the stand would
+            # bury the thing the hunter came for.
+            q = q.where(Detection.species_id.in_(species_ids))
+        rows = db.execute(
+            q.group_by(
+                Detection.species_id, Species.common_name, Detection.sex, Detection.group_type
+            )
         ).all()
         agg: dict[str, int] = {}
         for sp, cn, sex, gt, c in rows:
@@ -247,7 +269,7 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     return out
 
 
-def forecast_tonight(db: Session) -> dict:
+def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     now = datetime.now(timezone.utc)
     total_nights = db.scalar(
         select(func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at)))))
@@ -267,14 +289,19 @@ def forecast_tonight(db: Session) -> dict:
     ]
     forecasts = [
         f for f in (
-            _camera_forecast(db, c, now, producing=health[c.id]["producing"]) for c in cams
+            _camera_forecast(db, c, now, producing=health[c.id]["producing"],
+                             species_ids=species_ids)
+            for c in cams
         ) if f
     ]
     forecasts.sort(key=lambda f: f["probability"], reverse=True)
 
     cond = _tonight_conditions(now)
     if not forecasts:
-        reason = "No animal data from reporting cameras." if alerts else "No animal data yet."
+        if species_ids:
+            reason = "None of the selected species has been recorded on a reporting camera."
+        else:
+            reason = "No animal data from reporting cameras." if alerts else "No animal data yet."
         # NO_DATA, not SKIP: we have nothing to say about the ground, which is not the
         # same as telling somebody their evening isn't worth having.
         return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": total_nights,
@@ -290,7 +317,7 @@ def forecast_tonight(db: Session) -> dict:
     forecasts.sort(key=lambda f: f["probability"], reverse=True)
 
     top = forecasts[0]
-    where = _expectations(db, forecasts)
+    where = _expectations(db, forecasts, species_ids)
     top_classes = where[0]["classes"] if where else []
 
     # One line of news beats a wall of unchanged numbers. A hunter who opened the app
