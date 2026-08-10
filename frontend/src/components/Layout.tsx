@@ -71,7 +71,9 @@ export default function Layout() {
         </button>
       </header>
 
-      <main className="page" style={{ padding: 16 }}>
+      {/* Padding lives in theme.css — an inline padding here overrides the
+          media-query rule that clears the bottom tab bar, hiding content under it. */}
+      <main className="page">
         <Outlet />
       </main>
 

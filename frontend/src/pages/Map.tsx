@@ -104,12 +104,14 @@ export default function MapPage() {
   const drawingRef = useRef(false)
   const draftRef = useRef<[number, number][]>([])
   const placingRef = useRef<string | null>(null)
+  const placingStandRef = useRef(false)
 
   const [cameras, setCameras] = useState<Camera[]>([])
   const [data, setData] = useState<MapTonight | null>(null)
   const [drawing, setDrawing] = useState(false)
   const [draftLen, setDraftLen] = useState(0)
   const [placing, setPlacing] = useState<string | null>(null)
+  const [placingStand, setPlacingStand] = useState(false)
   const [show, setShow] = useState({ bedding: true, safe: true, routes: false, cones: true })
   const [busy, setBusy] = useState('')
 
@@ -230,10 +232,26 @@ export default function MapPage() {
       const app = s.approaches.length
         ? `<br><span style="opacity:.7">approach ${s.approaches.map((a) => compass(a.approach_deg)).join(', ')}</span>`
         : ''
+      // DOM content instead of an HTML string so the popup can carry a live
+      // Remove button — the only way to take a stand off the map from a phone.
+      const pop = document.createElement('div')
+      pop.style.cssText = 'color:#111;max-width:230px'
+      pop.innerHTML = `<b>${s.name}</b><br>${s.wind.text}${app}`
+      const del = document.createElement('button')
+      del.textContent = 'Remove stand'
+      del.style.cssText =
+        'display:block;margin-top:8px;background:#E5534B;color:#fff;border:none;' +
+        'border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer'
+      del.onclick = () => {
+        if (!window.confirm(`Remove stand "${s.name}"?`)) return
+        api(`/stands/${s.id}`, { method: 'DELETE' })
+          .then(load)
+          .catch((e) => window.alert((e as Error).message))
+      }
+      pop.appendChild(del)
       const mk = new maplibregl.Marker({ element: el, draggable: true })
         .setLngLat([s.lon as number, s.lat as number])
-        .setPopup(new maplibregl.Popup({ offset: 18 }).setHTML(
-          `<div style="color:#111;max-width:230px"><b>${s.name}</b><br>${s.wind.text}${app}</div>`))
+        .setPopup(new maplibregl.Popup({ offset: 18 }).setDOMContent(pop))
         .addTo(mapRef.current as maplibregl.Map)
       mk.on('dragend', () => {
         const ll = mk.getLngLat()
@@ -268,26 +286,40 @@ export default function MapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show])
 
-  // Drift the dash pattern along the centreline so the cone reads as air on the
-  // move. MapLibre has no dash-offset to animate, so cycle the pattern instead —
-  // and pace it by wind speed, so a gale visibly runs and a drainage flow creeps.
+  // Walk the arrowhead down the centreline so the cone reads as air on the move,
+  // paced by wind speed: a gale visibly runs, a drainage flow creeps.
   useEffect(() => {
-    if (!show.cones) return
-    const DASHES: [number, number, number][] = [
-      [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5],
-      [2, 4, 1], [2.5, 4, 0.5], [3, 4, 0],
-    ]
-    const speed = data?.airflow?.wind_speed_kmh ?? 6
+    if (!show.cones || !data) return
+    const stands = data.stands.filter(
+      (s) => s.lat != null && s.lon != null && s.wind.scent_bearing != null,
+    )
+    if (!stands.length) return
+    const speed = data.airflow?.wind_speed_kmh ?? 6
     const period = Math.max(45, 220 - speed * 7)   // faster wind, faster drift
+    const STEPS = 28
     let i = 0
     const t = window.setInterval(() => {
       const map = mapRef.current
-      if (!map || !map.getLayer('spines-line')) return
-      map.setPaintProperty('spines-line', 'line-dasharray', DASHES[i % DASHES.length])
+      if (!map || !map.getSource('heads')) return
+      const frac = 0.12 + 0.76 * ((i % STEPS) / STEPS)
+      setSrc('heads', {
+        type: 'FeatureCollection',
+        features: stands.map((s) => ({
+          type: 'Feature',
+          properties: { status: s.wind.status, rot: s.wind.scent_bearing },
+          geometry: {
+            type: 'Point',
+            coordinates: offset(
+              s.lat as number, s.lon as number, s.wind.scent_bearing as number,
+              (s.wind.range_m ?? data.scent_range_m) * frac,
+            ),
+          },
+        })),
+      })
       i++
     }, period)
     return () => window.clearInterval(t)
-  }, [show.cones, data?.airflow?.wind_speed_kmh])
+  }, [show.cones, data])
 
   // ── drawing ─────────────────────────────────────────────────
   function updateDraft() {
@@ -366,7 +398,7 @@ export default function MapPage() {
         id: 'cones-fill', type: 'fill', source: 'cones',
         paint: {
           'fill-color': ['case', ['==', ['get', 'status'], 'clean'], '#3FB950', '#E5534B'],
-          'fill-opacity': 0.11,
+          'fill-opacity': 0.3,
         },
       })
       map.addLayer({
@@ -374,18 +406,17 @@ export default function MapPage() {
         filter: ['==', ['get', 'band'], 5],
         paint: {
           'line-color': ['case', ['==', ['get', 'status'], 'clean'], '#3FB950', '#E5534B'],
-          'line-width': 1.5, 'line-opacity': 0.55,
+          'line-width': 2, 'line-opacity': 0.9,
         },
       })
-      // Animated centreline — the dash pattern is cycled below so the air reads as
-      // moving rather than as a static wedge.
+      // Solid centreline; the arrowhead below travels along it, so the air still
+      // reads as moving without the line itself flickering.
       map.addLayer({
         id: 'spines-line', type: 'line', source: 'spines',
         paint: {
           'line-color': ['case', ['==', ['get', 'status'], 'clean'], '#8FE39A', '#FF8A80'],
-          'line-width': 3,
-          'line-opacity': 0.9,
-          'line-dasharray': [0, 4, 3],
+          'line-width': 3.5,
+          'line-opacity': 1,
         },
       })
       map.addLayer({
@@ -430,7 +461,7 @@ export default function MapPage() {
       })
 
       map.on('click', 'zones-fill', (e) => {
-        if (drawingRef.current) return
+        if (drawingRef.current || placingRef.current || placingStandRef.current) return
         const f = e.features?.[0]
         if (!f) return
         const id = f.properties?.id as string
@@ -444,6 +475,16 @@ export default function MapPage() {
         if (drawingRef.current) {
           draftRef.current = [...draftRef.current, [e.lngLat.lng, e.lngLat.lat]]
           updateDraft()
+          return
+        }
+        if (placingStandRef.current) {
+          placingStandRef.current = false
+          setPlacingStand(false)
+          const name = window.prompt('Name the new stand', 'New stand')
+          if (!name) return
+          api('/stands', {
+            method: 'POST', body: JSON.stringify({ name, lat: e.lngLat.lat, lon: e.lngLat.lng }),
+          }).then(load).catch((err) => window.alert((err as Error).message))
           return
         }
         const camId = placingRef.current
@@ -502,10 +543,28 @@ export default function MapPage() {
             }}
           >Load terrain</button>
         )}
+        {!drawing && (
+          <button
+            onClick={() => {
+              const next = !placingStandRef.current
+              placingStandRef.current = next
+              setPlacingStand(next)
+            }}
+            style={{
+              marginLeft: 'auto',
+              background: placingStand ? 'var(--go)' : 'var(--surface-2)',
+              border: '1px solid var(--border)',
+              color: placingStand ? '#06210C' : 'var(--text)',
+              borderRadius: 8, padding: '7px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            }}
+          >
+            {placingStand ? 'Tap map to place…' : '+ Stand'}
+          </button>
+        )}
         <button
           onClick={drawing ? finishDraw : startDraw}
           className="btn"
-          style={{ width: 'auto', marginLeft: 'auto', padding: '7px 13px', fontSize: 13 }}
+          style={{ width: 'auto', marginLeft: drawing ? 'auto' : 0, padding: '7px 13px', fontSize: 13 }}
           disabled={!!busy || (drawing && draftLen < 3)}
         >
           {busy || (drawing ? `Finish area (${draftLen})` : 'Draw bedding')}
@@ -540,8 +599,11 @@ export default function MapPage() {
         ))}
       </div>
 
+      {/* Fill exactly down to the tab bar: 100vh ignores the safe-area insets, which
+          left a dead black band under the map on the phone. */}
       <div ref={mapEl} style={{
-        height: 'calc(100vh - 260px)', minHeight: 380, borderRadius: 12,
+        height: 'calc(100dvh - 216px - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+        minHeight: 380, borderRadius: 12,
         overflow: 'hidden', border: '1px solid var(--border)',
       }} />
 

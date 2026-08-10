@@ -98,9 +98,11 @@ main.page { padding: 16px; }
     z-index: 40;
     background: var(--surface);
     border-top: 1px solid var(--border);
-    padding: 6px max(8px, env(safe-area-inset-left))
-             calc(6px + env(safe-area-inset-bottom))
-             max(8px, env(safe-area-inset-right));
+    /* Sit low: only keep enough of the home-indicator inset to stay tappable.
+       The full inset left a dead band under the labels that read as a black bar. */
+    padding: 6px max(8px, env(safe-area-inset-right))
+             max(8px, calc(env(safe-area-inset-bottom) - 14px))
+             max(8px, env(safe-area-inset-left));
   }
   .tabbar a {
     flex: 1;
@@ -116,8 +118,9 @@ main.page { padding: 16px; }
   }
   .tabbar a.active { color: var(--go); }
   .tabbar .ico { font-size: 19px; line-height: 1; }
-  /* clear the bar itself plus whatever the home indicator reserves */
-  main.page { padding-bottom: calc(74px + env(safe-area-inset-bottom)); }
+  /* clear the bar itself plus whatever the home indicator reserves, with slack —
+     the last card must scroll fully above the bar, not vanish under it */
+  main.page { padding-bottom: calc(78px + max(8px, calc(env(safe-area-inset-bottom) - 14px))); }
   /* the sign-out button lives in Settings on a phone — the header is too tight */
   .appbar .signout { display: none; }
 }

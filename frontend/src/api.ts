@@ -46,6 +46,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     const detail = await resp.json().catch(() => ({}))
     throw new Error(detail.detail || `HTTP ${resp.status}`)
   }
+  // DELETEs answer 204 with no body — resp.json() on that rejects and the caller
+  // never gets to refresh, which reads as "the button did nothing".
+  if (resp.status === 204) return undefined as T
   return resp.json() as Promise<T>
 }
 
