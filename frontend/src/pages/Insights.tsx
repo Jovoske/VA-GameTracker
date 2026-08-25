@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, imageUrl } from '../api'
-import { useRefetchOnReturn } from '../hooks'
+import Overlay from '../components/Overlay'
+import { useRefetchOnReturn, useReveal } from '../hooks'
 
 type Insights = {
   outlook: {
@@ -49,6 +50,9 @@ export default function Insights() {
   const [zoom, setZoom] = useState<string | null>(null)
   const [pat, setPat] = useState<Patterns | null>(null)
   const [patScope, setPatScope] = useState('all')
+  // Bars grow from their baseline once the numbers land, then track the data
+  // from there — a refetch slides them to the new value rather than cutting.
+  const grown = useReveal(!!d)
 
   function load() {
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
@@ -121,13 +125,17 @@ export default function Insights() {
             return d.composition.slice(0, 8).map((x) => (
               <div
                 key={x.label}
+                className="pressable"
                 onClick={() => openClassImages(x.label)}
                 title={`View the ${x.count} ${x.label} photos`}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, cursor: 'pointer' }}
               >
                 <div style={{ width: 100, fontSize: 13 }}>{x.label}</div>
                 <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-                  <div style={{ width: `${(x.count / max) * 100}%`, height: '100%', background: 'var(--teal)' }} />
+                  <div
+                    className="bar-x"
+                    style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? x.count / max : 0})` }}
+                  />
                 </div>
                 <div style={{ width: 28, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{x.count}</div>
                 <div style={{ width: 88, fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={x.top_camera ?? ''}>
@@ -192,12 +200,12 @@ export default function Insights() {
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 32 }} title="sightings/night: low → high range of this factor">
                     {dr.buckets.map((b) => (
-                      <div key={b.label} title={`${b.label}: ${b.rate}/night`} style={{ width: 13, height: `${(b.rate / maxRate) * 100}%`, minHeight: 2, background: 'var(--teal)', borderRadius: '2px 2px 0 0' }} />
+                      <div key={b.label} title={`${b.label}: ${b.rate}/night`} className="bar-y" style={{ width: 13, height: `${(b.rate / maxRate) * 100}%`, minHeight: 2, background: 'var(--teal)', borderRadius: '2px 2px 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
                     ))}
                   </div>
                   <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ flex: 1, maxWidth: 120, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
-                      <div style={{ width: `${dr.confidence * 100}%`, height: '100%', background: 'var(--sand)' }} />
+                      <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? dr.confidence : 0})` }} />
                     </div>
                     <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{Math.round(dr.confidence * 100)}% confidence · {dr.sample_nights} nights</span>
                   </div>
@@ -229,7 +237,7 @@ export default function Insights() {
             <div style={{ fontSize: 14, lineHeight: 1.4 }}>{c.statement}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
               <div style={{ flex: 1, maxWidth: 140, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
-                <div style={{ width: `${Math.min(100, c.strength * 100)}%`, height: '100%', background: 'var(--teal)' }} />
+                <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? Math.min(1, c.strength) : 0})` }} />
               </div>
               <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>based on {c.sample} sightings</span>
             </div>
@@ -242,13 +250,10 @@ export default function Insights() {
       </div>
 
       {openClass && (
-        <div
-          onClick={closeClass}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 50, display: 'flex', padding: 16 }}
-        >
+        <Overlay onClose={closeClass}>{(close) => (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="card"
+            className="card ov-panel"
             style={{ padding: 0, maxWidth: 760, width: '100%', margin: 'auto', overflow: 'hidden', display: 'flex', flexDirection: 'column', maxHeight: '90vh' }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
@@ -257,7 +262,7 @@ export default function Insights() {
                 {classImgs ? `${classImgs.length} sighting${classImgs.length === 1 ? '' : 's'}` : 'loading…'}
               </span>
               <button
-                onClick={closeClass}
+                onClick={close}
                 style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
               >
                 Close
@@ -272,6 +277,7 @@ export default function Insights() {
                 {classImgs?.map((im) => (
                   <div
                     key={im.image_id}
+                    className="pressable"
                     onClick={() => setZoom(imageUrl(im.file_url))}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
@@ -285,16 +291,20 @@ export default function Insights() {
               </div>
             </div>
           </div>
-        </div>
+        )}</Overlay>
       )}
 
       {zoom && (
-        <div
-          onClick={() => setZoom(null)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+        <Overlay
+          onClose={() => setZoom(null)}
+          backdrop="rgba(0, 0, 0, 0.92)"
+          zIndex={60}
+          style={{ alignItems: 'center', justifyContent: 'center' }}
         >
-          <img src={zoom} alt="" style={{ maxWidth: '94vw', maxHeight: '94vh', borderRadius: 10 }} />
-        </div>
+          {(_close) => (
+            <img className="ov-panel" src={zoom} alt="" style={{ maxWidth: '94vw', maxHeight: '94vh', borderRadius: 10 }} />
+          )}
+        </Overlay>
       )}
     </div>
   )

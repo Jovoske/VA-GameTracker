@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, imageUrl } from '../api'
+import Overlay from '../components/Overlay'
 import { useRefetchOnReturn } from '../hooks'
 
 type SpeciesRow = {
@@ -172,6 +173,7 @@ export default function Animals() {
             }}
           >
             <div
+              className="pressable"
               onClick={() => openGallery(sp, null)}
               style={{
                 width: 56, height: 56, borderRadius: 10, overflow: 'hidden',
@@ -297,8 +299,12 @@ export default function Animals() {
               <div
                 key={a.id}
                 onClick={() => toggle(a.id)}
-                className="card"
-                style={{ padding: 0, overflow: 'hidden', cursor: 'pointer', outline: on ? '2px solid var(--teal)' : 'none' }}
+                className="card pressable"
+                style={{
+                  padding: 0, overflow: 'hidden', cursor: 'pointer',
+                  outline: on ? '2px solid var(--teal)' : '2px solid transparent',
+                  transition: 'outline-color var(--d-fast) var(--ease-out), transform var(--d-press) var(--ease-out)',
+                }}
               >
                 <div style={{ position: 'relative', height: 110, background: 'var(--surface-2)' }}>
                   {a.thumb_image_id && (
@@ -343,13 +349,10 @@ export default function Animals() {
 
       {/* ── Species photo gallery ─────────────────────────── */}
       {gallery && (
-        <div
-          onClick={closeGallery}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 50, display: 'flex', padding: 16 }}
-        >
+        <Overlay onClose={closeGallery}>{(close) => (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="card"
+            className="card ov-panel"
             style={{ padding: 0, maxWidth: 760, width: '100%', margin: 'auto', overflow: 'hidden', display: 'flex', flexDirection: 'column', maxHeight: '90vh' }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
@@ -358,7 +361,7 @@ export default function Animals() {
                 {galleryImgs ? `${galleryImgs.length} photo${galleryImgs.length === 1 ? '' : 's'}` : 'loading…'}
               </span>
               <button
-                onClick={closeGallery}
+                onClick={close}
                 style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
               >
                 Close
@@ -404,6 +407,7 @@ export default function Animals() {
                 {galleryImgs?.map((im) => (
                   <div
                     key={im.image_id}
+                    className="pressable"
                     onClick={() => setZoom(im)}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
@@ -419,24 +423,30 @@ export default function Animals() {
               </div>
             </div>
           </div>
-        </div>
+        )}</Overlay>
       )}
 
       {/* ── Fullscreen photo ──────────────────────────────── */}
       {zoom && (
-        <div
-          onClick={() => setZoom(null)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 60, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
+        <Overlay
+          onClose={() => setZoom(null)}
+          backdrop="rgba(0, 0, 0, 0.92)"
+          zIndex={60}
+          style={{ flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
         >
-          <img src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 10 }} />
-          <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-            <b>{zoom.camera}</b>
-            <span>{zoom.label}</span>
-            <span style={{ opacity: 0.75 }}>
-              {new Date(zoom.captured_at).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-            </span>
-          </div>
-        </div>
+          {(_close) => (
+            <>
+              <img className="ov-panel" src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 10 }} />
+              <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+                <b>{zoom.camera}</b>
+                <span>{zoom.label}</span>
+                <span style={{ opacity: 0.75 }}>
+                  {new Date(zoom.captured_at).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+            </>
+          )}
+        </Overlay>
       )}
     </div>
   )

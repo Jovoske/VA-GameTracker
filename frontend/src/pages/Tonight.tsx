@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ageLabel, api, apiCached } from '../api'
-import { useRefetchOnReturn } from '../hooks'
+import { useRefetchOnReturn, useReveal } from '../hooks'
 
 type Overview = {
   totals: { sightings: number; empty: number; nights: number; cameras: number }
@@ -89,6 +89,9 @@ export default function Tonight() {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [err, setErr] = useState('')
   const [planAt, setPlanAt] = useState<string | null>(null)
+  // True while a species chip has changed the question but the answer has not
+  // caught up yet. See the chip handler below.
+  const [settling, setSettling] = useState(false)
 
   // Which quarry the verdict is ranked for. Empty = every species left on in
   // Settings, which is the old behaviour and stays the default. Kept in
@@ -102,8 +105,12 @@ export default function Tonight() {
     }
   })
 
-  function load(sel: string[] = picked) {
+  function load(sel: string[] = picked, settle = false) {
     const q = sel.length ? `?species=${encodeURIComponent(sel.join(','))}` : ''
+    // Changing the quarry rewrites the whole verdict. Dimming the old answer for
+    // the moment it takes says "this is the previous question's answer" without
+    // tearing the card out and letting the page jump.
+    if (settle) setSettling(true)
     // Paint from the last good plan first; refresh underneath. A hunter in a valley
     // with no bars still gets the verdict, clearly labelled with its age.
     apiCached<Forecast>(`/forecast/tonight${q}`)
@@ -112,6 +119,7 @@ export default function Tonight() {
         setPlanAt(at)
       })
       .catch((e) => setErr(e.message))
+      .finally(() => setSettling(false))
     api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
   }
@@ -128,8 +136,13 @@ export default function Tonight() {
     const next = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]
     setPicked(next)
     localStorage.setItem('gs_species_filter', JSON.stringify(next))
-    load(next)
+    load(next, true)
   }
+
+  // The verdict is what the app is for, so it gets one quiet entrance when it
+  // first lands and nothing at all on any refresh after that.
+  const verdictIn = useReveal(!!f)
+  const grown = useReveal(!!d)
 
   if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
   if (!f) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
@@ -157,7 +170,7 @@ export default function Tonight() {
             onClick={() => {
               setPicked([])
               localStorage.setItem('gs_species_filter', '[]')
-              load([])
+              load([], true)
             }}
             style={{
               fontSize: 12, borderRadius: 999, padding: '5px 12px', cursor: 'pointer',
@@ -255,7 +268,11 @@ export default function Tonight() {
       )}
 
       {/* ── Verdict hero ───────────────────────────── */}
-      <div className="card" style={{ padding: 18, marginBottom: 14, borderTop: `3px solid ${vc}` }}>
+      <div
+        className={`card hero-enter${settling ? ' settling' : ''}`}
+        data-in={verdictIn}
+        style={{ padding: 18, marginBottom: 14, borderTop: `3px solid ${vc}` }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 22, color: vc, lineHeight: 1 }}>{verdictOf(f.verdict).glyph}</span>
           <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: '.02em' }}>
@@ -392,7 +409,7 @@ export default function Tonight() {
 
       {/* ── What to expect, by stand ───────────────── */}
       {f.where && f.where.length > 0 && (
-        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
+        <div className={`card${settling ? ' settling' : ''}`} style={{ padding: 18, marginBottom: 14 }}>
           <div style={labelStyle}>WHAT TO EXPECT · BY STAND</div>
           {f.where.map((w) => (
             <div key={w.camera} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
@@ -447,7 +464,7 @@ export default function Tonight() {
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
               {d.by_hour.map((x) => (
                 <div key={x.hour} title={`${hh(x.hour)} — ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
-                  <div style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0' }} />
+                  <div className="bar-y" style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
                 </div>
               ))}
             </div>
@@ -467,7 +484,7 @@ export default function Tonight() {
               <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                 <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
                 <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-                  <div style={{ width: `${(cam.sightings / maxCam) * 100}%`, height: '100%', background: 'var(--teal)' }} />
+                  <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? cam.sightings / maxCam : 0})` }} />
                 </div>
                 <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{cam.sightings}</div>
               </div>
@@ -482,7 +499,7 @@ export default function Tonight() {
                 <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                   <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
                   <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
-                    <div style={{ width: `${(s.count / maxSp) * 100}%`, height: '100%', background: 'var(--sand)' }} />
+                    <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? s.count / maxSp : 0})` }} />
                   </div>
                   <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{s.count}</div>
                 </div>

@@ -2,6 +2,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { useReducedMotion } from '../hooks'
 
 type Camera = {
   id: string
@@ -105,6 +106,12 @@ export default function MapPage() {
   const draftRef = useRef<[number, number][]>([])
   const placingRef = useRef<string | null>(null)
   const placingStandRef = useRef(false)
+  // Where the arrowheads are in their drift, kept outside the effect so a
+  // refetch does not teleport them back to the stand.
+  const driftRef = useRef(0)
+  // The camera is fitted to the estate once. After that the view belongs to
+  // whoever is holding the phone.
+  const fittedRef = useRef(false)
 
   const [cameras, setCameras] = useState<Camera[]>([])
   const [data, setData] = useState<MapTonight | null>(null)
@@ -114,6 +121,7 @@ export default function MapPage() {
   const [placingStand, setPlacingStand] = useState(false)
   const [show, setShow] = useState({ bedding: true, safe: true, routes: false, cones: true })
   const [busy, setBusy] = useState('')
+  const reducedMotion = useReducedMotion()
 
   // ── sources / layers ────────────────────────────────────────
   function setSrc(id: string, fc: GeoJSON.FeatureCollection) {
@@ -273,10 +281,14 @@ export default function MapPage() {
         ...cams.filter((c) => c.lat != null).map((c) => [c.lng as number, c.lat as number] as [number, number]),
         ...d.zones.flatMap((z) => (z.polygon.coordinates[0] || []).map((p) => [p[0], p[1]] as [number, number])),
       ]
-      if (pts.length > 1 && !drawingRef.current) {
+      // Only the first fit. `load()` also runs after every marker drag, and
+      // re-fitting there yanked the map out from under the finger that had just
+      // moved the pin — a hard cut that undid the user's own gesture.
+      if (pts.length > 1 && !drawingRef.current && !fittedRef.current) {
         const b = new maplibregl.LngLatBounds()
         pts.forEach((p) => b.extend(p))
         map.fitBounds(b, { padding: 70, maxZoom: 16, duration: 0 })
+        fittedRef.current = true
       }
     }
   }
@@ -288,38 +300,59 @@ export default function MapPage() {
 
   // Walk the arrowhead down the centreline so the cone reads as air on the move,
   // paced by wind speed: a gale visibly runs, a drainage flow creeps.
+  //
+  // This used to be a setInterval whose period bottomed out at 45ms — a 22fps
+  // stutter that read as a broken loop rather than as moving air, and that
+  // rebuilt a GeoJSON source on a fixed clock the map had no say in. On rAF the
+  // arrowhead is placed once per frame the compositor actually intends to draw,
+  // and the whole thing stops on its own when the tab goes to the background
+  // instead of grinding a phone that is in a pocket in a wood.
   useEffect(() => {
     if (!show.cones || !data) return
     const stands = data.stands.filter(
       (s) => s.lat != null && s.lon != null && s.wind.scent_bearing != null,
     )
     if (!stands.length) return
+
+    const headsAt = (frac: number): GeoJSON.FeatureCollection => ({
+      type: 'FeatureCollection',
+      features: stands.map((s) => ({
+        type: 'Feature',
+        properties: { status: s.wind.status, rot: s.wind.scent_bearing },
+        geometry: {
+          type: 'Point',
+          coordinates: offset(
+            s.lat as number, s.lon as number, s.wind.scent_bearing as number,
+            (s.wind.range_m ?? data.scent_range_m) * frac,
+          ),
+        },
+      })),
+    })
+
+    // Looping decorative motion is exactly what this preference is asking about.
+    // The cone, its colour and its direction all survive — only the drift stops,
+    // with the head parked mid-cone where it still reads as a direction arrow.
+    if (reducedMotion) {
+      setSrc('heads', headsAt(0.5))
+      return
+    }
+
     const speed = data.airflow?.wind_speed_kmh ?? 6
-    const period = Math.max(45, 220 - speed * 7)   // faster wind, faster drift
-    const STEPS = 28
-    let i = 0
-    const t = window.setInterval(() => {
+    const cycleMs = Math.max(45, 220 - speed * 7) * 28   // faster wind, faster drift
+    let raf = 0
+    let last = 0
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick)
+      // Clamped so a spell in the background does not arrive as one huge jump.
+      if (last) driftRef.current += Math.min(now - last, 100)
+      last = now
       const map = mapRef.current
       if (!map || !map.getSource('heads')) return
-      const frac = 0.12 + 0.76 * ((i % STEPS) / STEPS)
-      setSrc('heads', {
-        type: 'FeatureCollection',
-        features: stands.map((s) => ({
-          type: 'Feature',
-          properties: { status: s.wind.status, rot: s.wind.scent_bearing },
-          geometry: {
-            type: 'Point',
-            coordinates: offset(
-              s.lat as number, s.lon as number, s.wind.scent_bearing as number,
-              (s.wind.range_m ?? data.scent_range_m) * frac,
-            ),
-          },
-        })),
-      })
-      i++
-    }, period)
-    return () => window.clearInterval(t)
-  }, [show.cones, data])
+      setSrc('heads', headsAt(0.12 + 0.76 * ((driftRef.current % cycleMs) / cycleMs)))
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [show.cones, data, reducedMotion])
 
   // ── drawing ─────────────────────────────────────────────────
   function updateDraft() {

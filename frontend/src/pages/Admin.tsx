@@ -243,7 +243,7 @@ export default function Admin() {
                   cursor: savingId === s.id ? 'default' : 'pointer',
                   background: s.huntable ? 'var(--go)' : 'var(--surface-2)',
                   position: 'relative',
-                  transition: 'background .15s',
+                  transition: 'background var(--d-base) var(--ease-out)',
                   flexShrink: 0,
                   opacity: savingId === s.id ? 0.6 : 1,
                 }}
@@ -252,12 +252,15 @@ export default function Admin() {
                   style={{
                     position: 'absolute',
                     top: 3,
-                    left: s.huntable ? 23 : 3,
+                    left: 3,
                     width: 20,
                     height: 20,
                     borderRadius: '50%',
                     background: '#fff',
-                    transition: 'left .15s',
+                    // translate, not `left`: the knob rides the compositor
+                    // instead of forcing layout and paint on every frame.
+                    transform: s.huntable ? 'translateX(20px)' : 'translateX(0)',
+                    transition: 'transform var(--d-base) var(--ease-out)',
                   }}
                 />
               </button>

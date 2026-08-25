@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
 import { api, imageUrl } from '../api'
+import Overlay from '../components/Overlay'
 import { useRefetchOnReturn } from '../hooks'
 
 type Health = {
@@ -103,6 +104,13 @@ export default function Cameras() {
   const [syncMsg, setSyncMsg] = useState('')
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<Zoom | null>(null)
+  // Photos being marked empty/animal, held long enough to leave rather than
+  // blink out when the strip reloads underneath them.
+  const [flagging, setFlagging] = useState<Set<string>>(new Set())
+  // The strip a moment before it changes shape. See toggleHidden.
+  const [swapping, setSwapping] = useState<string | null>(null)
+  const [imgReady, setImgReady] = useState(true)
+  const swipe = useRef<{ x: number; t: number } | null>(null)
 
   async function loadImages(camId: string, includeEmpty: boolean) {
     const imgs = await api<Img[]>(`/cameras/${camId}/images?limit=80&include_empty=${includeEmpty}`)
@@ -125,35 +133,81 @@ export default function Cameras() {
   }, [])
   useRefetchOnReturn(loadCameras)
 
-  // Lightbox keyboard navigation: ← → to move, Esc to close.
+  // Lightbox keyboard navigation: ← → to move. Escape belongs to Overlay now, so
+  // that every panel in the app answers it rather than only this one.
   useEffect(() => {
     if (!zoom) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setZoom(null)
-      if (e.key === 'ArrowLeft') setZoom((z) => (z && z.idx > 0 ? { ...z, idx: z.idx - 1 } : z))
-      if (e.key === 'ArrowRight')
-        setZoom((z) => (z && z.idx < z.list.length - 1 ? { ...z, idx: z.idx + 1 } : z))
+      if (e.key === 'ArrowLeft') step(-1)
+      if (e.key === 'ArrowRight') step(1)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom])
 
+  /** Move through the open camera's photos, stopping at both ends. */
+  function step(d: number) {
+    if (!zoom) return
+    const i = zoom.idx + d
+    if (i < 0 || i >= zoom.list.length) return
+    // The next photo fades in once it has actually decoded. Swapping src alone
+    // gave a blank frame and then a jump as the stage resized to fit it.
+    setImgReady(false)
+    setZoom({ ...zoom, idx: i })
+  }
+
+  /**
+   * Swipe to turn the page — on a phone this is the whole navigation, and two
+   * 46px arrows were standing in for it. A flick counts even when it barely
+   * moves: past 0.11 px/ms the intent is unambiguous, which is the same
+   * threshold a drag-to-dismiss uses.
+   */
+  function swipeEnd(e: ReactPointerEvent) {
+    const s = swipe.current
+    swipe.current = null
+    if (!s) return
+    const dx = e.clientX - s.x
+    const dt = Math.max(1, e.timeStamp - s.t)
+    if (Math.abs(dx) < 12) return   // that was a tap
+    if (Math.abs(dx) > 60 || Math.abs(dx) / dt > 0.11) step(dx < 0 ? 1 : -1)
+  }
+
+  // Reviewing empties turns a horizontal scroll strip into a wrapped grid — the
+  // photos stay the same but the shape of the block does not, and snapping
+  // between the two reads as the page breaking. A short fade over the reflow
+  // hides the double-exposure; the layout changes while nothing is on screen.
   function toggleHidden(camId: string) {
     const next = !showHidden[camId]
-    setShowHidden((p) => ({ ...p, [camId]: next }))
-    loadImages(camId, next).catch(() => {})
+    setSwapping(camId)
+    window.setTimeout(() => {
+      setShowHidden((p) => ({ ...p, [camId]: next }))
+      loadImages(camId, next).catch(() => {})
+      requestAnimationFrame(() => setSwapping(null))
+    }, 110)
   }
 
   async function flag(camId: string, imgId: string, isEmpty: boolean) {
+    setFlagging((s) => new Set(s).add(imgId))
     try {
-      await api(`/images/${imgId}/flag`, {
-        method: 'POST',
-        body: JSON.stringify({ is_empty: isEmpty }),
-      })
+      // The photo leaves while the write is in flight, so the strip does not
+      // simply re-render minus one frame with no account of where it went.
+      await Promise.all([
+        api(`/images/${imgId}/flag`, {
+          method: 'POST',
+          body: JSON.stringify({ is_empty: isEmpty }),
+        }),
+        new Promise((res) => setTimeout(res, 180)),
+      ])
       await loadImages(camId, !!showHidden[camId])
     } catch {
       /* ignore */
     }
+    setFlagging((s) => {
+      const n = new Set(s)
+      n.delete(imgId)
+      return n
+    })
   }
 
   async function syncNow() {
@@ -195,16 +249,35 @@ export default function Cameras() {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12, gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>Cameras</div>
-        {syncMsg && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{syncMsg}</span>}
+      {/* No wrap and a message slot that is always there: the status text used to
+          appear mid-sync and shove the button it was reporting on out of reach. */}
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12, gap: 10 }}>
+        <div style={{ fontSize: 18, fontWeight: 700, flexShrink: 0 }}>Cameras</div>
+        <span
+          style={{
+            fontSize: 12,
+            color: 'var(--text-dim)',
+            flex: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            opacity: syncMsg ? 1 : 0,
+            transition: 'opacity var(--d-fast) var(--ease-out)',
+          }}
+        >
+          {syncMsg}
+        </span>
         <button
           className="btn"
-          style={{ width: 'auto', marginLeft: 'auto', padding: '8px 14px' }}
+          style={{ width: 'auto', padding: '8px 14px', flexShrink: 0 }}
           onClick={syncNow}
           disabled={syncing}
         >
-          {syncing ? 'Syncing…' : 'Sync now'}
+          {/* A SPYPOINT sync can run for a minute. A label alone leaves the user
+              deciding whether a dead button or a slow camera network is to blame. */}
+          {syncing && <span className="btn-progress" aria-hidden="true" />}
+          <span style={{ position: 'relative' }}>{syncing ? 'Syncing…' : 'Sync now'}</span>
         </button>
       </div>
       {err && (
@@ -279,16 +352,33 @@ export default function Cameras() {
                   marginTop: 10,
                   overflowX: hidden ? 'visible' : 'auto',
                   flexWrap: hidden ? 'wrap' : 'nowrap',
+                  opacity: swapping === c.id ? 0 : 1,
+                  transition: 'opacity 110ms var(--ease-out)',
                 }}
               >
                 {imgs.map((im) => {
                   const isEmpty = im.is_empty_frame === true
+                  const leaving = flagging.has(im.id)
                   return (
-                    <div key={im.id} style={{ position: 'relative', flexShrink: 0 }}>
+                    <div
+                      key={im.id}
+                      style={{
+                        position: 'relative',
+                        flexShrink: 0,
+                        opacity: leaving ? 0 : 1,
+                        transform: leaving ? 'scale(0.92)' : 'scale(1)',
+                        transition: 'opacity 180ms var(--ease-out), transform 180ms var(--ease-out)',
+                      }}
+                    >
                       <img
+                        className="pressable"
                         src={imageUrl(im.file_url as string)}
                         alt={im.species || 'trail-camera photo'}
-                        onClick={() => setZoom({ list: imgs, idx: imgs.indexOf(im), cam: c.name })}
+                        loading="lazy"
+                        onClick={() => {
+                          setImgReady(false)
+                          setZoom({ list: imgs, idx: imgs.indexOf(im), cam: c.name })
+                        }}
                         style={{
                           height: 74,
                           width: 100,
@@ -377,60 +467,82 @@ export default function Cameras() {
         })
         const what = im.is_empty_frame ? 'No animal' : classLabel(im) || 'Unclassified'
         return (
-          <div
-            onClick={() => setZoom(null)}
-            style={{
-              position: 'fixed',
-              inset: 0,
-              background: 'rgba(0,0,0,0.92)',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              zIndex: 50,
-              padding: 12,
-            }}
+          <Overlay
+            onClose={() => setZoom(null)}
+            backdrop="rgba(0, 0, 0, 0.92)"
+            style={{ flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
           >
-            <img
-              src={imageUrl(im.file_url as string)}
-              alt={what}
-              onClick={(e) => e.stopPropagation()}
-              style={{ maxWidth: '94vw', maxHeight: '80vh', borderRadius: 10 }}
-            />
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                marginTop: 10, display: 'flex', alignItems: 'center', gap: 12,
-                background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px',
-                fontSize: 13, color: '#fff', maxWidth: '94vw', flexWrap: 'wrap', justifyContent: 'center',
-              }}
-            >
-              <b>{zoom.cam}</b>
-              <span>{what}</span>
-              <span style={{ opacity: 0.75 }}>{when}</span>
-              <span style={{ opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
-                {zoom.idx + 1} / {zoom.list.length}
-              </span>
-            </div>
-            <button
-              className="lb-nav"
-              style={{ left: 8 }}
-              disabled={zoom.idx === 0}
-              onClick={(e) => { e.stopPropagation(); setZoom({ ...zoom, idx: zoom.idx - 1 }) }}
-              aria-label="Previous photo"
-            >
-              ‹
-            </button>
-            <button
-              className="lb-nav"
-              style={{ right: 8 }}
-              disabled={zoom.idx === zoom.list.length - 1}
-              onClick={(e) => { e.stopPropagation(); setZoom({ ...zoom, idx: zoom.idx + 1 }) }}
-              aria-label="Next photo"
-            >
-              ›
-            </button>
-          </div>
+            {(_close) => (
+              <>
+                {/* A stage of fixed size. Photos come off the cameras at mixed
+                    aspect ratios, and letting each one set the frame meant the
+                    picture jumped around the screen as you paged through. */}
+                <div
+                  className="ov-panel"
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => { swipe.current = { x: e.clientX, t: e.timeStamp } }}
+                  onPointerUp={swipeEnd}
+                  onPointerCancel={() => { swipe.current = null }}
+                  style={{
+                    width: '94vw',
+                    height: '80vh',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    touchAction: 'pan-y',
+                  }}
+                >
+                  <img
+                    key={im.id}
+                    src={imageUrl(im.file_url as string)}
+                    alt={what}
+                    draggable={false}
+                    onLoad={() => setImgReady(true)}
+                    style={{
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                      borderRadius: 10,
+                      opacity: imgReady ? 1 : 0,
+                      transition: 'opacity var(--d-fast) var(--ease-out)',
+                    }}
+                  />
+                </div>
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    marginTop: 10, display: 'flex', alignItems: 'center', gap: 12,
+                    background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px',
+                    fontSize: 13, color: '#fff', maxWidth: '94vw', flexWrap: 'wrap', justifyContent: 'center',
+                  }}
+                >
+                  <b>{zoom.cam}</b>
+                  <span>{what}</span>
+                  <span style={{ opacity: 0.75 }}>{when}</span>
+                  <span style={{ opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
+                    {zoom.idx + 1} / {zoom.list.length}
+                  </span>
+                </div>
+                <button
+                  className="lb-nav"
+                  style={{ left: 8 }}
+                  disabled={zoom.idx === 0}
+                  onClick={(e) => { e.stopPropagation(); step(-1) }}
+                  aria-label="Previous photo"
+                >
+                  ‹
+                </button>
+                <button
+                  className="lb-nav"
+                  style={{ right: 8 }}
+                  disabled={zoom.idx === zoom.list.length - 1}
+                  onClick={(e) => { e.stopPropagation(); step(1) }}
+                  aria-label="Next photo"
+                >
+                  ›
+                </button>
+              </>
+            )}
+          </Overlay>
         )
       })()}
     </div>
