@@ -38,3 +38,9 @@ Thumbs.db
 backend/celerybeat-schedule*
 .claude/settings.local.json
 _*.py
+
+# Installed agent skills. The files are fetched, not authored here, and
+# .claude/skills holds NTFS junctions that git would follow and commit twice.
+# skills-lock.json is tracked so the set stays reproducible.
+.agents/
+.claude/skills/
