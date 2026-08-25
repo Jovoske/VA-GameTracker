@@ -73,8 +73,15 @@ export default function Stands() {
   }
 
   useEffect(() => {
-    // Drain anything Sit Mode recorded while out of signal.
-    flushSitQueue().finally(load)
+    // Drain anything Sit Mode recorded while out of signal — and say how much
+    // came through. A queue that empties silently is indistinguishable from one
+    // that lost the night, which is the one thing this app cannot afford to be
+    // ambiguous about.
+    flushSitQueue()
+      .then((n) => {
+        if (n > 0) setMsg(`${n} sit${n === 1 ? '' : 's'} from the valley are in.`)
+      })
+      .finally(load)
   }, [])
 
   async function run(fn: () => Promise<unknown>, ok = '') {

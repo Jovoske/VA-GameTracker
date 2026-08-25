@@ -62,6 +62,10 @@ export async function flushSitQueue(): Promise<number> {
 
 const AMBER = '#FFB000'
 
+// Long enough that a knock against the seat rail cannot trigger it, short enough
+// that you are not holding a phone up in the cold wondering if it heard you.
+const HOLD_MS = 1200
+
 export default function SitMode() {
   const { sitId } = useParams()
   const nav = useNavigate()
@@ -69,7 +73,14 @@ export default function SitMode() {
   const [clock, setClock] = useState(new Date())
   const [pending, setPending] = useState(0)
   const [flash, setFlash] = useState('')
+  const [holding, setHolding] = useState(false)
   const holdTimer = useRef<number | null>(null)
+  const flashTimer = useRef<number | null>(null)
+  // A completed hold has already recorded "nothing". Lifting your finger then
+  // fires the button's click, which used to record "seen" straight over the top
+  // of it — so holding logged the opposite of what it says on the button, and
+  // the only ground truth this app ever gets was being written wrong.
+  const holdFired = useRef(false)
 
   useEffect(() => {
     api<Sit[]>('/sits')
@@ -85,6 +96,7 @@ export default function SitMode() {
 
     return () => {
       clearInterval(t)
+      if (flashTimer.current) window.clearTimeout(flashTimer.current)
       try {
         lock?.release()
       } catch {
@@ -93,25 +105,60 @@ export default function SitMode() {
     }
   }, [sitId])
 
+  // Signal comes back mid-sit more often than not — a shift in the seat is enough.
+  // Drain the queue there and then, and say so: the whole reason this screen keeps
+  // a local queue is that losing a night's outcomes loses the only ground truth
+  // the forecast is ever scored against, and the user deserves to see it land.
+  useEffect(() => {
+    const onOnline = async () => {
+      const n = await flushSitQueue()
+      if (n <= 0) return
+      setPending((p) => Math.max(0, p - n))
+      setFlash(`${n} entr${n === 1 ? 'y' : 'ies'} sent — signal is back`)
+      if (flashTimer.current) window.clearTimeout(flashTimer.current)
+      flashTimer.current = window.setTimeout(() => setFlash(''), 3500)
+    }
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [])
+
   async function record(outcome: string, message: string) {
     if (!sitId) return
     setFlash(message)
     if (navigator.vibrate) navigator.vibrate(20)
+    if (flashTimer.current) window.clearTimeout(flashTimer.current)
+    flashTimer.current = window.setTimeout(() => setFlash(''), 2500)
     try {
       await api(`/sits/${sitId}`, { method: 'PATCH', body: JSON.stringify({ outcome }) })
     } catch {
       queueWrite(sitId, outcome)
       setPending((n) => n + 1)
     }
-    setTimeout(() => setFlash(''), 2500)
   }
 
   function startHold() {
-    holdTimer.current = window.setTimeout(() => record('nothing', 'Nothing — logged'), 1200)
+    holdFired.current = false
+    setHolding(true)
+    holdTimer.current = window.setTimeout(() => {
+      holdFired.current = true
+      setHolding(false)
+      // Two pulses, because at this point you are not looking at the screen.
+      if (navigator.vibrate) navigator.vibrate([25, 60, 25])
+      record('nothing', 'Nothing — logged')
+    }, HOLD_MS)
   }
   function cancelHold() {
     if (holdTimer.current) window.clearTimeout(holdTimer.current)
     holdTimer.current = null
+    setHolding(false)
+  }
+  function onTap() {
+    // Swallow the click that follows a hold that already did its job.
+    if (holdFired.current) {
+      holdFired.current = false
+      return
+    }
+    record('seen', 'Seen — logged')
   }
 
   return (
@@ -135,22 +182,43 @@ export default function SitMode() {
         <div style={{ fontSize: 34, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
           {clock.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
         </div>
-        {pending > 0 && (
-          <div style={{ fontSize: 12, opacity: 0.85 }}>
-            {pending} entr{pending === 1 ? 'y' : 'ies'} waiting for signal
-          </div>
-        )}
-        {flash && <div style={{ fontSize: 14, marginTop: 4 }}>{flash}</div>}
+        {/* Both lines keep their space whether or not they have anything to say.
+            They sit directly above the button, and a line appearing used to shove
+            the whole target down the screen at the exact moment a thumb was
+            coming off it. */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
+            minHeight: 21,
+            marginTop: 2,
+            fontSize: 14,
+          }}
+        >
+          <span style={{ opacity: flash ? 1 : 0, transition: 'opacity var(--d-fast) var(--ease-out)' }}>
+            {flash || ' '}
+          </span>
+          <span style={{ marginLeft: 'auto', fontSize: 12, opacity: pending > 0 ? 0.85 : 0 }}>
+            {/* Held space, not held text: an invisible "0 waiting for signal"
+                still gets read out loud. */}
+            {pending > 0 ? `${pending} waiting for signal` : ''}
+          </span>
+        </div>
       </div>
 
       {/* The whole screen below the header is the button. */}
       <button
-        onClick={() => record('seen', 'Seen — logged')}
+        className="no-press"
+        onClick={onTap}
         onPointerDown={startHold}
         onPointerUp={cancelHold}
         onPointerLeave={cancelHold}
+        onPointerCancel={cancelHold}
         style={{
           flex: 1,
+          position: 'relative',
+          overflow: 'hidden',
           background: 'transparent',
           border: 'none',
           color: AMBER,
@@ -158,12 +226,33 @@ export default function SitMode() {
           fontWeight: 700,
           letterSpacing: '.06em',
           cursor: 'pointer',
+          touchAction: 'none',   /* a hold must not become a scroll */
         }}
       >
-        TAP = SEEN
-        <div style={{ fontSize: 15, fontWeight: 400, marginTop: 14, opacity: 0.8 }}>
-          hold = nothing yet
-        </div>
+        {/* The hold's only evidence. It is a progress readout rather than
+            decoration, so it stays on under reduced motion — a 1.2s wait with
+            nothing happening is indistinguishable from a control that is broken.
+            Fills at a constant rate (linear); lets go fast when you do. */}
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: `${AMBER}1F`,
+            transformOrigin: 'left center',
+            transform: holding ? 'scaleX(1)' : 'scaleX(0)',
+            transition: holding
+              ? `transform ${HOLD_MS}ms linear`
+              : 'transform var(--d-fast) var(--ease-out)',
+            pointerEvents: 'none',
+          }}
+        />
+        <span style={{ position: 'relative' }}>
+          TAP = SEEN
+          <span style={{ display: 'block', fontSize: 15, fontWeight: 400, marginTop: 14, opacity: 0.8 }}>
+            hold = nothing yet
+          </span>
+        </span>
       </button>
 
       <button
