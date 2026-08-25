@@ -22,6 +22,18 @@
   --border: #26322D;
   --radius: 14px;
   --font: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* ── motion ──
+     One curve per job. Everything that moves in this app pulls from here, so a
+     second hand-typed cubic-bezier is a bug rather than a preference. Nothing
+     interactive runs longer than 300ms: past that a phone stops feeling like an
+     instrument and starts feeling like it is thinking. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);      /* arriving, leaving, filling */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);  /* moving across the screen */
+  --d-press: 160ms;
+  --d-fast: 150ms;
+  --d-base: 200ms;
+  --d-slow: 400ms;   /* data reveals only — never a control */
 }
 
 * { box-sizing: border-box; }
@@ -39,6 +51,22 @@ body {
 a { color: inherit; text-decoration: none; }
 button { font-family: inherit; }
 
+/* ── press feedback ──
+   Installed to the home screen there is no browser chrome to flicker and no
+   cursor to change, so this is the only acknowledgement a tap ever gets. 0.97
+   reads as "pressed"; anything deeper reads as a toy. `.pressable` is for the
+   divs and images that take an onClick — a card, a thumbnail, a chart row. */
+button, .pressable {
+  transition: transform var(--d-press) var(--ease-out);
+}
+button:not(:disabled):active,
+.pressable:active {
+  transform: scale(0.97);
+}
+/* Opted out: a control that IS the whole screen. Scaling that reads as the
+   phone flinching. Sit Mode acknowledges its taps with the hold fill instead. */
+.no-press:active { transform: none; }
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -53,6 +81,7 @@ button { font-family: inherit; }
   border: 1px solid var(--border);
   border-radius: 10px;
   font-size: 15px;
+  transition: border-color var(--d-fast) var(--ease-out);
 }
 .input:focus { outline: none; border-color: var(--teal); }
 
@@ -66,8 +95,27 @@ button { font-family: inherit; }
   font-weight: 600;
   font-size: 15px;
   cursor: pointer;
+  position: relative;
+  overflow: hidden;   /* clips .btn-progress to the button's own corners */
+  /* Restates the transform transition because this rule outranks the `button`
+     one above and a bare `transition` here would drop it. */
+  transition: opacity var(--d-fast) var(--ease-out), transform var(--d-press) var(--ease-out);
 }
 .btn:disabled { opacity: 0.6; cursor: default; }
+
+/* A job with no known end time — a SPYPOINT sync can take a minute. An
+   indeterminate sweep says "still working" without inventing a percentage. */
+.btn-progress {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.22), transparent);
+  transform: translateX(-100%);
+  animation: btn-sweep 1.15s var(--ease-in-out) infinite;
+}
+@keyframes btn-sweep {
+  to { transform: translateX(100%); }
+}
 
 /* ── navigation: top links on desktop, bottom tab bar on phones ──
    On an iOS home-screen app the page renders UNDER the status bar and the home
@@ -117,6 +165,10 @@ main.page { padding: 16px; }
     -webkit-tap-highlight-color: transparent;
   }
   .tabbar a.active { color: var(--go); }
+  /* Tabs get dimmed, not scaled. This is the most-tapped control in the app and
+     the switch itself is instant — animating it would only add latency to the
+     one thing that should never have any. */
+  .tabbar a:active { opacity: 0.55; }
   .tabbar .ico { font-size: 19px; line-height: 1; }
   /* clear the bar itself plus whatever the home indicator reserves, with slack —
      the last card must scroll fully above the bar, not vanish under it */
@@ -140,3 +192,75 @@ main.page { padding: 16px; }
   cursor: pointer;
 }
 .lb-nav:disabled { opacity: 0.25; cursor: default; }
+/* Keeps its own vertical centring while it presses — the global button rule
+   would replace the translate and drop the arrow half its height down the page. */
+.lb-nav:not(:disabled):active { transform: translateY(-50%) scale(0.94); }
+
+/* ── overlays ──
+   One implementation behind every full-screen panel: the photo lightbox, the
+   herd-makeup gallery, the species gallery, the bare image zooms. They used to
+   be five near-identical copies — only one handled Escape, none stopped the page
+   behind from scrolling, and all of them cut in with no transition, which reads
+   as a screen change rather than as something opening on top of what you were
+   already looking at. */
+.ov {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  padding: 16px;
+  opacity: 0;
+  transition: opacity var(--d-fast) var(--ease-out);
+}
+.ov[data-open='true'] { opacity: 1; }
+/* From 0.96, never from 0: nothing in the world appears out of nothing. These
+   are centred modals, so scaling from the centre is the correct origin. */
+.ov-panel {
+  transform: scale(0.96);
+  transition: transform var(--d-base) var(--ease-out);
+}
+.ov[data-open='true'] .ov-panel { transform: scale(1); }
+
+/* ── data reveals ──
+   Bars grow from their own baseline on scaleX/scaleY rather than width/height,
+   so the whole reveal stays on the compositor. A chart's zero is a real zero,
+   which is why starting these at scale 0 is honest rather than a violation. */
+.bar-x, .bar-y {
+  transition: transform var(--d-slow) var(--ease-out);
+}
+.bar-x { transform-origin: left center; }
+.bar-y { transform-origin: center bottom; }
+
+/* The verdict is the one thing the app is for. It gets a single quiet entrance
+   on arrival and nothing on refresh. */
+.hero-enter {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity var(--d-slow) var(--ease-out), transform var(--d-slow) var(--ease-out);
+}
+.hero-enter[data-in='true'] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Content that swaps underneath a control the user is still adjusting — the
+   species chips on Tonight. Dimming says "this is the old answer" without
+   throwing the layout away and making the page jump. */
+.settling,
+.hero-enter[data-in='true'].settling {   /* outranks the entrance's own opacity */
+  opacity: 0.45;
+  transition: opacity var(--d-fast) var(--ease-out);
+}
+
+/* ── reduced motion ──
+   Fewer and gentler, not none. Everything here still changes colour and opacity,
+   because those carry state; what stops is movement. Killing the lot would take
+   the app's only tap feedback with it. */
+@media (prefers-reduced-motion: reduce) {
+  button:not(:disabled):active,
+  .pressable:active { transform: none; }
+  .lb-nav:not(:disabled):active { transform: translateY(-50%); }
+  .ov-panel, .ov[data-open='true'] .ov-panel { transform: none; }
+  .bar-x, .bar-y { transition: none; }
+  .hero-enter { transform: none; transition: opacity var(--d-base) var(--ease-out); }
+  .btn-progress { animation: none; opacity: 0.5; transform: none; }
+}
