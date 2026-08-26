@@ -53,9 +53,18 @@ app.include_router(routes_stands.router, prefix=API_PREFIX)
 app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
 app.include_router(routes_zones.router, prefix=API_PREFIX)
 
+import mimetypes
 import os
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
+
+# Windows has no registry entry for these, so Starlette guessed text/plain and
+# served the app's own typeface as if it were a text file. Browsers do not
+# MIME-check @font-face so it still rendered, but anything stricter in front of
+# this (a proxy, a CDN, a future Safari) is entitled to refuse it.
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("font/woff", ".woff")
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 _DIST = os.environ.get("FRONTEND_DIST", "")
 if _DIST and os.path.isdir(_DIST):
