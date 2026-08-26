@@ -46,7 +46,7 @@ export default function Login() {
               lineHeight: 1.45,
             }}
           >
-            Your session expired — please sign in again.
+            Your session expired. Please sign in again.
           </div>
         )}
 

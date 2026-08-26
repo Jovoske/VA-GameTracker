@@ -4,6 +4,42 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useReducedMotion } from '../hooks'
 
+/** The Stands crosshair, as flat geometry, for markers built outside React. */
+const STAND_MARK =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round">' +
+  '<circle cx="12" cy="12" r="6.5"/>' +
+  '<path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/>' +
+  '</svg>'
+
+/**
+ * Draw the wind arrowhead into the map's sprite.
+ *
+ * Points east at rotation 0, matching the ➤ this replaced, because the bearings
+ * feeding `icon-rotate` were calibrated against that glyph.
+ */
+function addArrowImage(map: maplibregl.Map, id: string, color: string) {
+  if (map.hasImage(id)) return
+  const S = 28
+  const cvs = document.createElement('canvas')
+  cvs.width = cvs.height = S
+  const ctx = cvs.getContext('2d')
+  if (!ctx) return
+  ctx.fillStyle = color
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'   // the halo the text layer used to carry
+  ctx.lineWidth = 1.5
+  ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.moveTo(S * 0.92, S * 0.5)          // tip, due east
+  ctx.lineTo(S * 0.18, S * 0.86)
+  ctx.lineTo(S * 0.36, S * 0.5)
+  ctx.lineTo(S * 0.18, S * 0.14)
+  ctx.closePath()
+  ctx.fill()
+  ctx.stroke()
+  map.addImage(id, ctx.getImageData(0, 0, S, S))
+}
+
 type Camera = {
   id: string
   name: string
@@ -233,10 +269,12 @@ export default function MapPage() {
       const col = windColor(s.wind.status)
       const el = document.createElement('div')
       el.style.cssText =
-        `width:26px;height:26px;border-radius:6px;background:${col};border:2px solid #fff;` +
-        'cursor:pointer;display:flex;align-items:center;justify-content:center;' +
-        'color:#06210C;font-size:13px;font-weight:700'
-      el.textContent = '🪑'
+        `width:26px;height:26px;border-radius:var(--r-chip);background:${col};border:2px solid #fff;` +
+        'cursor:pointer;display:flex;align-items:center;justify-content:center;color:#06210C'
+      // Was a chair emoji. Same crosshair the Stands tab uses, authored as
+      // geometry so it draws identically on every phone instead of borrowing
+      // whatever furniture the platform's emoji font happens to ship.
+      el.innerHTML = STAND_MARK
       const app = s.approaches.length
         ? `<br><span style="opacity:.7">approach ${s.approaches.map((a) => compass(a.approach_deg)).join(', ')}</span>`
         : ''
@@ -452,18 +490,26 @@ export default function MapPage() {
           'line-opacity': 1,
         },
       })
+      // The arrowhead was the text glyph ➤, which is a font's opinion rather than
+      // an icon: it renders at a different size, weight and baseline on every
+      // platform, and on a device whose font lacks it the wind direction silently
+      // becomes a tofu box. Drawn instead, once, into the map's own sprite.
+      //
+      // It points EAST at rotation 0 because ➤ did. `rot` is a scent bearing that
+      // was calibrated against that glyph, and quietly turning every wind arrow
+      // 90° in an app people use to decide where their scent goes is not a
+      // cosmetic bug.
+      addArrowImage(map, 'arrow-clean', '#8FE39A')
+      addArrowImage(map, 'arrow-dirty', '#FF8A80')
       map.addLayer({
         id: 'heads-sym', type: 'symbol', source: 'heads',
         layout: {
-          'text-field': '➤',
-          'text-size': 22,
-          'text-rotate': ['get', 'rot'],
-          'text-rotation-alignment': 'map',
-          'text-allow-overlap': true,
-        },
-        paint: {
-          'text-color': ['case', ['==', ['get', 'status'], 'clean'], '#8FE39A', '#FF8A80'],
-          'text-halo-color': '#000', 'text-halo-width': 1.2,
+          'icon-image': ['case', ['==', ['get', 'status'], 'clean'], 'arrow-clean', 'arrow-dirty'],
+          'icon-size': 0.8,
+          'icon-rotate': ['get', 'rot'],
+          'icon-rotation-alignment': 'map',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
         },
       })
       map.addLayer({
@@ -551,7 +597,7 @@ export default function MapPage() {
         )}
         {air && (air.source === 'katabatic' || air.source === 'anabatic') && air.slope?.downhill_deg != null && (
           <div style={{ fontSize: 13, color: 'var(--sand)' }}>
-            Calm — {air.source === 'katabatic' ? 'drainage' : 'upslope'}{' '}
+            Calm, {air.source === 'katabatic' ? 'drainage' : 'upslope'}{' '}
             {compass(air.source === 'katabatic' ? air.slope.downhill_deg : (air.slope.downhill_deg + 180) % 360)}
             {' '}~{air.wind_speed_kmh} km/h
           </div>
@@ -565,7 +611,7 @@ export default function MapPage() {
               setBusy('Loading terrain…')
               try {
                 const r = await api<{ relief_m: number }>('/terrain/refresh', { method: 'POST' })
-                window.alert(`Terrain loaded — ${r.relief_m} m of relief. Drainage advice is on.`)
+                window.alert(`Terrain loaded. ${r.relief_m} m of relief, so drainage advice is on.`)
                 await load()
               } catch (e) { window.alert((e as Error).message) }
               setBusy('')
@@ -645,7 +691,7 @@ export default function MapPage() {
           position: 'absolute', top: 92, left: 12, right: 12, background: 'rgba(22,29,26,.94)',
           border: '1px solid var(--border)', borderRadius: 10, padding: '9px 12px', zIndex: 6, fontSize: 12,
         }}>
-          Tap the map to trace where they lie up — three points minimum, then <b>Finish area</b>.
+          Tap the map to trace where they lie up. Three points minimum, then <b>Finish area</b>.
         </div>
       )}
 
@@ -662,7 +708,7 @@ export default function MapPage() {
           </div>
           <div style={{ color: 'var(--text-dim)' }}>
             {data.zones.length === 0
-              ? 'No bedding drawn yet — draw an area and the wind advice turns on.'
+              ? 'No bedding drawn yet. Draw an area and the wind advice turns on.'
               : sg?.note || 'Wind too light to map tonight.'}
           </div>
           {air?.text && air.source !== 'synoptic' && (

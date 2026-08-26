@@ -39,7 +39,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     if (!window.location.pathname.startsWith('/login')) {
       window.location.assign('/login?expired=1')
     }
-    throw new Error('Session expired — please sign in again')
+    throw new Error('Session expired. Please sign in again.')
   }
 
   if (!resp.ok) {

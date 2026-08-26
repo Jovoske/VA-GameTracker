@@ -114,7 +114,7 @@ export default function SitMode() {
       const n = await flushSitQueue()
       if (n <= 0) return
       setPending((p) => Math.max(0, p - n))
-      setFlash(`${n} entr${n === 1 ? 'y' : 'ies'} sent — signal is back`)
+      setFlash(`Signal is back. ${n} entr${n === 1 ? 'y' : 'ies'} sent.`)
       if (flashTimer.current) window.clearTimeout(flashTimer.current)
       flashTimer.current = window.setTimeout(() => setFlash(''), 3500)
     }
@@ -144,7 +144,7 @@ export default function SitMode() {
       setHolding(false)
       // Two pulses, because at this point you are not looking at the screen.
       if (navigator.vibrate) navigator.vibrate([25, 60, 25])
-      record('nothing', 'Nothing — logged')
+      record('nothing', 'Logged: nothing yet')
     }, HOLD_MS)
   }
   function cancelHold() {
@@ -158,7 +158,7 @@ export default function SitMode() {
       holdFired.current = false
       return
     }
-    record('seen', 'Seen — logged')
+    record('seen', 'Logged: seen')
   }
 
   return (
@@ -176,7 +176,7 @@ export default function SitMode() {
       }}
     >
       <div style={{ padding: '16px 18px', borderBottom: `1px solid ${AMBER}33` }}>
-        <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '.04em' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>
           {sit?.stand ?? 'SIT'}
         </div>
         <div style={{ fontSize: 34, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>

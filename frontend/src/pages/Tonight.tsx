@@ -79,7 +79,6 @@ const VERDICTS: Record<Verdict, { label: string; glyph: string; color: string }>
 const verdictOf = (v: string) => VERDICTS[v as Verdict] ?? VERDICTS.NO_DATA
 const verdictColor = (v: string) => verdictOf(v).color
 const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8]
-const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 const impactColor = (impact: string) =>
   impact.startsWith('+') ? 'var(--go)' : impact === '•' ? 'var(--text-dim)' : 'var(--marginal)'
 
@@ -226,7 +225,7 @@ export default function Tonight() {
 
       {alerts.length > 0 && (
         <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <div style={labelStyle}>ALERTS</div>
+          <div className="sect">Alerts</div>
           {alerts.map((a, i) => {
             const col =
               a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
@@ -250,7 +249,7 @@ export default function Tonight() {
           it is reported as a hardware fact rather than folded into the ranking. */}
       {f.alerts && f.alerts.length > 0 && (
         <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <div style={labelStyle}>CAMERAS NOT REPORTING</div>
+          <div className="sect">Cameras not reporting</div>
           {f.alerts.map((a, i) => (
             <div
               key={a.camera}
@@ -261,7 +260,7 @@ export default function Tonight() {
             </div>
           ))}
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.45 }}>
-            These stands keep their historical ranking — a camera out of photo credits still
+            These stands keep their historical ranking. A camera out of photo credits still
             has animals in front of it.
           </div>
         </div>
@@ -275,7 +274,7 @@ export default function Tonight() {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 22, color: vc, lineHeight: 1 }}>{verdictOf(f.verdict).glyph}</span>
-          <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: '.02em' }}>
+          <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.02em' }}>
             {verdictOf(f.verdict).label}
             {r && <span style={{ color: 'var(--text-dim)' }}> · {r.camera}</span>}
           </div>
@@ -294,9 +293,7 @@ export default function Tonight() {
                 declining to call it, so "too light to call" never reads like advice. */}
             {f.wind?.text && (
               <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                <span style={{ fontSize: 10, letterSpacing: '.06em', color: 'var(--text-dim)', flexShrink: 0 }}>
-                  WIND
-                </span>
+                <span style={{ fontSize: 11, color: 'var(--text-dim)', flexShrink: 0, width: 52 }}>Wind</span>
                 <span
                   style={{
                     fontSize: 14,
@@ -315,9 +312,7 @@ export default function Tonight() {
                 broken, so "nothing changed" is said out loud. */}
             {f.changed?.text && (
               <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                <span style={{ fontSize: 10, letterSpacing: '.06em', color: 'var(--text-dim)', flexShrink: 0 }}>
-                  CHANGED
-                </span>
+                <span style={{ fontSize: 11, color: 'var(--text-dim)', flexShrink: 0, width: 52 }}>Changed</span>
                 <span
                   style={{
                     fontSize: 14,
@@ -344,22 +339,20 @@ export default function Tonight() {
               <span style={{ color: 'var(--go)', fontWeight: 600 }}>
                 {hh(r.best_window.start_hour)}–{hh(r.best_window.end_hour)}
               </span>
-              {c.moon_illum != null && <span style={{ color: 'var(--text-dim)' }}>🌙 {c.moon_illum}%</span>}
+              {c.moon_illum != null && <span style={{ color: 'var(--text-dim)' }}>{c.moon_illum}% moon</span>}
               {c.darkness_minutes != null && (
-                <span style={{ color: 'var(--text-dim)' }}>🌑 {Math.round(c.darkness_minutes / 60)}h</span>
+                <span style={{ color: 'var(--text-dim)' }}>{Math.round(c.darkness_minutes / 60)} h dark</span>
               )}
               {c.wind_dir_deg != null && (
                 <span style={{ color: 'var(--text-dim)' }}>
-                  💨 {compass(c.wind_dir_deg)} {Math.round(c.wind_speed_kmh ?? 0)}km/h
+                  {compass(c.wind_dir_deg)} {Math.round(c.wind_speed_kmh ?? 0)} km/h
                 </span>
               )}
             </div>
 
             {f.factors && f.factors.length > 0 && (
               <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 8 }}>
-                  WHY
-                </div>
+                <div className="sect" style={{ marginBottom: 8 }}>Why</div>
                 {f.factors.map((fac, i) => (
                   <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, marginBottom: 6 }}>
                     <span style={{ color: impactColor(fac.impact), fontVariantNumeric: 'tabular-nums', minWidth: 26 }}>
@@ -375,9 +368,7 @@ export default function Tonight() {
 
         {f.alternates.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 8 }}>
-              OTHER STANDS
-            </div>
+            <div className="sect" style={{ marginBottom: 8 }}>Other stands</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {f.alternates.map((a) => (
                 <div
@@ -400,7 +391,7 @@ export default function Tonight() {
           </div>
         )}
         <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14, lineHeight: 1.5 }}>
-          Early forecast from {f.nights_of_data} nights — it sharpens as more accumulate.
+          Early forecast from {f.nights_of_data} nights. It sharpens as more accumulate.
           {/* An exclusion nobody is told about is indistinguishable from the bug it
               replaced, so the count is stated rather than quietly applied. */}
           {f.exposure?.note && <> {f.exposure.note}</>}
@@ -409,8 +400,8 @@ export default function Tonight() {
 
       {/* ── What to expect, by stand ───────────────── */}
       {f.where && f.where.length > 0 && (
-        <div className={`card${settling ? ' settling' : ''}`} style={{ padding: 18, marginBottom: 14 }}>
-          <div style={labelStyle}>WHAT TO EXPECT · BY STAND</div>
+        <div className={`block${settling ? ' settling' : ''}`}>
+          <div className="sect">What to expect, by stand</div>
           {f.where.map((w) => (
             <div key={w.camera} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
               <span style={{ color: verdictColor(w.verdict), fontSize: 13, width: 14, marginTop: 3, flexShrink: 0 }}>
@@ -430,7 +421,7 @@ export default function Tonight() {
                   </span>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
-                  {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>—</span>}
+                  {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>none</span>}
                   {w.classes.map((cl) => (
                     <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 6, padding: '2px 8px' }}>
                       {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
@@ -441,7 +432,7 @@ export default function Tonight() {
             </div>
           ))}
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-            Classes seen at each stand — stags vs hinds, sows with piglets — from sexed &amp; grouped sightings.
+            Classes seen at each stand: stags vs hinds, sows with piglets, from sexed and grouped sightings.
           </div>
         </div>
       )}
@@ -450,8 +441,8 @@ export default function Tonight() {
           hit rate against camera-nights, and it is withheld entirely until there is
           enough scored history for it to mean anything. */}
       {f.calibration?.statement && (
-        <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <div style={labelStyle}>TRACK RECORD</div>
+        <div className="block">
+          <div className="sect">Track record</div>
           <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>
         </div>
       )}
@@ -459,11 +450,11 @@ export default function Tonight() {
       {d && (
         <>
           {/* ── Activity by hour ───────────────────────── */}
-          <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-            <div style={labelStyle}>ACTIVITY BY HOUR · local time (peak window in green)</div>
+          <div className="block">
+            <div className="sect">Activity by hour <span className="sect-note">local time, peak window in green</span></div>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
               {d.by_hour.map((x) => (
-                <div key={x.hour} title={`${hh(x.hour)} — ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
+                <div key={x.hour} title={`${hh(x.hour)}: ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
                   <div className="bar-y" style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
                 </div>
               ))}
@@ -478,8 +469,8 @@ export default function Tonight() {
           </div>
 
           {/* ── By camera ──────────────────────────────── */}
-          <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-            <div style={labelStyle}>SIGHTINGS BY CAMERA</div>
+          <div className="block">
+            <div className="sect">Sightings by camera</div>
             {d.by_camera.map((cam) => (
               <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                 <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
@@ -493,8 +484,8 @@ export default function Tonight() {
 
           {/* ── By species ─────────────────────────────── */}
           {d.by_species.length > 0 && (
-            <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-              <div style={labelStyle}>SPECIES</div>
+            <div className="block">
+              <div className="sect">Species</div>
               {d.by_species.slice(0, 8).map((s) => (
                 <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                   <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>

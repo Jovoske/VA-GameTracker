@@ -1,3 +1,4 @@
+import { MoonIcon } from '@phosphor-icons/react/dist/csr/Moon'
 import { useEffect, useState } from 'react'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
@@ -40,7 +41,6 @@ const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(u
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
 const clock = (iso: string | null) =>
   iso ? new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '–'
-const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 
 export default function Insights() {
   const [d, setD] = useState<Insights | null>(null)
@@ -82,8 +82,8 @@ export default function Insights() {
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Insights</div>
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>NEXT 7 NIGHTS · SUN &amp; MOON</div>
+      <div className="block">
+        <div className="sect">The next seven nights</div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
           {d.outlook.map((o) => (
             <div
@@ -100,7 +100,9 @@ export default function Insights() {
               <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
                 {dayName(o.date)} {dayNum(o.date)}
               </div>
-              <div style={{ fontSize: 14, margin: '4px 0' }}>🌙</div>
+              <div style={{ margin: '5px 0 3px', color: 'var(--text-dim)', display: 'flex', justifyContent: 'center' }}>
+                <MoonIcon size={15} />
+              </div>
               <div style={{ fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                 {Math.round(o.moon_illum)}%
               </div>
@@ -111,15 +113,15 @@ export default function Insights() {
           ))}
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.45 }}>
-          Moon illumination and last shootable light. No odds here on purpose — a night seven
+          Moon illumination and last shootable light. No odds here on purpose: a night seven
           days out can't be called until the forecast has been scored against what the cameras
           actually saw. Tonight's call lives on the Tonight tab.
         </div>
       </div>
 
       {d.composition && d.composition.length > 0 && (
-        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-          <div style={labelStyle}>HERD MAKEUP · WHERE</div>
+        <div className="block">
+          <div className="sect">Herd makeup, and where</div>
           {(() => {
             const max = Math.max(...d.composition.map((x) => x.count), 1)
             return d.composition.slice(0, 8).map((x) => (
@@ -146,7 +148,7 @@ export default function Insights() {
             ))
           })()}
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-            Stags vs hinds, sows with piglets vs sounders — and the stand each favours.
+            Stags vs hinds, sows with piglets vs sounders, and the stand each favours.
           </div>
         </div>
       )}
@@ -155,8 +157,8 @@ export default function Insights() {
         const sc = pat.scopes.find((s) => s.key === patScope) || pat.scopes[0]
         const maxRate = Math.max(...sc.drivers.flatMap((d) => d.buckets.map((b) => b.rate)), 1)
         return (
-          <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-            <div style={labelStyle}>BEHAVIOUR DRIVERS · WEATHER &amp; MOON</div>
+          <div className="block">
+            <div className="sect">What moves them</div>
             <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
               {pat.scopes.map((s) => (
                 <button
@@ -175,7 +177,7 @@ export default function Insights() {
               ))}
             </div>
             {sc.drivers.length === 0 && (
-              <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No clear weather/moon driver yet — needs more nights.</div>
+              <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No clear weather or moon driver yet. It needs more nights.</div>
             )}
             {sc.drivers.map((dr, i) => (
               <div key={i} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: i < sc.drivers.length - 1 ? '1px solid var(--border)' : 'none' }}>
@@ -185,7 +187,7 @@ export default function Insights() {
                     {dr.statement}
                     {dr.confidence < 0.4 && (
                       <span
-                        title="Weak signal so far — treat as a hint, not a rule"
+                        title="Weak signal so far. Treat it as a hint, not a rule."
                         style={{
                           marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: '.03em',
                           color: 'var(--sand)', border: '1px solid var(--border)',
@@ -214,14 +216,14 @@ export default function Insights() {
             ))}
             <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
               {sc.label}: {sc.sightings} sightings over {pat.nights} weather-backtracked nights (avg {sc.avg_per_night}/night). A
-              running calculation — it sharpens as more nights feed in.
+              running calculation. It sharpens as more nights feed in.
             </div>
           </div>
         )
       })()}
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>PATTERNS</div>
+      <div className="block">
+        <div className="sect">Patterns</div>
         {d.correlations.length === 0 && (
           <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>Not enough data yet to call patterns.</div>
         )}
@@ -246,7 +248,7 @@ export default function Insights() {
       </div>
 
       <div style={{ color: 'var(--text-dim)', fontSize: 11, textAlign: 'center' }}>
-        Early patterns from ~1 month of data — they firm up over the season.
+        Early patterns from about a month of data. They firm up over the season.
       </div>
 
       {openClass && (

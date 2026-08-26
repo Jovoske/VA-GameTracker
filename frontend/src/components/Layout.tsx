@@ -1,20 +1,41 @@
+import type { Icon } from '@phosphor-icons/react'
+import { CameraIcon } from '@phosphor-icons/react/dist/csr/Camera'
+import { ChartLineUpIcon } from '@phosphor-icons/react/dist/csr/ChartLineUp'
+import { CrosshairIcon } from '@phosphor-icons/react/dist/csr/Crosshair'
+import { MapTrifoldIcon } from '@phosphor-icons/react/dist/csr/MapTrifold'
+import { MoonStarsIcon } from '@phosphor-icons/react/dist/csr/MoonStars'
+import { PawPrintIcon } from '@phosphor-icons/react/dist/csr/PawPrint'
+import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { setToken } from '../api'
 
-const TABS = [
-  { to: '/', label: 'Tonight', ico: '🌙', end: true },
-  { to: '/stands', label: 'Stands', ico: '🎯' },
-  { to: '/cameras', label: 'Cameras', ico: '📷' },
-  { to: '/map', label: 'Map', ico: '🗺️' },
-  { to: '/insights', label: 'Insights', ico: '📈' },
-  { to: '/animals', label: 'Animals', ico: '🦌' },
-  { to: '/settings', label: 'Settings', ico: '⚙️' },
+/**
+ * Icons are drawn, from one family, at one weight.
+ *
+ * These were emoji: 🌙 🎯 📷 🗺️ 📈 🦌 ⚙️. Emoji are not an icon system. They
+ * render as a different picture on every phone, they carry another vendor's
+ * colour palette into the middle of this one, and they sit on their own baseline
+ * so no two ever align. Phosphor at one size, regular when the tab is idle and
+ * filled when it is current, which is the weight change a native tab bar uses to
+ * say "you are here" without needing the colour to do all the work.
+ *
+ * Deep imports rather than the barrel: the package carries about nine thousand
+ * icons and this app wants seven of them.
+ */
+const TABS: { to: string; label: string; Ico: Icon; end?: boolean }[] = [
+  { to: '/', label: 'Tonight', Ico: MoonStarsIcon, end: true },
+  { to: '/stands', label: 'Stands', Ico: CrosshairIcon },
+  { to: '/cameras', label: 'Cameras', Ico: CameraIcon },
+  { to: '/map', label: 'Map', Ico: MapTrifoldIcon },
+  { to: '/insights', label: 'Insights', Ico: ChartLineUpIcon },
+  { to: '/animals', label: 'Animals', Ico: PawPrintIcon },
+  { to: '/settings', label: 'Settings', Ico: SlidersHorizontalIcon },
 ]
 
 const linkStyle = (isActive: boolean) => ({
-  padding: '8px 12px',
-  borderRadius: 8,
+  padding: '7px 11px',
+  borderRadius: 'var(--r-ctl)',
   fontSize: 14,
   color: isActive ? 'var(--text)' : 'var(--text-dim)',
   background: isActive ? 'var(--surface-2)' : 'transparent',
@@ -39,7 +60,7 @@ export default function Layout() {
   return (
     <div style={{ maxWidth: 720, margin: '0 auto', minHeight: '100%' }}>
       <header className="appbar">
-        <div style={{ fontWeight: 700, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap' }}>
+        <div style={{ fontWeight: 600, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
         </div>
 
@@ -60,7 +81,7 @@ export default function Layout() {
             background: 'none',
             border: '1px solid var(--border)',
             color: 'var(--text-dim)',
-            borderRadius: 8,
+            borderRadius: 'var(--r-ctl)',
             padding: '6px 10px',
             cursor: 'pointer',
             fontSize: 13,
@@ -79,10 +100,16 @@ export default function Layout() {
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
       <nav className="tabbar">
-        {TABS.map((t) => (
-          <NavLink key={t.to} to={t.to} end={t.end} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico" aria-hidden="true">{t.ico}</span>
-            {t.label}
+        {TABS.map(({ to, label, Ico, end }) => (
+          <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'active' : '')}>
+            {({ isActive }) => (
+              <>
+                <span className="ico">
+                  <Ico size={22} weight={isActive ? 'fill' : 'regular'} />
+                </span>
+                {label}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>

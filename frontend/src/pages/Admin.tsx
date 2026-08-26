@@ -34,7 +34,6 @@ type CamAccount = {
   cameras: number
   can_remove: boolean
 }
-const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 const smallBtn = {
   background: 'var(--surface-2)',
   border: '1px solid var(--border)',
@@ -93,7 +92,7 @@ export default function Admin() {
       await api('/users', { method: 'POST', body: JSON.stringify(newUser) })
       setNewUser({ email: '', password: '', role: 'member' })
       setUsers(await api<UserRow[]>('/users'))
-      setUserMsg('Added ✓')
+      setUserMsg('Added')
     } catch (e) {
       setUserMsg((e as Error).message)
     }
@@ -124,7 +123,7 @@ export default function Admin() {
       })
       setNewAcct({ username: '', password: '', label: '' })
       setAccounts(await api<CamAccount[]>('/camera-accounts'))
-      setAcctMsg(r.note || 'Connected ✓')
+      setAcctMsg(r.note || 'Connected')
     } catch (e) {
       setAcctMsg((e as Error).message)
     }
@@ -150,7 +149,7 @@ export default function Admin() {
         body: JSON.stringify({ current_password: pw.current, new_password: pw.next }),
       })
       setPw({ current: '', next: '' })
-      setPwMsg('Password changed ✓')
+      setPwMsg('Password changed')
     } catch (e) {
       setPwMsg((e as Error).message)
     }
@@ -196,7 +195,7 @@ export default function Admin() {
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <div style={labelStyle}>HUNTING ADVICE</div>
+          <div className="sect">Hunting advice</div>
           {species.length > 0 && (
             <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
               {onCount} of {species.length} shown
@@ -205,7 +204,7 @@ export default function Admin() {
         </div>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
           Choose which animals appear in Tonight's recommendation and the outlook. Turn off
-          anything out of season or that you don't hunt — for example ibex when it's closed, or
+          anything out of season or that you don't hunt: ibex when it's closed, say, or
           rabbits. The stats keep tracking every species regardless; this only shapes the advice.
         </div>
         {species.length === 0 ? (
@@ -234,7 +233,7 @@ export default function Admin() {
                 onClick={() => toggleSpecies(s)}
                 disabled={savingId === s.id}
                 aria-pressed={s.huntable}
-                title={s.huntable ? 'Shown in advice — click to hide' : 'Hidden from advice — click to show'}
+                title={s.huntable ? 'Shown in advice. Click to hide.' : 'Hidden from advice. Click to show.'}
                 style={{
                   width: 46,
                   height: 26,
@@ -270,9 +269,9 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>CAMERA ACCOUNTS</div>
+        <div className="sect">Camera accounts</div>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-          Connect a SPYPOINT account and its cameras join the estate — photos, AI detection and
+          Connect a SPYPOINT account and its cameras join the estate, with photos, AI detection and
           forecasts included. Guests can add their own account here.
         </div>
         {accounts.map((a) => (
@@ -293,7 +292,7 @@ export default function Admin() {
             onChange={(e) => setNewAcct({ ...newAcct, username: e.target.value })} autoComplete="off" />
           <input className="input" placeholder="SPYPOINT password" type="password" value={newAcct.password}
             onChange={(e) => setNewAcct({ ...newAcct, password: e.target.value })} autoComplete="new-password" />
-          <input className="input" placeholder="Label (e.g. 'Marco's cameras') — optional" value={newAcct.label}
+          <input className="input" placeholder="Label, optional (e.g. 'Marco's cameras')" value={newAcct.label}
             onChange={(e) => setNewAcct({ ...newAcct, label: e.target.value })} />
           <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
             onClick={addAccount} disabled={acctBusy || !newAcct.username || !newAcct.password}>
@@ -305,9 +304,9 @@ export default function Admin() {
 
       {me?.role === 'admin' && (
         <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-          <div style={labelStyle}>PEOPLE</div>
+          <div className="sect">People</div>
           <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-            Who can sign in. Guests get "member" — they see everything and can connect their own
+            Who can sign in. Guests get "member": they see everything and can connect their own
             cameras, but can't change settings or manage people.
           </div>
           {users.map((u) => (
@@ -343,7 +342,7 @@ export default function Admin() {
       )}
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>CHANGE PASSWORD</div>
+        <div className="sect">Change password</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <input className="input" placeholder="Current password" type="password" value={pw.current}
             onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
@@ -358,7 +357,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>VERSION</div>
+        <div className="sect">Version</div>
         <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
         <button
           className="btn"
@@ -400,7 +399,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>AI LABELLING</div>
+        <div className="sect">AI labelling</div>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
           Identify sex on red deer (stag / hind) and wild boar using cloud vision. Uses your
           ANTHROPIC_API_KEY and costs a little API credit per photo; only un-sexed animals are processed.
@@ -417,7 +416,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={labelStyle}>ACCOUNT</div>
+        <div className="sect">Account</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, color: 'var(--text-dim)', flex: 1, minWidth: 0 }}>
             Signed in as <span style={{ color: 'var(--text)' }}>{me?.email ?? '…'}</span>
@@ -436,7 +435,7 @@ export default function Admin() {
 
       {status && (
         <div className="card" style={{ padding: 18 }}>
-          <div style={labelStyle}>SYSTEM</div>
+          <div className="sect">System</div>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>{k}</span>

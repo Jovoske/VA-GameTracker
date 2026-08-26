@@ -34,7 +34,6 @@ type Sit = {
 }
 type Me = { id: string; role: string }
 
-const label = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em', marginBottom: 12 } as const
 const btn = {
   background: 'var(--surface-2)',
   color: 'var(--text)',
@@ -128,8 +127,8 @@ export default function Stands() {
 
       {stands.length === 0 && (
         <div className="card" style={{ padding: 18, marginBottom: 14, fontSize: 13, lineHeight: 1.6 }}>
-          <div style={label}>NO STANDS YET</div>
-          A stand is where you actually sit — not where a camera hangs. Cameras go where animals
+          <div className="sect">No stands yet</div>
+          A stand is where you actually sit, not where a camera hangs. Cameras go where animals
           go; stands exist where a bullet can safely stop. Add one below, then record its
           approach bearings (where animals come from) so the wind check has something to work
           with. Until then the app will say so rather than guess.
@@ -141,7 +140,7 @@ export default function Stands() {
               padding: '8px 12px', cursor: 'pointer', fontSize: 13,
             }}
           >
-            Start me off — one per camera
+            Start me off, one per camera
           </button>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
             Places a stand at each camera so you have something to drag, rather than typing
@@ -211,7 +210,7 @@ export default function Stands() {
                                 method: 'PATCH',
                                 body: JSON.stringify({ outcome: value }),
                               }),
-                            'Logged — thank you, that is the only ground truth this app gets.',
+                            'Logged. Thank you: that is the only ground truth this app gets.',
                           )
                         }
                       >
@@ -228,7 +227,7 @@ export default function Stands() {
 
       {me?.role === 'admin' && (
         <div className="card" style={{ padding: 16 }}>
-          <div style={label}>ADD A STAND</div>
+          <div className="sect">Add a stand</div>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               className="input"
@@ -253,7 +252,7 @@ export default function Stands() {
       )}
 
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14, lineHeight: 1.6, textAlign: 'center' }}>
-        A sit nobody reports on stays <b>unreported</b> — never "nothing". Confusing "I saw
+        A sit nobody reports on stays <b>unreported</b>, never "nothing". Confusing "I saw
         nothing" with "I didn't say" would poison the only ground truth this app will ever have.
       </div>
     </div>

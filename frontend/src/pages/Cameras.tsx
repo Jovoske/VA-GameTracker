@@ -226,10 +226,10 @@ export default function Cameras() {
             const s = await api<{ status: string; images_downloaded?: number }>('/cameras/sync/status')
             if (s.status === 'ok') {
               const n = s.images_downloaded ?? 0
-              setSyncMsg(n > 0 ? `Done — ${n} new photo${n === 1 ? '' : 's'}` : 'Done — no new photos')
+              setSyncMsg(n > 0 ? `Done. ${n} new photo${n === 1 ? '' : 's'}.` : 'Done. No new photos.')
               done = true
             } else if (s.status === 'error') {
-              setSyncMsg('Sync failed — see Settings for details')
+              setSyncMsg('Sync failed. See Settings for details.')
               done = true
             } else {
               setSyncMsg('Syncing…')
@@ -238,7 +238,7 @@ export default function Cameras() {
             /* transient — keep polling */
           }
         }
-        if (!done) setSyncMsg('Still running in the background — photos will appear as they arrive.')
+        if (!done) setSyncMsg('Still running in the background. Photos will appear as they arrive.')
       }
     } catch (e) {
       setSyncMsg((e as Error).message)
@@ -282,7 +282,7 @@ export default function Cameras() {
       </div>
       {err && (
         <div className="card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--skip)' }}>
-          Couldn't load cameras: {err} — pull down or tap Sync now to retry.
+          Couldn't load cameras: {err}. Tap Sync now to retry.
         </div>
       )}
 

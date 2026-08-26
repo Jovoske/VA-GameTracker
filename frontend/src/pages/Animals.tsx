@@ -1,3 +1,4 @@
+import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useState } from 'react'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
@@ -34,8 +35,7 @@ type Animal = {
 }
 
 const fmt = (s: string | null) =>
-  s ? new Date(s).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—'
-const labelStyle = { fontSize: 12, color: 'var(--text-dim)', letterSpacing: '.05em' } as const
+  s ? new Date(s).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'never'
 
 export default function Animals() {
   // ── species browser ─────────────────────────────────────
@@ -156,7 +156,7 @@ export default function Animals() {
 
       {/* ── Spotted on the estate ─────────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 18 }}>
-        <div style={{ ...labelStyle, marginBottom: 12 }}>SPOTTED ON THE ESTATE</div>
+        <div className="sect">Spotted on the estate</div>
         {spErr && <div style={{ fontSize: 13, color: 'var(--skip)' }}>Couldn't load: {spErr}</div>}
         {!spErr && species.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No sightings yet.</div>
@@ -231,7 +231,7 @@ export default function Animals() {
           </div>
         ))}
         <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
-          Every species the cameras have seen — tap one for its photos, or a class (Stag, Sow + piglets…)
+          Every species the cameras have seen. Tap one for its photos, or a class (Stag, Sow + piglets…)
           for just those.
         </div>
       </div>
@@ -250,10 +250,10 @@ export default function Animals() {
       {err && <div style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 10 }}>{err}</div>}
 
       <div className="card" style={{ padding: 16, marginBottom: 14, lineHeight: 1.5, fontSize: 13 }}>
-        <div style={{ ...labelStyle, marginBottom: 8 }}>HOW THIS WORKS — HONESTLY</div>
+        <div className="sect">How this works, honestly</div>
         Telling apart individual animals of the same species from night-time infrared photos is
-        beyond the current model. It can only group <b>near-duplicate frames</b> — the same animal
-        within one visit — so most sightings stand alone. Treat this as a manual tool: when <i>you</i>{' '}
+        beyond the current model. It can only group <b>near-duplicate frames</b>: the same animal
+        within one visit. Most sightings stand alone. Treat this as a manual tool: when <i>you</i>{' '}
         recognise the same animal across sightings, select them and <b>Merge</b> into one named
         individual. Nothing here is an asserted identity.
       </div>
@@ -285,11 +285,11 @@ export default function Animals() {
       ) : items.length === 0 ? (
         <div className="card" style={{ padding: 16, color: 'var(--text-dim)', fontSize: 13, lineHeight: 1.5 }}>
           Nothing here yet. Tap <b style={{ color: 'var(--text)' }}>Recompute</b> (top right) to scan your
-          sightings for repeat visitors — it takes a few minutes and runs on the server.
+          sightings for repeat visitors. It takes a few minutes and runs on the server.
         </div>
       ) : shown.length === 0 ? (
         <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>
-          No grouped candidates yet — toggle “Show all” to browse individual sightings and merge them.
+          No grouped candidates yet. Toggle “Show all” to browse individual sightings and merge them.
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 10 }}>
@@ -316,7 +316,7 @@ export default function Animals() {
                     />
                   )}
                   <div style={{ position: 'absolute', top: 6, left: 6, width: 18, height: 18, borderRadius: 4, background: on ? 'var(--teal)' : 'rgba(0,0,0,.5)', border: '1px solid rgba(255,255,255,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#fff' }}>
-                    {on ? '✓' : ''}
+                    {on ? <CheckIcon size={13} weight="bold" /> : null}
                   </div>
                   {a.confirmed && (
                     <div style={{ position: 'absolute', top: 6, right: 6, fontSize: 10, background: 'var(--go)', color: '#000', borderRadius: 4, padding: '1px 5px', fontWeight: 700 }}>
