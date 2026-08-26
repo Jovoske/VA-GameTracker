@@ -152,11 +152,11 @@ export default function Animals() {
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto' }}>
-      <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Animals</div>
+      <h1 className="page-title">Animals</h1>
 
       {/* ── Spotted on the estate ─────────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 18 }}>
-        <div className="sect">Spotted on the estate</div>
+        <h2 className="sect">Spotted on the estate</h2>
         {spErr && <div style={{ fontSize: 13, color: 'var(--skip)' }}>Couldn't load: {spErr}</div>}
         {!spErr && species.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No sightings yet.</div>
@@ -176,7 +176,7 @@ export default function Animals() {
               className="pressable"
               onClick={() => openGallery(sp, null)}
               style={{
-                width: 56, height: 56, borderRadius: 10, overflow: 'hidden',
+                width: 56, height: 56, borderRadius: 'var(--r-ctl)', overflow: 'hidden',
                 background: 'var(--surface-2)', flexShrink: 0, cursor: 'pointer',
               }}
               title={`All ${sp.name} photos`}
@@ -213,7 +213,7 @@ export default function Animals() {
                       title={`View the ${cl.count} ${cl.label} photos`}
                       style={{
                         fontSize: 12, background: 'var(--surface-2)', border: '1px solid var(--border)',
-                        color: 'var(--text)', borderRadius: 7, padding: '3px 9px', cursor: 'pointer',
+                        color: 'var(--text)', borderRadius: 'var(--r-ctl)', padding: '3px 9px', cursor: 'pointer',
                       }}
                     >
                       {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
@@ -239,7 +239,7 @@ export default function Animals() {
       {/* ── Individual recognition (experimental) ─────────── */}
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
         <div style={{ fontWeight: 700, fontSize: 15 }}>Individual recognition</div>
-        <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--marginal)', border: '1px solid var(--border)', borderRadius: 6, padding: '1px 6px' }}>
+        <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--marginal)', border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '1px 6px' }}>
           experimental
         </span>
         <button onClick={recompute} disabled={!!busy} style={btn} title="Re-embed new sightings and regenerate candidates">
@@ -250,7 +250,7 @@ export default function Animals() {
       {err && <div style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 10 }}>{err}</div>}
 
       <div className="card" style={{ padding: 16, marginBottom: 14, lineHeight: 1.5, fontSize: 13 }}>
-        <div className="sect">How this works, honestly</div>
+        <h2 className="sect">How this works, honestly</h2>
         Telling apart individual animals of the same species from night-time infrared photos is
         beyond the current model. It can only group <b>near-duplicate frames</b>: the same animal
         within one visit. Most sightings stand alone. Treat this as a manual tool: when <i>you</i>{' '}
@@ -315,16 +315,16 @@ export default function Animals() {
                       style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                     />
                   )}
-                  <div style={{ position: 'absolute', top: 6, left: 6, width: 18, height: 18, borderRadius: 4, background: on ? 'var(--teal)' : 'rgba(0,0,0,.5)', border: '1px solid rgba(255,255,255,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#fff' }}>
+                  <div style={{ position: 'absolute', top: 6, left: 6, width: 18, height: 18, borderRadius: 'var(--r-chip)', background: on ? 'var(--teal)' : 'rgba(0,0,0,.5)', border: '1px solid rgba(255,255,255,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#fff' }}>
                     {on ? <CheckIcon size={13} weight="bold" /> : null}
                   </div>
                   {a.confirmed && (
-                    <div style={{ position: 'absolute', top: 6, right: 6, fontSize: 10, background: 'var(--go)', color: '#000', borderRadius: 4, padding: '1px 5px', fontWeight: 700 }}>
+                    <div style={{ position: 'absolute', top: 6, right: 6, fontSize: 10, background: 'var(--go)', color: '#000', borderRadius: 'var(--r-chip)', padding: '1px 5px', fontWeight: 700 }}>
                       confirmed
                     </div>
                   )}
                   {a.sightings >= 2 && (
-                    <div style={{ position: 'absolute', bottom: 6, right: 6, fontSize: 10, background: 'rgba(0,0,0,.6)', color: '#fff', borderRadius: 4, padding: '1px 5px' }}>
+                    <div style={{ position: 'absolute', bottom: 6, right: 6, fontSize: 10, background: 'rgba(0,0,0,.6)', color: '#fff', borderRadius: 'var(--r-chip)', padding: '1px 5px' }}>
                       ×{a.sightings}
                     </div>
                   )}
@@ -362,7 +362,7 @@ export default function Animals() {
               </span>
               <button
                 onClick={close}
-                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
+                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 'var(--r-ctl)', padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
               >
                 Close
               </button>
@@ -371,7 +371,7 @@ export default function Animals() {
                   <button
                     onClick={() => openGallery(gallery.sp, null)}
                     style={{
-                      fontSize: 12, borderRadius: 7, padding: '3px 9px', cursor: 'pointer',
+                      fontSize: 12, borderRadius: 'var(--r-ctl)', padding: '3px 9px', cursor: 'pointer',
                       border: '1px solid var(--border)',
                       background: gallery.label === null ? 'var(--go)' : 'var(--surface-2)',
                       color: gallery.label === null ? '#06210C' : 'var(--text)',
@@ -385,7 +385,7 @@ export default function Animals() {
                       key={cl.label}
                       onClick={() => openGallery(gallery.sp, cl.label)}
                       style={{
-                        fontSize: 12, borderRadius: 7, padding: '3px 9px', cursor: 'pointer',
+                        fontSize: 12, borderRadius: 'var(--r-ctl)', padding: '3px 9px', cursor: 'pointer',
                         border: '1px solid var(--border)',
                         background: gallery.label === cl.label ? 'var(--go)' : 'var(--surface-2)',
                         color: gallery.label === cl.label ? '#06210C' : 'var(--text)',
@@ -409,7 +409,7 @@ export default function Animals() {
                     key={im.image_id}
                     className="pressable"
                     onClick={() => setZoom(im)}
-                    style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
+                    style={{ background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', overflow: 'hidden', cursor: 'pointer' }}
                   >
                     <img src={imageUrl(im.file_url)} loading="lazy" alt={im.label} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
@@ -436,8 +436,8 @@ export default function Animals() {
         >
           {(_close) => (
             <>
-              <img className="ov-panel" src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 10 }} />
-              <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+              <img className="ov-panel" src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 'var(--r-ctl)' }} />
+              <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 'var(--r-ctl)', padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
                 <b>{zoom.camera}</b>
                 <span>{zoom.label}</span>
                 <span style={{ opacity: 0.75 }}>
@@ -457,7 +457,7 @@ const btn = {
   background: 'var(--surface-2)',
   border: '1px solid var(--border)',
   color: 'var(--text)',
-  borderRadius: 8,
+  borderRadius: 'var(--r-ctl)',
   padding: '5px 10px',
   fontSize: 12,
   cursor: 'pointer',

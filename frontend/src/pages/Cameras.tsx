@@ -299,7 +299,7 @@ export default function Cameras() {
                   <span
                     style={{
                       fontSize: 10, fontWeight: 700, letterSpacing: '.04em', color: '#06210C',
-                      background: healthMeta(c.health.status).color, borderRadius: 5, padding: '2px 7px',
+                      background: healthMeta(c.health.status).color, borderRadius: 'var(--r-chip)', padding: '2px 7px',
                     }}
                   >
                     {healthMeta(c.health.status).label}
@@ -335,7 +335,7 @@ export default function Cameras() {
                     background: hidden ? 'var(--surface-2)' : 'none',
                     border: '1px solid var(--border)',
                     color: 'var(--text-dim)',
-                    borderRadius: 8,
+                    borderRadius: 'var(--r-ctl)',
                     padding: '4px 10px',
                     cursor: 'pointer',
                     fontSize: 12,
@@ -383,7 +383,7 @@ export default function Cameras() {
                           height: 74,
                           width: 100,
                           objectFit: 'cover',
-                          borderRadius: 8,
+                          borderRadius: 'var(--r-ctl)',
                           cursor: 'pointer',
                           background: 'var(--surface-2)',
                           opacity: isEmpty ? 0.4 : 1,
@@ -400,7 +400,7 @@ export default function Cameras() {
                             right: 3,
                             width: 26,
                             height: 26,
-                            borderRadius: 6,
+                            borderRadius: 'var(--r-ctl)',
                             border: 'none',
                             cursor: 'pointer',
                             fontSize: 15,
@@ -424,7 +424,7 @@ export default function Cameras() {
                             background: 'rgba(0,0,0,0.6)',
                             color: '#fff',
                             padding: '1px 4px',
-                            borderRadius: 4,
+                            borderRadius: 'var(--r-chip)',
                           }}
                         >
                           {Math.round(im.animal_conf * 100)}%
@@ -440,7 +440,7 @@ export default function Cameras() {
                             background: 'rgba(0,0,0,0.62)',
                             color: '#fff',
                             padding: '1px 5px',
-                            borderRadius: 4,
+                            borderRadius: 'var(--r-chip)',
                             maxWidth: 116,
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
@@ -501,7 +501,7 @@ export default function Cameras() {
                     style={{
                       maxWidth: '100%',
                       maxHeight: '100%',
-                      borderRadius: 10,
+                      borderRadius: 'var(--r-ctl)',
                       opacity: imgReady ? 1 : 0,
                       transition: 'opacity var(--d-fast) var(--ease-out)',
                     }}
@@ -511,7 +511,7 @@ export default function Cameras() {
                   onClick={(e) => e.stopPropagation()}
                   style={{
                     marginTop: 10, display: 'flex', alignItems: 'center', gap: 12,
-                    background: 'rgba(0,0,0,0.55)', borderRadius: 10, padding: '8px 14px',
+                    background: 'rgba(0,0,0,0.55)', borderRadius: 'var(--r-ctl)', padding: '8px 14px',
                     fontSize: 13, color: '#fff', maxWidth: '94vw', flexWrap: 'wrap', justifyContent: 'center',
                   }}
                 >

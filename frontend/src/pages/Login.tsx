@@ -40,7 +40,7 @@ export default function Login() {
               fontSize: 13,
               color: 'var(--sand)',
               background: 'var(--surface-2)',
-              borderRadius: 8,
+              borderRadius: 'var(--r-ctl)',
               padding: '8px 11px',
               marginBottom: 16,
               lineHeight: 1.45,

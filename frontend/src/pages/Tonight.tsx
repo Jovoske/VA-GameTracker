@@ -158,7 +158,7 @@ export default function Tonight() {
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
-      <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Tonight</div>
+      <h1 className="page-title">Tonight</h1>
 
       {/* What are you after? Ranking the ground by the commonest animal on it is the
           wrong answer when you have come out for boar. Chips list only species left
@@ -172,7 +172,7 @@ export default function Tonight() {
               load([], true)
             }}
             style={{
-              fontSize: 12, borderRadius: 999, padding: '5px 12px', cursor: 'pointer',
+              fontSize: 12, borderRadius: 'var(--r-pill)', padding: '5px 12px', cursor: 'pointer',
               border: '1px solid var(--border)',
               background: picked.length === 0 ? 'var(--go)' : 'transparent',
               color: picked.length === 0 ? '#06210C' : 'var(--text-dim)',
@@ -189,7 +189,7 @@ export default function Tonight() {
                 onClick={() => toggleSpecies(s.id)}
                 title={`${s.detections} sightings`}
                 style={{
-                  fontSize: 12, borderRadius: 999, padding: '5px 12px', cursor: 'pointer',
+                  fontSize: 12, borderRadius: 'var(--r-pill)', padding: '5px 12px', cursor: 'pointer',
                   border: '1px solid var(--border)',
                   background: on ? 'var(--go)' : 'transparent',
                   color: on ? '#06210C' : 'var(--text-dim)',
@@ -211,7 +211,7 @@ export default function Tonight() {
             fontSize: 12,
             padding: '7px 12px',
             marginBottom: 12,
-            borderRadius: 8,
+            borderRadius: 'var(--r-ctl)',
             background: 'var(--surface-2)',
             color: 'var(--text-dim)',
             border: `1px solid ${
@@ -225,7 +225,7 @@ export default function Tonight() {
 
       {alerts.length > 0 && (
         <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <div className="sect">Alerts</div>
+          <h2 className="sect">Alerts</h2>
           {alerts.map((a, i) => {
             const col =
               a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
@@ -249,7 +249,7 @@ export default function Tonight() {
           it is reported as a hardware fact rather than folded into the ranking. */}
       {f.alerts && f.alerts.length > 0 && (
         <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <div className="sect">Cameras not reporting</div>
+          <h2 className="sect">Cameras not reporting</h2>
           {f.alerts.map((a, i) => (
             <div
               key={a.camera}
@@ -328,7 +328,7 @@ export default function Tonight() {
             {r.classes && r.classes.length > 0 && (
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
                 {r.classes.map((cl) => (
-                  <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 6, padding: '2px 8px' }}>
+                  <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '2px 8px' }}>
                     {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
                   </span>
                 ))}
@@ -352,7 +352,7 @@ export default function Tonight() {
 
             {f.factors && f.factors.length > 0 && (
               <div style={{ marginTop: 14 }}>
-                <div className="sect" style={{ marginBottom: 8 }}>Why</div>
+                <h2 className="sect" style={{ marginBottom: 8 }}>Why</h2>
                 {f.factors.map((fac, i) => (
                   <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, marginBottom: 6 }}>
                     <span style={{ color: impactColor(fac.impact), fontVariantNumeric: 'tabular-nums', minWidth: 26 }}>
@@ -368,12 +368,12 @@ export default function Tonight() {
 
         {f.alternates.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <div className="sect" style={{ marginBottom: 8 }}>Other stands</div>
+            <h2 className="sect" style={{ marginBottom: 8 }}>Other stands</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {f.alternates.map((a) => (
                 <div
                   key={a.camera}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2)', borderRadius: 8, padding: '8px 11px' }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '8px 11px' }}
                 >
                   <span style={{ color: verdictColor(a.verdict), fontSize: 13, width: 14, flexShrink: 0 }}>
                     {verdictOf(a.verdict).glyph}
@@ -401,7 +401,7 @@ export default function Tonight() {
       {/* ── What to expect, by stand ───────────────── */}
       {f.where && f.where.length > 0 && (
         <div className={`block${settling ? ' settling' : ''}`}>
-          <div className="sect">What to expect, by stand</div>
+          <h2 className="sect">What to expect, by stand</h2>
           {f.where.map((w) => (
             <div key={w.camera} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
               <span style={{ color: verdictColor(w.verdict), fontSize: 13, width: 14, marginTop: 3, flexShrink: 0 }}>
@@ -423,7 +423,7 @@ export default function Tonight() {
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
                   {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>none</span>}
                   {w.classes.map((cl) => (
-                    <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 6, padding: '2px 8px' }}>
+                    <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '2px 8px' }}>
                       {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
                     </span>
                   ))}
@@ -442,7 +442,7 @@ export default function Tonight() {
           enough scored history for it to mean anything. */}
       {f.calibration?.statement && (
         <div className="block">
-          <div className="sect">Track record</div>
+          <h2 className="sect">Track record</h2>
           <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>
         </div>
       )}
@@ -451,11 +451,11 @@ export default function Tonight() {
         <>
           {/* ── Activity by hour ───────────────────────── */}
           <div className="block">
-            <div className="sect">Activity by hour <span className="sect-note">local time, peak window in green</span></div>
+            <h2 className="sect">Activity by hour <span className="sect-note">local time, peak window in green</span></h2>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
               {d.by_hour.map((x) => (
                 <div key={x.hour} title={`${hh(x.hour)}: ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
-                  <div className="bar-y" style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: '3px 3px 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
+                  <div className="bar-y" style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: 'var(--r-chip) var(--r-chip) 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
                 </div>
               ))}
             </div>
@@ -470,11 +470,11 @@ export default function Tonight() {
 
           {/* ── By camera ──────────────────────────────── */}
           <div className="block">
-            <div className="sect">Sightings by camera</div>
+            <h2 className="sect">Sightings by camera</h2>
             {d.by_camera.map((cam) => (
               <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                 <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
-                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
                   <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? cam.sightings / maxCam : 0})` }} />
                 </div>
                 <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{cam.sightings}</div>
@@ -485,11 +485,11 @@ export default function Tonight() {
           {/* ── By species ─────────────────────────────── */}
           {d.by_species.length > 0 && (
             <div className="block">
-              <div className="sect">Species</div>
+              <h2 className="sect">Species</h2>
               {d.by_species.slice(0, 8).map((s) => (
                 <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                   <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
-                  <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
                     <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? s.count / maxSp : 0})` }} />
                   </div>
                   <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{s.count}</div>

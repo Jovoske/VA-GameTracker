@@ -618,7 +618,7 @@ export default function MapPage() {
             }}
             style={{
               background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--sand)',
-              borderRadius: 8, padding: '5px 10px', cursor: 'pointer', fontSize: 12,
+              borderRadius: 'var(--r-ctl)', padding: '5px 10px', cursor: 'pointer', fontSize: 12,
             }}
           >Load terrain</button>
         )}
@@ -634,7 +634,7 @@ export default function MapPage() {
               background: placingStand ? 'var(--go)' : 'var(--surface-2)',
               border: '1px solid var(--border)',
               color: placingStand ? '#06210C' : 'var(--text)',
-              borderRadius: 8, padding: '7px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+              borderRadius: 'var(--r-ctl)', padding: '7px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 600,
             }}
           >
             {placingStand ? 'Tap map to place…' : '+ Stand'}
@@ -651,7 +651,7 @@ export default function MapPage() {
         {drawing && (
           <button onClick={cancelDraw} style={{
             background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-dim)',
-            borderRadius: 8, padding: '7px 12px', cursor: 'pointer', fontSize: 13,
+            borderRadius: 'var(--r-ctl)', padding: '7px 12px', cursor: 'pointer', fontSize: 13,
           }}>Cancel</button>
         )}
       </div>
@@ -682,14 +682,14 @@ export default function MapPage() {
           left a dead black band under the map on the phone. */}
       <div ref={mapEl} style={{
         height: 'calc(100dvh - 216px - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
-        minHeight: 380, borderRadius: 12,
+        minHeight: 380, borderRadius: 'var(--r-card)',
         overflow: 'hidden', border: '1px solid var(--border)',
       }} />
 
       {drawing && (
         <div style={{
           position: 'absolute', top: 92, left: 12, right: 12, background: 'rgba(22,29,26,.94)',
-          border: '1px solid var(--border)', borderRadius: 10, padding: '9px 12px', zIndex: 6, fontSize: 12,
+          border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '9px 12px', zIndex: 6, fontSize: 12,
         }}>
           Tap the map to trace where they lie up. Three points minimum, then <b>Finish area</b>.
         </div>
@@ -698,7 +698,7 @@ export default function MapPage() {
       {!drawing && data && (
         <div style={{
           position: 'absolute', bottom: 12, left: 12, background: 'rgba(22,29,26,.92)',
-          border: '1px solid var(--border)', borderRadius: 10, padding: '9px 12px',
+          border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '9px 12px',
           maxWidth: 300, zIndex: 6, fontSize: 11, lineHeight: 1.5,
         }}>
           <div style={{ display: 'flex', gap: 12, marginBottom: 5, flexWrap: 'wrap' }}>
@@ -720,7 +720,7 @@ export default function MapPage() {
       {unplaced.length > 0 && !drawing && (
         <div style={{
           position: 'absolute', top: 92, left: 12, background: 'var(--surface)',
-          border: '1px solid var(--border)', borderRadius: 10, padding: 12, maxWidth: 230, zIndex: 5,
+          border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: 12, maxWidth: 230, zIndex: 5,
         }}>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
             {placing ? 'Tap the map to drop it' : 'Place your cameras:'}
@@ -731,7 +731,7 @@ export default function MapPage() {
                 display: 'block', width: '100%', textAlign: 'left', marginBottom: 6,
                 background: placing === c.id ? 'var(--go)' : 'var(--surface-2)',
                 color: placing === c.id ? '#06210C' : 'var(--text)',
-                border: '1px solid var(--border)', borderRadius: 8, padding: '6px 10px',
+                border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '6px 10px',
                 cursor: 'pointer', fontSize: 13,
               }}>
               {placing === c.id ? `Placing ${c.name}…` : `Place ${c.name}`}

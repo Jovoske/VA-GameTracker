@@ -80,10 +80,10 @@ export default function Insights() {
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
-      <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Insights</div>
+      <h1 className="page-title">Insights</h1>
 
       <div className="block">
-        <div className="sect">The next seven nights</div>
+        <h2 className="sect">The next seven nights</h2>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
           {d.outlook.map((o) => (
             <div
@@ -93,7 +93,7 @@ export default function Insights() {
                 flex: '1 0 68px',
                 textAlign: 'center',
                 padding: '8px 4px',
-                borderRadius: 8,
+                borderRadius: 'var(--r-ctl)',
                 background: 'var(--surface-2)',
               }}
             >
@@ -121,7 +121,7 @@ export default function Insights() {
 
       {d.composition && d.composition.length > 0 && (
         <div className="block">
-          <div className="sect">Herd makeup, and where</div>
+          <h2 className="sect">Herd makeup, and where</h2>
           {(() => {
             const max = Math.max(...d.composition.map((x) => x.count), 1)
             return d.composition.slice(0, 8).map((x) => (
@@ -133,7 +133,7 @@ export default function Insights() {
                 style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, cursor: 'pointer' }}
               >
                 <div style={{ width: 100, fontSize: 13 }}>{x.label}</div>
-                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
                   <div
                     className="bar-x"
                     style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? x.count / max : 0})` }}
@@ -158,14 +158,14 @@ export default function Insights() {
         const maxRate = Math.max(...sc.drivers.flatMap((d) => d.buckets.map((b) => b.rate)), 1)
         return (
           <div className="block">
-            <div className="sect">What moves them</div>
+            <h2 className="sect">What moves them</h2>
             <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
               {pat.scopes.map((s) => (
                 <button
                   key={s.key}
                   onClick={() => setPatScope(s.key)}
                   style={{
-                    fontSize: 12, padding: '4px 10px', borderRadius: 8, cursor: 'pointer',
+                    fontSize: 12, padding: '4px 10px', borderRadius: 'var(--r-ctl)', cursor: 'pointer',
                     border: '1px solid var(--border)',
                     background: s.key === sc.key ? 'var(--surface-2)' : 'transparent',
                     color: s.key === sc.key ? 'var(--text)' : 'var(--text-dim)',
@@ -191,7 +191,7 @@ export default function Insights() {
                         style={{
                           marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: '.03em',
                           color: 'var(--sand)', border: '1px solid var(--border)',
-                          borderRadius: 5, padding: '1px 6px', verticalAlign: 'middle',
+                          borderRadius: 'var(--r-chip)', padding: '1px 6px', verticalAlign: 'middle',
                         }}
                       >
                         EARLY SIGNAL
@@ -202,11 +202,11 @@ export default function Insights() {
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 32 }} title="sightings/night: low → high range of this factor">
                     {dr.buckets.map((b) => (
-                      <div key={b.label} title={`${b.label}: ${b.rate}/night`} className="bar-y" style={{ width: 13, height: `${(b.rate / maxRate) * 100}%`, minHeight: 2, background: 'var(--teal)', borderRadius: '2px 2px 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
+                      <div key={b.label} title={`${b.label}: ${b.rate}/night`} className="bar-y" style={{ width: 13, height: `${(b.rate / maxRate) * 100}%`, minHeight: 2, background: 'var(--teal)', borderRadius: 'var(--r-chip) var(--r-chip) 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
                     ))}
                   </div>
                   <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ flex: 1, maxWidth: 120, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+                    <div style={{ flex: 1, maxWidth: 120, height: 4, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
                       <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? dr.confidence : 0})` }} />
                     </div>
                     <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{Math.round(dr.confidence * 100)}% confidence · {dr.sample_nights} nights</span>
@@ -223,7 +223,7 @@ export default function Insights() {
       })()}
 
       <div className="block">
-        <div className="sect">Patterns</div>
+        <h2 className="sect">Patterns</h2>
         {d.correlations.length === 0 && (
           <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>Not enough data yet to call patterns.</div>
         )}
@@ -238,7 +238,7 @@ export default function Insights() {
           >
             <div style={{ fontSize: 14, lineHeight: 1.4 }}>{c.statement}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
-              <div style={{ flex: 1, maxWidth: 140, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ flex: 1, maxWidth: 140, height: 4, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
                 <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? Math.min(1, c.strength) : 0})` }} />
               </div>
               <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>based on {c.sample} sightings</span>
@@ -265,7 +265,7 @@ export default function Insights() {
               </span>
               <button
                 onClick={close}
-                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
+                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 'var(--r-ctl)', padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
               >
                 Close
               </button>
@@ -281,7 +281,7 @@ export default function Insights() {
                     key={im.image_id}
                     className="pressable"
                     onClick={() => setZoom(imageUrl(im.file_url))}
-                    style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
+                    style={{ background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', overflow: 'hidden', cursor: 'pointer' }}
                   >
                     <img src={imageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
@@ -304,7 +304,7 @@ export default function Insights() {
           style={{ alignItems: 'center', justifyContent: 'center' }}
         >
           {(_close) => (
-            <img className="ov-panel" src={zoom} alt="" style={{ maxWidth: '94vw', maxHeight: '94vh', borderRadius: 10 }} />
+            <img className="ov-panel" src={zoom} alt="" style={{ maxWidth: '94vw', maxHeight: '94vh', borderRadius: 'var(--r-ctl)' }} />
           )}
         </Overlay>
       )}

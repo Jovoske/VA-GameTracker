@@ -92,11 +92,22 @@ button { font-family: inherit; }
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--surface-2); }
 
-/* ── section headings ──
-   These replace the uppercase micro-caps kicker that used to sit above all
+/* ── headings ──
+   Real elements, not styled divs. Every heading in this app used to be a <div>,
+   which meant a screen reader got a wall of undifferentiated text with no
+   structure to jump through and no way to tell a section from its contents. The
+   look is unchanged; the document finally has an outline.
+
+   .sect replaced the uppercase micro-caps kicker that used to sit above all
    fifteen sections. A label whose only job is to announce the heading beneath it
-   is furniture; the heading can carry itself. Sentence case, real size, and the
-   hairline does the separating that a box used to do. */
+   is furniture; the heading can carry itself. */
+.page-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin: 0 0 12px;
+}
 .sect {
   font-size: 13px;
   font-weight: 600;

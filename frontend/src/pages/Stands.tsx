@@ -38,7 +38,7 @@ const btn = {
   background: 'var(--surface-2)',
   color: 'var(--text)',
   border: '1px solid var(--border)',
-  borderRadius: 10,
+  borderRadius: 'var(--r-ctl)',
   padding: '12px 14px',
   fontSize: 14,
   cursor: 'pointer',
@@ -113,7 +113,7 @@ export default function Stands() {
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
-      <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Stands</div>
+      <h1 className="page-title">Stands</h1>
 
       {msg && (
         <div
@@ -127,7 +127,7 @@ export default function Stands() {
 
       {stands.length === 0 && (
         <div className="card" style={{ padding: 18, marginBottom: 14, fontSize: 13, lineHeight: 1.6 }}>
-          <div className="sect">No stands yet</div>
+          <h2 className="sect">No stands yet</h2>
           A stand is where you actually sit, not where a camera hangs. Cameras go where animals
           go; stands exist where a bullet can safely stop. Add one below, then record its
           approach bearings (where animals come from) so the wind check has something to work
@@ -136,7 +136,7 @@ export default function Stands() {
             onClick={bootstrap}
             style={{
               display: 'block', marginTop: 12, background: 'var(--surface-2)',
-              color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8,
+              color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)',
               padding: '8px 12px', cursor: 'pointer', fontSize: 13,
             }}
           >
@@ -227,7 +227,7 @@ export default function Stands() {
 
       {me?.role === 'admin' && (
         <div className="card" style={{ padding: 16 }}>
-          <div className="sect">Add a stand</div>
+          <h2 className="sect">Add a stand</h2>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               className="input"

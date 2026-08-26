@@ -38,7 +38,7 @@ const smallBtn = {
   background: 'var(--surface-2)',
   border: '1px solid var(--border)',
   color: 'var(--text-dim)',
-  borderRadius: 8,
+  borderRadius: 'var(--r-ctl)',
   padding: '5px 10px',
   fontSize: 12,
   cursor: 'pointer',
@@ -191,11 +191,11 @@ export default function Admin() {
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
-      <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Settings</div>
+      <h1 className="page-title">Settings</h1>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <div className="sect">Hunting advice</div>
+          <h2 className="sect">Hunting advice</h2>
           {species.length > 0 && (
             <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
               {onCount} of {species.length} shown
@@ -237,7 +237,7 @@ export default function Admin() {
                 style={{
                   width: 46,
                   height: 26,
-                  borderRadius: 13,
+                  borderRadius: 'var(--r-card)',
                   border: 'none',
                   cursor: savingId === s.id ? 'default' : 'pointer',
                   background: s.huntable ? 'var(--go)' : 'var(--surface-2)',
@@ -269,7 +269,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div className="sect">Camera accounts</div>
+        <h2 className="sect">Camera accounts</h2>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
           Connect a SPYPOINT account and its cameras join the estate, with photos, AI detection and
           forecasts included. Guests can add their own account here.
@@ -304,7 +304,7 @@ export default function Admin() {
 
       {me?.role === 'admin' && (
         <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-          <div className="sect">People</div>
+          <h2 className="sect">People</h2>
           <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
             Who can sign in. Guests get "member": they see everything and can connect their own
             cameras, but can't change settings or manage people.
@@ -314,7 +314,7 @@ export default function Admin() {
               <div style={{ flex: 1, minWidth: 0, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {u.email}{u.is_you ? ' (you)' : ''}
               </div>
-              <span style={{ fontSize: 11, color: u.role === 'admin' ? 'var(--sand)' : 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 6, padding: '1px 7px' }}>
+              <span style={{ fontSize: 11, color: u.role === 'admin' ? 'var(--sand)' : 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '1px 7px' }}>
                 {u.role}
               </span>
               {!u.is_you && <button onClick={() => delUser(u)} style={smallBtn}>Remove</button>}
@@ -342,7 +342,7 @@ export default function Admin() {
       )}
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div className="sect">Change password</div>
+        <h2 className="sect">Change password</h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <input className="input" placeholder="Current password" type="password" value={pw.current}
             onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
@@ -357,7 +357,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div className="sect">Version</div>
+        <h2 className="sect">Version</h2>
         <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
         <button
           className="btn"
@@ -382,7 +382,7 @@ export default function Admin() {
                     display: 'block',
                     background: 'var(--surface-2)',
                     padding: '8px 10px',
-                    borderRadius: 8,
+                    borderRadius: 'var(--r-ctl)',
                     marginTop: 4,
                     fontSize: 12,
                     fontFamily: 'var(--font-mono, monospace)',
@@ -399,7 +399,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div className="sect">AI labelling</div>
+        <h2 className="sect">AI labelling</h2>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
           Identify sex on red deer (stag / hind) and wild boar using cloud vision. Uses your
           ANTHROPIC_API_KEY and costs a little API credit per photo; only un-sexed animals are processed.
@@ -416,7 +416,7 @@ export default function Admin() {
       </div>
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div className="sect">Account</div>
+        <h2 className="sect">Account</h2>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, color: 'var(--text-dim)', flex: 1, minWidth: 0 }}>
             Signed in as <span style={{ color: 'var(--text)' }}>{me?.email ?? '…'}</span>
@@ -435,7 +435,7 @@ export default function Admin() {
 
       {status && (
         <div className="card" style={{ padding: 18 }}>
-          <div className="sect">System</div>
+          <h2 className="sect">System</h2>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>{k}</span>
