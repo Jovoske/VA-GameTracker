@@ -20,8 +20,22 @@
   --text: #E6EDEA;
   --text-dim: #8A9A92;
   --border: #26322D;
-  --radius: 14px;
-  --font: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* ── shape ──
+     Four steps, and every rounded corner in the app is one of them. There were
+     sixteen distinct radii before this, which is what "no system" looks like
+     from the inside. Cards are the only thing that gets the big radius; pills
+     are for small controls and nothing else. */
+  --r-chip: 4px;     /* badges, tags, tiny inline counts */
+  --r-ctl: 8px;      /* inputs, buttons, list rows, thumbnails */
+  --r-card: 14px;    /* cards and panels only */
+  --r-pill: 999px;   /* filter chips, toggles */
+  --radius: var(--r-card);
+
+  /* ── type ──
+     IBM Plex Sans: drawn as a working face for technical material, and it has
+     true tabular figures, which matters in an app that is mostly numbers read
+     at 12px in the dark. */
+  --font: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 
   /* ── motion ──
      One curve per job. Everything that moves in this app pulls from here, so a
@@ -51,6 +65,58 @@ body {
 a { color: inherit; text-decoration: none; }
 button { font-family: inherit; }
 
+/* ── the surfaces nobody draws ──
+   Selection, caret, scrollbars and focus rings ship with browser defaults that
+   belong to no design system. Left alone they are the clearest sign a screen was
+   assembled rather than built: a blue Windows selection highlight inside a
+   dark-green app is the tell. */
+::selection { background: color-mix(in srgb, var(--teal) 32%, transparent); color: var(--text); }
+:root { caret-color: var(--teal); accent-color: var(--go); }
+
+/* Keyboard focus only. A mouse press already has the scale to acknowledge it, so
+   a ring there would just be noise; a keyboard user has nothing else. */
+:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+  border-radius: var(--r-ctl);
+}
+:focus:not(:focus-visible) { outline: none; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 3px solid var(--bg);   /* inset, so the thumb reads as a bar not a slab */
+  border-radius: var(--r-pill);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--surface-2); }
+
+/* ── section headings ──
+   These replace the uppercase micro-caps kicker that used to sit above all
+   fifteen sections. A label whose only job is to announce the heading beneath it
+   is furniture; the heading can carry itself. Sentence case, real size, and the
+   hairline does the separating that a box used to do. */
+.sect {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0 0 10px;
+}
+.sect-note {           /* the quiet qualifier that often follows a heading */
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+  letter-spacing: 0;
+}
+
+/* A block that is a group of content, not an object worth elevating. Most of the
+   32 boxes on these pages were this: identical bordered rectangles stacked down
+   the page, which flattens every page into one texture. */
+.block { padding: 0 0 18px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+.block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
 /* ── press feedback ──
    Installed to the home screen there is no browser chrome to flicker and no
    cursor to change, so this is the only acknowledgement a tap ever gets. 0.97
@@ -79,7 +145,7 @@ button:not(:disabled):active,
   background: var(--surface-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-ctl);
   font-size: 15px;
   transition: border-color var(--d-fast) var(--ease-out);
 }
@@ -91,7 +157,7 @@ button:not(:disabled):active,
   background: var(--go);
   color: #06210C;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--r-ctl);
   font-weight: 600;
   font-size: 15px;
   cursor: pointer;
@@ -159,7 +225,7 @@ main.page { padding: 16px; }
     align-items: center;
     gap: 2px;
     padding: 5px 0 3px;
-    border-radius: 8px;
+    border-radius: var(--r-ctl);
     font-size: 10px;
     color: var(--text-dim);
     -webkit-tap-highlight-color: transparent;
@@ -169,7 +235,8 @@ main.page { padding: 16px; }
      the switch itself is instant — animating it would only add latency to the
      one thing that should never have any. */
   .tabbar a:active { opacity: 0.55; }
-  .tabbar .ico { font-size: 19px; line-height: 1; }
+  /* A fixed box so the label baseline never moves between regular and fill. */
+  .tabbar .ico { display: flex; align-items: center; justify-content: center; height: 22px; }
   /* clear the bar itself plus whatever the home indicator reserves, with slack —
      the last card must scroll fully above the bar, not vanish under it */
   main.page { padding-bottom: calc(78px + max(8px, calc(env(safe-area-inset-bottom) - 14px))); }
@@ -187,7 +254,7 @@ main.page { padding: 16px; }
   background: rgba(0, 0, 0, 0.45);
   color: #fff;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--r-ctl);
   font-size: 26px;
   cursor: pointer;
 }
