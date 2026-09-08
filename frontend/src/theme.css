@@ -204,6 +204,9 @@ button:not(:disabled):active,
 main.page { padding: 16px; }
 
 @media (max-width: 640px) {
+  /* Bottom tabs provide navigation on phones. Let the brand header leave the
+     viewport so scrolling reveals camera/forecast data all the way to the top. */
+  .appbar { position: static; }
   .topnav { display: none; }
   .tabbar {
     display: flex;
