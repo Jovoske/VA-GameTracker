@@ -350,3 +350,12 @@ main.page { padding: 16px; }
 [role='button']:focus-visible, a:focus-visible, button:focus-visible { outline: 2px solid var(--go); outline-offset: 4px; }
 @media (min-width: 641px) { .appbar { flex-wrap: wrap; } .topnav { order: 3; flex-basis: 100%; overflow-x: auto; } .topnav a { white-space: nowrap; } }
 @media (max-width: 380px) { .tabbar { overflow-x: auto; } .tabbar a { min-width: 48px; } }
+.pattern-comparison { padding: 18px 0; border-top: 1px solid var(--border); }
+.pattern-comparison h3 { margin: 0 0 8px; font-size: 17px; font-weight: 500; }
+.pattern-comparison p { color: var(--text-dim); font-size: 13px; line-height: 1.6; }
+.pattern-comparison table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pattern-comparison caption { text-align: left; padding: 10px 0; font-weight: 500; }
+.pattern-comparison th, .pattern-comparison td { padding: 10px 6px; border-bottom: 1px solid var(--border); text-align: right; font-weight: 400; }
+.pattern-comparison th:first-child { text-align: left; }
+.pattern-comparison thead { color: var(--text-dim); font-size: 11px; }
+.pattern-comparison small { display: block; color: var(--text-dim); margin-top: 4px; }

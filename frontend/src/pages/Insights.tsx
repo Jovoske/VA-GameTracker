@@ -19,11 +19,12 @@ type Insights = {
 type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
 type Driver = {
   factor: string
+  key?: string
   statement: string
   effect_pct: number
   sample_nights: number
   confidence: number
-  buckets: { label: string; rate: number }[]
+  buckets: { label: string; rate: number; days?: number; min?: number; max?: number }[]
   correlation: number
 }
 type PScope = {
@@ -36,6 +37,12 @@ type PScope = {
   sightings: number
 }
 type Patterns = { scopes: PScope[]; nights: number; range?: [string, string] }
+
+function formatRange(key: string, min: number, max: number) {
+  const divisor = key === 'darkness' ? 60 : 1
+  const unit = key === 'darkness' ? ' h' : ['moon_illum', 'cloud'].includes(key) ? '%' : key === 'temp' ? ' °C' : key === 'wind' ? ' km/h' : key === 'rain' ? ' mm' : key.startsWith('pressure') ? ' hPa' : ''
+  return (min / divisor).toFixed(1) + '–' + (max / divisor).toFixed(1) + unit
+}
 
 const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
@@ -165,7 +172,6 @@ export default function Insights() {
 
       {pat && pat.scopes.length > 0 && (() => {
         const sc = pat.scopes.find((s) => s.key === patScope) || pat.scopes[0]
-        const maxRate = Math.max(...sc.drivers.flatMap((d) => d.buckets.map((b) => b.rate)), 1)
         return (
           <div className="block">
             <div className="sect">Weather and moon associations</div>
@@ -189,45 +195,21 @@ export default function Insights() {
             {sc.drivers.length === 0 && (
               <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No clear weather or moon driver yet. It needs more nights.</div>
             )}
-            {sc.drivers.map((dr, i) => (
-              <div key={i} style={{ marginBottom: 14, paddingBottom: 14, borderBottom: i < sc.drivers.length - 1 ? '1px solid var(--border)' : 'none' }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-dim)', minWidth: 92 }}>{dr.factor}</span>
-                  <span style={{ fontSize: 14, flex: 1, lineHeight: 1.4 }}>
-                    {dr.statement}
-                    {dr.confidence < 0.4 && (
-                      <span
-                        title="Weak signal so far. Treat it as a hint, not a rule."
-                        style={{
-                          marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: '.03em',
-                          color: 'var(--sand)', border: '1px solid var(--border)',
-                          borderRadius: 5, padding: '1px 6px', verticalAlign: 'middle',
-                        }}
-                      >
-                        EARLY SIGNAL
-                      </span>
-                    )}
-                  </span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 32 }} title="sightings/night: low → high range of this factor">
-                    {dr.buckets.map((b) => (
-                      <div key={b.label} title={`${b.label}: ${b.rate}/night`} className="bar-y" style={{ width: 13, height: `${(b.rate / maxRate) * 100}%`, minHeight: 2, background: 'var(--teal)', borderRadius: '2px 2px 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
-                    ))}
-                  </div>
-                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ flex: 1, maxWidth: 120, height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden' }}>
-                      <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? dr.confidence : 0})` }} />
-                    </div>
-                    <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{Math.round(dr.confidence * 100)}% confidence · {dr.sample_nights} nights</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-              {sc.label}: {sc.sightings} sightings over {pat.nights} weather-backtracked nights (avg {sc.avg_per_night}/night). A
-              running calculation. It sharpens as more nights feed in.
-            </div>
+            <p className="page-intro">Exploratory comparisons of recorded detections. Each factor is compared separately; season, camera uptime, repeated triggers, and other conditions are not controlled for.</p>
+            {sc.drivers.map((dr, i) => {
+              const key = dr.key || (dr.factor === 'Moonlight' ? 'moon_illum' : dr.factor === 'Dark hours' ? 'darkness' : '')
+              const title = key === 'moon_illum' ? 'Moon illumination' : key === 'darkness' ? 'Night duration' : dr.factor
+              const definition = key === 'moon_illum'
+                ? 'Illuminated fraction of the moon. This does not measure light at ground level or account for clouds or the moon being above the horizon.'
+                : key === 'darkness' ? 'Hours outside daylight, calculated from sunrise and sunset. Shorter nights have fewer hours of darkness; cloud cover is a separate measurement.'
+                : key === 'cloud' ? 'Average cloud cover during the overnight weather window.' : 'Lower and higher refer to the bottom and top thirds of this measurement in the recorded sample.'
+              return <section key={i} className="pattern-comparison">
+                <h3>{title}</h3><p>{definition}</p>
+                <table><caption>Average detections per recording day</caption><thead><tr><th>Measurement group</th><th>Detections / day</th><th>Days</th></tr></thead><tbody>{dr.buckets.map(bucket => <tr key={bucket.label}><th>{bucket.label === 'low' ? 'Lower third' : bucket.label === 'high' ? 'Higher third' : 'Middle third'}{bucket.min != null && bucket.max != null && <small>{formatRange(key, bucket.min, bucket.max)}</small>}</th><td>{bucket.rate.toFixed(1)}</td><td>{bucket.days ?? '—'}</td></tr>)}</tbody></table>
+                <p>{dr.sample_nights} recording days compared. This is an association in this sample, not evidence that the condition caused more activity.</p>
+              </section>
+            })}
+            <p className="page-intro">{sc.label}: {sc.sightings} detections across {sc.total_nights} recording days. Each day runs 06:00–06:00 in estate time and includes daytime detections; weather is summarized for the overnight window. Counts are not unique animals or adjusted for camera uptime.</p>
           </div>
         )
       })()}

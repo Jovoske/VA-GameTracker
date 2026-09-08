@@ -1,264 +1,79 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
+import { useRefetchOnReturn } from '../hooks'
 import { flushSitQueue } from './SitMode'
+import '../map/map.css'
 
-/**
- * Stands — claim one for tonight, then report what came of it.
- *
- * The claim is the point. It is written before the sit, when the phone is out and
- * hands are clean, and it exists because claiming has a payoff for the person doing
- * it: the wind verdict and the answer to "is anyone else on that ridge". Whether or
- * not anyone ever reports an outcome, that row makes hunting pressure measurable.
- *
- * Outcome buttons are large and few. This gets tapped in the dark, in gloves.
- */
-
-type Stand = {
-  id: string
-  name: string
-  approach_dirs_deg: number[] | null
-  shooting_dirs_deg: number[] | null
-  has_geometry: boolean
-  claimed_tonight: boolean
-  claimed_by: string | null
-}
-type Sit = {
-  id: string
-  stand_id: string
-  stand: string | null
-  outcome: string
-  started_at: string | null
-  wind_status: string | null
-  wind_text: string | null
-}
+type Stand = { id: string; name: string; lat: number | null; lon: number | null; claimed_tonight: boolean; claimed_by: string | null }
+type Sit = { id: string; stand_id: string; user_id: string | null; outcome: string; started_at: string | null; wind_text: string | null }
 type Me = { id: string; role: string }
-
-const btn = {
-  background: 'var(--surface-2)',
-  color: 'var(--text)',
-  border: '1px solid var(--border)',
-  borderRadius: 10,
-  padding: '12px 14px',
-  fontSize: 14,
-  cursor: 'pointer',
-  minHeight: 48,
-} as const
-
-const OUTCOMES: [string, string][] = [
-  ['nothing', 'No animals seen'],
-  ['seen', 'Animals seen'],
-  ['shootable_no_shot', 'Shootable, no shot'],
-  ['shot', 'Shot taken'],
-]
+const OUTCOMES = [['nothing', 'No animals seen'], ['seen', 'Animals seen'], ['shootable_no_shot', 'Opportunity, no shot'], ['shot', 'Shot taken']] as const
+const outcomeLabel = (value: string) => OUTCOMES.find(([key]) => key === value)?.[1] ?? 'Outcome not recorded'
 
 export default function Stands() {
   const nav = useNavigate()
+  const [params] = useSearchParams()
   const [stands, setStands] = useState<Stand[] | null>(null)
   const [sits, setSits] = useState<Sit[]>([])
   const [me, setMe] = useState<Me | null>(null)
-  const [msg, setMsg] = useState('')
-  const [loadErr, setLoadErr] = useState('')
-  const [newName, setNewName] = useState('')
-
+  const [err, setErr] = useState('')
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const saving = useRef(false)
+  const [filter, setFilter] = useState('all')
+  const focused = useRef(false)
   async function load() {
-    setLoadErr('')
+    setErr('')
     try {
-      setMe(await api<Me>('/users/me'))
-      setStands(await api<Stand[]>('/stands'))
-      setSits(await api<Sit[]>('/sits'))
-    } catch (e) {
-      setLoadErr((e as Error).message)
-    }
+      const [all, reports, user] = await Promise.all([api<Stand[]>('/stands'), api<Sit[]>('/sits'), api<Me>('/users/me')])
+      setStands(all); setSits(reports.filter(s => s.outcome !== 'cancelled')); setMe(user)
+    } catch (e) { setErr(`Could not load stands. ${(e as Error).message}`) }
   }
-
   useEffect(() => {
-    // Drain anything Sit Mode recorded while out of signal — and say how much
-    // came through. A queue that empties silently is indistinguishable from one
-    // that lost the night, which is the one thing this app cannot afford to be
-    // ambiguous about.
-    flushSitQueue()
-      .then((n) => {
-        if (n > 0) setMsg(`${n} offline sit report${n === 1 ? '' : 's'} synced.`)
-      })
-      .finally(load)
+    flushSitQueue().then(n => { if (n) setNotice(`${n} offline sit report${n === 1 ? '' : 's'} synced.`) }).catch(() => setNotice('Some offline reports could not sync. They remain saved on this device.')).finally(load)
   }, [])
-
-  async function run(fn: () => Promise<unknown>, ok = '') {
-    setMsg('')
-    try {
-      await fn()
-      if (ok) setMsg(ok)
-      await load()
-    } catch (e) {
-      setMsg((e as Error).message)
-    }
+  useRefetchOnReturn(() => { if (!saving.current) load() })
+  useEffect(() => {
+    if (!stands || focused.current || !params.get('stand')) return
+    document.getElementById(`stand-${params.get('stand')}`)?.scrollIntoView({ block: 'center' }); focused.current = true
+  }, [stands, params])
+  async function run(id: string, action: () => Promise<unknown>, message: string, next?: string) {
+    if (saving.current) return
+    saving.current = true; setBusy(id); setErr(''); setNotice('')
+    try { await action(); setNotice(message); if (next) nav(next); else await load() }
+    catch (e) { setErr(`Could not save your change. ${(e as Error).message}`) }
+    finally { saving.current = false; setBusy(null) }
   }
+  const sitFor = (id: string) => sits.find(s => s.stand_id === id)
+  const owned = (s: Stand) => !!me && (sitFor(s.id)?.user_id === me.id || s.claimed_by === me.id)
+  const occupied = (s: Stand) => s.claimed_tonight || !!sitFor(s.id)
+  const shown = stands?.filter(s => filter === 'all' || (filter === 'mine' ? owned(s) : !occupied(s))) ?? []
 
-  async function bootstrap() {
-    await run(async () => {
-      const r = await api<{ created: string[]; note: string }>('/stands/bootstrap', {
-        method: 'POST',
-      })
-      setMsg(
-        r.created.length
-          ? `Created ${r.created.length} stand${r.created.length === 1 ? '' : 's'}. ${r.note}`
-          : 'Every camera already has a stand.',
-      )
-    })
-  }
-
-  if (!stands && loadErr) return <div className="status-panel" role="alert">Could not load stands: {loadErr}<button className="text-action" onClick={load}>Retry loading stands</button></div>
-  if (!stands) return <div role="status" style={{ color: 'var(--text-dim)' }}>Loading stands…</div>
-
-  const sitFor = (standId: string) => sits.find((s) => s.stand_id === standId)
-
-  return (
-    <div style={{ maxWidth: 560, margin: '0 auto' }}>
-      <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Stands</div>
-      <p className="page-intro">Reserve a stand for tonight, check its wind information, and record what you saw after your sit.</p>
-      {loadErr && <div className="status-panel" role="alert">Could not refresh stands: {loadErr}<button className="text-action" onClick={load}>Retry loading stands</button></div>}
-
-      {msg && (
-        <div
-          onClick={() => setMsg('')}
-          className="card"
-          style={{ padding: '10px 14px', marginBottom: 14, fontSize: 13, cursor: 'pointer' }}
-        >
-          {msg}
-        </div>
-      )}
-
-      {stands.length === 0 && (
-        <div className="card" style={{ padding: 18, marginBottom: 14, fontSize: 13, lineHeight: 1.6 }}>
-          <div className="sect">No stands yet</div>
-          A stand is where you actually sit, not where a camera hangs. Cameras go where animals
-          go; stands exist where a bullet can safely stop. Add one below, then record its
-          approach bearings (where animals come from) so the wind check has something to work
-          with. Until then the app will say so rather than guess.
-          <button
-            onClick={bootstrap}
-            style={{
-              display: 'block', marginTop: 12, background: 'var(--surface-2)',
-              color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8,
-              padding: '8px 12px', cursor: 'pointer', fontSize: 13,
-            }}
-          >
-            Create a stand at each camera
-          </button>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
-            Places a stand at each camera so you have something to drag, rather than typing
-            the estate in from scratch. Arcs stay unset, so wind advice stays quiet.
-          </div>
-        </div>
-      )}
-
-      {stands.map((s) => {
-        const sit = sitFor(s.id)
-        return (
-          <div key={s.id} className="card" style={{ padding: 16, marginBottom: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-              <div style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>{s.name}</div>
-              {!s.has_geometry && (
-                <span style={{ fontSize: 11, color: 'var(--v-look)' }}>no approach arcs</span>
-              )}
-            </div>
-
-            {sit?.wind_text && (
-              <div style={{ fontSize: 13, marginTop: 6, lineHeight: 1.45, color: 'var(--text-dim)' }}>
-                {sit.wind_text}
-              </div>
-            )}
-
-            {!sit && (
-              <button
-                style={{ ...btn, width: '100%', marginTop: 12 }}
-                onClick={() => run(() => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }) }))}
-              >
-                Claim for tonight
-              </button>
-            )}
-
-            {sit && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
-                  Claimed tonight
-                  {sit.started_at ? ' · sitting' : ''}
-                  {sit.outcome !== 'unreported' ? ` · ${sit.outcome.replace(/_/g, ' ')}` : ''}
-                </div>
-
-                {sit.outcome === 'unreported' && (
-                  <button
-                    style={{ ...btn, width: '100%' }}
-                    onClick={() => run(async () => {
-                      if (!sit.started_at) {
-                        await api(`/sits/${sit.id}/start`, { method: 'POST' })
-                      }
-                      nav(`/sit/${sit.id}`)
-                    })}
-                  >
-                    {sit.started_at ? 'Back to sit mode' : 'Start sit'}
-                  </button>
-                )}
-
-                {sit.outcome === 'unreported' && (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-                    {OUTCOMES.map(([value, text]) => (
-                      <button
-                        key={value}
-                        style={btn}
-                        onClick={() =>
-                          run(
-                            () =>
-                              api(`/sits/${sit.id}`, {
-                                method: 'PATCH',
-                                body: JSON.stringify({ outcome: value }),
-                              }),
-                            'Sit outcome saved. This helps compare forecasts with observed activity.',
-                          )
-                        }
-                      >
-                        {text}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {me?.role === 'admin' && (
-        <div className="card" style={{ padding: 16 }}>
-          <div className="sect">Add a stand</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              className="input"
-              placeholder="Stand name"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-            />
-            <button
-              style={btn}
-              disabled={!newName}
-              onClick={() =>
-                run(async () => {
-                  await api('/stands', { method: 'POST', body: JSON.stringify({ name: newName }) })
-                  setNewName('')
-                })
-              }
-            >
-              Add
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14, lineHeight: 1.6, textAlign: 'center' }}>
-        A sit nobody reports on stays <b>unreported</b>, never "nothing". Confusing "I saw
-        nothing" with "I didn't say" would poison the only ground truth this app will ever have.
-      </div>
-    </div>
-  )
+  return <div className="stands-page estate-map">
+    <div className="map-page-heading"><div><h1>Tonight’s stands</h1><p>Choose a position. Reserve it. Record your sit.</p></div><Link className="map-button" to="/map">Open map ↗</Link></div>
+    {err && <div className="map-message map-message--error" role="alert">{err}<button onClick={load} disabled={!!busy}>Retry loading stands</button></div>}
+    {notice && <div className="map-message" role="status">{notice}</div>}
+    {!stands && !err && <div className="status-panel" role="status">Loading stands…</div>}
+    {stands && stands.length > 0 && <>
+      <div className="stand-summary" aria-label="Tonight's reservations"><div><strong>{stands.filter(s => !occupied(s)).length}</strong><span>Available</span></div><div><strong>{stands.filter(owned).length}</strong><span>Reserved by you</span></div><div><strong>{stands.filter(s => occupied(s) && !owned(s)).length}</strong><span>Reserved by others</span></div></div>
+      <div className="stand-filters" aria-label="Filter stands">{[['all', 'All stands'], ['available', 'Available'], ['mine', 'Your reservations']].map(([value, label]) => <button key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div>
+    </>}
+    {stands?.length === 0 && <div className="stand-empty"><h2>No stands yet</h2><p>Add the positions where you actually sit on the estate map. They’ll appear here for reservations and sit reports.</p><Link className="map-button map-button--primary" to="/map">{me?.role === 'admin' ? 'Add a stand on the map →' : 'View estate map →'}</Link></div>}
+    {stands && stands.length > 0 && shown.length === 0 && <p className="status-panel">No stands match this filter. Choose All stands to see every location.</p>}
+    {shown.map(s => {
+      const sit = sitFor(s.id), mine = owned(s), taken = occupied(s), active = sit?.outcome === 'unreported'
+      return <article key={s.id} id={`stand-${s.id}`} className={`stand-entry${params.get('stand') === s.id ? ' stand-entry--selected' : ''}`}>
+        <div className="stand-entry-top"><div><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{mine ? active ? sit?.started_at ? 'Your sit is in progress' : 'Reserved by you' : 'Your sit is recorded' : taken ? 'Reserved by another hunter' : 'Available tonight'}</span><h2>{s.name}</h2></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Set map position ↗' : 'View on map ↗'}</Link></div>
+        {mine && sit?.wind_text ? <details className="stand-wind"><summary>Wind check saved with your reservation</summary><p>{sit.wind_text}</p><Link to={`/map?stand=${s.id}`}>Check current conditions on the map →</Link></details> : <p className="map-detail-copy">{taken ? 'This position is already reserved tonight.' : 'Check wind direction and nearby bedding on the map before reserving.'}</p>}
+        {!taken && <button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }) }), `${s.name} reserved for tonight.`)}>{busy === s.id ? 'Reserving…' : 'Reserve for tonight'}</button>}
+        {mine && sit && active && <>
+          <div className="map-actions"><button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => sit.started_at ? Promise.resolve() : api(`/sits/${sit.id}/start`, { method: 'POST' }), '', `/sit/${sit.id}`)}>{busy === s.id ? 'Saving…' : sit.started_at ? 'Continue sit →' : 'Start sit →'}</button>{!sit.started_at && <button className="map-link" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: 'cancelled' }) }), 'Reservation cancelled. The stand is available again.')}>Cancel reservation</button>}</div>
+          <details className="stand-outcome"><summary>Record sit outcome</summary><p>Choose what happened during your sit. This closes the report.</p><div className="stand-outcome-buttons">{OUTCOMES.map(([value, label]) => <button key={value} className="map-button" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: value }) }), 'Sit outcome saved.')}>{label}</button>)}</div></details>
+        </>}
+        {mine && sit && !active && <p className="stand-recorded">{outcomeLabel(sit.outcome)}</p>}
+      </article>
+    })}
+    {!!stands?.length && <p className="stand-footnote">Reservations are for tonight. An unreported sit is kept separate from a sit with no animals seen. Manage stand positions on the map.</p>}
+  </div>
 }

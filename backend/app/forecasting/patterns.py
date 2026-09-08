@@ -36,14 +36,14 @@ SCOPES = [("all", "All animals"), ("wild_boar", "Wild boar"), ("red_deer", "Red 
 
 # key, label, description-when-high, description-when-low
 _VARS = [
-    ("moon_illum", "Moonlight", "bright, moonlit nights", "dark nights"),
-    ("pressure", "Pressure", "high pressure (settled)", "low pressure (unsettled)"),
+    ("moon_illum", "Moon illumination", "higher moon illumination", "lower moon illumination"),
+    ("pressure", "Pressure", "higher pressure", "lower pressure"),
     ("pressure_trend", "Pressure trend", "rising pressure", "falling pressure"),
     ("temp", "Temperature", "warmer nights", "cooler nights"),
     ("wind", "Wind", "windier nights", "calm nights"),
     ("rain", "Rain", "wetter nights", "drier nights"),
-    ("cloud", "Cloud cover", "overcast skies", "clear skies"),
-    ("darkness", "Dark hours", "longer-dark nights", "shorter-dark nights"),
+    ("cloud", "Cloud cover", "higher cloud cover", "lower cloud cover"),
+    ("darkness", "Night duration", "longer nights", "shorter nights"),
 ]
 
 
@@ -172,12 +172,13 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
     confidence = round(min(0.85, min(1.0, n / 45) * min(1.0, abs(r) * 1.6)), 2)
     if confidence < 0.15:
         return None
-    # Phrase big effects as a multiple ("~2.5× the activity") — "+248%" reads like a
-    # statistics bug to a human, and at these sample sizes it half is.
-    if effect >= 100:
-        statement = f"~{(1 + effect / 100):.1f}× the activity on {desc}."
-    else:
-        statement = f"~{round(effect)}% more activity on {desc}."
+    # effect_pct is a normalized contrast used by the existing forecast weighting.
+    # Its denominator is the overall mean, NOT the low group. It must never be
+    # presented as a percent increase or a ratio between groups.
+    statement = (
+        f"Recorded {hi_rate:.1f} vs {lo_rate:.1f} detections per recording day: "
+        f"{hi_desc} compared with {lo_desc}."
+    )
     return {
         "factor": label,
         "statement": statement,
@@ -186,9 +187,9 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
         "sample_nights": n,
         "confidence": confidence,
         "buckets": [
-            {"label": "low", "rate": round(lo_rate, 1)},
-            {"label": "mid", "rate": round(mid_rate, 1)},
-            {"label": "high", "rate": round(hi_rate, 1)},
+            {"label": "low", "rate": round(lo_rate, 1), "days": k, "min": pairs[0][0], "max": pairs[k - 1][0]},
+            {"label": "mid", "rate": round(mid_rate, 1), "days": n - 2 * k, "min": pairs[k][0], "max": pairs[n - k - 1][0]},
+            {"label": "high", "rate": round(hi_rate, 1), "days": k, "min": pairs[n - k][0], "max": pairs[-1][0]},
         ],
         "correlation": round(r, 2),
         # for feeding tonight's conditions back into the forecast:

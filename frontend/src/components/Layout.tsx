@@ -58,7 +58,7 @@ export default function Layout() {
   }
 
   return (
-    <div style={{ maxWidth: 720, margin: '0 auto', minHeight: '100%' }}>
+    <div style={{ maxWidth: loc.pathname === '/map' ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
       <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="appbar">
         <div style={{ fontWeight: 600, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
