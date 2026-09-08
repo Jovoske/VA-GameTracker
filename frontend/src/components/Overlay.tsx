@@ -25,6 +25,7 @@ const EXIT_MS = 150
 // so without the stack one Escape would close the photo and the gallery under it
 // in the same keystroke.
 let locks = 0
+let nextOverlay = 0
 const stack: symbol[] = []
 
 function lockScroll(): () => void {
@@ -47,12 +48,16 @@ export default function Overlay({
   backdrop = 'rgba(0, 0, 0, 0.8)',
   zIndex = 50,
   style,
+  label = 'Photo gallery',
+  backLabel = 'Back to page',
   children,
 }: {
   onClose: () => void
   backdrop?: string
   zIndex?: number
   style?: CSSProperties
+  label?: string
+  backLabel?: string
   children: (close: () => void) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
@@ -60,35 +65,66 @@ export default function Overlay({
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
   const me = useRef(Symbol('overlay'))
+  const root = useRef<HTMLDivElement>(null)
+  const timer = useRef<number>()
+  const historyKey = useRef(`overlay-${Date.now()}-${++nextOverlay}`)
 
   useEffect(() => {
     const release = lockScroll()
     const id_ = me.current
     stack.push(id_)
+    if (window.history.state?.gsOverlay !== historyKey.current) {
+      window.history.pushState({ ...window.history.state, gsOverlay: historyKey.current }, '')
+    }
     // Flip on the next frame so the transition has two states to move between.
-    const id = requestAnimationFrame(() => setOpen(true))
+    const previousFocus = document.activeElement as HTMLElement | null
+    const id = requestAnimationFrame(() => {
+      setOpen(true)
+      root.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    })
+    const onPop = () => {
+      if (stack[stack.length - 1] === id_ && window.history.state?.gsOverlay !== historyKey.current) dismiss()
+    }
+    window.addEventListener('popstate', onPop)
     return () => {
       cancelAnimationFrame(id)
+      window.clearTimeout(timer.current)
+      window.removeEventListener('popstate', onPop)
       const i = stack.indexOf(id_)
       if (i >= 0) stack.splice(i, 1)
       release()
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true })
     }
   }, [])
 
   function close() {
     if (closing.current) return
+    if (window.history.state?.gsOverlay === historyKey.current) window.history.back()
+    else dismiss()
+  }
+
+  function dismiss() {
+    if (closing.current) return
     closing.current = true
     setOpen(false)
-    window.setTimeout(() => onCloseRef.current(), EXIT_MS)
+    timer.current = window.setTimeout(() => onCloseRef.current(), EXIT_MS)
   }
 
   // Escape closes, on every overlay rather than just the one that remembered to,
   // and only on the topmost one.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
       if (stack[stack.length - 1] !== me.current) return
-      close()
+      if (e.key === 'Escape') { e.preventDefault(); close() }
+      if (e.key === 'Tab') {
+        const controls = Array.from(root.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input, select, textarea, [tabindex="0"]') ?? [])
+          .filter((el) => el.getClientRects().length > 0)
+        e.preventDefault()
+        const current = controls.indexOf(document.activeElement as HTMLElement)
+        const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
+          : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length
+        controls[next]?.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -98,10 +134,18 @@ export default function Overlay({
   return (
     <div
       className="ov"
+      ref={root}
+      role="dialog"
+      aria-modal="true"
+      aria-label={label}
       data-open={open}
-      onClick={close}
+      onClick={(e) => { if (e.target === e.currentTarget) close() }}
       style={{ background: backdrop, zIndex, ...style }}
     >
+      <div className="ov-toolbar" onClick={(e) => e.stopPropagation()}>
+        <button className="ov-back" onClick={close}>← {backLabel}</button>
+        <span>{label}</span>
+      </div>
       {children(close)}
     </div>
   )

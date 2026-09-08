@@ -1,5 +1,5 @@
 import { MoonIcon } from '@phosphor-icons/react/dist/csr/Moon'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
 import { useRefetchOnReturn, useReveal } from '../hooks'
@@ -45,6 +45,8 @@ const clock = (iso: string | null) =>
 export default function Insights() {
   const [d, setD] = useState<Insights | null>(null)
   const [err, setErr] = useState('')
+  const [classErr, setClassErr] = useState('')
+  const classRequest = useRef(0)
   const [openClass, setOpenClass] = useState<string | null>(null)
   const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
   const [zoom, setZoom] = useState<string | null>(null)
@@ -55,6 +57,7 @@ export default function Insights() {
   const grown = useReveal(!!d)
 
   function load() {
+    setErr('')
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
     api<Patterns>('/insights/patterns').then(setPat).catch(() => {})
   }
@@ -62,25 +65,31 @@ export default function Insights() {
   useRefetchOnReturn(load, 120_000)
 
   async function openClassImages(label: string) {
+    const request = ++classRequest.current
+    setClassErr('')
     setOpenClass(label)
     setClassImgs(null)
     try {
-      setClassImgs(await api<ClassImg[]>('/insights/class?label=' + encodeURIComponent(label)))
+      const photos = await api<ClassImg[]>('/insights/class?label=' + encodeURIComponent(label))
+      if (request === classRequest.current) setClassImgs(photos)
     } catch {
-      setClassImgs([])
+      if (request === classRequest.current) setClassErr('Could not load photos. Check your connection and retry.')
     }
   }
   function closeClass() {
+    classRequest.current++
     setOpenClass(null)
     setClassImgs(null)
   }
 
-  if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
-  if (!d) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
+  if (err && !d) return <div className="status-panel" role="alert">Could not load insights: {err}<button className="text-action" onClick={load}>Retry loading insights</button></div>
+  if (!d) return <div role="status" style={{ color: 'var(--text-dim)' }}>Loading activity insights…</div>
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Insights</div>
+      <p className="page-intro">Explore recorded animal activity, weather associations, and light conditions for the coming week.</p>
+      {err && <div className="status-panel" role="alert">Could not refresh insights. Showing the previous results.<button className="text-action" onClick={load}>Retry</button></div>}
 
       <div className="block">
         <div className="sect">The next seven nights</div>
@@ -113,21 +122,22 @@ export default function Insights() {
           ))}
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.45 }}>
-          Moon illumination and last shootable light. No odds here on purpose: a night seven
-          days out can't be called until the forecast has been scored against what the cameras
-          actually saw. Tonight's call lives on the Tonight tab.
+          Each day shows the illuminated percentage of the moon and the end of civil twilight in your device's local time. For tonight's animal-activity forecast, open Tonight.
         </div>
       </div>
 
       {d.composition && d.composition.length > 0 && (
         <div className="block">
-          <div className="sect">Herd makeup, and where</div>
+          <div className="sect">Animal groups by camera</div>
           {(() => {
             const max = Math.max(...d.composition.map((x) => x.count), 1)
             return d.composition.slice(0, 8).map((x) => (
               <div
                 key={x.label}
                 className="pressable"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => openClassImages(x.label)}
                 title={`View the ${x.count} ${x.label} photos`}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, cursor: 'pointer' }}
@@ -148,7 +158,7 @@ export default function Insights() {
             ))
           })()}
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-            Stags vs hinds, sows with piglets vs sounders, and the stand each favours.
+            Recorded group types and the camera with the most sightings. Select a row to view its photos.
           </div>
         </div>
       )}
@@ -158,7 +168,7 @@ export default function Insights() {
         const maxRate = Math.max(...sc.drivers.flatMap((d) => d.buckets.map((b) => b.rate)), 1)
         return (
           <div className="block">
-            <div className="sect">What moves them</div>
+            <div className="sect">Weather and moon associations</div>
             <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
               {pat.scopes.map((s) => (
                 <button
@@ -248,11 +258,11 @@ export default function Insights() {
       </div>
 
       <div style={{ color: 'var(--text-dim)', fontSize: 11, textAlign: 'center' }}>
-        Early patterns from about a month of data. They firm up over the season.
+        These patterns describe recorded activity, not proven causes. More camera nights can change the results.
       </div>
 
       {openClass && (
-        <Overlay onClose={closeClass}>{(close) => (
+        <Overlay onClose={closeClass} label={`${openClass} photos`} backLabel="Back to insights">{(close) => (
           <div
             onClick={(e) => e.stopPropagation()}
             className="card ov-panel"
@@ -271,7 +281,8 @@ export default function Insights() {
               </button>
             </div>
             <div style={{ overflowY: 'auto', padding: 12 }}>
-              {!classImgs && <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading…</div>}
+              {classErr && <div className="status-panel" role="alert">{classErr}<button className="text-action" onClick={() => openClassImages(openClass)}>Retry loading photos</button></div>}
+              {!classImgs && !classErr && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
               {classImgs && classImgs.length === 0 && (
                 <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>No photos.</div>
               )}
@@ -280,6 +291,9 @@ export default function Insights() {
                   <div
                     key={im.image_id}
                     className="pressable"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                     onClick={() => setZoom(imageUrl(im.file_url))}
                     style={{ background: 'var(--surface-2)', borderRadius: 8, overflow: 'hidden', cursor: 'pointer' }}
                   >
@@ -298,13 +312,15 @@ export default function Insights() {
 
       {zoom && (
         <Overlay
+          label="Photo details"
+          backLabel="Back to gallery"
           onClose={() => setZoom(null)}
           backdrop="rgba(0, 0, 0, 0.92)"
           zIndex={60}
           style={{ alignItems: 'center', justifyContent: 'center' }}
         >
           {(_close) => (
-            <img className="ov-panel" src={zoom} alt="" style={{ maxWidth: '94vw', maxHeight: '94vh', borderRadius: 10 }} />
+            <img className="ov-panel" src={zoom} alt={`${openClass} trail-camera photo`} style={{ maxWidth: '94vw', maxHeight: '75dvh', borderRadius: 10 }} />
           )}
         </Overlay>
       )}

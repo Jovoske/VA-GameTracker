@@ -59,13 +59,14 @@ export default function Layout() {
 
   return (
     <div style={{ maxWidth: 720, margin: '0 auto', minHeight: '100%' }}>
+      <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="appbar">
         <div style={{ fontWeight: 600, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
         </div>
 
         {/* Desktop / tablet: links in the header. On phones the bottom tab bar takes over. */}
-        <nav className="topnav">
+        <nav className="topnav" aria-label="Main navigation">
           {TABS.map((t) => (
             <NavLink key={t.to} to={t.to} end={t.end} style={({ isActive }) => linkStyle(isActive)}>
               {t.label}
@@ -94,12 +95,12 @@ export default function Layout() {
 
       {/* Padding lives in theme.css — an inline padding here overrides the
           media-query rule that clears the bottom tab bar, hiding content under it. */}
-      <main className="page">
+      <main className="page" id="main-content" tabIndex={-1}>
         <Outlet />
       </main>
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
-      <nav className="tabbar">
+      <nav className="tabbar" aria-label="Main navigation">
         {TABS.map(({ to, label, Ico, end }) => (
           <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'active' : '')}>
             {({ isActive }) => (

@@ -46,10 +46,10 @@ const btn = {
 } as const
 
 const OUTCOMES: [string, string][] = [
-  ['nothing', 'Nothing'],
-  ['seen', 'Seen'],
+  ['nothing', 'No animals seen'],
+  ['seen', 'Animals seen'],
   ['shootable_no_shot', 'Shootable, no shot'],
-  ['shot', 'Shot'],
+  ['shot', 'Shot taken'],
 ]
 
 export default function Stands() {
@@ -58,16 +58,17 @@ export default function Stands() {
   const [sits, setSits] = useState<Sit[]>([])
   const [me, setMe] = useState<Me | null>(null)
   const [msg, setMsg] = useState('')
+  const [loadErr, setLoadErr] = useState('')
   const [newName, setNewName] = useState('')
 
   async function load() {
+    setLoadErr('')
     try {
       setMe(await api<Me>('/users/me'))
       setStands(await api<Stand[]>('/stands'))
       setSits(await api<Sit[]>('/sits'))
     } catch (e) {
-      setMsg((e as Error).message)
-      setStands([])
+      setLoadErr((e as Error).message)
     }
   }
 
@@ -78,7 +79,7 @@ export default function Stands() {
     // ambiguous about.
     flushSitQueue()
       .then((n) => {
-        if (n > 0) setMsg(`${n} sit${n === 1 ? '' : 's'} from the valley are in.`)
+        if (n > 0) setMsg(`${n} offline sit report${n === 1 ? '' : 's'} synced.`)
       })
       .finally(load)
   }, [])
@@ -107,13 +108,16 @@ export default function Stands() {
     })
   }
 
-  if (!stands) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
+  if (!stands && loadErr) return <div className="status-panel" role="alert">Could not load stands: {loadErr}<button className="text-action" onClick={load}>Retry loading stands</button></div>
+  if (!stands) return <div role="status" style={{ color: 'var(--text-dim)' }}>Loading stands…</div>
 
   const sitFor = (standId: string) => sits.find((s) => s.stand_id === standId)
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 12 }}>Stands</div>
+      <p className="page-intro">Reserve a stand for tonight, check its wind information, and record what you saw after your sit.</p>
+      {loadErr && <div className="status-panel" role="alert">Could not refresh stands: {loadErr}<button className="text-action" onClick={load}>Retry loading stands</button></div>}
 
       {msg && (
         <div
@@ -140,7 +144,7 @@ export default function Stands() {
               padding: '8px 12px', cursor: 'pointer', fontSize: 13,
             }}
           >
-            Start me off, one per camera
+            Create a stand at each camera
           </button>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
             Places a stand at each camera so you have something to drag, rather than typing
@@ -186,12 +190,12 @@ export default function Stands() {
                 {sit.outcome === 'unreported' && (
                   <button
                     style={{ ...btn, width: '100%' }}
-                    onClick={async () => {
+                    onClick={() => run(async () => {
                       if (!sit.started_at) {
-                        await api(`/sits/${sit.id}/start`, { method: 'POST' }).catch(() => {})
+                        await api(`/sits/${sit.id}/start`, { method: 'POST' })
                       }
                       nav(`/sit/${sit.id}`)
-                    }}
+                    })}
                   >
                     {sit.started_at ? 'Back to sit mode' : 'Start sit'}
                   </button>
@@ -210,7 +214,7 @@ export default function Stands() {
                                 method: 'PATCH',
                                 body: JSON.stringify({ outcome: value }),
                               }),
-                            'Logged. Thank you: that is the only ground truth this app gets.',
+                            'Sit outcome saved. This helps compare forecasts with observed activity.',
                           )
                         }
                       >

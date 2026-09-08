@@ -103,6 +103,9 @@ export default function Cameras() {
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
   const [err, setErr] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [actionErr, setActionErr] = useState('')
+  const [imgError, setImgError] = useState(false)
   const [zoom, setZoom] = useState<Zoom | null>(null)
   // Photos being marked empty/animal, held long enough to leave rather than
   // blink out when the strip reloads underneath them.
@@ -118,6 +121,7 @@ export default function Cameras() {
   }
 
   async function loadCameras() {
+    setLoading(true)
     try {
       const cams = await api<Camera[]>('/cameras')
       setCameras(cams)
@@ -125,6 +129,8 @@ export default function Cameras() {
       await Promise.all(cams.map((c) => loadImages(c.id, !!showHidden[c.id])))
     } catch (e) {
       setErr((e as Error).message)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -154,6 +160,7 @@ export default function Cameras() {
     // The next photo fades in once it has actually decoded. Swapping src alone
     // gave a blank frame and then a jump as the stage resized to fit it.
     setImgReady(false)
+    setImgError(false)
     setZoom({ ...zoom, idx: i })
   }
 
@@ -182,12 +189,13 @@ export default function Cameras() {
     setSwapping(camId)
     window.setTimeout(() => {
       setShowHidden((p) => ({ ...p, [camId]: next }))
-      loadImages(camId, next).catch(() => {})
+      loadImages(camId, next).catch(() => setActionErr('Could not load these photos. Try changing the filter again.'))
       requestAnimationFrame(() => setSwapping(null))
     }, 110)
   }
 
   async function flag(camId: string, imgId: string, isEmpty: boolean) {
+    setActionErr('')
     setFlagging((s) => new Set(s).add(imgId))
     try {
       // The photo leaves while the write is in flight, so the strip does not
@@ -201,7 +209,7 @@ export default function Cameras() {
       ])
       await loadImages(camId, !!showHidden[camId])
     } catch {
-      /* ignore */
+      setActionErr('Could not save the photo review or refresh the list. Reload the cameras to check its status before trying again.')
     }
     setFlagging((s) => {
       const n = new Set(s)
@@ -259,9 +267,6 @@ export default function Cameras() {
             color: 'var(--text-dim)',
             flex: 1,
             minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
             opacity: syncMsg ? 1 : 0,
             transition: 'opacity var(--d-fast) var(--ease-out)',
           }}
@@ -282,9 +287,15 @@ export default function Cameras() {
       </div>
       {err && (
         <div className="card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--skip)' }}>
-          Couldn't load cameras: {err}. Tap Sync now to retry.
+          Could not load cameras: {err}
+          <button className="text-action" onClick={loadCameras}>Retry loading cameras</button>
         </div>
       )}
+      <p className="page-intro">Check camera health and browse the latest 80 photos per camera. Open a photo to view details or review photos with no animal detected.</p>
+      <div role="status" className="sr-only">{syncMsg}</div>
+      {actionErr && <div className="status-panel" role="alert">{actionErr}<button className="text-action" onClick={() => { setActionErr(''); loadCameras() }}>Reload cameras</button></div>}
+      {loading && cameras.length === 0 && <div className="status-panel" role="status">Loading cameras and photos…</div>}
+      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras connected yet</strong><p>Connect your SPYPOINT account in Settings, then choose Sync now to import your cameras and photos.</p><a href="/settings">Open Settings →</a></div>}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {cameras.map((c) => {
@@ -306,15 +317,15 @@ export default function Cameras() {
                   </span>
                 )}
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 14, fontSize: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span style={{ color: batteryColor(c.battery_pct) }}>battery {c.battery_pct ?? '–'}%</span>
-                  <span style={{ color: 'var(--text-dim)' }}>signal {c.signal_pct ?? '–'}%</span>
+                  <span style={{ color: batteryColor(c.battery_pct) }}>Battery {c.battery_pct == null ? 'unknown' : `${c.battery_pct}%`}</span>
+                  <span style={{ color: 'var(--text-dim)' }}>Signal {c.signal_pct == null ? 'unknown' : `${c.signal_pct}%`}</span>
                   {c.photo_limit != null && (
                     <span style={{ color: creditColor(c.photo_count, c.photo_limit) }}>
-                      photos {c.photo_count ?? '?'}/{c.photo_limit}
+                      Plan usage: {c.photo_count ?? '?'}/{c.photo_limit} photos
                     </span>
                   )}
                   <span style={{ color: 'var(--text-dim)' }}>
-                    {c.image_count - c.empty_count} animals · {timeAgo(c.last_capture)}
+                    {Math.max(0, c.image_count - c.empty_count)} photos not marked empty · Latest photo: {timeAgo(c.last_capture)}
                   </span>
                 </div>
               </div>
@@ -341,7 +352,7 @@ export default function Cameras() {
                     fontSize: 12,
                   }}
                 >
-                  {hidden ? 'Hide empty frames' : `Review ${c.empty_count} hidden`}
+                  {hidden ? 'Hide photos with no animal detected' : `Review ${c.empty_count} photos marked empty`}
                 </button>
               )}
 
@@ -372,11 +383,16 @@ export default function Cameras() {
                     >
                       <img
                         className="pressable"
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Open photo from ${c.name}: ${im.species || 'Species not identified'}`}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                         src={imageUrl(im.file_url as string)}
                         alt={im.species || 'trail-camera photo'}
                         loading="lazy"
                         onClick={() => {
                           setImgReady(false)
+                          setImgError(false)
                           setZoom({ list: imgs, idx: imgs.indexOf(im), cam: c.name })
                         }}
                         style={{
@@ -393,6 +409,8 @@ export default function Cameras() {
                       {hidden && (
                         <button
                           onClick={() => flag(c.id, im.id, !isEmpty)}
+                          disabled={leaving}
+                          aria-label={isEmpty ? 'Mark photo as containing an animal' : 'Mark photo as empty'}
                           title={isEmpty ? 'Mark as animal (keep)' : 'Mark as empty (hide)'}
                           style={{
                             position: 'absolute',
@@ -453,7 +471,7 @@ export default function Cameras() {
                     </div>
                   )
                 })}
-                {imgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>No photos</div>}
+                {imgs.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{images[c.id] == null ? 'Loading photos…' : hidden ? 'No downloaded photos available.' : 'No photos in this view. Review photos marked empty, or sync for new photos.'}</div>}
               </div>
             </div>
           )
@@ -465,9 +483,11 @@ export default function Cameras() {
         const when = new Date(im.captured_at).toLocaleString(undefined, {
           weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
         })
-        const what = im.is_empty_frame ? 'No animal' : classLabel(im) || 'Unclassified'
+        const what = im.is_empty_frame ? 'No animal detected' : classLabel(im) || 'Species not identified'
         return (
           <Overlay
+            label={`${zoom.cam} · Photo ${zoom.idx + 1} of ${zoom.list.length}`}
+            backLabel="Back to cameras"
             onClose={() => setZoom(null)}
             backdrop="rgba(0, 0, 0, 0.92)"
             style={{ flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
@@ -485,24 +505,28 @@ export default function Cameras() {
                   onPointerCancel={() => { swipe.current = null }}
                   style={{
                     width: '94vw',
-                    height: '80vh',
+                    height: '65dvh',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     touchAction: 'pan-y',
                   }}
                 >
+                  {imgError && <div role="alert" style={{ color: '#fff' }}>Could not load this photo. Try another photo or return to cameras.</div>}
+                  {!imgReady && !imgError && <span role="status" style={{ color: '#fff' }}>Loading photo…</span>}
                   <img
                     key={im.id}
                     src={imageUrl(im.file_url as string)}
                     alt={what}
                     draggable={false}
                     onLoad={() => setImgReady(true)}
+                    onError={() => setImgError(true)}
                     style={{
                       maxWidth: '100%',
                       maxHeight: '100%',
                       borderRadius: 10,
                       opacity: imgReady ? 1 : 0,
+                      display: imgError ? 'none' : undefined,
                       transition: 'opacity var(--d-fast) var(--ease-out)',
                     }}
                   />
