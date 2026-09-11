@@ -1,5 +1,6 @@
 """Serve stored image files; let the user flag a frame as empty/animal."""
 import os
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,7 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.api.deps import get_current_user
 from app.core.security import decode_token
 from app.core.db import get_db
-from app.models import Image, User
+from app.models import Camera, Image, User
 
 router = APIRouter(prefix="/images", tags=["images"])
 
@@ -22,10 +23,18 @@ router = APIRouter(prefix="/images", tags=["images"])
 _optional_bearer = HTTPBearer(auto_error=False)
 
 
+def download_name(camera_name: str | None, captured_at) -> str:
+    """`Ridge_2025-10-04_22-00.jpg`: the camera and the moment, which is what anyone
+    sorting a folder of these later actually wants to know."""
+    stem = re.sub(r"[^A-Za-z0-9]+", "-", camera_name or "camera").strip("-") or "camera"
+    return f"{stem}_{captured_at:%Y-%m-%d_%H-%M}.jpg"
+
+
 @router.get("/{image_id}/file")
 def image_file(
     image_id: uuid.UUID,
     token: str | None = None,
+    download: bool = False,
     creds: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
 ) -> FileResponse:
@@ -45,6 +54,15 @@ def image_file(
     image = db.get(Image, image_id)
     if image is None or not image.original_path or not os.path.exists(image.original_path):
         raise HTTPException(404, "Image file not found")
+    if download:
+        # Content-Disposition: attachment, so the lightbox's Download button saves
+        # a file instead of opening the photo in a tab the user then has to leave.
+        cam = db.get(Camera, image.camera_id)
+        return FileResponse(
+            image.original_path,
+            media_type="image/jpeg",
+            filename=download_name(cam.name if cam else None, image.captured_at),
+        )
     return FileResponse(image.original_path, media_type="image/jpeg")
 
 

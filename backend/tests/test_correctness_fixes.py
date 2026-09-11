@@ -203,3 +203,54 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
         assert client.get(url, headers={"Authorization": f"Bearer {token}"}).status_code == 200
     finally:
         app.dependency_overrides.pop(get_db, None)
+
+
+def test_download_name_is_camera_and_moment():
+    from app.api.routes_images import download_name
+
+    when = datetime(2025, 10, 4, 22, 5, tzinfo=timezone.utc)
+    assert download_name("Ridge", when) == "Ridge_2025-10-04_22-05.jpg"
+    assert download_name("MP14 waterhole / east", when) == "MP14-waterhole-east_2025-10-04_22-05.jpg"
+    assert download_name(None, when) == "camera_2025-10-04_22-05.jpg"
+
+
+@requires_db
+def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
+    """`?download=1` is what the lightbox's Download button asks for: the same bytes,
+    but as an attachment named after the camera and the capture time, so the
+    browser saves a file rather than navigating to the photo."""
+    from fastapi.testclient import TestClient
+
+    from app.core.db import get_db
+    from app.core.security import create_access_token
+    from app.main import app
+    from app.models import Camera, Estate, Image
+
+    photo = tmp_path / "frame.jpg"
+    photo.write_bytes(b"\xff\xd8\xff\xd9")
+    estate = Estate(name="E", timezone="Europe/Madrid", lat=39.0, lon=-1.3)
+    db_session.add(estate)
+    db_session.flush()
+    cam = Camera(estate_id=estate.id, name="Ridge", spypoint_id="c1")
+    db_session.add(cam)
+    db_session.flush()
+    img = Image(
+        camera_id=cam.id,
+        captured_at=datetime(2025, 10, 4, 22, 0, tzinfo=timezone.utc),
+        original_path=str(photo),
+    )
+    db_session.add(img)
+    db_session.commit()
+
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        client = TestClient(app)
+        token = create_access_token(str(uuid.uuid4()))
+        plain = client.get(f"/api/images/{img.id}/file?token={token}")
+        assert "attachment" not in plain.headers.get("content-disposition", "")
+        saved = client.get(f"/api/images/{img.id}/file?token={token}&download=1")
+        assert saved.status_code == 200
+        assert saved.headers["content-disposition"] == 'attachment; filename="Ridge_2025-10-04_22-00.jpg"'
+        assert saved.content == photo.read_bytes()
+    finally:
+        app.dependency_overrides.pop(get_db, None)

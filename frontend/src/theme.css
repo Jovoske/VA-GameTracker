@@ -273,6 +273,39 @@ main.page { padding: 16px; }
 /* Keeps its own vertical centring while it presses — the global button rule
    would replace the translate and drop the arrow half its height down the page. */
 .lb-nav:not(:disabled):active { transform: translateY(-50%) scale(0.94); }
+/* The stage the photo sits on: fixed size, clipped, so a zoomed-in photo grows
+   under the toolbar and caption rather than over them. Sized against the
+   dynamic viewport where the browser knows it, so the toolbar clears the top. */
+.lb-stage {
+  width: 94vw;
+  height: min(80vh, calc(100vh - 150px));
+  height: min(80dvh, calc(100dvh - 150px));
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  touch-action: none;           /* pinch and drag belong to the photo, not the page */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.lb-tools {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: 10px; right: 10px;
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  pointer-events: none;         /* the strip between the buttons is still backdrop */
+}
+.lb-tool {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; justify-content: center; gap: 2px;
+  height: 40px; min-width: 40px; padding: 0 12px 0 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: none;
+  border-radius: var(--r-ctl);
+  font-size: 14px; font-weight: 600;
+  cursor: pointer;
+}
+.lb-tool-icon { width: 40px; padding: 0; }
+.lb-tool:disabled { opacity: 0.5; cursor: default; }
 
 /* ── overlays ──
    One implementation behind every full-screen panel: the photo lightbox, the

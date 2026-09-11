@@ -26,6 +26,13 @@ const EXIT_MS = 150
 // in the same keystroke.
 let locks = 0
 const stack: symbol[] = []
+// Each open panel is also one entry in the browser history, so the phone's Back
+// gesture closes the panel instead of leaving the page it opened over — which
+// is what it did, and after paging through twenty photos it read as the app
+// throwing you out. Ids only ever go up: a popstate whose id is below mine
+// means my entry is gone. A reload lands on whatever entry was current, panel
+// id and all, so the count starts above it rather than at zero.
+let seq = (window.history.state?.ov as number | undefined) || 0
 
 function lockScroll(): () => void {
   if (locks === 0) {
@@ -60,25 +67,46 @@ export default function Overlay({
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
   const me = useRef(Symbol('overlay'))
+  const hist = useRef(0)
 
   useEffect(() => {
     const release = lockScroll()
     const id_ = me.current
     stack.push(id_)
+    // Same URL, one more entry. react-router's own state rides along so a reload
+    // on this entry still lands on the right page. StrictMode runs this twice in
+    // dev, so an entry this instance already pushed is reused, not doubled.
+    if (!hist.current || window.history.state?.ov !== hist.current) {
+      hist.current = ++seq
+      window.history.pushState({ ...(window.history.state ?? {}), ov: hist.current }, '')
+    }
+    const hid = hist.current
+    const onPop = () => {
+      const cur = (window.history.state?.ov as number | undefined) ?? 0
+      if (cur >= hid) return // still at (or ahead of) my entry: a Forward, not a Back
+      close()
+    }
+    window.addEventListener('popstate', onPop)
     // Flip on the next frame so the transition has two states to move between.
     const id = requestAnimationFrame(() => setOpen(true))
     return () => {
       cancelAnimationFrame(id)
+      window.removeEventListener('popstate', onPop)
       const i = stack.indexOf(id_)
       if (i >= 0) stack.splice(i, 1)
       release()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function close() {
     if (closing.current) return
     closing.current = true
     setOpen(false)
+    // Closed from inside (button, Escape, backdrop): drop my history entry too, so
+    // the next Back goes where it would have before this panel opened. When Back
+    // itself did the closing the entry is already gone.
+    if ((window.history.state?.ov as number | undefined) === hist.current) window.history.back()
     window.setTimeout(() => onCloseRef.current(), EXIT_MS)
   }
 
