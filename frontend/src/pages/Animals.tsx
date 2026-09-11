@@ -2,6 +2,7 @@ import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
+import PhotoLightbox from '../components/PhotoLightbox'
 import { useRefetchOnReturn } from '../hooks'
 
 type SpeciesRow = {
@@ -46,7 +47,8 @@ export default function Animals() {
   const galleryRequest = useRef(0)
   const [gallery, setGallery] = useState<{ sp: SpeciesRow; label: string | null } | null>(null)
   const [galleryImgs, setGalleryImgs] = useState<SpImg[] | null>(null)
-  const [zoom, setZoom] = useState<SpImg | null>(null)
+  // Index into galleryImgs of the photo open in the viewer.
+  const [zoom, setZoom] = useState<number | null>(null)
 
   function loadSpecies() {
     setSpErr('')
@@ -420,14 +422,14 @@ export default function Animals() {
                 <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>No photos.</div>
               )}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
-                {galleryImgs?.map((im) => (
+                {galleryImgs?.map((im, i) => (
                   <div
                     key={im.image_id}
                     className="pressable"
                     role="button"
                     tabIndex={0}
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
-                    onClick={() => setZoom(im)}
+                    onClick={() => setZoom(i)}
                     style={{ background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', overflow: 'hidden', cursor: 'pointer' }}
                   >
                     <img src={imageUrl(im.file_url)} loading="lazy" alt={im.label} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
@@ -446,28 +448,14 @@ export default function Animals() {
       )}
 
       {/* ── Fullscreen photo ──────────────────────────────── */}
-      {zoom && (
-        <Overlay
-          label="Photo details"
+      {zoom != null && galleryImgs && (
+        <PhotoLightbox
+          photos={galleryImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label }))}
+          start={zoom}
           backLabel="Back to gallery"
-          onClose={() => setZoom(null)}
-          backdrop="rgba(0, 0, 0, 0.92)"
           zIndex={60}
-          style={{ flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
-        >
-          {(_close) => (
-            <>
-              <img className="ov-panel" src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '65dvh', borderRadius: 'var(--r-ctl)' }} />
-              <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 'var(--r-ctl)', padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-                <b>{zoom.camera}</b>
-                <span>{zoom.label}</span>
-                <span style={{ opacity: 0.75 }}>
-                  {new Date(zoom.captured_at).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                </span>
-              </div>
-            </>
-          )}
-        </Overlay>
+          onClose={() => setZoom(null)}
+        />
       )}
     </div>
   )

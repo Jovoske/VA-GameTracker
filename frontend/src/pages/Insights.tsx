@@ -2,6 +2,7 @@ import { MoonIcon } from '@phosphor-icons/react/dist/csr/Moon'
 import { useEffect, useRef, useState } from 'react'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
+import PhotoLightbox from '../components/PhotoLightbox'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 
 type Insights = {
@@ -56,7 +57,8 @@ export default function Insights() {
   const classRequest = useRef(0)
   const [openClass, setOpenClass] = useState<string | null>(null)
   const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
-  const [zoom, setZoom] = useState<string | null>(null)
+  // Index into classImgs of the photo open in the viewer.
+  const [zoom, setZoom] = useState<number | null>(null)
   const [pat, setPat] = useState<Patterns | null>(null)
   const [patScope, setPatScope] = useState('all')
   // Bars grow from their baseline once the numbers land, then track the data
@@ -269,14 +271,14 @@ export default function Insights() {
                 <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>No photos.</div>
               )}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
-                {classImgs?.map((im) => (
+                {classImgs?.map((im, i) => (
                   <div
                     key={im.image_id}
                     className="pressable"
                     role="button"
                     tabIndex={0}
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
-                    onClick={() => setZoom(imageUrl(im.file_url))}
+                    onClick={() => setZoom(i)}
                     style={{ background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', overflow: 'hidden', cursor: 'pointer' }}
                   >
                     <img src={imageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
@@ -292,19 +294,14 @@ export default function Insights() {
         )}</Overlay>
       )}
 
-      {zoom && (
-        <Overlay
-          label="Photo details"
+      {zoom != null && openClass && classImgs && (
+        <PhotoLightbox
+          photos={classImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: openClass }))}
+          start={zoom}
           backLabel="Back to gallery"
-          onClose={() => setZoom(null)}
-          backdrop="rgba(0, 0, 0, 0.92)"
           zIndex={60}
-          style={{ alignItems: 'center', justifyContent: 'center' }}
-        >
-          {(_close) => (
-            <img className="ov-panel" src={zoom} alt={`${openClass} trail-camera photo`} style={{ maxWidth: '94vw', maxHeight: '75dvh', borderRadius: 'var(--r-ctl)' }} />
-          )}
-        </Overlay>
+          onClose={() => setZoom(null)}
+        />
       )}
     </div>
   )
