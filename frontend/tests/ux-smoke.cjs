@@ -1,0 +1,68 @@
+// Run against the Vite server. Install Playwright separately or set PLAYWRIGHT_MODULE.
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const photos = [1, 2].map(n => ({id: `p${n}`, image_id: `p${n}`, captured_at: '2026-09-07T19:30:00Z', file_url: `/api/images/p${n}/file`, species: 'Wild Boar', label: 'Wild Boar', camera: 'Oak ridge', group_type: 'solitary', group_size: 1, is_empty_frame: false, reviewed: false, animal_conf: 0.9, sex: 'unknown'}));
+const camera = {id:'cam1', name:'Oak ridge', battery_pct:72, signal_pct:null, model:'Trail camera', image_count:24, empty_count:4, last_capture:'2026-09-07T19:30:00Z', last_report_at:null, photo_limit:100, photo_count:24, health:null};
+const species = {id:'boar', name:'Wild Boar', count:2, last_seen:photos[0].captured_at, thumb_image_id:'p1', classes:[]};
+const insights = {outlook:[{date:'2026-09-08',moon_phase:'Waxing',moon_illum:42,civil_twilight_end:'2026-09-08T19:00:00Z'}], composition:[{label:'Wild Boar',count:2,top_camera:'Oak ridge'}], correlations:[]};
+(async()=>{
+ const browser=await chromium.launch({headless:true,channel:process.env.BROWSER_CHANNEL || 'msedge'});
+ const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
+ await context.addInitScript(()=>localStorage.setItem('gs_token','ux-test-fixture'));
+ const page=await context.newPage();
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ let failGallery=false, failCameras=false, emptyCameras=false, failStands=true, failForecast=true;
+ await page.route('**/api/**',async route=>{
+  const u=new URL(route.request().url());
+  if(u.pathname.endsWith('/file')) return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640"><rect width="960" height="640" fill="#394b3b"/><text x="80" y="330" fill="white" font-size="36">Trail-camera test photo</text></svg>'});
+  if ((failStands && u.pathname==='/api/stands') || (failForecast && u.pathname==='/api/forecast/tonight')) return route.fulfill({status:503,json:{detail:'Test connection failure'}});
+  if (u.pathname==='/api/forecast/tonight') return route.fulfill({json:{verdict:'NO_DATA',conditions:{},alternates:[],nights_of_data:0}});
+  if (u.pathname==='/api/analytics/overview') return route.fulfill({status:503,json:{detail:'Analytics unavailable'}});
+  if ((failGallery && u.pathname.includes('/species/boar/images')) || (failCameras && u.pathname==='/api/cameras')) return route.fulfill({status:503,json:{detail:'Test connection failure'}});
+  const data=u.pathname==='/api/cameras'?(emptyCameras?[]:[camera]):u.pathname.includes('/cameras/cam1/images')?photos:u.pathname==='/api/species/spotted'?[species]:u.pathname.includes('/species/boar/images')?photos:u.pathname==='/api/insights'?insights:u.pathname==='/api/insights/class'?photos:u.pathname==='/api/insights/patterns'?{scopes:[],nights:0}:[];
+  await route.fulfill({json:data});
+ });
+ const url=process.env.UX_BASE_URL || 'http://127.0.0.1:5173';
+ const waitDialogs=async n=>{await page.waitForFunction(n=>document.querySelectorAll('[role="dialog"]').length===n,n)};
+ await page.goto(url+'/cameras');
+ const first=page.getByRole('button',{name:'Open photo from Oak ridge: Wild Boar'}).first();
+ await first.waitFor(); await first.focus(); await page.keyboard.press('Enter');await waitDialogs(1);
+ await page.getByRole('button',{name:'Back to cameras'}).waitFor();
+ assert.equal(await page.evaluate(()=>document.body.style.overflow),'hidden');
+ await page.getByRole('button',{name:'Next photo',exact:true}).click();
+ assert.match(await page.getByRole('dialog').getAttribute('aria-label'),/Photo 2 of 2/);
+ assert.equal(await page.getByRole('button',{name:'Next photo',exact:true}).isDisabled(),true);
+ await page.keyboard.press('Tab');
+ assert.equal(await page.evaluate(()=>document.querySelector('[role="dialog"]').contains(document.activeElement)),true);
+ await page.getByRole('button',{name:'Back to cameras'}).click();await waitDialogs(0);
+ assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Open photo from Oak ridge: Wild Boar');
+ assert.notEqual(await page.evaluate(()=>document.body.style.overflow),'hidden');
+ await first.click();await waitDialogs(1);await page.goBack();await waitDialogs(0);
+ assert.equal(new URL(page.url()).pathname,'/cameras');
+ await first.click();await waitDialogs(1);await page.keyboard.press('Escape');await waitDialogs(0);
+ for(const width of [320,390,768,1280]){await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`overflow at ${width}`)}
+ await page.setViewportSize({width:390,height:844});
+ if(process.env.UX_SCREENSHOTS){fs.mkdirSync(process.env.UX_SCREENSHOTS,{recursive:true});await page.screenshot({path:process.env.UX_SCREENSHOTS+'/cameras-mobile.png',fullPage:true});await first.click();await waitDialogs(1);await page.waitForFunction(()=>getComputedStyle(document.querySelector('[role=dialog]')).opacity==='1');await page.screenshot({path:process.env.UX_SCREENSHOTS+'/photo-mobile.png'});await page.keyboard.press('Escape');await waitDialogs(0)}
+ await page.goto(url+'/animals');
+ await page.getByTitle('All Wild Boar photos').first().click();await waitDialogs(1);
+ await page.getByRole('dialog').getByRole('button').filter({has:page.locator('img')}).first().click();await waitDialogs(2);
+ await page.getByRole('button',{name:'Back to gallery'}).click();await waitDialogs(1);
+ assert.equal(await page.evaluate(()=>document.body.style.overflow),'hidden');
+ await page.getByRole('dialog').getByRole('button').filter({has:page.locator('img')}).first().click();await waitDialogs(2);
+ await page.goBack();await waitDialogs(1);await page.goBack();await waitDialogs(0);
+ assert.equal(new URL(page.url()).pathname,'/animals');
+ failGallery=true;await page.getByTitle('All Wild Boar photos').first().click();await waitDialogs(1);
+ await page.getByRole('alert').waitFor();assert.equal(await page.getByText('No photos.',{exact:true}).count(),0);
+ failGallery=false;await page.getByRole('button',{name:'Retry loading photos'}).click();await page.getByRole('dialog').locator('img').first().waitFor();
+ await page.getByRole('button',{name:'Back to animals'}).click();await waitDialogs(0);
+ await page.goto(url+'/insights');await page.getByTitle('View the 2 Wild Boar photos').click();await waitDialogs(1);
+ await page.getByRole('dialog').getByRole('button').filter({has:page.locator('img')}).first().click();await waitDialogs(2);
+ await page.keyboard.press('Escape');await waitDialogs(1);await page.keyboard.press('Escape');await waitDialogs(0);
+ failCameras=true;await page.goto(url+'/cameras');await page.getByRole('button',{name:'Retry loading cameras'}).waitFor();failCameras=false;emptyCameras=true;await page.getByRole('button',{name:'Retry loading cameras'}).click();await page.getByText('No cameras connected yet').waitFor();
+ await page.goto(url+'/stands');await page.getByRole('button',{name:'Retry loading stands'}).waitFor();assert.equal(await page.getByText('No stands yet',{exact:true}).count(),0);failStands=false;await page.getByRole('button',{name:'Retry loading stands'}).click();await page.getByText('No stands yet',{exact:true}).waitFor();
+ await page.goto(url+'/');await page.getByRole('button',{name:'Retry forecast'}).waitFor();failForecast=false;await page.getByRole('button',{name:'Retry forecast'}).click();await page.getByText('NO DATA',{exact:true}).waitFor();
+ assert.deepEqual(errors,[]);
+ console.log('PASS: photo return button, browser Back, Escape, nested galleries, focus restoration, scroll lock, image paging, mobile/tablet/desktop overflow, gallery error/retry, camera and stands error/retry/empty states, forecast retry and independence from analytics failures.');
+ await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});

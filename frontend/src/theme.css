@@ -215,6 +215,9 @@ button:not(:disabled):active,
 main.page { padding: 16px; }
 
 @media (max-width: 640px) {
+  /* Bottom tabs provide navigation on phones. Let the brand header leave the
+     viewport so scrolling reveals camera/forecast data all the way to the top. */
+  .appbar { position: static; }
   .topnav { display: none; }
   .tabbar {
     display: flex;
@@ -275,37 +278,21 @@ main.page { padding: 16px; }
 .lb-nav:not(:disabled):active { transform: translateY(-50%) scale(0.94); }
 /* The stage the photo sits on: fixed size, clipped, so a zoomed-in photo grows
    under the toolbar and caption rather than over them. Sized against the
-   dynamic viewport where the browser knows it, so the toolbar clears the top. */
+   dynamic viewport where the browser knows it, below the 76px toolbar band. */
 .lb-stage {
+  position: relative;
   width: 94vw;
-  height: min(80vh, calc(100vh - 150px));
-  height: min(80dvh, calc(100dvh - 150px));
+  height: min(65vh, calc(100vh - 200px));
+  height: min(65dvh, calc(100dvh - 200px));
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
   touch-action: none;           /* pinch and drag belong to the photo, not the page */
   user-select: none;
   -webkit-user-select: none;
 }
-.lb-tools {
-  position: absolute;
-  top: max(10px, env(safe-area-inset-top));
-  left: 10px; right: 10px;
-  display: flex; justify-content: space-between; align-items: center; gap: 8px;
-  pointer-events: none;         /* the strip between the buttons is still backdrop */
-}
-.lb-tool {
-  pointer-events: auto;
-  display: inline-flex; align-items: center; justify-content: center; gap: 2px;
-  height: 40px; min-width: 40px; padding: 0 12px 0 8px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  border: none;
-  border-radius: var(--r-ctl);
-  font-size: 14px; font-weight: 600;
-  cursor: pointer;
-}
-.lb-tool-icon { width: 40px; padding: 0; }
-.lb-tool:disabled { opacity: 0.5; cursor: default; }
+/* "Loading photo…" and the failure notice sit over the stage rather than beside
+   the (invisible) photo, which pushed it off-centre while it decoded. */
+.lb-status { position: absolute; color: #fff; font-size: 13px; text-align: center; padding: 0 16px; }
 
 /* ── overlays ──
    One implementation behind every full-screen panel: the photo lightbox, the
@@ -375,3 +362,33 @@ main.page { padding: 16px; }
   .hero-enter { transform: none; transition: opacity var(--d-base) var(--ease-out); }
   .btn-progress { animation: none; opacity: 0.5; transform: none; }
 }
+
+/* Clear return paths and readable controls at phone and tablet sizes. */
+.ov { padding-top: max(76px, calc(env(safe-area-inset-top) + 64px)) !important; padding-bottom: max(16px, env(safe-area-inset-bottom)) !important; }
+.ov-toolbar { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 16px; padding: max(12px, env(safe-area-inset-top)) 16px 12px; background: #151a18; color: #fff; z-index: 1; }
+.ov-toolbar > span { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-back { flex-shrink: 0; min-height: 44px; padding: 10px 14px; border: 1px solid #69766e; border-radius: 8px; background: #27312b; color: #fff; cursor: pointer; font: inherit; }
+/* What a panel can do besides leave — the lightbox's zoom and download. Same
+   button as Back, squared off, so the toolbar reads as one row of controls. */
+.ov-tools { flex-shrink: 0; display: flex; gap: 8px; }
+.ov-tool { width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid #69766e; border-radius: 8px; background: #27312b; color: #fff; cursor: pointer; }
+.ov-tool:disabled { opacity: 0.5; cursor: default; }
+.ov .card.ov-panel { max-height: calc(100dvh - 112px) !important; }
+.page-intro { font-size: 14px; line-height: 1.6; color: var(--text-dim); margin: 0 0 20px; max-width: 65ch; }
+.status-panel { padding: 18px; margin-bottom: 16px; background: var(--surface-2); border-radius: 10px; font-size: 14px; line-height: 1.6; }
+.text-action { display: block; background: transparent; color: var(--go); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; min-height: 44px; font: inherit; cursor: pointer; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.skip-link { position: fixed; top: -100px; left: 16px; z-index: 100; padding: 12px; background: var(--surface); }
+.skip-link:focus { top: 8px; }
+[role='button']:focus-visible, a:focus-visible, button:focus-visible { outline: 2px solid var(--go); outline-offset: 4px; }
+@media (min-width: 641px) { .appbar { flex-wrap: wrap; } .topnav { order: 3; flex-basis: 100%; overflow-x: auto; } .topnav a { white-space: nowrap; } }
+@media (max-width: 380px) { .tabbar { overflow-x: auto; } .tabbar a { min-width: 48px; } }
+.pattern-comparison { padding: 18px 0; border-top: 1px solid var(--border); }
+.pattern-comparison h3 { margin: 0 0 8px; font-size: 17px; font-weight: 500; }
+.pattern-comparison p { color: var(--text-dim); font-size: 13px; line-height: 1.6; }
+.pattern-comparison table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pattern-comparison caption { text-align: left; padding: 10px 0; font-weight: 500; }
+.pattern-comparison th, .pattern-comparison td { padding: 10px 6px; border-bottom: 1px solid var(--border); text-align: right; font-weight: 400; }
+.pattern-comparison th:first-child { text-align: left; }
+.pattern-comparison thead { color: var(--text-dim); font-size: 11px; }
+.pattern-comparison small { display: block; color: var(--text-dim); margin-top: 4px; }

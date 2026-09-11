@@ -1,5 +1,5 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
 import { useRefetchOnReturn } from '../hooks'
@@ -41,27 +41,36 @@ export default function Animals() {
   // ── species browser ─────────────────────────────────────
   const [species, setSpecies] = useState<SpeciesRow[]>([])
   const [spErr, setSpErr] = useState('')
+  const [spLoading, setSpLoading] = useState(true)
+  const [galleryErr, setGalleryErr] = useState('')
+  const galleryRequest = useRef(0)
   const [gallery, setGallery] = useState<{ sp: SpeciesRow; label: string | null } | null>(null)
   const [galleryImgs, setGalleryImgs] = useState<SpImg[] | null>(null)
   const [zoom, setZoom] = useState<SpImg | null>(null)
 
   function loadSpecies() {
-    api<SpeciesRow[]>('/species/spotted').then(setSpecies).catch((e) => setSpErr(e.message))
+    setSpErr('')
+    setSpLoading(true)
+    api<SpeciesRow[]>('/species/spotted').then(setSpecies).catch((e) => setSpErr(e.message)).finally(() => setSpLoading(false))
   }
   useEffect(loadSpecies, [])
   useRefetchOnReturn(loadSpecies, 120_000)
 
   async function openGallery(sp: SpeciesRow, label: string | null) {
+    const request = ++galleryRequest.current
+    setGalleryErr('')
     setGallery({ sp, label })
     setGalleryImgs(null)
     try {
       const q = label ? `?label=${encodeURIComponent(label)}` : ''
-      setGalleryImgs(await api<SpImg[]>(`/species/${sp.id}/images${q}`))
+      const photos = await api<SpImg[]>(`/species/${sp.id}/images${q}`)
+      if (request === galleryRequest.current) setGalleryImgs(photos)
     } catch {
-      setGalleryImgs([])
+      if (request === galleryRequest.current) setGalleryErr('Could not load photos. Check your connection and retry.')
     }
   }
   function closeGallery() {
+    galleryRequest.current++
     setGallery(null)
     setGalleryImgs(null)
   }
@@ -75,6 +84,7 @@ export default function Animals() {
   const [busy, setBusy] = useState('')
 
   function load() {
+    setErr('')
     setLoading(true)
     api<Animal[]>('/animals')
       .then((d) => setItems(d))
@@ -153,12 +163,14 @@ export default function Animals() {
   return (
     <div style={{ maxWidth: 720, margin: '0 auto' }}>
       <h1 className="page-title">Animals</h1>
+      <p className="page-intro">Browse species recorded by your cameras. Open a species to see its photos. Individual animal matches below are experimental and need your review.</p>
 
       {/* ── Spotted on the estate ─────────────────────────── */}
       <div className="card" style={{ padding: 18, marginBottom: 18 }}>
         <h2 className="sect">Spotted on the estate</h2>
-        {spErr && <div style={{ fontSize: 13, color: 'var(--skip)' }}>Couldn't load: {spErr}</div>}
-        {!spErr && species.length === 0 && (
+        {spErr && <div role="alert" style={{ fontSize: 13, color: 'var(--skip)' }}>Could not load species: {spErr}<button className="text-action" onClick={loadSpecies}>Retry loading species</button></div>}
+        {spLoading && <div role="status">Loading species…</div>}
+        {!spLoading && !spErr && species.length === 0 && (
           <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No sightings yet.</div>
         )}
         {species.map((sp, i) => (
@@ -174,6 +186,9 @@ export default function Animals() {
           >
             <div
               className="pressable"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
               onClick={() => openGallery(sp, null)}
               style={{
                 width: 56, height: 56, borderRadius: 'var(--r-ctl)', overflow: 'hidden',
@@ -349,7 +364,7 @@ export default function Animals() {
 
       {/* ── Species photo gallery ─────────────────────────── */}
       {gallery && (
-        <Overlay onClose={closeGallery}>{(close) => (
+        <Overlay onClose={closeGallery} label={`${gallery.sp.name} photos`} backLabel="Back to animals">{(close) => (
           <div
             onClick={(e) => e.stopPropagation()}
             className="card ov-panel"
@@ -399,7 +414,8 @@ export default function Animals() {
               )}
             </div>
             <div style={{ overflowY: 'auto', padding: 12 }}>
-              {!galleryImgs && <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading…</div>}
+              {galleryErr && <div className="status-panel" role="alert">{galleryErr}<button className="text-action" onClick={() => openGallery(gallery.sp, gallery.label)}>Retry loading photos</button></div>}
+              {!galleryImgs && !galleryErr && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
               {galleryImgs && galleryImgs.length === 0 && (
                 <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>No photos.</div>
               )}
@@ -408,6 +424,9 @@ export default function Animals() {
                   <div
                     key={im.image_id}
                     className="pressable"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                     onClick={() => setZoom(im)}
                     style={{ background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', overflow: 'hidden', cursor: 'pointer' }}
                   >
@@ -429,6 +448,8 @@ export default function Animals() {
       {/* ── Fullscreen photo ──────────────────────────────── */}
       {zoom && (
         <Overlay
+          label="Photo details"
+          backLabel="Back to gallery"
           onClose={() => setZoom(null)}
           backdrop="rgba(0, 0, 0, 0.92)"
           zIndex={60}
@@ -436,7 +457,7 @@ export default function Animals() {
         >
           {(_close) => (
             <>
-              <img className="ov-panel" src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '82vh', borderRadius: 'var(--r-ctl)' }} />
+              <img className="ov-panel" src={imageUrl(zoom.file_url)} alt={zoom.label} style={{ maxWidth: '94vw', maxHeight: '65dvh', borderRadius: 'var(--r-ctl)' }} />
               <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 'var(--r-ctl)', padding: '8px 14px', fontSize: 13, color: '#fff', display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
                 <b>{zoom.camera}</b>
                 <span>{zoom.label}</span>

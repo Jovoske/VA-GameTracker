@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ageLabel, api, apiCached } from '../api'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 
@@ -87,6 +87,7 @@ export default function Tonight() {
   const [f, setF] = useState<Forecast | null>(null)
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [err, setErr] = useState('')
+  const requestId = useRef(0)
   const [planAt, setPlanAt] = useState<string | null>(null)
   // True while a species chip has changed the question but the answer has not
   // caught up yet. See the chip handler below.
@@ -105,6 +106,8 @@ export default function Tonight() {
   })
 
   function load(sel: string[] = picked, settle = false) {
+    const request = ++requestId.current
+    setErr('')
     const q = sel.length ? `?species=${encodeURIComponent(sel.join(','))}` : ''
     // Changing the quarry rewrites the whole verdict. Dimming the old answer for
     // the moment it takes says "this is the previous question's answer" without
@@ -114,12 +117,17 @@ export default function Tonight() {
     // with no bars still gets the verdict, clearly labelled with its age.
     apiCached<Forecast>(`/forecast/tonight${q}`)
       .then(({ data, at }) => {
+        if (request !== requestId.current) return
         setF(data)
         setPlanAt(at)
       })
-      .catch((e) => setErr(e.message))
-      .finally(() => setSettling(false))
-    api<Overview>('/analytics/overview').then(setD).catch((e) => setErr(e.message))
+      .catch((e) => {
+        if (request !== requestId.current) return
+        setErr(e.message)
+        if (settle) setF(null)
+      })
+      .finally(() => { if (request === requestId.current) setSettling(false) })
+    api<Overview>('/analytics/overview').then(setD).catch(() => setD(null))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
   }
   useEffect(() => {
@@ -143,8 +151,8 @@ export default function Tonight() {
   const verdictIn = useReveal(!!f)
   const grown = useReveal(!!d)
 
-  if (err) return <div style={{ color: 'var(--text-dim)' }}>Couldn't load: {err}</div>
-  if (!f) return <div style={{ color: 'var(--text-dim)' }}>Loading…</div>
+  if (err && !f) return <div className="status-panel" role="alert">Could not load tonight's forecast: {err}<button className="text-action" onClick={() => load()}>Retry forecast</button></div>
+  if (!f) return <div className="status-panel" role="status">Loading tonight's forecast…</div>
 
   const c = f.conditions
   const r = f.recommended
@@ -159,6 +167,8 @@ export default function Tonight() {
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <h1 className="page-title">Tonight</h1>
+      <p className="page-intro">Compare expected activity near your cameras, then choose a stand. Forecasts use recorded sightings and current conditions.</p>
+      {err && <div className="status-panel" role="alert">Could not refresh the forecast. Showing the previous result.<button className="text-action" onClick={() => load()}>Retry forecast</button></div>}
 
       {/* What are you after? Ranking the ground by the commonest animal on it is the
           wrong answer when you have come out for boar. Chips list only species left
@@ -166,6 +176,7 @@ export default function Tonight() {
       {species.length > 1 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
           <button
+            aria-pressed={picked.length === 0}
             onClick={() => {
               setPicked([])
               localStorage.setItem('gs_species_filter', '[]')
@@ -179,13 +190,14 @@ export default function Tonight() {
               fontWeight: picked.length === 0 ? 700 : 400,
             }}
           >
-            Anything
+            All enabled species
           </button>
           {species.map((s) => {
             const on = picked.includes(s.id)
             return (
               <button
                 key={s.id}
+                aria-pressed={on}
                 onClick={() => toggleSpecies(s.id)}
                 title={`${s.detections} sightings`}
                 style={{
@@ -368,7 +380,7 @@ export default function Tonight() {
 
         {f.alternates.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <h2 className="sect" style={{ marginBottom: 8 }}>Other stands</h2>
+            <h2 className="sect" style={{ marginBottom: 8 }}>Other camera locations</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {f.alternates.map((a) => (
                 <div
@@ -383,7 +395,7 @@ export default function Tonight() {
                   </span>
                   {/* A fraction, not a percentage — the sample size stays visible. */}
                   <span style={{ fontSize: 12, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                    {a.nights_present}/{a.active_nights} nights
+                    Seen on {a.nights_present} of {a.active_nights} monitored nights
                   </span>
                 </div>
               ))}
@@ -401,7 +413,7 @@ export default function Tonight() {
       {/* ── What to expect, by stand ───────────────── */}
       {f.where && f.where.length > 0 && (
         <div className={`block${settling ? ' settling' : ''}`}>
-          <h2 className="sect">What to expect, by stand</h2>
+          <h2 className="sect">Recent activity by camera</h2>
           {f.where.map((w) => (
             <div key={w.camera} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
               <span style={{ color: verdictColor(w.verdict), fontSize: 13, width: 14, marginTop: 3, flexShrink: 0 }}>
@@ -417,11 +429,11 @@ export default function Tonight() {
                     {hh(w.best_window.start_hour)}–{hh(w.best_window.end_hour)}
                   </span>
                   <span style={{ fontSize: 12, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                    {w.nights_present}/{w.active_nights} nights
+                    Seen on {w.nights_present} of {w.active_nights} monitored nights
                   </span>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
-                  {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>none</span>}
+                  {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>No group type identified</span>}
                   {w.classes.map((cl) => (
                     <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '2px 8px' }}>
                       {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
@@ -432,7 +444,7 @@ export default function Tonight() {
             </div>
           ))}
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-            Classes seen at each stand: stags vs hinds, sows with piglets, from sexed and grouped sightings.
+            Group types identified in camera photos. Repeated photos can show the same animals; counts do not represent unique individuals.
           </div>
         </div>
       )}
@@ -499,7 +511,7 @@ export default function Tonight() {
           )}
 
           <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', lineHeight: 1.6 }}>
-            {d.totals.sightings} animal sightings · {d.totals.empty} empty frames filtered · {d.totals.nights} nights of data
+            {d.totals.sightings} photos not marked empty · {d.totals.empty} empty photos excluded · {d.totals.nights} nights of data
           </div>
         </>
       )}
