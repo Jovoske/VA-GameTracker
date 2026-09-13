@@ -1,0 +1,77 @@
+# Opt-in overlay for an existing GameSense Docker deployment. See docs/14-suntek-ftp.md.
+services:
+  ftp-spool-init:
+    image: python:3.12-slim
+    user: "0:0"
+    volumes:
+      - ftp-spool:/spool
+    command:
+      - python
+      - -c
+      - |
+        import os
+        from pathlib import Path
+        root = Path('/spool')
+        for path in [root] + [root / name for name in ('staging', 'ready', 'ftp-home', 'processing', 'failed', 'processed')]:
+            if path.is_symlink():
+                raise RuntimeError('Spool directories must not be symbolic links')
+            path.mkdir(exist_ok=True)
+            os.chown(path, 10001, 10001)
+            os.chmod(path, 0o2770)
+
+  ftp-receiver:
+    build:
+      context: ./ftp-receiver
+    environment:
+      FTP_USERNAME: ${FTP_USERNAME:?Set a dedicated camera FTP username}
+      FTP_PASSWORD: ${FTP_PASSWORD:?Set a dedicated camera FTP password}
+      FTP_BIND: 0.0.0.0
+      FTP_PORT: 2121
+      FTP_PUBLIC_IP: ${FTP_PUBLIC_IP:-}
+      FTP_SPOOL_ROOT: /spool
+    volumes:
+      - ftp-spool:/spool
+    ports:
+      - "${FTP_BIND_ADDRESS:-127.0.0.1}:${FTP_CONTROL_PORT:-2121}:2121"
+      - "${FTP_BIND_ADDRESS:-127.0.0.1}:50000-50009:50000-50009"
+    depends_on:
+      ftp-spool-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  ftp-importer:
+    build:
+      context: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-gamesense}:${POSTGRES_PASSWORD:-gamesense}@db:5432/${POSTGRES_DB:-gamesense}
+      REDIS_URL: redis://redis:6379/0
+    command:
+      - python
+      - -m
+      - app.ingestion.ftp_import
+      - run
+      - --spool
+      - /data/ftp-spool
+      - --camera-id
+      - ${FTP_CAMERA_ID:?Register the camera and set FTP_CAMERA_ID}
+      - --timezone
+      - ${FTP_CAMERA_TIMEZONE:-Europe/Madrid}
+      - --watch
+      - --interval
+      - "30"
+    volumes:
+      - ftp-spool:/data/ftp-spool
+      - media:/data/media
+      - models:/data/models
+    depends_on:
+      ftp-spool-init:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ftp-spool:

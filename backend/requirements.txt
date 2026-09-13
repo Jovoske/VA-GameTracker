@@ -23,3 +23,7 @@ timm
 anthropic==0.69.0
 # Encrypt guest SPYPOINT passwords at rest (Fernet, key derived from JWT_SECRET).
 cryptography==44.0.0
+# Validate camera FTP JPEGs and read their EXIF capture times.
+Pillow==12.3.0
+# IANA zones are not supplied by Windows itself.
+tzdata==2026.4
