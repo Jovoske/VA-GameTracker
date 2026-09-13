@@ -50,7 +50,7 @@ export default function MapPage() {
     } catch (e) { if (request === requestId.current) setErr(`Could not refresh map data. ${(e as Error).message}`) }
     finally { if (request === requestId.current) setLoading(false) }
   }
-  useEffect(() => { load(); api<{ role: string }>('/users/me').then(me => setAdmin(me.role === 'admin')).catch(() => {}) }, [])
+  useEffect(() => { load(); api<{ role: string }>('/auth/me').then(me => setAdmin(me.role === 'admin')).catch(() => {}) }, [])
   useRefetchOnReturn(() => { if (!editRef.current && !busyRef.current) load() }, 120_000)
 
   useEffect(() => {

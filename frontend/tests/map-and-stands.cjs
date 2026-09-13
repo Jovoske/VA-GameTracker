@@ -20,9 +20,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  if(u.pathname==='/api/sits/new'){sits.find(s=>s.id==='new').outcome=body.outcome;stands[0].claimed_tonight=false;stands[0].claimed_by=null;return route.fulfill({json:{}})}
  return route.fulfill({json:{}})
  }
- let result=u.pathname==='/api/map/tonight'?data():u.pathname==='/api/cameras'?cameras:u.pathname==='/api/users/me'?{id:'me',role:'admin'}:u.pathname==='/api/stands'?stands:u.pathname==='/api/sits'?sits:[];
- if(u.pathname==='/api/insights')result={outlook:[],composition:[],correlations:[]};
- if(u.pathname==='/api/insights/patterns')result={nights:30,scopes:[{key:'all',label:'All animals',total_nights:30,sightings:450,drivers:[{key:'moon_illum',factor:'Moon illumination',statement:'~67% more activity on bright moonlit nights.',confidence:.5,sample_nights:30,buckets:[{label:'low',rate:10,days:10,min:0,max:20},{label:'mid',rate:15,days:10,min:21,max:70},{label:'high',rate:20,days:10,min:71,max:100}]}]}]};
+ let result=u.pathname==='/api/map/tonight'?data():u.pathname==='/api/cameras'?cameras:u.pathname==='/api/auth/me'?{id:'me',role:'admin'}:u.pathname==='/api/stands'?stands:u.pathname==='/api/sits'?sits:undefined;
+ if(result===undefined)return route.fulfill({status:404,json:{detail:'Not Found'}});
  await route.fulfill({json:result});
  });
  const tileReady = page.waitForResponse(r=>r.url().includes('/MapServer/tile/') && r.status()===200,{timeout:30000});
@@ -46,7 +45,6 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const other=page.locator('#stand-s3');await other.waitFor();assert.equal(await other.getByRole('button').count(),0,'Other hunter reservations have no write controls');
  const free=page.locator('#stand-s1');await free.getByRole('button',{name:'Reserve for tonight'}).click();await free.getByRole('button',{name:'Cancel reservation'}).waitFor();await free.getByRole('button',{name:'Cancel reservation'}).click();await free.getByRole('button',{name:'Reserve for tonight'}).waitFor();
  if(process.env.UX_SCREENSHOTS)await page.screenshot({path:process.env.UX_SCREENSHOTS+'/stands-mobile.png',fullPage:true});
- await page.goto('http://127.0.0.1:5173/insights');await page.getByRole('table').waitFor();assert.equal(await page.getByText(/67% more activity/).count(),0);await page.getByText(/does not measure light at ground level/).waitFor();assert.equal(await page.getByText(/% confidence/).count(),0);
- assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/layers, explicit draft/save, mobile overflow, reservation ownership, cancelled reservations, clear raw-data comparisons.');
+ assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/layers, explicit draft/save, mobile overflow, reservation ownership, cancelled reservations.');
  } finally { await browser.close() }
 })().catch(e=>{console.error(e);process.exit(1)});

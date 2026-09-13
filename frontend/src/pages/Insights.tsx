@@ -1,9 +1,12 @@
 import { MoonIcon } from '@phosphor-icons/react/dist/csr/Moon'
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
+import WeatherPatterns, { type Patterns } from '../components/WeatherPatterns'
 import { useRefetchOnReturn, useReveal } from '../hooks'
+import './insights.css'
 
 type Insights = {
   outlook: {
@@ -15,36 +18,9 @@ type Insights = {
     civil_twilight_end: string | null
   }[]
   composition: { label: string; count: number; top_camera: string | null }[]
-  correlations: { statement: string; strength: number; sample: number }[]
+  correlations: { kind?: string; statement: string; strength: number; sample: number }[]
 }
 type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
-type Driver = {
-  factor: string
-  key?: string
-  statement: string
-  effect_pct: number
-  sample_nights: number
-  confidence: number
-  buckets: { label: string; rate: number; days?: number; min?: number; max?: number }[]
-  correlation: number
-}
-type PScope = {
-  key: string
-  label: string
-  drivers: Driver[]
-  active_nights: number
-  total_nights: number
-  avg_per_night: number
-  sightings: number
-}
-type Patterns = { scopes: PScope[]; nights: number; range?: [string, string] }
-
-function formatRange(key: string, min: number, max: number) {
-  const divisor = key === 'darkness' ? 60 : 1
-  const unit = key === 'darkness' ? ' h' : ['moon_illum', 'cloud'].includes(key) ? '%' : key === 'temp' ? ' °C' : key === 'wind' ? ' km/h' : key === 'rain' ? ' mm' : key.startsWith('pressure') ? ' hPa' : ''
-  return (min / divisor).toFixed(1) + '–' + (max / divisor).toFixed(1) + unit
-}
-
 const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
 const clock = (iso: string | null) =>
@@ -61,14 +37,26 @@ export default function Insights() {
   const [zoom, setZoom] = useState<number | null>(null)
   const [pat, setPat] = useState<Patterns | null>(null)
   const [patScope, setPatScope] = useState('all')
+  const [patErr, setPatErr] = useState('')
+  const [patLoading, setPatLoading] = useState(true)
+  const patternRequest = useRef(0)
   // Bars grow from their baseline once the numbers land, then track the data
   // from there — a refetch slides them to the new value rather than cutting.
   const grown = useReveal(!!d)
 
+  function loadPatterns() {
+    const request = ++patternRequest.current
+    setPatErr('')
+    setPatLoading(true)
+    api<Patterns>('/insights/patterns')
+      .then(result => { if (request === patternRequest.current) setPat(result) })
+      .catch(e => { if (request === patternRequest.current) setPatErr(e.message) })
+      .finally(() => { if (request === patternRequest.current) setPatLoading(false) })
+  }
   function load() {
     setErr('')
     api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
-    api<Patterns>('/insights/patterns').then(setPat).catch(() => {})
+    loadPatterns()
   }
   useEffect(load, [])
   useRefetchOnReturn(load, 120_000)
@@ -90,54 +78,50 @@ export default function Insights() {
     setOpenClass(null)
     setClassImgs(null)
   }
-
-  if (err && !d) return <div className="status-panel" role="alert">Could not load insights: {err}<button className="text-action" onClick={load}>Retry loading insights</button></div>
-  if (!d) return <div role="status" style={{ color: 'var(--text-dim)' }}>Loading activity insights…</div>
+  // During a rolling update the old API may still send untyped moon summaries.
+  // Typed location summaries can legitimately include camera names like Moon Meadow.
+  const observations = d?.correlations.filter(c => c.kind ? c.kind !== 'moon' : !/moon|bright nights|dark nights/i.test(c.statement)) || []
 
   return (
-    <div style={{ maxWidth: 560, margin: '0 auto' }}>
-      <h1 className="page-title">Insights</h1>
-      <p className="page-intro">Explore recorded animal activity, weather associations, and light conditions for the coming week.</p>
-      {err && <div className="status-panel" role="alert">Could not refresh insights. Showing the previous results.<button className="text-action" onClick={load}>Retry</button></div>}
+    <div className="insights-page">
+      <div className="insights-header"><div><h1 className="page-title">Insights</h1><p className="page-intro">Get to know the animals on your land.</p></div><Link to="/" className="insights-tonight">Plan tonight <span aria-hidden="true">↗</span></Link></div>
+      <WeatherPatterns patterns={pat} scope={patScope} onScope={setPatScope} error={patErr} loading={patLoading} retry={loadPatterns} />
+      {err && <div className="status-panel" role="alert">{d ? 'Could not update the calendar and other sightings. Showing the previous results.' : 'Could not load the calendar and other sightings.'}<button className="text-action" onClick={load}>Retry loading insights</button></div>}
+      {!d && !err && <p role="status" className="page-intro">Loading the calendar and other sightings…</p>}
 
-      <div className="block">
-        <h2 className="sect">The next seven nights</h2>
-        <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
+      {d && <div className="block insights-calendar">
+        <h2 className="sect">Moon & last light this week</h2>
+        <p className="page-intro">A calendar to help you plan your evening. It does not predict how many animals you will see.</p>
+        <div className="moon-week">
           {d.outlook.map((o) => (
             <div
               key={o.date}
-              title={`${o.moon_phase} · last light ${clock(o.civil_twilight_end)}`}
-              style={{
-                flex: '1 0 68px',
-                textAlign: 'center',
-                padding: '8px 4px',
-                borderRadius: 'var(--r-ctl)',
-                background: 'var(--surface-2)',
-              }}
+              className="moon-day"
             >
               <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
                 {dayName(o.date)} {dayNum(o.date)}
               </div>
-              <div style={{ margin: '5px 0 3px', color: 'var(--text-dim)', display: 'flex', justifyContent: 'center' }}>
-                <MoonIcon size={15} />
+              <div className="moon-illustration" aria-hidden="true">
+                <MoonIcon size={26} weight={o.moon_illum > 65 ? 'fill' : 'regular'} />
               </div>
               <div style={{ fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                {Math.round(o.moon_illum)}%
+                {Math.round(o.moon_illum)}% lit
               </div>
-              <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3 }}>
-                {clock(o.civil_twilight_end)}
+              <div className="moon-day-phase">{o.moon_phase.replace(/_/g, ' ')}</div>
+              <div className="moon-last-light">
+                <span>Last light</span><strong>{clock(o.civil_twilight_end)}</strong>
               </div>
             </div>
           ))}
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.45 }}>
-          Each day shows the illuminated percentage of the moon and the end of civil twilight in your device's local time. For tonight's animal-activity forecast, open Tonight.
+          “Lit” means how much of the moon’s face is sunlit, not how bright it will be outside. Last light is when the remaining evening glow fades. Times follow your device’s time zone.
         </div>
-      </div>
+      </div>}
 
-      {d.composition && d.composition.length > 0 && (
+      {d && d.composition && d.composition.length > 0 && (
         <div className="block">
-          <h2 className="sect">Animal groups by camera</h2>
+          <h2 className="sect">Who the cameras are seeing</h2>
           {(() => {
             const max = Math.max(...d.composition.map((x) => x.count), 1)
             return d.composition.slice(0, 8).map((x) => (
@@ -172,78 +156,14 @@ export default function Insights() {
         </div>
       )}
 
-      {pat && pat.scopes.length > 0 && (() => {
-        const sc = pat.scopes.find((s) => s.key === patScope) || pat.scopes[0]
-        return (
-          <div className="block">
-            <h2 className="sect">Weather and moon associations</h2>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
-              {pat.scopes.map((s) => (
-                <button
-                  key={s.key}
-                  onClick={() => setPatScope(s.key)}
-                  style={{
-                    fontSize: 12, padding: '4px 10px', borderRadius: 'var(--r-ctl)', cursor: 'pointer',
-                    border: '1px solid var(--border)',
-                    background: s.key === sc.key ? 'var(--surface-2)' : 'transparent',
-                    color: s.key === sc.key ? 'var(--text)' : 'var(--text-dim)',
-                    fontWeight: s.key === sc.key ? 600 : 400,
-                  }}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-            {sc.drivers.length === 0 && (
-              <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No clear weather or moon driver yet. It needs more nights.</div>
-            )}
-            <p className="page-intro">Exploratory comparisons of recorded detections. Each factor is compared separately; season, camera uptime, repeated triggers, and other conditions are not controlled for.</p>
-            {sc.drivers.map((dr, i) => {
-              const key = dr.key || (dr.factor === 'Moonlight' ? 'moon_illum' : dr.factor === 'Dark hours' ? 'darkness' : '')
-              const title = key === 'moon_illum' ? 'Moon illumination' : key === 'darkness' ? 'Night duration' : dr.factor
-              const definition = key === 'moon_illum'
-                ? 'Illuminated fraction of the moon. This does not measure light at ground level or account for clouds or the moon being above the horizon.'
-                : key === 'darkness' ? 'Hours outside daylight, calculated from sunrise and sunset. Shorter nights have fewer hours of darkness; cloud cover is a separate measurement.'
-                : key === 'cloud' ? 'Average cloud cover during the overnight weather window.' : 'Lower and higher refer to the bottom and top thirds of this measurement in the recorded sample.'
-              return <section key={i} className="pattern-comparison">
-                <h3>{title}</h3><p>{definition}</p>
-                <table><caption>Average detections per recording day</caption><thead><tr><th>Measurement group</th><th>Detections / day</th><th>Days</th></tr></thead><tbody>{dr.buckets.map(bucket => <tr key={bucket.label}><th>{bucket.label === 'low' ? 'Lower third' : bucket.label === 'high' ? 'Higher third' : 'Middle third'}{bucket.min != null && bucket.max != null && <small>{formatRange(key, bucket.min, bucket.max)}</small>}</th><td>{bucket.rate.toFixed(1)}</td><td>{bucket.days ?? '—'}</td></tr>)}</tbody></table>
-                <p>{dr.sample_nights} recording days compared. This is an association in this sample, not evidence that the condition caused more activity.</p>
-              </section>
-            })}
-            <p className="page-intro">{sc.label}: {sc.sightings} detections across {sc.total_nights} recording days. Each day runs 06:00–06:00 in estate time and includes daytime detections; weather is summarized for the overnight window. Counts are not unique animals or adjusted for camera uptime.</p>
-          </div>
-        )
-      })()}
-
-      <div className="block">
-        <h2 className="sect">Patterns</h2>
-        {d.correlations.length === 0 && (
-          <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>Not enough data yet to call patterns.</div>
-        )}
-        {d.correlations.map((c, i) => (
-          <div
-            key={i}
-            style={{
-              marginBottom: 12,
-              paddingBottom: 12,
-              borderBottom: i < d.correlations.length - 1 ? '1px solid var(--border)' : 'none',
-            }}
-          >
-            <div style={{ fontSize: 14, lineHeight: 1.4 }}>{c.statement}</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
-              <div style={{ flex: 1, maxWidth: 140, height: 4, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
-                <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? Math.min(1, c.strength) : 0})` }} />
-              </div>
-              <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>based on {c.sample} sightings</span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ color: 'var(--text-dim)', fontSize: 11, textAlign: 'center' }}>
-        These patterns describe recorded activity, not proven causes. More camera nights can change the results.
-      </div>
+      {d && <div className="block insights-observations">
+        <h2 className="sect">Other things your cameras tell us</h2>
+        {observations.length === 0 && <p className="page-intro">More sightings will help reveal the busiest times and places.</p>}
+        {observations.map((c, i) => <div className="insights-observation" key={i}>
+          <p>{c.statement}</p><span>From {c.sample.toLocaleString()} camera sightings</span>
+        </div>)}
+        <p className="page-intro">The same animal may appear more than once. Cameras that record more often can account for more sightings.</p>
+      </div>}
 
       {openClass && (
         <Overlay onClose={closeClass} label={`${openClass} photos`} backLabel="Back to insights">{(close) => (

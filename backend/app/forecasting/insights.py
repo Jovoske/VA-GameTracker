@@ -1,40 +1,25 @@
-"""Insights — multi-day outlook + plain-language correlations.
+"""Insights — sun/moon calendar and summaries of recorded sightings.
 
-Correlations are stated as sentences with a sample size and honest hedging.
-With ~1 season of data these are early signals, not laws.
+Weather and moon comparisons come from patterns.py so the page uses one
+consistent comparison for each condition.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Integer, and_, cast, extract, func, select
+from sqlalchemy import Integer, cast, extract, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.enrichment.astro import moon_phase, solar
 from app.forecasting.model import _best_window, class_label
-from app.models import Camera, Detection, EnvSnapshot, Image, Species
+from app.models import Camera, Detection, Image, Species
 
 _TZ = settings.estate_timezone
 
 
 def _local_hour():
     return cast(extract("hour", func.timezone(_TZ, Image.captured_at)), Integer).label("h")
-
-
-def _det_env():
-    """Base join: detections → their image → the env snapshot at capture time."""
-    return (
-        select(Detection)
-        .join(Image, Image.id == Detection.image_id)
-        .join(
-            EnvSnapshot,
-            and_(
-                EnvSnapshot.camera_id == Image.camera_id,
-                EnvSnapshot.observed_at == Image.captured_at,
-            ),
-        )
-    )
 
 
 def _outlook(days: int = 7) -> list[dict]:
@@ -76,10 +61,11 @@ def _correlations(db: Session) -> list[dict]:
         select(h, func.count()).select_from(Detection).join(Image, Image.id == Detection.image_id).group_by(h)
     ).all()
     by_hour = {int(x): int(c) for x, c in hour_rows}
-    w = _best_window(by_hour)
+    w = _best_window(by_hour, sittable_only=False)
     out.append({
-        "statement": f"Activity peaks {w['start_hour']:02d}:00–{w['end_hour']:02d}:00 — "
-                     f"{w['share_pct']}% of all sightings.",
+        "kind": "time",
+        "statement": f"The busiest camera hours were {w['start_hour']:02d}:00–{w['end_hour']:02d}:00, "
+                     f"with {w['share_pct']}% of recorded sightings.",
         "strength": w["share_pct"] / 100, "sample": total,
     })
 
@@ -95,43 +81,16 @@ def _correlations(db: Session) -> list[dict]:
             select(h, func.count()).select_from(Detection).join(Image, Image.id == Detection.image_id)
             .where(Detection.species_id == sid).group_by(h)
         ).all()
-        sw = _best_window({int(x): int(c) for x, c in rows})
+        sw = _best_window({int(x): int(c) for x, c in rows}, sittable_only=False)
         out.append({
-            "statement": f"{name} are most active {sw['start_hour']:02d}:00–{sw['end_hour']:02d}:00.",
+            "kind": "time",
+            "statement": f"The busiest camera hours for {name.lower()} were "
+                         f"{sw['start_hour']:02d}:00–{sw['end_hour']:02d}:00.",
             "strength": sw["share_pct"] / 100, "sample": int(cnt),
         })
 
-    # 3. Moon: dark vs bright nights (per-night rate)
-    def _moon(lo, hi):
-        det = db.scalar(
-            _det_env().with_only_columns(func.count(Detection.id))
-            .where(EnvSnapshot.moon_illum_pct >= lo, EnvSnapshot.moon_illum_pct < hi)
-        ) or 0
-        nights = db.scalar(
-            _det_env().with_only_columns(
-                func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at))))
-            ).where(EnvSnapshot.moon_illum_pct >= lo, EnvSnapshot.moon_illum_pct < hi)
-        ) or 0
-        return det, nights
-
-    dark_d, dark_n = _moon(0, 25)
-    bright_d, bright_n = _moon(50, 101)
-    if dark_n >= 3 and bright_n >= 3:
-        dr, br = dark_d / dark_n, bright_d / bright_n
-        if dr >= br * 1.25:
-            out.append({
-                "statement": f"~{round((dr / br - 1) * 100)}% more activity on dark nights "
-                             f"(<25% moon) than bright ones.",
-                "strength": min(1.0, dr / br - 1), "sample": dark_d + bright_d,
-            })
-        elif br >= dr * 1.25:
-            out.append({
-                "statement": f"~{round((br / dr - 1) * 100)}% more activity on bright nights "
-                             f"(>50% moon) than dark ones.",
-                "strength": min(1.0, br / dr - 1), "sample": dark_d + bright_d,
-            })
-
-    # 4. Camera concentration
+    # 3. Camera concentration. Moon comparisons live in patterns.py, where the
+    # denominator also includes quiet recording days.
     cam_rows = db.execute(
         select(Camera.name, func.count(Detection.id))
         .select_from(Detection).join(Image, Image.id == Detection.image_id)
@@ -143,7 +102,8 @@ def _correlations(db: Session) -> list[dict]:
         share = round(top2 / total * 100)
         names = " and ".join(n for n, _ in cam_rows[:2])
         out.append({
-            "statement": f"{names} account for {share}% of all activity.",
+            "kind": "location",
+            "statement": f"{names} recorded {share}% of all camera sightings.",
             "strength": share / 100, "sample": total,
         })
     return out

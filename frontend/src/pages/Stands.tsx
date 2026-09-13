@@ -26,7 +26,7 @@ export default function Stands() {
   async function load() {
     setErr('')
     try {
-      const [all, reports, user] = await Promise.all([api<Stand[]>('/stands'), api<Sit[]>('/sits'), api<Me>('/users/me')])
+      const [all, reports, user] = await Promise.all([api<Stand[]>('/stands'), api<Sit[]>('/sits'), api<Me>('/auth/me')])
       setStands(all); setSits(reports.filter(s => s.outcome !== 'cancelled')); setMe(user)
     } catch (e) { setErr(`Could not load stands. ${(e as Error).message}`) }
   }
