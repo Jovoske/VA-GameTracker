@@ -2,6 +2,11 @@
 
 Continue from branch `codex/suntek-ftp-ingestion`. The user wants this camera's JPEGs in VA-GameTracker without an email mailbox. The source implementation is prepared; no server deployment, firewall change, or firmware flash has been performed. Server access was unavailable during development.
 
+> **Update:** the native Db01 steps below are now scripted in `deploy/install-ftp.ps1`; see
+> [the Db01 section of the guide](14-suntek-ftp.md#db01-native-windows-one-shot-install).
+> Merging to `main` deploys the code; the script installs the two services. Router
+> port-forwarding and the camera-side MMSCONFIG steps are still manual.
+
 ## Start with the existing deployment
 
 Read [the recorded deployment handoff](09-handoff.md) and verify it against the server before applying changes. It describes **Db01, Windows Server 2022, a native installation under `C:\GameSense`, PostgreSQL on port 5433, NSSM services, and scheduled pipeline tasks**. Treat those details as recorded context, not freshly verified server state. If still accurate, follow the native installation section of [the FTP guide](14-suntek-ftp.md), not its Docker section.

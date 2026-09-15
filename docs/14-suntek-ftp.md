@@ -52,6 +52,32 @@ Run from the existing deployment checkout and retain its Compose project name, e
 
 The importer checks for completed uploads every 30 seconds. The app's existing AI jobs process imported photos on their usual schedule; a photo appearing in the gallery does not mean species recognition has already finished.
 
+## Db01 (native Windows) one-shot install
+
+Production runs natively on Db01, so the code arrives by the normal push-to-`main` loop
+([deployment](09-deployment.md)); this section is the rest. Once Db01 has pulled a `main`
+that contains `ftp-receiver/`, create `C:\GameSense\ftp.env` (outside the repo; the header of
+`deploy/install-ftp.ps1` lists its keys) and run, elevated, on Db01:
+
+```powershell
+Invoke-Command -ComputerName Db01 {
+    powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\install-ftp.ps1
+}
+```
+
+It creates the spool `C:\GameSense\data\ftp-spool` and a receiver-only venv, registers the
+camera in the app (filling `FTP_CAMERA_ID` back into `ftp.env`), installs the auto-start NSSM
+services `GameSenseFTP` (receiver, logs to `C:\GameSense\logs\ftp-receiver.log`) and
+`GameSenseFTPImport` (importer, `ftp-importer.log`), proves a loopback upload lands as a
+`ready` package before the importer starts, and opens Windows Firewall for the control port
+and TCP 50000-50009 when `FTP_BIND` is not loopback. Re-run it after editing `ftp.env`.
+`deploy/update.ps1` restarts both services on every later deploy.
+
+Run it first with the default `FTP_BIND=127.0.0.1`; then set `FTP_BIND=0.0.0.0` and
+`FTP_PUBLIC_IP`, re-run, forward the ports on the router, and test from outside the LAN
+before touching the camera. The router forwarding and the camera's MMSCONFIG settings
+remain manual steps.
+
 ## Native Windows/Linux installation
 
 Use the existing backend Python environment and database configuration. Update backend dependencies from `backend/requirements.txt`. Install the receiver's small dependency list in its own virtual environment using `pip install -r ftp-receiver/requirements.txt`.
