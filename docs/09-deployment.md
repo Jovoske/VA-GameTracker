@@ -53,6 +53,14 @@ driving `backend/pipeline.py`.
 | `GameSense-Plan` | 17:00 daily | `plan` | record tonight's claims **before** the night |
 | `GameSense-Score` | 11:00 daily | `score` | grade last night's claims against the cameras |
 
+Two optional NSSM services carry the Suntek 4G camera's photos in over FTP; see the
+[Suntek guide](14-suntek-ftp.md) and `deploy/install-ftp.ps1`:
+
+| Service | Does |
+|---|---|
+| `GameSenseFTP` | upload-only FTP receiver for the camera, publishes completed JPEGs to `C:\GameSense\data\ftp-spool` |
+| `GameSenseFTPImport` | imports ready packages into the camera gallery every 30 s; the normal `sync` AI pass then classifies them |
+
 `plan` and `score` are what make the forecast falsifiable. Without them nothing
 is ever recorded or graded, the Tonight card keeps saying *"0 scored nights"*
 forever, and the app is back to making claims nobody checks. Order matters:

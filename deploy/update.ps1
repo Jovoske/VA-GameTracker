@@ -53,6 +53,13 @@ if ($changed -match '(?m)^backend/requirements\.txt$') {
     if ($LASTEXITCODE -ne 0) { Note 'ERROR: pip install failed - see update-pip.log' }
 }
 
+# The camera FTP receiver has its own environment (no database access); refresh it too.
+if (($changed -match '(?m)^ftp-receiver/requirements\.txt$') -and (Test-Path 'C:\GameSense\venv-ftp\Scripts\python.exe')) {
+    Note 'pip install (ftp receiver)'
+    & 'C:\GameSense\venv-ftp\Scripts\python.exe' -m pip install -q -r "$repo\ftp-receiver\requirements.txt" *> "$logs\update-pip-ftp.log"
+    if ($LASTEXITCODE -ne 0) { Note 'ERROR: receiver pip install failed - see update-pip-ftp.log' }
+}
+
 # Rebuild the SPA only when the frontend moved (npm + vite is the slow part).
 if ($changed -match '(?m)^frontend/') {
     Note 'npm build'
@@ -142,6 +149,12 @@ Select-String -Path "$logs\update-alembic.log" -Pattern 'Running upgrade' -EA Si
     ForEach-Object { Note ($_.Line.Trim()) }
 
 Restart-Service GameSenseAPI
+# The Suntek FTP services (deploy/install-ftp.ps1) run repo code too; restart them when present
+# so the importer never keeps an old module loaded. A restart mid-upload is safe: the receiver
+# only publishes completed files, and the importer replays anything it had not committed.
+foreach ($svc in @('GameSenseFTPImport', 'GameSenseFTP')) {
+    if (Get-Service $svc -EA SilentlyContinue) { Restart-Service $svc -EA SilentlyContinue; Note "restarted $svc" }
+}
 Start-Sleep -Seconds 8
 try {
     Invoke-WebRequest 'http://localhost:8090/api/health' -UseBasicParsing -TimeoutSec 15 | Out-Null
