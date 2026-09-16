@@ -99,3 +99,27 @@ Verified:
 To change any FTP setting: edit `C:\GameSense\ftp.env` and re-run
 `deploy\install-ftp.ps1` elevated on Db01 (idempotent). `deploy/update.ps1` restarts both
 services on every deploy.
+
+## Change of route: email, 2026-09-16 (later the same day)
+
+Db01 is a protected company server: no router forward or inbound port can be arranged for
+it, so the FTP path above cannot receive from the camera. Db01 has unrestricted outbound
+access (checked: TCP 22, 443, 993 and 465 all reachable), so the camera now delivers by
+**email** and Db01 polls the mailbox. See [16-suntek-email.md](16-suntek-email.md).
+
+Done on Db01:
+
+- `GameSenseFTP` receiver service removed; the two "GameSense FTP" firewall rules removed;
+  `ftp.env` set back to `FTP_BIND=127.0.0.1` with no public IP. Nothing listens on 2121.
+- `GameSenseFTPImport` (the importer) kept running; it is what the email path feeds.
+- Camera record, spool and FTP account unchanged (the account is unused now).
+
+Still to do:
+
+1. Create the dedicated camera mailbox and its app password (Gmail: 2-Step Verification,
+   then App password).
+2. Write `C:\GameSense\mail.env` and run `deploy\install-mail.ps1` on Db01. It fails if the
+   mailbox login does not work, before starting anything.
+3. Email a JPEG to the mailbox and confirm it appears under the camera in the app.
+4. Configure the camera's SMTP settings in MMSCONFIG and trigger one photo.
+5. Place the camera on the map.

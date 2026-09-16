@@ -149,10 +149,10 @@ Select-String -Path "$logs\update-alembic.log" -Pattern 'Running upgrade' -EA Si
     ForEach-Object { Note ($_.Line.Trim()) }
 
 Restart-Service GameSenseAPI
-# The Suntek FTP services (deploy/install-ftp.ps1) run repo code too; restart them when present
+# The Suntek FTP/mail services (deploy/install-ftp.ps1, install-mail.ps1) run repo code too; restart them when present
 # so the importer never keeps an old module loaded. A restart mid-upload is safe: the receiver
 # only publishes completed files, and the importer replays anything it had not committed.
-foreach ($svc in @('GameSenseFTPImport', 'GameSenseFTP')) {
+foreach ($svc in @('GameSenseFTPImport', 'GameSenseFTP', 'GameSenseMail')) {
     if (Get-Service $svc -EA SilentlyContinue) { Restart-Service $svc -EA SilentlyContinue; Note "restarted $svc" }
 }
 Start-Sleep -Seconds 8

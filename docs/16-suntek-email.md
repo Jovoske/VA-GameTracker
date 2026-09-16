@@ -1,0 +1,133 @@
+# Suntek HC801LTE photos by email
+
+The camera emails each photo over SMTP to a dedicated mailbox. A poller on the GameSense
+server reads that mailbox over IMAP, **outbound only**, and drops every JPEG attachment into
+the spool that the existing importer (`backend/app/ingestion/ftp_import.py`) already watches.
+From there the photo gets the same enrichment, AI detection and forecast treatment as a
+SPYPOINT photo.
+
+This replaced the [FTP path](14-suntek-ftp.md) on Db01 on 2026-09-16: Db01 is a protected
+company server and no inbound port or router forward can be opened for it. The FTP
+receiver and importer code stay in the repository; only the importer is used by this path.
+
+```
+camera --SMTP--> mailbox (Gmail) <--IMAP poll-- mail-receiver --> spool/ready --> importer --> app
+```
+
+## Pieces
+
+| Piece | Where | Notes |
+| --- | --- | --- |
+| Mail receiver | `mail-receiver/receiver.py` | standard library only; one process per mailbox and spool |
+| Installer (Db01) | `deploy/install-mail.ps1` | NSSM service `GameSenseMail`; idempotent |
+| Importer | `backend/app/ingestion/ftp_import.py`, service `GameSenseFTPImport` | unchanged; installed by `deploy/install-ftp.ps1` |
+| Tests | `mail-receiver/tests`, `integration-tests/test_suntek_mail_bridge.py` | fake IMAP client; bridge test runs the real importer parser |
+
+Progress is tracked by IMAP UID in `<spool>/.mail-state.json`, not by read/unread flags, so
+opening the mailbox by hand never hides a photo from the import. Messages are marked read
+afterwards purely for convenience. The importer deduplicates by file hash, so a resent
+photo never creates a second image.
+
+Per message: every part that is `image/jpeg` or named `.jpg`/`.jpeg`, is a complete JPEG
+(SOI and EOI markers), and is at most 20 MiB becomes its own package. The email `Date`
+header becomes the package's `received_at`; the importer still prefers the JPEG's EXIF
+capture time when present. Messages without a usable JPEG, or from a sender that fails the
+optional `MAIL_FROM_FILTER`, are skipped and logged. A dropped IMAP connection or a full
+disk raises and is retried on the next poll without advancing; only unparsable mail is
+skipped permanently (logged at ERROR with its UID).
+
+## Mailbox
+
+Create a **dedicated** mailbox for the camera. Do not reuse a personal account: the camera
+stores the password in plain text and the poller has full read access.
+
+For Gmail:
+
+1. Create a new Google account for the camera.
+2. Turn on 2-Step Verification (Google account, Security).
+3. Create an **App password** (Security, 2-Step Verification, App passwords). Google shows
+   16 letters in groups of four; spaces do not matter.
+4. IMAP is enabled by default on new accounts. If the Gmail settings show it off, turn it on
+   (Settings, See all settings, Forwarding and POP/IMAP).
+
+Any other IMAP provider works; set `MAIL_IMAP_HOST`/`MAIL_IMAP_PORT` accordingly.
+
+## Db01 (native Windows) install
+
+`deploy/install-ftp.ps1` must have run once already (it registers the camera and installs
+the importer); on Db01 it has. Then create `C:\GameSense\mail.env` (outside the repo, never
+in git):
+
+```
+MAIL_IMAP_HOST=imap.gmail.com
+MAIL_IMAP_PORT=993
+MAIL_USERNAME=<camera mailbox address>
+MAIL_PASSWORD=<app password>
+MAIL_FOLDER=INBOX
+MAIL_FROM_FILTER=
+MAIL_POLL_SECONDS=60
+```
+
+and run, elevated, on Db01 (or from the laptop over WinRM):
+
+```powershell
+Invoke-Command -ComputerName Db01 {
+    powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\install-mail.ps1
+}
+```
+
+The script installs the service, then **logs in to the mailbox once before starting it**, so
+a wrong password fails loudly here rather than silently in a log. Re-run it after editing
+`mail.env`. `deploy/update.ps1` restarts the service on every deploy.
+
+Logs: `C:\GameSense\logs\mail-receiver.log` (poller) and `C:\GameSense\logs\ftp-importer.log`
+(importer). Each poll prints one JSON line with `messages/published/skipped/errors` counts.
+
+## Camera settings
+
+MMSCONFIG, SMTP / Email section (menu names vary by firmware revision):
+
+| Setting | Value |
+| --- | --- |
+| Send mode | instant / every photo; picture only (video is not imported) |
+| SMTP server | `smtp.gmail.com` |
+| SMTP port | `465` with SSL on; if the firmware has no SSL switch, try `587` |
+| Account / login | the camera mailbox address |
+| Password | the app password |
+| Send to / receiver | the same camera mailbox address |
+| GPRS / APN | the SIM provider's data APN |
+
+Save the settings to the SD card as the manual describes, insert it with the camera off, and
+trigger one photo. Before enabling sending, confirm with USB unplugged that the camera can
+take a photo and show it on its own screen.
+
+If the camera cannot negotiate TLS with Gmail (2020 firmware), the options are, in order:
+port 587 (STARTTLS); a mailbox at a provider that still accepts SMTP AUTH without TLS; or
+the [FTP path](14-suntek-ftp.md) on a small rented server outside the company network.
+
+## Verify
+
+1. Send yourself a test mail with a JPEG attached from any mail client to the camera mailbox.
+   Within `MAIL_POLL_SECONDS` plus 30 s it should appear under the camera in the app.
+2. Send the same mail again: the importer logs `duplicate`, the camera image count stays.
+3. Let the camera send one photo. Check its capture time in the app is right; the importer
+   log line names the `timestamp_source` (`exif_*` is what you want; `received_at_fallback`
+   means the photo carried no EXIF and the email time was used).
+
+## Operations
+
+- **Re-import from the start:** stop `GameSenseMail`, delete `<spool>\.mail-state.json`,
+  start it again. The importer's hash check keeps duplicates out.
+- **Mailbox full:** Gmail's 15 GB holds years of camera photos; delete old mail from the
+  mailbox freely once imported, the spool and app keep the originals.
+- **Two receivers on one spool** is prevented by `<spool>\.mail-receiver.lock`; the FTP
+  receiver uses its own `staging` and lock, so both could run side by side if ever needed.
+
+## Tests
+
+From `backend` with the development requirements installed:
+
+```sh
+python -m pytest -o addopts='' ../mail-receiver/tests ../integration-tests/test_suntek_mail_bridge.py -q
+python -m ruff check ../mail-receiver ../integration-tests/test_suntek_mail_bridge.py
+```

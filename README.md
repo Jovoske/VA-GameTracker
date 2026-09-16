@@ -61,7 +61,7 @@ start.bat    Windows launcher
 
 ## Local development notes
 
-Suntek HC801LTE cameras can use the optional [FTP receiver and importer](docs/14-suntek-ftp.md) to send JPEGs without an email mailbox. It requires server setup and a first camera transfer test; the services are opt-in.
+Suntek HC801LTE cameras have two optional input paths: the [email mailbox poller](docs/16-suntek-email.md) (outbound IMAP only, works behind a locked-down network; the one in use on Db01) and the [FTP receiver](docs/14-suntek-ftp.md) (needs an inbound port). Both feed the same importer; the services are opt-in.
 
 The agent deploying this integration should start with the [Suntek server handoff](docs/15-suntek-server-handoff.md).
 
