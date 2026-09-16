@@ -138,6 +138,20 @@ The camera's `ERR_LOG.TXT` on that card (15 Sep 2026) shows modem Quectel EC25, 
 attempt yet. The card also carries old SPYPOINT LINK-MICRO logs (LOG.TXT, CELL.TXT) from 2025;
 harmless.
 
+**Blocker found 2026-09-16 from the camera's `ERR_LOG.TXT`:** the camera triggers on motion
+and tries to send, but the modem is configured with `AT+QICSGP=1,1,"bicsapn","","",1` and
+`AT+QIACT=1` fails, so it never reaches SMTP. `bicsapn` is the BICS "SIM for Things" default
+APN; the firmware (`Ver:800 07/18/2020`) derives it from the SIM's IMSI (208 09 …) and ignores
+the APN in `Parameter.dat`. Verified twice: with SMTP mode Manual/Other/Other and with a
+hand-patched file in Auto mode, Spain/Vodafone; both still sent `bicsapn`. The file itself is
+correct (decoded: every byte is nibble-swapped then XOR 0xFF; SMTP block at 1040: mode byte
+1=Auto/0=Manual, on/off byte, pics/day, country[16] at 1043, operator[16] at 1059, APN at 1104,
+server at 1296, sender at 1424, password at 1488, Email1 at 1552). Ways out, in order: ask
+Always Connected to enable `bicsapn` on the SIM (draft in Gmail Drafts); test the SIM in a
+phone with APN `bicsapn` to see whether the network accepts it at all; ask Suntek for a
+firmware that honours the configured APN; or a native-operator SIM (loses multi-country
+roaming, which Julle wants).
+
 MMSCONFIG, SMTP tab (Manual mode):
 
 | Setting | Value |
