@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, setToken } from '../api'
+import NotificationSettings from '../components/NotificationSettings'
+import Toggle from '../components/Toggle'
 
 type Status = {
   cameras: number
@@ -229,44 +231,18 @@ export default function Admin() {
                   {s.detections} sighting{s.detections === 1 ? '' : 's'}
                 </div>
               </div>
-              <button
-                onClick={() => toggleSpecies(s)}
+              <Toggle
+                on={s.huntable}
                 disabled={savingId === s.id}
-                aria-pressed={s.huntable}
-                title={s.huntable ? 'Shown in advice. Click to hide.' : 'Hidden from advice. Click to show.'}
-                style={{
-                  width: 46,
-                  height: 26,
-                  borderRadius: 'var(--r-card)',
-                  border: 'none',
-                  cursor: savingId === s.id ? 'default' : 'pointer',
-                  background: s.huntable ? 'var(--go)' : 'var(--surface-2)',
-                  position: 'relative',
-                  transition: 'background var(--d-base) var(--ease-out)',
-                  flexShrink: 0,
-                  opacity: savingId === s.id ? 0.6 : 1,
-                }}
-              >
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: 3,
-                    left: 3,
-                    width: 20,
-                    height: 20,
-                    borderRadius: '50%',
-                    background: '#fff',
-                    // translate, not `left`: the knob rides the compositor
-                    // instead of forcing layout and paint on every frame.
-                    transform: s.huntable ? 'translateX(20px)' : 'translateX(0)',
-                    transition: 'transform var(--d-base) var(--ease-out)',
-                  }}
-                />
-              </button>
+                onChange={() => toggleSpecies(s)}
+                label={s.huntable ? 'Shown in advice. Click to hide.' : 'Hidden from advice. Click to show.'}
+              />
             </div>
           ))
         )}
       </div>
+
+      <NotificationSettings />
 
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <h2 className="sect">Camera accounts</h2>

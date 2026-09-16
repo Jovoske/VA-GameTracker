@@ -27,3 +27,6 @@ cryptography==44.0.0
 Pillow==12.3.0
 # IANA zones are not supplied by Windows itself.
 tzdata==2026.4
+# Web Push (VAPID-signed, aes128gcm) for sighting notifications. 2.3.0 is the last
+# release that accepts the cryptography pin above; 2.4+ wants cryptography>=47.
+pywebpush==2.3.0

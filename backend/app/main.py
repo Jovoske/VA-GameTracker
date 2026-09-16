@@ -15,6 +15,7 @@ from app.api import (
     routes_health,
     routes_images,
     routes_insights,
+    routes_notifications,
     routes_species,
     routes_stands,
     routes_users,
@@ -52,6 +53,7 @@ app.include_router(routes_users.router, prefix=API_PREFIX)
 app.include_router(routes_stands.router, prefix=API_PREFIX)
 app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
 app.include_router(routes_zones.router, prefix=API_PREFIX)
+app.include_router(routes_notifications.router, prefix=API_PREFIX)
 
 import mimetypes
 import os

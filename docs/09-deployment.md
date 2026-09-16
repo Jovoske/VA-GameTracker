@@ -53,6 +53,10 @@ driving `backend/pipeline.py`.
 | `GameSense-Plan` | 17:00 daily | `plan` | record tonight's claims **before** the night |
 | `GameSense-Score` | 11:00 daily | `score` | grade last night's claims against the cameras |
 
+Sighting notifications need no task of their own: the dispatcher runs at the end
+of every classification pass, so the `sync` task carries it. See
+[Notifications](17-notifications.md).
+
 Two optional NSSM services carry the Suntek 4G camera's photos in over FTP; see the
 [Suntek guide](14-suntek-ftp.md) and `deploy/install-ftp.ps1`:
 

@@ -58,4 +58,17 @@ def classify_unclassified(db: Session, *, limit: int = 2000) -> dict:
             db.commit()
             log.info("classify.progress", done=i, total=len(images))
     db.commit()
+
+    # A sighting exists from this moment, so this is where it is announced — one hook
+    # here rather than one in each of the four places that call this pass. It may
+    # never fail the pass: a push service being down is no reason to leave photos
+    # unclassified, and the watermark means the next run picks up anything missed.
+    try:
+        from app.notifications.dispatch import dispatch_new_sightings
+
+        dispatch_new_sightings(db)
+    except Exception as e:
+        log.warning("notify.failed", error=str(e)[:300])
+        db.rollback()
+
     return {"classified": len(images), "by_species": counts}

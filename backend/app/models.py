@@ -415,3 +415,94 @@ class Sit(Base):
         Index("ix_sits_night", "night"),
         Index("ix_sits_stand_night", "stand_id", "night"),
     )
+
+
+class AppSetting(Base):
+    """Server-generated state that must outlive a restart but has no business in .env.
+
+    Turning notifications on should not require anyone to hand-edit the server: the
+    Web Push (VAPID) key pair is generated on first use and kept here, as is the
+    dispatcher's watermark. Values are small JSON documents keyed by name.
+    """
+
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class NotificationPref(Base):
+    """Which animals a person wants to hear about, and whether they want to at all.
+
+    One row per user; a missing row means "never set up" and the API answers with
+    defaults (priority species selected, alerts off). `species_ids` is a JSON list of
+    species keys rather than a join table: it is tiny, always read whole, and written
+    whole from the settings screen.
+    """
+
+    __tablename__ = "notification_prefs"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    species_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PushSubscription(Base):
+    """A browser's Web Push endpoint: one per installed app or device, owned by a user.
+
+    The endpoint is the identity. A phone that signs in as someone else re-homes its
+    row, so a push always goes to whoever is signed in on that device.
+    """
+
+    __tablename__ = "push_subscriptions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String, nullable=False)
+    auth: Mapped[str] = mapped_column(String, nullable=False)
+    user_agent: Mapped[str | None] = mapped_column(String)
+    failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("endpoint", name="uq_push_subscriptions_endpoint"),
+        Index("ix_push_subscriptions_user_id", "user_id"),
+    )
+
+
+class Notification(Base):
+    """What was (or would have been) sent: the in-app record behind every push.
+
+    Push is fire-and-forget and phones drop it silently, so the app keeps its own
+    copy. The settings screen lists these, which is how a person tells a quiet night
+    from a broken subscription.
+    """
+
+    __tablename__ = "notifications"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="sighting")
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str | None] = mapped_column(String)
+    species_id: Mapped[str | None] = mapped_column(ForeignKey("species.id"))
+    image_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("images.id", ondelete="SET NULL")
+    )
+    # sent / failed / no_subscription — how delivery went, for the settings screen.
+    push_status: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_notifications_user_created", "user_id", "created_at"),)

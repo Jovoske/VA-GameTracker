@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     spypoint_password: str = ""
     sync_interval_minutes: int = 15
 
+    # Notifications (Web Push). The VAPID key pair is generated on first use and kept
+    # in the database, so nothing here is required. The subject is the contact a push
+    # service may use if this sender misbehaves; it defaults to mailto:<admin_email>.
+    vapid_subject: str = ""
+    # Photos captured longer ago than this are never announced: a backfill is history,
+    # not news, and a season of it arriving as pushes would get the app muted.
+    notify_lookback_hours: int = 24
+
     # Storage / retention
     media_root: str = "/data/media"
     models_root: str = "/data/models"

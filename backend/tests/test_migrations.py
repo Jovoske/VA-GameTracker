@@ -41,6 +41,9 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert _columns(eng, "sits")
         images = _columns(eng, "images")
         assert "animal_conf" in images and "reviewed" in images
+        notes = _columns(eng, "notifications")
+        assert "push_status" in notes and "read_at" in notes
+        assert "species_ids" in _columns(eng, "notification_prefs")
     finally:
         eng.dispose()
 
@@ -88,6 +91,7 @@ def test_new_revisions_are_idempotent(fresh_db):
     try:
         assert _columns(eng, "camera_nights")
         assert _columns(eng, "sits")
+        assert _columns(eng, "push_subscriptions")
     finally:
         eng.dispose()
 

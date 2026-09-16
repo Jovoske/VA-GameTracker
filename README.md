@@ -76,3 +76,4 @@ The agent deploying this integration should start with the [Suntek server handof
 - **M2** — AI: MegaDetector + DeepFaune (European), bounding boxes, annotated images.
 - **M3** — the Tonight card: per-stand forecast, wind-safe analysis, GO/MARGINAL/SKIP with reasons.
 - **Tier 2+** — individual re-ID, movement inference, correlations, alerts, Git self-update panel.
+- **Notifications** — per-species push to the phone (Settings → Notifications); see [docs/17-notifications.md](docs/17-notifications.md).

@@ -102,3 +102,46 @@ self.addEventListener('fetch', (e) => {
       ),
   )
 })
+
+// ── Web Push ──
+// The server sends a small JSON body: { title, body, url, tag, at }. Same `tag` per
+// species, so a second sounder an hour later replaces the first banner rather than
+// stacking under it. Anything unparseable still shows as a plain notification —
+// a push that arrived and was silently dropped is the worst outcome.
+self.addEventListener('push', (e) => {
+  let data = {}
+  try {
+    data = e.data ? e.data.json() : {}
+  } catch {
+    data = { title: 'GameSense', body: e.data ? e.data.text() : '' }
+  }
+  const title = data.title || 'GameSense'
+  const opts = {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: data.tag || undefined,
+    renotify: Boolean(data.tag),
+    data: { url: data.url || '/' },
+    timestamp: data.at ? Date.parse(data.at) || Date.now() : Date.now(),
+  }
+  e.waitUntil(self.registration.showNotification(title, opts))
+})
+
+// Tapping the banner focuses the app if it is open and sends it to the page the
+// notification points at; otherwise it opens the app there.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close()
+  const target = new URL((e.notification.data && e.notification.data.url) || '/', self.location.origin).href
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if ('focus' in client) {
+          if ('navigate' in client) client.navigate(target).catch(() => {})
+          return client.focus()
+        }
+      }
+      return self.clients.openWindow(target)
+    }),
+  )
+})

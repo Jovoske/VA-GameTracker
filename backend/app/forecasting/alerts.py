@@ -1,8 +1,9 @@
 """Alerts — notable events worth surfacing: opportunity nights, recent target-species
 sightings, and pattern breaks (a usually-active camera gone quiet).
 
-In-app feed for now; browser push (VAPID via the PWA service worker) is the next
-delivery upgrade and reuses these same events.
+This is the in-app feed on Tonight, recomputed on every read. Push to phones lives in
+app.notifications: it announces new sightings per species as they are classified,
+filtered by what each person asked to hear about.
 """
 from __future__ import annotations
 
