@@ -128,6 +128,16 @@ the camera reads it when switched to TEST. The SMTP tab has a `Manual` mode with
 Type of `Other`, a `No SSL / SSL / STARTTLS` choice, and Server / Port / Email / Password
 fields, so Gmail on 465 with SSL is expressible. Leave the MMS tab OFF and the FTP tab OFF.
 
+**Done 2026-09-16 via MMSCONFIG on the laptop:** SMTP ON, Mode Manual, Country/Operator
+Other, APN `globaldata.iot` (Always Connected IoT SIM, no APN user/password, roaming must be on;
+registers as "NL KPN Global IoT", LTE band 20), Server type Other, SSL, `smtp.gmail.com`, port
+465, sender and Email1 both `FoxCam.Suntek@gmail.com`, app password typed by Julle. Saved as
+`Parameter.dat` (1808 bytes; copy kept on the laptop Desktop) and copied to the SD card root.
+The camera's `ERR_LOG.TXT` on that card (15 Sep 2026) shows modem Quectel EC25, firmware
+`Ver:800 07/18/2020`, IMEI 860425047946098, successful NTP time sync (so data works), no SMTP
+attempt yet. The card also carries old SPYPOINT LINK-MICRO logs (LOG.TXT, CELL.TXT) from 2025;
+harmless.
+
 MMSCONFIG, SMTP tab (Manual mode):
 
 | Setting | Value |
