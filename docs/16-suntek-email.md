@@ -107,7 +107,13 @@ So the order is:
    only has the same Drive links, suntekcamera.gr and unioncam.net have no copy. Sources left:
    the CD/mini-CD in the camera box (the manual says "Load CD into the computer"), the
    firmware package itself (Suntek often bundles a MMSCONFIG folder), or support@cnsuntek.com
-   (updated request draft in Gmail Drafts). The same page notes that Gmail may reject
+   (updated request draft in Gmail Drafts).
+   **Working source (found 2026-09-16):** Suntek's corporate site hosts the file itself.
+   Download entry "4G Camera Mmsconfig Download Link" at
+   http://www.unioncam.net/en/newsdetail.aspx?code=0301&id=120, file
+   http://www.unioncam.net/uploadfiles/file/20190301/MMSCONFIG_4g.zip (294 082 bytes,
+   dated 2019-03-01, plain HTTP). Sibling entries: id=114 (2G/3G MMSCONFIG), id=122
+   (MMSCONFIG preloaded with Suntek's test email). The same page notes that Gmail may reject
    the camera's SMTP and offers Suntek's own test SMTP account as a workaround; if that
    turns out to be the only server the firmware can talk to, the poller can read any IMAP
    mailbox, so a mailbox at a provider the camera accepts is the fallback.
