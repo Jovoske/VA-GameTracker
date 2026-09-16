@@ -93,11 +93,14 @@ with the MMSCONFIG PC utility writing `Parameter.dat` to the SD card. Neither th
 the utility was ever supplied; the three firmware files sent in September 2021 were app-route
 builds, and the January 2021 one white-screened this board.
 
+**Update, later on 2026-09-16:** Julle reports he now has the MMSCONFIG-version firmware, so
+the support request (left as an unsent Gmail draft) is not needed.
+
 So the order is:
 
-1. Get the MMSCONFIG-version firmware for PCB `HC800-4G-6582053_V10` from Suntek support
-   (draft request already in the Gmail Drafts folder, 2026-09-16). Do not flash anything
-   that is not confirmed for this exact PCB.
+1. Flash the MMSCONFIG-version firmware if not already done (SD card, `FWR8012.bin`, power to
+   TEST, red LED for ~10 s, then format the card). Afterwards the menu must show MMS and
+   SMTP entries; if it white-screens, the build does not match PCB `HC800-4G-6582053_V10`.
 2. Get the 4G MMSCONFIG utility. Suntek links it from https://cnsuntek.com/mmsconfig/
    ("4G Series: MMSCONFIG", a Google Drive file). The same page notes that Gmail may reject
    the camera's SMTP and offers Suntek's own test SMTP account as a workaround; if that
