@@ -5,11 +5,11 @@ detection, species, the Tonight forecast and sighting notifications all work for
 without special cases. The original plan was written 2026-09-16 before the camera
 arrived; the live findings below now supersede its unverified protocol assumptions.
 
-**Implementation status (2026-09-16):** the integration, Settings controls,
-local gallery storage, migration and automated tests are implemented. A real
-UBox Pro login, device listing and high-resolution image download now work.
-The user has authorized deployment and encrypted account storage on Db01.
-See the live findings and operating notes below.
+**Implementation status (2026-09-16):** deployed to Db01 at commit `ba07f9b`,
+with migration `0013_ubox` applied and the API healthy. The active UBox Pro account
+is stored encrypted, and camera **FoxCon1** has 18 imported photos processed by
+the real detector/classifier. All 18 authenticated live gallery image endpoints
+returned valid 4608 × 2592 JPEGs. See the live findings and operating notes below.
 
 ## The camera and its platform
 
@@ -82,11 +82,13 @@ Two arrays: `items` (basic) and `infos` (detail). Fields seen: `device_uid`,
 `user/event_calendar` (which days have events) and `user/get_cloud_video_url`
 (clips, ignore for now).
 
-**Unknown until Phase 0:** whether `cloud_image_url`/`img` are populated **without a
-paid cloud plan**; the snapshot resolution; how long events stay listed; whether
-`event_time` is UTC or device-local (that is what `time_diff` is for); what the
-`type` codes mean (PIR vs AI person/animal); whether the image URLs are signed and
-expire; rate limits.
+**Remaining open questions after the live checks:** whether snapshots remain
+available **without a paid cloud plan or after a trial expires**; how long events
+stay listed; whether `event_time` is UTC or device-local (that is what `time_diff`
+is for); what the `type` codes mean (PIR vs AI person/animal); how long the signed
+image URLs remain valid; rate limits. HD snapshots are verified at 4608 × 2592 pixels, with
+1280 × 720 regular snapshots as fallback. One timestamp sample is consistent
+with Unix UTC; the three-event comparison against the app remains pending.
 
 ## Phase 0: probe (half a day)
 
@@ -164,7 +166,7 @@ Update `docs/03-database-schema.md`.
 ## Phase 4: Settings UI
 
 In `frontend/src/pages/Admin.tsx`, the Camera accounts card gets a provider choice
-(SPYPOINT / UBox) on the add form; the list shows the provider as a small tag.
+(SPYPOINT / UBox Pro) on the add form; the list shows the provider as a small tag.
 `routes_camera_accounts.add_account` branches on provider: verify with `UboxClient`
 (login + device count) before saving, `encrypt()` the password, then kick
 `backfill_ubox_account` as a background task under the pipeline lock exactly as the
@@ -197,15 +199,15 @@ SPYPOINT branch does. Removing an account keeps photos (`cameras.account_id` nul
 
 - **Unofficial API.** Same standing as SPYPOINT: a vendor change breaks it, the sync
   log makes it visible, nothing else is affected.
-- **Snapshot quality.** If Phase 0 shows tiny thumbnails, the detector may miss small
-  or distant animals. Options then: the `img` field vs `cloud_image_url`, a cloud plan
-  for full clips (extract a frame), or SD card pulls.
+- **Snapshot quality.** HD JPEGs are verified at 4608 × 2592 and preferred over the
+  1280 × 720 regular snapshot. Detection quality for small or distant wildlife
+  still needs field observations; the live samples are indoor/person test frames.
 - **Trigger noise.** A PTZ security camera may fire on wind, birds and light. The
   empty-frame filter handles that, but expect a higher empty ratio than the SPYPOINTs.
 - **Timezone.** Get this right in Phase 0; every pattern in Insights depends on
   capture time.
-- **Credentials.** Only the user types the UBox password, in Settings on the live app.
-  Never in chat, commits, docs or logs.
+- **Credentials.** New accounts can be connected in Settings on the live app.
+  Stored passwords are encrypted; never include credentials in commits, docs or logs.
 
 ## Definition of done
 
@@ -246,6 +248,29 @@ image URLs are committed.
 - Samples are indoor/person test frames. The detector should put these under
   **Review photos marked empty** in Cameras; Animals lists classified wildlife.
 
+### Db01 deployment and live gallery verification, 2026-09-16
+
+- Db01 is running commit **`ba07f9b`**. Migration **`0013_ubox`** is applied,
+  the API is healthy, and the served frontend contains the **UBox Pro** provider
+  label.
+- The authorized account is active and its password is stored encrypted.
+  Its camera, **FoxCon1**, appears in the app.
+- The initial live import found **22 events**: **18 photos imported**, **4 skipped
+  by the minimum interval**, and **zero failures**.
+- All **18 photos** completed the real detector/classifier pipeline; **17 were
+  marked empty**. To view filtered shots, open **Cameras → FoxCon1 → Review photos
+  marked empty**. Animals shows classified wildlife rather than every camera frame.
+- Every one of the **18 authenticated live gallery image endpoints** returned
+  **HTTP 200** and a valid **4608 × 2592 JPEG**. These are the locally stored images
+  served by GameSense.
+- The account retains a **60-second minimum import gap** and **500-photo daily
+  ceiling per camera**. The camera's own trigger interval is also one minute.
+  Ongoing imports use the normal **15-minute scheduled sync**.
+
+This confirms deployment, ingestion, inference and image delivery. Cloud access
+after a trial or without a paid plan, retention, and the three-event timestamp
+comparison remain unresolved; the successful import does not settle those points.
+
 The following source-only notes describe the earlier implementation stage:
 
 No UBox credentials or real camera were available during implementation. The
@@ -266,8 +291,8 @@ establishes these corrections to the plan:
 - Cloud events are in `data.list`, with pagination in `data.count`. The importer
   prefers `cloud_hd_image_url`, then an HTTPS `img`, with `cloud_image_url` fallback.
 - The HMAC-SHA1/base64/comma hash matches a pinned Node-generated test vector.
-  Special-character passwords are not rejected locally; their vendor acceptance
-  is still unverified.
+  The live follow-up verified vendor acceptance of a password containing
+  punctuation using the complete `+`/`/`/`=` substitutions documented above.
 - Numeric `event_time` is treated as Unix UTC seconds. Requests use `time_diff=0`,
   `summer_time=0`, `time_revised=false`. **This neutral-UTC interpretation still
   needs comparison with three events in the real UBox Pro app.** Naive timestamp
@@ -275,12 +300,13 @@ establishes these corrections to the plan:
 - The signal scale is unknown (the reference contains `signal=1`). GameSense
   leaves the signal percentage unavailable rather than displaying a made-up
   percentage. Actual device heartbeat/online state and saved captures feed health.
-- Whether a paid cloud plan is necessary, image dimensions, retention, URL expiry,
-  event-type meanings and rate limits remain unknown. No plan was purchased and
-  no camera configuration was changed.
+- Whether a paid cloud plan is necessary after a trial, retention, URL expiry,
+  event-type meanings and rate limits remain unknown. Image dimensions are now
+  verified by the live checks above. No plan was purchased during these checks;
+  the user set the camera's trigger interval to one minute.
 
-Use the operator probe in `backend/app/ingestion/ubox_probe.py` from the Db01 venv
-before relying on this integration. Its CLI help describes credential entry,
+For future provider diagnostics, use the operator probe in
+`backend/app/ingestion/ubox_probe.py` from the Db01 venv. Its CLI help describes credential entry,
 scrubbed diagnostic output and the optional local detector check. Record the
 actual observations here; never include a password, token, signed image URL or
 SIM identifier. If the account lists motion events without image URLs, Settings
@@ -289,12 +315,12 @@ cloud-plan requirements in UBox Pro before buying anything.
 
 ## Picture volume and app behavior
 
-Settings → Camera accounts now has a **SPYPOINT / UBox** provider choice. UBox
+Settings → Camera accounts now has a **SPYPOINT / UBox Pro** provider choice. UBox Pro
 credentials are verified, encrypted and saved through the same account flow.
 Connecting imports the previous seven days. A connection made during another
 pipeline run gets that initial history on the next scheduled sync.
 
-UBox defaults, separately enforced for every camera on the account:
+UBox Pro defaults, separately enforced for every camera on the account:
 
 - **Minimum gap: 60 seconds** between saved snapshots (adjustable 10–3600).
 - **Daily ceiling: 500 snapshots**, by the estate's local calendar day
@@ -353,5 +379,5 @@ The ORM also now declares the zones index already created by migration 0010, so
 fresh-schema comparison is accurate. No unrelated production behavior changed.
 
 The automated checks use synthetic accounts and inference outputs. The separate
-live checks above used the actual authorized account. Deployment and live-gallery
-verification are tracked separately from the automated test results.
+live checks above used the actual authorized account and real inference. Db01
+deployment and all 18 live gallery image endpoints are verified as recorded above.

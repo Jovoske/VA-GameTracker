@@ -48,7 +48,7 @@ driving `backend/pipeline.py`.
 | Task | When | Mode | Does |
 |---|---|---|---|
 | `GameSense-Update` | every 10 min | — | `deploy/update.ps1`, the loop above |
-| `GameSense-Sync` | every 15 min | `sync` | SPYPOINT pull + local AI + exposure recompute |
+| `GameSense-Sync` | every 15 min | `sync` | SPYPOINT and UBox Pro pull + local AI + exposure recompute |
 | `GameSense-Sex` | hourly | `sex` | cloud vision stag/hind pass (costs API credit) |
 | `GameSense-Plan` | 17:00 daily | `plan` | record tonight's claims **before** the night |
 | `GameSense-Score` | 11:00 daily | `score` | grade last night's claims against the cameras |
