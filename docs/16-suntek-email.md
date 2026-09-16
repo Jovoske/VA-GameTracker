@@ -102,7 +102,12 @@ So the order is:
    TEST, red LED for ~10 s, then format the card). Afterwards the menu must show MMS and
    SMTP entries; if it white-screens, the build does not match PCB `HC800-4G-6582053_V10`.
 2. Get the 4G MMSCONFIG utility. Suntek links it from https://cnsuntek.com/mmsconfig/
-   ("4G Series: MMSCONFIG", a Google Drive file). The same page notes that Gmail may reject
+   ("4G Series: MMSCONFIG", a Google Drive file). **As of 2026-09-16 both Drive files are
+   blocked by Google** ("does not comply with our Terms of Service"); the Wayback Machine
+   only has the same Drive links, suntekcamera.gr and unioncam.net have no copy. Sources left:
+   the CD/mini-CD in the camera box (the manual says "Load CD into the computer"), the
+   firmware package itself (Suntek often bundles a MMSCONFIG folder), or support@cnsuntek.com
+   (updated request draft in Gmail Drafts). The same page notes that Gmail may reject
    the camera's SMTP and offers Suntek's own test SMTP account as a workaround; if that
    turns out to be the only server the firmware can talk to, the poller can read any IMAP
    mailbox, so a mailbox at a provider the camera accepts is the fallback.
@@ -110,7 +115,14 @@ So the order is:
 
 ## Camera settings
 
-MMSCONFIG, SMTP / Email section (menu names vary by firmware revision):
+Confirmed from the HC-801LTE manual (2020 edition, pages 21-28): the camera's own SMTP menu
+only has SMTP ON/OFF, FTP ON/OFF, Image Size and Country. Server, account, password and
+recipient can **only** be set in MMSCONFIG, which saves `Parameter.dat` to the SD card root;
+the camera reads it when switched to TEST. The SMTP tab has a `Manual` mode with a Server
+Type of `Other`, a `No SSL / SSL / STARTTLS` choice, and Server / Port / Email / Password
+fields, so Gmail on 465 with SSL is expressible. Leave the MMS tab OFF and the FTP tab OFF.
+
+MMSCONFIG, SMTP tab (Manual mode):
 
 | Setting | Value |
 | --- | --- |
