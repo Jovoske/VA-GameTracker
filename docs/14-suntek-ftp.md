@@ -54,6 +54,10 @@ The importer checks for completed uploads every 30 seconds. The app's existing A
 
 ## Db01 (native Windows) one-shot install
 
+> **Done on Db01 on 2026-09-16.** Services installed, firewall open, LAN upload verified.
+> See the [deployment record](15-suntek-server-handoff.md#deployment-record-db01-2026-09-16)
+> for the camera id, paths, and the manual steps that remain (router forward, camera config).
+
 Production runs natively on Db01, so the code arrives by the normal push-to-`main` loop
 ([deployment](09-deployment.md)); this section is the rest. Once Db01 has pulled a `main`
 that contains `ftp-receiver/`, create `C:\GameSense\ftp.env` (outside the repo; the header of

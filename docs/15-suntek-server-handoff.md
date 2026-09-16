@@ -47,3 +47,55 @@ python -m ruff check app/ingestion/ftp_import.py tests/test_ftp_import.py ../ftp
 Set `GAMESENSE_REQUIRE_DB=1` and `GAMESENSE_TEST_DSN` to a **separate scratch PostgreSQL instance** whose test account can create/drop databases. The current shared fixture builds temporary database URLs by replacing `/postgres?`, so the DSN must contain that exact segment, for example `postgresql+psycopg://TEST_USER:TEST_PASSWORD@127.0.0.1:55432/postgres?connect_timeout=5`, using the actual scratch port and credentials. Do not point these tests at the production database or change the live PostgreSQL port. Inspect `backend/tests/conftest.py` before running them; temporary test databases are created and dropped.
 
 For the live acceptance test, confirm the photo belongs to the correct camera, has a readable original and correct timestamp/timezone, appears only once when resent, and reaches the existing AI pipeline. Stop only the newly added FTP services to roll back their operation; retain the spool and imported originals. Review the guide's explicit recovery procedure before retrying failed or interrupted importer work.
+
+## Deployment record: Db01, 2026-09-16
+
+The server side is installed and verified. Everything below was done from the
+laptop over WinRM against the deployed revision `14254a5`.
+
+| Item | Value |
+| --- | --- |
+| Config | `C:\GameSense\ftp.env` (outside the repo; holds the only copy of the FTP password) |
+| Services | `GameSenseFTP` (receiver) and `GameSenseFTPImport` (importer), NSSM, auto-start, both running |
+| Spool | `C:\GameSense\data\ftp-spool` |
+| Logs | `C:\GameSense\logs\ftp-receiver.log`, `C:\GameSense\logs\ftp-importer.log` |
+| Camera in app | "Suntek HC801LTE", id `3bf1c949-e6c3-4a42-825f-2890de499052`, estate Piedras Lisas, timezone Europe/Madrid |
+| FTP account | `suntek-01` (password in `ftp.env` only; never commit it) |
+| Bind / port | `0.0.0.0:2121`, passive TCP 50000-50009, advertised public IP `217.67.227.28` |
+| Windows Firewall | inbound rules "GameSense FTP control" and "GameSense FTP passive", enabled |
+| Db01 LAN address | `192.168.10.9`, gateway `192.168.10.1` |
+
+Verified:
+
+- Installer loopback smoke test passed twice (before and after switching to `0.0.0.0`).
+- A JPEG uploaded from another LAN host (`192.168.10.120`) became a `ready` package,
+  was imported within 30 s, and is visible under the camera in the app with a working
+  `/file` download. The importer logged `received_at_fallback` because the test file
+  had no EXIF; check that the first real camera photo carries a capture time.
+- Re-sending the identical file was counted as `duplicate`; the camera still shows one image.
+- The test image `4741480a-d6e6-4d55-8895-2ca16e6b839a` was flagged as an empty frame.
+- Port 2121 is reachable from another LAN host, so the Windows Firewall rules work.
+- The public address `217.67.227.28:2121` does **not** connect from inside the LAN.
+  Expected: no router forward exists yet (and/or no hairpin NAT).
+- The router answers no UPnP discovery, so the forward must be added by hand.
+
+### Remaining steps (manual)
+
+1. **Router** at `192.168.10.1`: forward TCP `2121` and TCP `50000-50009` to `192.168.10.9`.
+   Confirm its WAN page shows `217.67.227.28`. A `10.x` or `100.64.x` WAN address means
+   carrier-grade NAT, and inbound FTP will not work without a different arrangement.
+2. **Outside-LAN test**: from a phone hotspot, any FTP client, passive mode, folder `/`,
+   account `suntek-01`, upload a JPEG. It should appear under the camera in the app.
+3. **Camera** via MMSCONFIG and the `Parameter.dat` SD-card workflow (keep the firmware):
+   FTP enabled, server `217.67.227.28`, port `2121`, folder `/`, account `suntek-01`,
+   password from `ftp.env`, photo-only capture, correct SIM APN. First confirm, with USB
+   unplugged, that the camera saves and shows a photo on its SD card. Then trigger one photo
+   and watch the two logs above.
+4. **Map**: place the camera in the app so enrichment uses the right location.
+5. If the public IP turns out to be dynamic, the camera's server setting will break when it
+   changes; the receiver advertises an IP literal in passive replies, so a DDNS name alone
+   is not enough. Revisit before relying on it.
+
+To change any FTP setting: edit `C:\GameSense\ftp.env` and re-run
+`deploy\install-ftp.ps1` elevated on Db01 (idempotent). `deploy/update.ps1` restarts both
+services on every deploy.
