@@ -123,3 +123,19 @@ Still to do:
 3. Email a JPEG to the mailbox and confirm it appears under the camera in the app.
 4. Configure the camera's SMTP settings in MMSCONFIG and trigger one photo.
 5. Place the camera on the map.
+
+### Email path installed and verified on Db01, 2026-09-16
+
+- Mailbox: `FoxCam.Suntek@gmail.com` (dedicated account, 2-Step Verification on, app
+  password in `C:\GameSense\mail.env` only). Google refused the plain account password over
+  IMAP, as expected; the app password works.
+- `deploy\install-mail.ps1` run: service `GameSenseMail` running, auto-start, log
+  `C:\GameSense\logs\mail-receiver.log`. It correctly skipped Google's three welcome mails.
+- End-to-end test through the camera's exact path: a JPEG with EXIF capture time sent from the
+  camera account to itself over `smtp.gmail.com:465` (SSL, app password) was polled within a
+  minute, imported by `GameSenseFTPImport` with `timestamp_source=exif_with_offset`, and shows
+  under the camera in the app with the right capture time (12:40 Europe/Madrid). Test image
+  `6b14ad96-e3a9-4073-ad11-ffa39f62ad06` flagged as an empty frame.
+
+Remaining: camera SMTP settings in MMSCONFIG (values printed by the installer and listed in
+[16-suntek-email.md](16-suntek-email.md)), first real photo, place the camera on the map.
