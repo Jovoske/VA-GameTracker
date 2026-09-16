@@ -152,6 +152,15 @@ phone with APN `bicsapn` to see whether the network accepts it at all; ask Sunte
 firmware that honours the configured APN; or a native-operator SIM (loses multi-country
 roaming, which Julle wants).
 
+**RESOLVED 2026-09-16 12:19:** once the camera was outdoors on LTE, the same settings worked
+first time: the network accepted `bicsapn`, the camera emailed `PICT_20260916_1214.jpg`
+(98 KB), the poller published it within a minute, the importer stored it under the Suntek
+camera with capture time 12:14 Europe/Madrid (from the filename; the camera's JPEGs carry no
+EXIF time, so timestamps are minute-precision). The indoor failures were the weak 2G/EDGE
+signal (CSQ 5, `+CGREG: 0,2`), not the APN. The Always Connected and Suntek support drafts are
+therefore unnecessary. Lesson: this firmware's SIM-derived APN is fine for BICS-based SIMs;
+test sending outdoors with LTE before blaming settings.
+
 MMSCONFIG, SMTP tab (Manual mode):
 
 | Setting | Value |

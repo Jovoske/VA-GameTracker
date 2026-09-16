@@ -139,3 +139,10 @@ Still to do:
 
 Remaining: camera SMTP settings in MMSCONFIG (values printed by the installer and listed in
 [16-suntek-email.md](16-suntek-email.md)), first real photo, place the camera on the map.
+
+### First real camera photo, 2026-09-16 12:19
+
+Camera configured via MMSCONFIG (see [16-suntek-email.md](16-suntek-email.md)); first
+motion-triggered photo emailed over LTE, polled, imported and visible in the app under
+"Suntek HC801LTE" with the right capture time. The whole chain is live. Remaining: place the
+camera on the map; watch the first night's photos for AI results.
