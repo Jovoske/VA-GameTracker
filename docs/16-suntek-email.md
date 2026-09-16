@@ -83,6 +83,28 @@ a wrong password fails loudly here rather than silently in a log. Re-run it afte
 Logs: `C:\GameSense\logs\mail-receiver.log` (poller) and `C:\GameSense\logs\ftp-importer.log`
 (importer). Each poll prints one JSON line with `messages/published/skipped/errors` counts.
 
+## Camera firmware: the real prerequisite
+
+Found in the 2021 support thread with Suntek (support@cnsuntek.com, Howard Zhang): this
+camera shipped with the **APP-version firmware**, whose menu is only Camera / Video / Setup and
+which sends photos to Suntek's cloud for the SuntekCam app. Email (SMTP) and MMS sending exist
+only in the **MMSCONFIG-version firmware**, which adds MMS and SMTP menus and is configured
+with the MMSCONFIG PC utility writing `Parameter.dat` to the SD card. Neither that firmware nor
+the utility was ever supplied; the three firmware files sent in September 2021 were app-route
+builds, and the January 2021 one white-screened this board.
+
+So the order is:
+
+1. Get the MMSCONFIG-version firmware for PCB `HC800-4G-6582053_V10` from Suntek support
+   (draft request already in the Gmail Drafts folder, 2026-09-16). Do not flash anything
+   that is not confirmed for this exact PCB.
+2. Get the 4G MMSCONFIG utility. Suntek links it from https://cnsuntek.com/mmsconfig/
+   ("4G Series: MMSCONFIG", a Google Drive file). The same page notes that Gmail may reject
+   the camera's SMTP and offers Suntek's own test SMTP account as a workaround; if that
+   turns out to be the only server the firmware can talk to, the poller can read any IMAP
+   mailbox, so a mailbox at a provider the camera accepts is the fallback.
+3. Only then the camera settings below.
+
 ## Camera settings
 
 MMSCONFIG, SMTP / Email section (menu names vary by firmware revision):
