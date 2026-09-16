@@ -96,6 +96,11 @@ class Camera(Base):
     spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
     ubox_uid: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    # Keep the imported/default label available while an estate uses its own name.
+    provider_name: Mapped[str | None] = mapped_column(String)
+    name_is_custom: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
     altitude_m: Mapped[float | None] = mapped_column(Float)

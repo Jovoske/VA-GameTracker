@@ -315,6 +315,12 @@ cloud-plan requirements in UBox Pro before buying anything.
 
 ## Picture volume and app behavior
 
+Camera names start with the imported provider name. In **Cameras**, choose
+**Rename** beside a camera, enter a name and select **Save name**. Custom names
+remain in place during UBox Pro and SPYPOINT syncs and are used throughout the
+app. **Use imported name** restores the latest provider name. Estate admins and
+members can rename cameras; viewers can read the names.
+
 Settings → Camera accounts now has a **SPYPOINT / UBox Pro** provider choice. UBox Pro
 credentials are verified, encrypted and saved through the same account flow.
 Connecting imports the previous seven days. A connection made during another

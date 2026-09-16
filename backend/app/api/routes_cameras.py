@@ -1,11 +1,12 @@
 """Camera routes — list (with location), images, sync/backfill/scan, review, map placement."""
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -107,6 +108,9 @@ def list_cameras(
         sightings = (count or 0) - (empty or 0)
         out.append({
             "id": str(c.id), "name": c.name, "battery_pct": c.battery_pct,
+            "provider_name": c.provider_name or c.name,
+            "name_is_custom": c.name_is_custom,
+            "can_rename": user.role in {"admin", "member"},
             "battery_level": c.battery_level,
             "signal_pct": c.signal_pct, "model": c.model, "active": c.active,
             "last_sync_at": c.last_sync_at, "last_capture": last,
@@ -119,6 +123,50 @@ def list_cameras(
             "health": camera_health(c),
         })
     return out
+
+
+class CameraNameBody(BaseModel):
+    # Explicit null restores the latest provider name; omission is not a reset.
+    name: str | None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value):
+            raise ValueError("Camera name cannot contain control characters")
+        value = value.strip()
+        if not 1 <= len(value) <= 100:
+            raise ValueError("Camera name must contain between 1 and 100 characters")
+        return value
+
+
+@router.patch("/{camera_id}/name")
+def rename_camera(
+    camera_id: uuid.UUID,
+    body: CameraNameBody,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    if user.role not in {"admin", "member"}:
+        raise HTTPException(403, "Only estate admins and members can rename cameras")
+    camera = db.scalar(select(Camera).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ).with_for_update().execution_options(populate_existing=True))
+    if camera is None:
+        raise HTTPException(404, "Camera not found")
+    # Local imports have no vendor label, so retain their initial name as default.
+    if not camera.provider_name:
+        camera.provider_name = camera.name
+    camera.name = camera.provider_name if body.name is None else body.name
+    camera.name_is_custom = body.name is not None
+    db.commit()
+    return {
+        "id": str(camera.id), "name": camera.name,
+        "provider_name": camera.provider_name,
+        "name_is_custom": camera.name_is_custom, "can_rename": True,
+    }
 
 
 @router.post("/sync")

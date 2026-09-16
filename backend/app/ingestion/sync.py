@@ -50,14 +50,21 @@ def _media_path(estate_id, camera_id, captured_at: datetime, photo_id: str) -> s
 
 
 def upsert_camera(db: Session, estate_id, cam: SpypointCamera, account_id=None) -> Camera:
-    row = db.scalar(select(Camera).where(Camera.spypoint_id == cam.spypoint_id))
+    # Refresh even an already-loaded instance after acquiring the row lock: a
+    # rename in another transaction must not be overwritten by a stale sync.
+    row = db.scalar(select(Camera).where(Camera.spypoint_id == cam.spypoint_id)
+                    .with_for_update().execution_options(populate_existing=True))
     if row is None:
-        row = Camera(estate_id=estate_id, spypoint_id=cam.spypoint_id, name=cam.name)
+        default_name = cam.name or "SPYPOINT"
+        row = Camera(estate_id=estate_id, spypoint_id=cam.spypoint_id,
+                     name=default_name, provider_name=default_name)
         db.add(row)
     if account_id is not None:
         row.account_id = account_id
     if cam.name:
-        row.name = cam.name
+        row.provider_name = cam.name
+        if not row.name_is_custom:
+            row.name = cam.name
     if cam.battery_pct is not None:
         row.battery_pct = cam.battery_pct
     if cam.signal_pct is not None:

@@ -45,6 +45,7 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert "animal_conf" in images and "reviewed" in images
         assert "ubox_event_id" in images
         assert "ubox_uid" in _columns(eng, "cameras")
+        assert {"provider_name", "name_is_custom"} <= _columns(eng, "cameras").keys()
         assert {
             "provider", "ubox_min_interval_seconds", "ubox_max_images_per_day"
         } <= _columns(eng, "camera_accounts").keys()
@@ -224,6 +225,48 @@ def test_ubox_database_rejects_invalid_provider_and_limits(fresh_db, values):
             ))
         with pytest.raises(IntegrityError), eng.begin() as c:
             c.execute(text(f"UPDATE camera_accounts SET {values}"))
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_name_upgrade_preserves_names_images_and_saved_overrides(fresh_db):
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0013_ubox")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 creates today's ORM; reconstruct the real deployed 0013 shape.
+            c.execute(text("ALTER TABLE cameras DROP COLUMN provider_name"))
+            c.execute(text("ALTER TABLE cameras DROP COLUMN name_is_custom"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','UTC') RETURNING id"
+            )).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,ubox_uid,active) "
+                "VALUES (gen_random_uuid(),:estate,'Existing camera','device-id',true) RETURNING id"
+            ), {"estate": estate_id}).scalar_one()
+            image_id = c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:camera,now(),'photo.jpg',false) RETURNING id"
+            ), {"camera": camera_id}).scalar_one()
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            camera = c.execute(text("SELECT * FROM cameras WHERE id=:id"), {"id": camera_id}).one()
+            assert camera.name == camera.provider_name == "Existing camera"
+            assert not camera.name_is_custom
+            assert camera.ubox_uid == "device-id"
+            assert c.execute(text("SELECT camera_id FROM images WHERE id=:id"),
+                             {"id": image_id}).scalar_one() == camera_id
+            c.execute(text("UPDATE cameras SET name='My meadow', name_is_custom=true WHERE id=:id"),
+                      {"id": camera_id})
+        command.stamp(cfg, "0013_ubox")
+        command.upgrade(cfg, "head")
+        with eng.connect() as c:
+            camera = c.execute(text("SELECT * FROM cameras WHERE id=:id"), {"id": camera_id}).one()
+            assert camera.name == "My meadow" and camera.name_is_custom
+            assert camera.provider_name == "Existing camera"
     finally:
         eng.dispose()
 

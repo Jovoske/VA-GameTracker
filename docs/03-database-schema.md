@@ -18,6 +18,16 @@ forecasts ─< forecast_outcomes (calibration)           sync_log        model_r
 
 ## Core tables
 
+Camera display names are editable in the Cameras page. `cameras.name` remains the
+effective label used across the app, while `provider_name` remembers the latest
+SPYPOINT/UBox label (or the initial name for local imports). Provider sync updates
+the effective name only while `name_is_custom` is false. Estate admins and members
+can `PATCH /api/cameras/{id}/name` with `{"name":"North meadow"}`; `{"name":null}`
+restores the latest default. Custom names are trimmed, limited to 100 characters,
+and cannot be blank or contain control characters. Viewers can read names but
+cannot change them. Migration `0014_camera_names` backfills existing defaults
+without changing camera identities, names or photos.
+
 ```sql
 -- Tenancy / property -------------------------------------------------
 CREATE TABLE estates (
@@ -64,6 +74,8 @@ CREATE TABLE cameras (
   spypoint_id   text UNIQUE,                    -- SPYPOINT device id
   ubox_uid      varchar UNIQUE,                 -- UBox device id; NULL for other sources
   name          text NOT NULL,
+  provider_name varchar,                        -- latest imported/default name
+  name_is_custom boolean NOT NULL DEFAULT false,-- keep app rename across provider sync
   location      geometry(Point,4326),           -- GPS (auto from SPYPOINT, draggable)
   altitude_m    real,
   model         text,

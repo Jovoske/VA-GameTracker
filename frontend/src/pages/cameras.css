@@ -1,0 +1,23 @@
+.camera-name { min-width: 0; max-width: 100%; }
+.camera-name--editing { flex-basis: 100%; }
+.camera-name-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
+.camera-name-title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.camera-name-action {
+  background: transparent;
+  color: var(--go);
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl);
+  padding: 8px 10px;
+  min-height: 44px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.camera-name-action:hover:not(:disabled) { background: var(--surface-2); }
+.camera-name-action:disabled { opacity: 0.6; cursor: default; }
+.camera-name-form { width: min(100%, 430px); margin-top: 8px; }
+.camera-name-form label { display: block; font-size: 13px; margin-bottom: 6px; }
+.camera-name-form .input { min-width: 0; }
+.camera-name-hint { margin: 8px 0; color: var(--text-dim); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.camera-name-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.camera-name-buttons .btn { width: auto; min-height: 44px; padding: 8px 14px; font-size: 13px; }
+.camera-name-error { color: var(--skip); font-size: 13px; line-height: 1.5; margin: 8px 0 0; overflow-wrap: anywhere; }

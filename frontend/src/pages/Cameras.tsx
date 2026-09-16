@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, imageUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { useRefetchOnReturn } from '../hooks'
+import './cameras.css'
 
 type Health = {
   status: string
@@ -13,6 +14,9 @@ type Health = {
 type Camera = {
   id: string
   name: string
+  provider_name: string | null
+  name_is_custom: boolean
+  can_rename: boolean
   battery_pct: number | null
   battery_level: string | null
   signal_pct: number | null
@@ -95,6 +99,113 @@ function timeAgo(ts: string | null): string {
 }
 
 type Zoom = { photos: LightboxPhoto[]; idx: number }
+type CameraName = Pick<Camera, 'id' | 'name' | 'provider_name' | 'name_is_custom' | 'can_rename'>
+
+function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value: CameraName) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(camera.name)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+  const renameButton = useRef<HTMLButtonElement>(null)
+  const fieldId = `camera-name-${camera.id}`
+
+  function close() {
+    setEditing(false)
+    setError('')
+    requestAnimationFrame(() => renameButton.current?.focus())
+  }
+
+  async function save(name: string | null) {
+    if (saving) return
+    if (name !== null && !name.trim()) {
+      setError('Enter a camera name.')
+      return
+    }
+    if (name !== null && /[\p{Cc}\p{Cf}]/u.test(name)) {
+      setError('Use a name without hidden control characters.')
+      return
+    }
+    setSaving(true)
+    setError('')
+    setMessage('')
+    try {
+      const updated = await api<CameraName>(`/cameras/${camera.id}/name`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: name === null ? null : name.trim() }),
+      })
+      onSaved(updated)
+      setMessage(name === null ? `Using imported name: ${updated.name}.` : `Camera renamed to ${updated.name}.`)
+      close()
+    } catch (e) {
+      const detail = (e as Error).message
+      setError(`Could not save the camera name. ${detail && !detail.includes('[object Object]') ? detail : 'Check the name and try again.'}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className={`camera-name${editing ? ' camera-name--editing' : ''}`}>
+      <div className="camera-name-heading">
+        <span className="camera-name-title">{camera.name}</span>
+        {camera.can_rename && !editing && (
+          <button
+            ref={renameButton}
+            className="camera-name-action"
+            type="button"
+            aria-label={`Rename ${camera.name}`}
+            onClick={() => { setDraft(camera.name); setError(''); setMessage(''); setEditing(true) }}
+          >
+            Rename
+          </button>
+        )}
+      </div>
+      {editing && (
+        <form
+          className="camera-name-form"
+          aria-label={`Rename ${camera.name}`}
+          aria-busy={saving}
+          onSubmit={(e) => { e.preventDefault(); void save(draft) }}
+          onKeyDown={(e) => { if (e.key === 'Escape' && !saving) { e.preventDefault(); close() } }}
+        >
+          <label htmlFor={fieldId}>Camera name</label>
+          <input
+            id={fieldId}
+            className="input"
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); setError('') }}
+            onFocus={(e) => e.currentTarget.select()}
+            maxLength={100}
+            required
+            autoFocus
+            disabled={saving}
+            aria-invalid={!!error}
+            aria-describedby={`${fieldId}-hint${error ? ` ${fieldId}-error` : ''}`}
+          />
+          <p id={`${fieldId}-hint`} className="camera-name-hint">
+            {camera.name_is_custom && camera.provider_name
+              ? `Imported name: ${camera.provider_name}. Your name stays after syncing.`
+              : 'Names are imported automatically. A name you save here stays after syncing.'}
+          </p>
+          <div className="camera-name-buttons">
+            <button className="btn" type="submit" disabled={saving || !draft.trim()}>
+              {saving ? 'Saving…' : 'Save name'}
+            </button>
+            <button className="camera-name-action" type="button" onClick={close} disabled={saving}>Cancel</button>
+            {camera.name_is_custom && camera.provider_name && (
+              <button className="camera-name-action" type="button" onClick={() => void save(null)} disabled={saving}>
+                Use imported name
+              </button>
+            )}
+          </div>
+          {error && <p id={`${fieldId}-error`} className="camera-name-error" role="alert">{error}</p>}
+        </form>
+      )}
+      <span className="sr-only" role="status">{message}</span>
+    </div>
+  )
+}
 
 /** What the viewer says is in the frame, and where it came from. */
 function toPhoto(cam: string, im: Img): LightboxPhoto {
@@ -271,7 +382,7 @@ export default function Cameras() {
           return (
             <div key={c.id} className="card" style={{ padding: 14 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                <div style={{ fontWeight: 600, fontSize: 15 }}>{c.name}</div>
+                <CameraNameEditor camera={c} onSaved={(updated) => setCameras((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))} />
                 <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{c.model}</div>
                 {c.health && c.health.status !== 'ok' && (
                   <span

@@ -68,15 +68,21 @@ def _ubox_accounts(db: Session, account_id=None) -> list[CameraAccount]:
 
 
 def upsert_camera(db: Session, estate_id, device: UboxDevice, account_id=None) -> Camera:
-    camera = db.scalar(select(Camera).where(Camera.ubox_uid == device.uid))
+    # Serialize metadata changes with app renames, refreshing any cached ORM row.
+    camera = db.scalar(select(Camera).where(Camera.ubox_uid == device.uid)
+                       .with_for_update().execution_options(populate_existing=True))
     if camera is None:
-        camera = Camera(estate_id=estate_id, ubox_uid=device.uid, name=device.name or "UBox")
+        default_name = device.name or "UBox"
+        camera = Camera(estate_id=estate_id, ubox_uid=device.uid,
+                        name=default_name, provider_name=default_name)
         db.add(camera)
     elif camera.estate_id != estate_id:
         raise UboxError("This UBox camera is already linked to another estate")
     camera.account_id = account_id
     if device.name:
-        camera.name = device.name
+        camera.provider_name = device.name
+        if not camera.name_is_custom:
+            camera.name = device.name
     camera.model = f"UBox {device.model}".strip() if device.model else "UBox"
     camera.battery_pct = device.battery_pct
     # UBIA's documented sample signal=1 has no established scale. Keep unknown
