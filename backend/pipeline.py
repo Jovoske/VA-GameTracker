@@ -54,7 +54,9 @@ def _run(mode: str) -> None:
             log.info("pipeline.backfill", result=backfill_all(db, months=months))
         elif mode == "sync":
             from app.ingestion.sync import sync_all
+            from app.ingestion.ubox_sync import sync_ubox_all
             log.info("pipeline.sync", result=sync_all(db))
+            log.info("pipeline.ubox", result=sync_ubox_all(db))
 
         if mode in ("sync", "backfill"):
             from app.ai.empty_filter import scan_unprocessed

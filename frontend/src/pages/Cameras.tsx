@@ -187,7 +187,7 @@ export default function Cameras() {
 
   async function syncNow() {
     setSyncing(true)
-    setSyncMsg('Contacting SPYPOINT…')
+    setSyncMsg('Contacting camera providers…')
     try {
       const r = await api<{ status: string; note?: string }>('/cameras/sync', { method: 'POST' })
       if (r.status === 'busy') {

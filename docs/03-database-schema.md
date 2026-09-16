@@ -38,10 +38,31 @@ CREATE TABLE users (
 );
 
 -- Cameras & stands ---------------------------------------------------
+CREATE TABLE camera_accounts (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  estate_id     uuid NOT NULL REFERENCES estates(id),
+  owner_user_id uuid REFERENCES users(id),
+  label         text,
+  provider      varchar NOT NULL DEFAULT 'spypoint'
+                CHECK (provider IN ('spypoint','ubox')),
+  username      varchar NOT NULL,
+  password_enc  varchar NOT NULL,               -- Fernet encrypted, never returned by API
+  active        boolean NOT NULL DEFAULT true,
+  ubox_min_interval_seconds int NOT NULL DEFAULT 60
+                CHECK (ubox_min_interval_seconds BETWEEN 10 AND 3600),
+  ubox_max_images_per_day int NOT NULL DEFAULT 500
+                CHECK (ubox_max_images_per_day BETWEEN 1 AND 5000),
+  last_sync_at  timestamptz,
+  created_at    timestamptz DEFAULT now(),
+  UNIQUE (provider, username)                   -- one vendor login belongs to one estate
+);
+
 CREATE TABLE cameras (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   estate_id     uuid NOT NULL REFERENCES estates(id),
+  account_id    uuid REFERENCES camera_accounts(id),
   spypoint_id   text UNIQUE,                    -- SPYPOINT device id
+  ubox_uid      varchar UNIQUE,                 -- UBox device id; NULL for other sources
   name          text NOT NULL,
   location      geometry(Point,4326),           -- GPS (auto from SPYPOINT, draggable)
   altitude_m    real,
@@ -50,7 +71,8 @@ CREATE TABLE cameras (
   signal_pct    int,
   last_sync_at  timestamptz,
   active        boolean NOT NULL DEFAULT true,
-  created_at    timestamptz NOT NULL DEFAULT now()
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  CHECK (spypoint_id IS NULL OR ubox_uid IS NULL)
 );
 CREATE INDEX ON cameras USING gist (location);
 
@@ -81,6 +103,7 @@ CREATE TABLE images (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   camera_id         uuid NOT NULL REFERENCES cameras(id),
   spypoint_photo_id text UNIQUE,
+  ubox_event_id     varchar UNIQUE,             -- stable provider event identity, not image URL
   captured_at       timestamptz NOT NULL,        -- real capture time (drives enrichment)
   original_path     text,                        -- local path, downloaded (not just URL)
   annotated_path    text,
@@ -203,12 +226,26 @@ CREATE TABLE sync_log (
   camera_id     uuid REFERENCES cameras(id),
   photos_synced int, images_downloaded int,
   status        text, error text,
+  details       jsonb,                          -- provider and per-camera import/skip counts
   started_at    timestamptz, finished_at timestamptz
 );
 ```
 
 ## Notes & decisions baked in
 
+- **UBox (`0013_ubox`):** existing camera accounts default to `spypoint`; UBox uses
+  the same encrypted credential storage, camera rows and image pipeline. A provider
+  account is unique globally by `(provider, username)`, since device identifiers
+  are global and a camera belongs to one estate. The same email can connect once
+  per provider. A camera can have neither vendor ID (FTP/manual) or exactly one;
+  UBox images deduplicate by `ubox_event_id`, with the importer also checking file
+  hashes per camera. Removing an account detaches cameras and preserves images.
+- **UBox volume controls:** each camera inherits its account's minimum capture
+  interval (default 60 seconds, allowed 10–3600) and maximum imports per day
+  (default 500, allowed 1–5000). These limits are enforced before download and AI
+  processing. `sync_log.details` records provider and skip counts so noise and
+  missing snapshots remain visible without being presented as sync errors. These
+  settings limit GameSense imports; they do not change camera recording settings.
 - **`embedding vector(512)`** is a placeholder — the exact dimension follows the chosen re-ID backbone (e.g., 512/768/2048). Easy to set once the AI model is confirmed.
 - **Confidence is non-null by convention** on every estimate (`species_conf`, `sex_conf`, `age_conf`, `match_conf`, forecast `confidence`). The UI contract is "no number without a confidence."
 - **`env_snapshots` is per camera × capture time**, written at ingest from the **archive** endpoint for the real timestamp — this is the direct fix for audit bug C1.

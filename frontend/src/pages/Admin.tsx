@@ -27,14 +27,68 @@ type Species = {
 }
 type Me = { id: string; email: string; role: string }
 type UserRow = { id: string; email: string; role: string; is_you: boolean }
+type CameraProvider = 'spypoint' | 'ubox'
+type ImportLimits = { interval: string; daily: string }
 type CamAccount = {
   id: string
   label: string
   username: string
+  provider: CameraProvider
   owner: string | null
   active: boolean
   cameras: number
   can_remove: boolean
+  can_edit: boolean
+  ubox_min_interval_seconds: number
+  ubox_max_images_per_day: number
+  last_import: {
+    at: string | null
+    status: string | null
+    error: string | null
+    downloaded: number
+    interval_skipped: number
+    daily_limit_skipped: number
+    no_image: number
+    failed: number
+  } | null
+}
+const providerName = (provider: CameraProvider) => provider === 'ubox' ? 'UBox Pro' : 'SPYPOINT'
+
+function UboxImportFields({
+  prefix, limits, onChange, disabled,
+}: {
+  prefix: string
+  limits: ImportLimits
+  onChange: (limits: ImportLimits) => void
+  disabled: boolean
+}) {
+  return (
+    <fieldset style={{ border: 0, margin: 0, padding: 0 }} disabled={disabled}>
+      <legend style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Photo import limits</legend>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+        <label htmlFor={`${prefix}-interval`} style={{ flex: '1 1 170px', fontSize: 13 }}>
+          Minimum gap (seconds)
+          <input id={`${prefix}-interval`} className="input" type="number" inputMode="numeric"
+            min={10} max={3600} step={1} required value={limits.interval} style={{ marginTop: 5 }}
+            aria-describedby={`${prefix}-help`}
+            onChange={(e) => onChange({ ...limits, interval: e.target.value })} />
+        </label>
+        <label htmlFor={`${prefix}-daily`} style={{ flex: '1 1 170px', fontSize: 13 }}>
+          Maximum photos per day
+          <input id={`${prefix}-daily`} className="input" type="number" inputMode="numeric"
+            min={1} max={5000} step={1} required value={limits.daily} style={{ marginTop: 5 }}
+            aria-describedby={`${prefix}-help`}
+            onChange={(e) => onChange({ ...limits, daily: e.target.value })} />
+        </label>
+      </div>
+      <div id={`${prefix}-help`} style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5, marginTop: 8 }}>
+        Applied separately to each camera, per day in the estate's time zone. GameSense skips snapshots that
+        are too close together or over the daily limit before downloading or running AI.
+        This can skip sightings. Your camera keeps capturing normally; originals remain
+        available only as long as UBox Pro retains them.
+      </div>
+    </fieldset>
+  )
 }
 const smallBtn = {
   background: 'var(--surface-2)',
@@ -62,9 +116,14 @@ export default function Admin() {
   const [newUser, setNewUser] = useState({ email: '', password: '', role: 'member' })
   const [userMsg, setUserMsg] = useState('')
   const [accounts, setAccounts] = useState<CamAccount[]>([])
-  const [newAcct, setNewAcct] = useState({ username: '', password: '', label: '' })
+  const [newAcct, setNewAcct] = useState({
+    username: '', password: '', label: '', provider: 'spypoint' as CameraProvider,
+    interval: '60', daily: '500',
+  })
   const [acctMsg, setAcctMsg] = useState('')
   const [acctBusy, setAcctBusy] = useState(false)
+  const [editingLimits, setEditingLimits] = useState<(ImportLimits & { id: string }) | null>(null)
+  const [limitsBusy, setLimitsBusy] = useState(false)
   const [pw, setPw] = useState({ current: '', next: '' })
   const [pwMsg, setPwMsg] = useState('')
 
@@ -121,15 +180,40 @@ export default function Admin() {
           username: newAcct.username,
           password: newAcct.password,
           label: newAcct.label || null,
+          provider: newAcct.provider,
+          ubox_min_interval_seconds: Number(newAcct.interval),
+          ubox_max_images_per_day: Number(newAcct.daily),
         }),
       })
-      setNewAcct({ username: '', password: '', label: '' })
+      setNewAcct({ ...newAcct, username: '', password: '', label: '' })
       setAccounts(await api<CamAccount[]>('/camera-accounts'))
       setAcctMsg(r.note || 'Connected')
     } catch (e) {
       setAcctMsg((e as Error).message)
     }
     setAcctBusy(false)
+  }
+
+  async function saveImportLimits() {
+    if (!editingLimits) return
+    setAcctMsg('')
+    setLimitsBusy(true)
+    try {
+      const r = await api<{ note: string }>(`/camera-accounts/${editingLimits.id}/import-settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ubox_min_interval_seconds: Number(editingLimits.interval),
+          ubox_max_images_per_day: Number(editingLimits.daily),
+        }),
+      })
+      setAccounts(await api<CamAccount[]>('/camera-accounts'))
+      setEditingLimits(null)
+      setAcctMsg(r.note)
+    } catch (e) {
+      setAcctMsg((e as Error).message)
+    } finally {
+      setLimitsBusy(false)
+    }
   }
 
   async function delAccount(a: CamAccount) {
@@ -247,35 +331,106 @@ export default function Admin() {
       <div className="card" style={{ padding: 18, marginBottom: 14 }}>
         <h2 className="sect">Camera accounts</h2>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-          Connect a SPYPOINT account and its cameras join the estate, with photos, AI detection and
+          Connect a SPYPOINT or UBox Pro account and its cameras join the estate, with photos, AI detection and
           forecasts included. Guests can add their own account here.
         </div>
         {accounts.map((a) => (
-          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderTop: '1px solid var(--border)' }}>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 14 }}>{a.label}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.owner ? ` · added by ${a.owner}` : ''}
+          <div key={a.id} style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+              <div style={{ minWidth: 0, flex: '1 1 200px' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 7 }}>
+                  <span style={{ fontSize: 14, overflowWrap: 'anywhere' }}>{a.label}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 'var(--r-chip)', padding: '1px 6px' }}>
+                    {providerName(a.provider)}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-dim)', overflowWrap: 'anywhere' }}>
+                  {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.owner ? ` · added by ${a.owner}` : ''}
+                </div>
               </div>
+              {a.can_remove && (
+                <button type="button" onClick={() => delAccount(a)} style={smallBtn}
+                  disabled={limitsBusy} aria-label={`Disconnect ${a.label}`}>Disconnect</button>
+              )}
             </div>
-            {a.can_remove && (
-              <button onClick={() => delAccount(a)} style={smallBtn}>Disconnect</button>
+            {a.provider === 'ubox' && editingLimits?.id !== a.id && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-dim)', flex: '1 1 200px' }}>
+                  Per camera: at least {a.ubox_min_interval_seconds}s apart,
+                  {' '}up to {a.ubox_max_images_per_day} photos/day.
+                </div>
+                {a.can_edit && <button type="button" style={smallBtn} disabled={limitsBusy}
+                  aria-label={`Edit import limits for ${a.label}`}
+                  onClick={() => setEditingLimits({
+                    id: a.id, interval: String(a.ubox_min_interval_seconds), daily: String(a.ubox_max_images_per_day),
+                  })}>Edit limits</button>}
+              </div>
+            )}
+            {a.provider === 'ubox' && a.last_import && (
+              <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5, marginTop: 8 }}>
+                Last import{a.last_import.at ? ` (${new Date(a.last_import.at).toLocaleString()})` : ''}:
+                {' '}{a.last_import.downloaded} photos added,
+                {' '}{a.last_import.interval_skipped} skipped by minimum gap,
+                {' '}{a.last_import.daily_limit_skipped} skipped by daily limit.
+                {a.last_import.no_image > 0 && ` ${a.last_import.no_image} events had no snapshot.`}
+                {a.last_import.failed > 0 && ` ${a.last_import.failed} photos could not be imported.`}
+                {a.last_import.error && <div style={{ marginTop: 4 }}>Import problem: {a.last_import.error}</div>}
+              </div>
+            )}
+            {a.provider === 'ubox' && editingLimits?.id === a.id && (
+              <form onSubmit={(e) => { e.preventDefault(); void saveImportLimits() }} style={{ marginTop: 14 }}>
+                <UboxImportFields prefix={`account-${a.id}`} limits={editingLimits} disabled={limitsBusy}
+                  onChange={(limits) => setEditingLimits({ id: a.id, ...limits })} />
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button className="btn" type="submit" disabled={limitsBusy} style={{ width: 'auto', padding: '8px 12px' }}>
+                    {limitsBusy ? 'Saving…' : 'Save limits'}
+                  </button>
+                  <button type="button" style={smallBtn} disabled={limitsBusy}
+                    onClick={() => setEditingLimits(null)}>Cancel</button>
+                </div>
+              </form>
             )}
           </div>
         ))}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
-          <input className="input" placeholder="SPYPOINT email" value={newAcct.username}
-            onChange={(e) => setNewAcct({ ...newAcct, username: e.target.value })} autoComplete="off" />
-          <input className="input" placeholder="SPYPOINT password" type="password" value={newAcct.password}
-            onChange={(e) => setNewAcct({ ...newAcct, password: e.target.value })} autoComplete="new-password" />
-          <input className="input" placeholder="Label, optional (e.g. 'Marco's cameras')" value={newAcct.label}
-            onChange={(e) => setNewAcct({ ...newAcct, label: e.target.value })} />
-          <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
-            onClick={addAccount} disabled={acctBusy || !newAcct.username || !newAcct.password}>
-            {acctBusy ? 'Checking with SPYPOINT…' : 'Connect account'}
+        <form onSubmit={(e) => { e.preventDefault(); void addAccount() }}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+          <label htmlFor="camera-provider" style={{ fontSize: 13 }}>
+            Camera provider
+            <select id="camera-provider" className="input" value={newAcct.provider} disabled={acctBusy}
+              style={{ marginTop: 5 }}
+              onChange={(e) => setNewAcct({ ...newAcct, provider: e.target.value as CameraProvider })}>
+              <option value="spypoint">SPYPOINT</option>
+              <option value="ubox">UBox Pro</option>
+            </select>
+          </label>
+          <label htmlFor="camera-email" style={{ fontSize: 13 }}>
+            {providerName(newAcct.provider)} email
+            <input id="camera-email" className="input" type="email" required value={newAcct.username}
+              disabled={acctBusy} style={{ marginTop: 5 }}
+              onChange={(e) => setNewAcct({ ...newAcct, username: e.target.value })} autoComplete="off" />
+          </label>
+          <label htmlFor="camera-password" style={{ fontSize: 13 }}>
+            {providerName(newAcct.provider)} password
+            <input id="camera-password" className="input" type="password" required value={newAcct.password}
+              disabled={acctBusy} style={{ marginTop: 5 }}
+              onChange={(e) => setNewAcct({ ...newAcct, password: e.target.value })} autoComplete="new-password" />
+          </label>
+          <label htmlFor="camera-label" style={{ fontSize: 13 }}>
+            Label (optional)
+            <input id="camera-label" className="input" placeholder="e.g. Marco's cameras" value={newAcct.label}
+              disabled={acctBusy} style={{ marginTop: 5 }}
+              onChange={(e) => setNewAcct({ ...newAcct, label: e.target.value })} />
+          </label>
+          {newAcct.provider === 'ubox' && (
+            <UboxImportFields prefix="new-account" limits={newAcct} disabled={acctBusy}
+              onChange={(limits) => setNewAcct({ ...newAcct, ...limits })} />
+          )}
+          <button className="btn" type="submit" style={{ width: 'auto', padding: '9px 14px' }}
+            disabled={acctBusy || !newAcct.username.trim() || !newAcct.password}>
+            {acctBusy ? `Checking with ${providerName(newAcct.provider)}…` : 'Connect account'}
           </button>
-        </div>
-        {acctMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
+        </form>
+        {acctMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
       </div>
 
       {me?.role === 'admin' && (

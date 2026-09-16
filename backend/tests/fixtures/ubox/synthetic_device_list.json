@@ -1,0 +1,22 @@
+{
+  "code": 0,
+  "data": {
+    "firmware_ver": [{"model_num": "879", "version": "available-version-only"}],
+    "items": [{"device_uid": "synthetic-camera", "device_name": "Test woodland", "is_owner": true}],
+    "infos": [{
+      "device_uid": "synthetic-camera",
+      "model_num": "879",
+      "time_diff": 7200,
+      "has_cloud_storage": true,
+      "dynamic_info": {
+        "device_uid": "synthetic-camera",
+        "online_state": "2",
+        "battery": 81,
+        "is_battery_charging": false,
+        "signal": 1,
+        "latest_active_utc": 1789556400
+      }
+    }]
+  },
+  "msg": "success"
+}

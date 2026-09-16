@@ -31,7 +31,9 @@ def _accounts(db: Session) -> list[dict]:
                     "password": settings.spypoint_password})
     from app.core.crypto import decrypt
 
-    for a in db.scalars(select(CameraAccount).where(CameraAccount.active.is_(True))).all():
+    for a in db.scalars(select(CameraAccount).where(
+        CameraAccount.active.is_(True), CameraAccount.provider == "spypoint",
+    )).all():
         try:
             out.append({"id": a.id, "username": a.username, "password": decrypt(a.password_enc)})
         except Exception as e:

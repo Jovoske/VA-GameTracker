@@ -182,7 +182,8 @@ def test_no_hit_rate_is_shown_on_thin_evidence(db_session, cam):
 @requires_db
 def test_calibration_reports_skill_against_climatology(db_session, cam):
     """With enough scored nights, the number that appears is a measured hit rate."""
-    base = date(2025, 9, 1)
+    # Keep the fixture inside calibration's rolling lookback as the calendar advances.
+    base = date.today() - timedelta(days=MIN_EVALUATED + 5)
     for i in range(MIN_EVALUATED + 5):
         night = base + timedelta(days=i)
         # A well-calibrated-ish model: high probability on nights animals appear.
@@ -215,7 +216,7 @@ def test_calibration_reports_skill_against_climatology(db_session, cam):
 @requires_db
 def test_a_useless_model_does_not_claim_skill(db_session, cam):
     """A constant forecast must not report itself as beating the baseline."""
-    base = date(2025, 9, 1)
+    base = date.today() - timedelta(days=MIN_EVALUATED + 5)
     for i in range(MIN_EVALUATED + 5):
         fc = Forecast(
             camera_id=cam.id,

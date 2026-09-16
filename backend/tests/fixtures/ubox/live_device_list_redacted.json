@@ -1,0 +1,132 @@
+{
+  "code": 0,
+  "data": {
+    "reply_get_notification": {
+      "items": []
+    },
+    "noti": [],
+    "is_reach_limit": false,
+    "ads_page_url": "https://redacted.invalid/image",
+    "firmware_ver": [
+      {
+        "model_num": "2592",
+        "version": "2592.0.33.7"
+      },
+      {
+        "model_num": "192",
+        "version": "192.70.2.72"
+      }
+    ],
+    "items": [
+      {
+        "add_utc": 1789566539,
+        "device_uid": "id_df281f1c13bfbaa3",
+        "device_name": "[redacted]",
+        "is_owner": true,
+        "ps_name": "[redacted]",
+        "zone_id": "id_f854e56854b730d6",
+        "address_id": "id_b1c63fd094fdbc73",
+        "can_insert_sim_card": true,
+        "alexa_status": 0,
+        "geo_info": {
+          "longitude": "[redacted]",
+          "latitude": "[redacted]"
+        },
+        "ordering": {
+          "group": "[redacted]",
+          "index": 1
+        },
+        "notice_on": true
+      }
+    ],
+    "infos": [
+      {
+        "dynamic_info": {
+          "device_uid": "id_df281f1c13bfbaa3",
+          "online_state": "2",
+          "battery": 85,
+          "is_battery_charging": false,
+          "signal": 2,
+          "latest_active_utc": 1789571033,
+          "is_low_power": false
+        },
+        "card_info": {
+          "is_flag_import": true,
+          "is_ubia_card": true,
+          "is_lock": false,
+          "icc_id": "id_7a2105d8ae5ccd85",
+          "icc_id_1": "id_7a2105d8ae5ccd85",
+          "icc_id_2": "",
+          "esim_eid": "",
+          "traffic_remain_day": 7,
+          "expire_utc": 1790171340,
+          "card_pkg_flow_status": "[redacted]",
+          "card_pkg_expire_status": "[redacted]",
+          "policy_suggest_sync_traffic": false,
+          "is_lifetime_plan": false,
+          "is_pkg_bound_on_user": true,
+          "using_card_is_esim": false,
+          "is_ubia_esim": false
+        },
+        "cfg_app_ui": {
+          "app_ctrl_live_osd_logo": "",
+          "app_ctl_live_ivs_box": "",
+          "app_ctl_ivs_detect_car": "",
+          "app_ctl_arming_setting": "",
+          "app_ctl_usercard_first": ""
+        },
+        "device_uid": "id_df281f1c13bfbaa3",
+        "device_name": "[redacted]",
+        "can_insert_sim_card": true,
+        "add_utc": 1789566539,
+        "zone_id": "id_f854e56854b730d6",
+        "address_id": "id_b1c63fd094fdbc73",
+        "alexa_status": 0,
+        "alexa_id": "",
+        "is_ap_device": false,
+        "device_user": "id_b8743a5cbdf327a5",
+        "device_pwd": "[redacted]",
+        "has_cloud_storage": true,
+        "is_cloud_storage_opened": true,
+        "dev_func": 537995776,
+        "is_dst_enabled": true,
+        "location": "",
+        "model_num": "2592",
+        "is_notice_enabled": true,
+        "is_owner": true,
+        "permissions": "",
+        "product_id": "id_00d9368d2f032d10",
+        "ps_name": "[redacted]",
+        "has_ticket_service": false,
+        "time_diff": 3600,
+        "cur_work_mode": 128,
+        "want_work_mode": 128,
+        "device_type": 0,
+        "is_panoramic_device": false,
+        "json_app_info": "[redacted]",
+        "geo_info": {
+          "longitude": "[redacted]",
+          "latitude": "[redacted]",
+          "source": "[redacted]",
+          "at": 1789570172
+        },
+        "dev_func_ex": [
+          2,
+          1,
+          36,
+          0
+        ],
+        "model_dev_type": 28,
+        "capabilities": [
+          "[redacted]",
+          "[redacted]"
+        ]
+      }
+    ],
+    "zj_items": [],
+    "uids_sorting": [
+      "[redacted]"
+    ],
+    "claim_lifetime_plan_items": []
+  }
+}

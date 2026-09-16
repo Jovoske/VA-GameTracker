@@ -1,0 +1,30 @@
+{
+  "code": 0,
+  "data": {
+    "cloud": 1,
+    "count": {"total": 3, "pages": 1, "page": 1, "page_num": 20},
+    "time_diff": 7200,
+    "list": [
+      {
+        "id": 41,
+        "device_uid": "synthetic-camera",
+        "event_time": 1789556400,
+        "img": "https://images.example.test/full.jpg?signature=synthetic",
+        "cloud_image_url": "https://images.example.test/thumb.jpg?signature=synthetic",
+        "type": 1,
+        "ai_result": {},
+        "status": 2
+      },
+      {
+        "uuid": "synthetic-event",
+        "device_uid": "synthetic-camera",
+        "event_time": 1789556460,
+        "img": "",
+        "cloud_image_url": "https://images.example.test/thumb2.jpg",
+        "type": 2
+      },
+      {"device_uid": "synthetic-camera", "event_time": 1789556520, "type": 3}
+    ]
+  },
+  "msg": "success"
+}

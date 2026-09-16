@@ -49,30 +49,52 @@ class User(Base):
 
 
 class CameraAccount(Base):
-    """An extra SPYPOINT login whose cameras feed this estate (guests' own accounts).
+    """A provider login whose cameras feed this estate (guests' own accounts).
 
-    The primary account stays in .env; these are added at runtime via Settings. The
-    SPYPOINT password is encrypted at rest (Fernet, key derived from JWT_SECRET).
+    The primary SPYPOINT account stays in .env; these are added via Settings. Each
+    password is encrypted at rest (Fernet, key derived from JWT_SECRET).
     """
     __tablename__ = "camera_accounts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     label: Mapped[str | None] = mapped_column(String)
-    username: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(
+        String, nullable=False, default="spypoint", server_default="spypoint"
+    )
+    username: Mapped[str] = mapped_column(String, nullable=False)
     password_enc: Mapped[str] = mapped_column(String, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Limits apply separately to every UBox camera on this account, before download/AI.
+    ubox_min_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=60, server_default=text("60")
+    )
+    ubox_max_images_per_day: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=500, server_default=text("500")
+    )
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        CheckConstraint("provider IN ('spypoint','ubox')", name="provider_valid"),
+        CheckConstraint(
+            "ubox_min_interval_seconds BETWEEN 10 AND 3600", name="ubox_interval_valid"
+        ),
+        CheckConstraint(
+            "ubox_max_images_per_day BETWEEN 1 AND 5000", name="ubox_daily_limit_valid"
+        ),
+        # Device identifiers are global: one provider account belongs to one estate.
+        UniqueConstraint("provider", "username", name="uq_camera_accounts_provider_username"),
+    )
 
 
 class Camera(Base):
     __tablename__ = "cameras"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
-    # Which extra SPYPOINT account this camera came from (NULL = the primary .env account).
+    # Provider account (NULL also covers the primary SPYPOINT login and local imports).
     account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("camera_accounts.id"))
     spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
+    ubox_uid: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
@@ -93,6 +115,11 @@ class Camera(Base):
     cycle_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        CheckConstraint(
+            "spypoint_id IS NULL OR ubox_uid IS NULL", name="provider_exclusive"
+        ),
+    )
 
 
 class Stand(Base):
@@ -147,6 +174,7 @@ class Zone(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("kind IN ('bedding','feeding','water','no_go')", name="zone_kind_valid"),
+        Index("ix_zones_estate_kind", "estate_id", "kind"),
     )
 
 
@@ -170,6 +198,7 @@ class Image(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cameras.id"), nullable=False)
     spypoint_photo_id: Mapped[str | None] = mapped_column(String, unique=True)
+    ubox_event_id: Mapped[str | None] = mapped_column(String, unique=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     original_path: Mapped[str | None] = mapped_column(String)
     annotated_path: Mapped[str | None] = mapped_column(String)
@@ -208,7 +237,8 @@ class Detection(Base):
     group_size: Mapped[int | None] = mapped_column(Integer)
     group_type: Mapped[str | None] = mapped_column(String)
     bbox: Mapped[dict | None] = mapped_column(JSONB)
-    embedding: Mapped[list[float] | None] = mapped_column(JSONB)  # DINOv2-L embedding stored as a JSON list (no pgvector)
+    # DINOv2-L embedding stored as a JSON list (no pgvector).
+    embedding: Mapped[list[float] | None] = mapped_column(JSONB)
     model_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("model_runs.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
@@ -292,7 +322,9 @@ class Forecast(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     factors: Mapped[dict | None] = mapped_column(JSONB)
     model_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("model_runs.id"))
-    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     __table_args__ = (Index("ix_forecasts_date_camera", "target_date", "camera_id"),)
 
 
@@ -336,6 +368,7 @@ class SyncLog(Base):
     images_downloaded: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(String)
     error: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -363,7 +396,9 @@ class CameraNight(Base):
     exposure_state: Mapped[str] = mapped_column(String, nullable=False)
     frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     empty_frames: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     __table_args__ = (
         UniqueConstraint("camera_id", "night", name="uq_camera_night"),
         CheckConstraint(

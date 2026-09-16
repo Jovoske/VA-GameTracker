@@ -1,6 +1,7 @@
 """Camera routes — list (with location), images, sync/backfill/scan, review, map placement."""
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -49,10 +50,32 @@ def _sync_work(db: Session) -> None:
     from app.ai.empty_filter import scan_unprocessed
     from app.ai.species import classify_unclassified
     from app.ingestion.sync import sync_all
+    from app.ingestion.ubox_sync import sync_ubox_all
 
-    sync_all(db)
-    scan_unprocessed(db)
-    classify_unclassified(db)
+    results = {}
+    error = None
+    try:
+        results["spypoint"] = sync_all(db)
+        results["ubox"] = sync_ubox_all(db)
+        scan_unprocessed(db)
+        classify_unclassified(db)
+        from app.forecasting.exposure import recompute_camera_nights
+
+        recompute_camera_nights(db)
+    except Exception as exc:
+        db.rollback()
+        error = f"Sync pipeline failed ({type(exc).__name__})"
+    # Provider imports each keep a diagnostic log. This final summary gives the
+    # Sync button a combined count after both providers and the AI pass finish.
+    now = datetime.now(timezone.utc)
+    db.add(SyncLog(
+        status="error" if error or any(r.get("status") == "error" for r in results.values())
+        else "ok",
+        started_at=now, finished_at=now, error=error,
+        images_downloaded=sum(r.get("total", 0) for r in results.values()),
+        details={"provider": "pipeline", "results": results},
+    ))
+    db.commit()
 
 
 @router.get("")
@@ -143,12 +166,15 @@ def trigger_scan(background: BackgroundTasks, _: User = Depends(get_current_admi
 
 @router.get("/sync/status")
 def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    if _pipeline_busy():
+        return {"status": "running"}
     row = db.scalar(select(SyncLog).order_by(SyncLog.started_at.desc()).limit(1))
     if row is None:
         return {"status": "never"}
     return {
         "status": row.status, "images_downloaded": row.images_downloaded,
         "started_at": row.started_at, "finished_at": row.finished_at, "error": row.error,
+        "details": row.details,
     }
 
 

@@ -2,6 +2,7 @@
 from app.core.db import SessionLocal
 from app.core.logging import get_logger
 from app.ingestion.sync import backfill_all, sync_all
+from app.ingestion.ubox_sync import sync_ubox_all
 from app.tasks.celery_app import celery
 
 log = get_logger(__name__)
@@ -11,6 +12,7 @@ log = get_logger(__name__)
 def spypoint_sync() -> dict:
     with SessionLocal() as db:
         result = sync_all(db)
+        result["ubox"] = sync_ubox_all(db)
     log.info("spypoint_sync.done", status=result.get("status"), total=result.get("total"))
     return result
 
