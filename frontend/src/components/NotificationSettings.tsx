@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ageLabel, api } from '../api'
 import {
   currentSubscription,
@@ -282,7 +283,11 @@ export default function NotificationSettings() {
               {feed.items.map((n) => (
                 <div key={n.id} style={{ ...row, alignItems: 'flex-start' }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontSize: 14 }}>{n.title}</div>
+                    {n.url ? (
+                      <Link to={n.url} style={{ fontSize: 14, color: 'var(--text)', textDecoration: 'underline', textUnderlineOffset: 3 }}>{n.title}</Link>
+                    ) : (
+                      <div style={{ fontSize: 14 }}>{n.title}</div>
+                    )}
                     <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.4 }}>{n.body}</div>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', whiteSpace: 'nowrap' }}>
