@@ -23,6 +23,7 @@ This endpoint set and the host/path URL reconstruction are the genuinely valuabl
 4. **Token lifecycle.** Cache the bearer token; on `401`, re-authenticate once and retry. Handle expiry transparently.
 5. **Resilience.** Timeouts, exponential backoff on `429/5xx`, per-camera isolation (one camera failing doesn't abort the run), structured `sync_log` rows with counts + errors.
 6. **Credentials.** From encrypted app settings / env (`SPYPOINT_USERNAME`, `SPYPOINT_PASSWORD`); never logged, never committed.
+7. **Timestamps are camera wall clock.** `originDate` (and `date`, `dateEnd`) carry the camera's own clock with a `Z` suffix, not UTC: a frame the camera stamps 10:30 arrives as `10:30:00.000Z`. The client reads them as wall times in `ESTATE_TIMEZONE` and stores real UTC, and expresses the `dateEnd` cursor the same way. Migration `0015_spypoint_local_time` corrected rows imported before this (and their env snapshots) once, recorded under `app_settings.spypoint_capture_times_localized`.
 
 ## Client shape
 

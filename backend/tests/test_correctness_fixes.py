@@ -73,7 +73,8 @@ def test_capture_time_is_preferred_over_receipt_time(monkeypatch):
 
     monkeypatch.setattr(client, "_request", lambda *a, **k: _Resp())
     (photo,) = client.list_photos("cam-1")
-    assert photo.captured_at.hour == 22, "a late upload must not become a dawn sighting"
+    local = photo.captured_at.astimezone(client.camera_tz)
+    assert local.hour == 22, "a late upload must not become a dawn sighting"
 
 
 # ── the night boundary ──────────────────────────────────────────────────────

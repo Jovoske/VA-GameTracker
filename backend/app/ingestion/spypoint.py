@@ -9,9 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
+from app.core.config import settings
 from app.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -157,8 +159,16 @@ def _extract_coords(cam: dict) -> tuple[float | None, float | None]:
     return None, None
 
 
-def _parse_dt(value: Any) -> datetime | None:
-    """Parse a SPYPOINT timestamp, or None if it cannot be trusted.
+def _parse_dt(value: Any, tz: ZoneInfo | None = None) -> datetime | None:
+    """Parse a SPYPOINT photo timestamp, or None if it cannot be trusted.
+
+    SPYPOINT reports ``originDate`` as the camera's own wall clock with a ``Z``
+    stapled on: a photo stamped 10:30 by the camera arrives as ``10:30:00.000Z``
+    whatever the camera's clock is set to. Taking that ``Z`` at face value shifted
+    every capture by the estate's UTC offset (two hours in summer), which is what
+    the gallery, notifications and hour histograms then displayed. When ``tz`` is
+    given, a zero-offset or naive value is read as a wall time in that zone and
+    converted to real UTC. A genuine non-zero offset is trusted as written.
 
     This used to fall back to datetime.now(), silently stamping a photo with the
     moment it happened to sync. Every number in the product is a function of *when*
@@ -170,9 +180,22 @@ def _parse_dt(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    if tz is None:
+        return parsed
+    offset = parsed.utcoffset()
+    if offset is None or not offset:
+        return parsed.replace(tzinfo=tz).astimezone(timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def wall_clock_cursor(when: datetime, tz: ZoneInfo) -> str:
+    """Express a real instant in SPYPOINT's ``dateEnd`` convention (camera wall clock + Z)."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(tz).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _extract_tags(photo: dict) -> list[str]:
@@ -186,9 +209,15 @@ def _extract_tags(photo: dict) -> list[str]:
 
 
 class SpypointClient:
-    def __init__(self, username: str, password: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self, username: str, password: str, timeout: float = 30.0,
+        camera_timezone: str | None = None,
+    ) -> None:
         self._username = username
         self._password = password
+        # The zone the cameras' clocks are set to; SPYPOINT timestamps are wall
+        # times in it, not UTC (see _parse_dt).
+        self.camera_tz = ZoneInfo(camera_timezone or settings.estate_timezone)
         self._token: str | None = None
         self._client = httpx.Client(timeout=timeout)
 
@@ -260,11 +289,17 @@ class SpypointClient:
         )
 
     # ── photos ──────────────────────────────────────────────
+    def date_cursor(self, when: datetime) -> str:
+        """``dateEnd`` value for paging backward from a real instant."""
+        return wall_clock_cursor(when, self.camera_tz)
+
     def list_photos(
         self, camera_id: str, *, limit: int = 100, date_end: str | None = None
     ) -> list[SpypointPhoto]:
         body = {
             "camera": [camera_id],
+            # dateEnd is in the same wall-clock convention as the photo timestamps;
+            # callers paging by a real instant go through date_cursor().
             "dateEnd": date_end or "2100-01-01T00:00:00.000Z",
             "favorite": False,
             "hd": False,
@@ -281,7 +316,7 @@ class SpypointClient:
             # preferring `date` can manufacture a dawn "peak window" out of a late
             # delivery. Capture time first, receipt time only as a fallback.
             captured_at = _parse_dt(
-                p.get("originDate") or p.get("date") or p.get("createdAt")
+                p.get("originDate") or p.get("date") or p.get("createdAt"), self.camera_tz
             )
             if captured_at is None:
                 skipped += 1
