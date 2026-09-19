@@ -1,9 +1,15 @@
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from app.ingestion.spypoint import (
     SpypointClient,
     _extract_coords,
     _extract_signal,
     _parse_dt,
+    wall_clock_cursor,
 )
+
+MADRID = ZoneInfo("Europe/Madrid")
 
 
 def test_photo_url_prefers_large():
@@ -46,6 +52,56 @@ def test_parse_dt_iso_is_aware():
     dt = _parse_dt("2026-04-13T18:52:10.000Z")
     assert dt.year == 2026
     assert dt.tzinfo is not None
+
+
+def test_parse_dt_reads_spypoint_z_as_camera_wall_clock():
+    # The camera stamped the frame 10:30 (CEST); SPYPOINT sends it as 10:30Z.
+    dt = _parse_dt("2026-09-19T10:30:00.000Z", MADRID)
+    assert dt == datetime(2026, 9, 19, 8, 30, tzinfo=timezone.utc)
+    assert dt.astimezone(MADRID).strftime("%H:%M") == "10:30"
+    # Winter: the offset follows the date, not a fixed two hours.
+    dt = _parse_dt("2026-01-10T07:15:00.000Z", MADRID)
+    assert dt == datetime(2026, 1, 10, 6, 15, tzinfo=timezone.utc)
+
+
+def test_parse_dt_trusts_a_real_offset_and_reads_naive_as_local():
+    dt = _parse_dt("2026-09-19T10:30:00+02:00", MADRID)
+    assert dt == datetime(2026, 9, 19, 8, 30, tzinfo=timezone.utc)
+    assert _parse_dt("2026-09-19T10:30:00", MADRID) == dt
+    assert _parse_dt("garbage", MADRID) is None
+
+
+def test_wall_clock_cursor_round_trips_with_parse():
+    instant = datetime(2026, 9, 19, 8, 30, tzinfo=timezone.utc)
+    cursor = wall_clock_cursor(instant, MADRID)
+    assert cursor == "2026-09-19T10:30:00.000Z"
+    assert _parse_dt(cursor, MADRID) == instant
+
+
+def test_list_photos_uses_camera_timezone(monkeypatch):
+    client = SpypointClient("u", "p", camera_timezone="Europe/Madrid")
+    payload = {"photos": [
+        {"id": "a", "originDate": "2026-09-19T10:30:00.000Z",
+         "large": {"host": "h", "path": "a.jpg"}},
+        {"id": "b", "originDate": ""},
+    ]}
+
+    class _Resp:
+        def json(self):
+            return payload
+
+    seen = {}
+
+    def fake_request(method, path, **kw):
+        seen.update(kw.get("json") or {})
+        return _Resp()
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    photos = client.list_photos("cam", date_end=client.date_cursor(
+        datetime(2026, 9, 19, 8, 30, tzinfo=timezone.utc)))
+    assert [p.spypoint_id for p in photos] == ["a"]
+    assert photos[0].captured_at == datetime(2026, 9, 19, 8, 30, tzinfo=timezone.utc)
+    assert seen["dateEnd"] == "2026-09-19T10:30:00.000Z"
 
 
 def test_parse_camera_real_spypoint_shape():

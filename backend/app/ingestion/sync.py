@@ -170,7 +170,7 @@ def backfill_camera(
         if oldest is None or oldest < cutoff or oldest == seen_oldest:
             break  # reached cutoff, ran out, or no progress
         seen_oldest = oldest
-        date_end = oldest.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        date_end = client.date_cursor(oldest)
 
     return {"camera": cam.name, "pages": pages, "new": total_new}
 
