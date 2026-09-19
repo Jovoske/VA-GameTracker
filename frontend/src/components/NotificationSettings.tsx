@@ -8,6 +8,7 @@ import {
   subscribeThisDevice,
   unsubscribeThisDevice,
 } from '../push'
+import SettingsSection from './SettingsSection'
 import Toggle from './Toggle'
 
 type SpeciesPref = { id: string; common_name: string; selected: boolean; detections: number }
@@ -188,15 +189,8 @@ export default function NotificationSettings() {
   else deviceLine = 'This device is not subscribed yet.'
 
   return (
-    <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <h2 className="sect">Notifications</h2>
-        {s && s.species.length > 0 && (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-            {selected} of {s.species.length} animals
-          </div>
-        )}
-      </div>
+    <SettingsSection id="notifications" title="Notifications"
+      summary={s && s.species.length > 0 ? `${selected} of ${s.species.length} animals` : undefined}>
       <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
         A push on your phone when a camera catches an animal you care about. One message per
         species per sync, with the camera and the time, and never for photos older than a day.
@@ -304,6 +298,6 @@ export default function NotificationSettings() {
           )}
         </>
       )}
-    </div>
+    </SettingsSection>
   )
 }
