@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, setToken } from '../api'
 import NotificationSettings from '../components/NotificationSettings'
+import SettingsSection from '../components/SettingsSection'
 import Toggle from '../components/Toggle'
 
 type Status = {
@@ -279,15 +280,8 @@ export default function Admin() {
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <h1 className="page-title">Settings</h1>
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <h2 className="sect">Hunting advice</h2>
-          {species.length > 0 && (
-            <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-              {onCount} of {species.length} shown
-            </div>
-          )}
-        </div>
+      <SettingsSection id="advice" title="Hunting advice"
+        summary={species.length > 0 ? `${onCount} of ${species.length} shown` : undefined}>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
           Choose which animals appear in Tonight's recommendation and the outlook. Turn off
           anything out of season or that you don't hunt: ibex when it's closed, say, or
@@ -324,12 +318,11 @@ export default function Admin() {
             </div>
           ))
         )}
-      </div>
+      </SettingsSection>
 
       <NotificationSettings />
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <h2 className="sect">Camera accounts</h2>
+      <SettingsSection id="accounts" title="Camera accounts">
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
           Connect a SPYPOINT or UBox Pro account and its cameras join the estate, with photos, AI detection and
           forecasts included. Guests can add their own account here.
@@ -431,11 +424,10 @@ export default function Admin() {
           </button>
         </form>
         {acctMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
-      </div>
+      </SettingsSection>
 
       {me?.role === 'admin' && (
-        <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-          <h2 className="sect">People</h2>
+        <SettingsSection id="people" title="People">
           <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
             Who can sign in. Guests get "member": they see everything and can connect their own
             cameras, but can't change settings or manage people.
@@ -469,11 +461,10 @@ export default function Admin() {
             </div>
           </div>
           {userMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{userMsg}</div>}
-        </div>
+        </SettingsSection>
       )}
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <h2 className="sect">Change password</h2>
+      <SettingsSection id="password" title="Change password" defaultOpen>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <input className="input" placeholder="Current password" type="password" value={pw.current}
             onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
@@ -485,10 +476,9 @@ export default function Admin() {
           </button>
         </div>
         {pwMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
-      </div>
+      </SettingsSection>
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <h2 className="sect">Version</h2>
+      <SettingsSection id="version" title="Version" defaultOpen>
         <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
         <button
           className="btn"
@@ -527,10 +517,9 @@ export default function Admin() {
             )}
           </div>
         )}
-      </div>
+      </SettingsSection>
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <h2 className="sect">AI labelling</h2>
+      <SettingsSection id="ai" title="AI labelling" defaultOpen>
         <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
           Identify sex on red deer (stag / hind) and wild boar using cloud vision. Uses your
           ANTHROPIC_API_KEY and costs a little API credit per photo; only un-sexed animals are processed.
@@ -544,10 +533,9 @@ export default function Admin() {
           {sexBusy ? 'Starting…' : 'Identify deer / boar sex'}
         </button>
         {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
-      </div>
+      </SettingsSection>
 
-      <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-        <h2 className="sect">Account</h2>
+      <SettingsSection id="account" title="Account" defaultOpen>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, color: 'var(--text-dim)', flex: 1, minWidth: 0 }}>
             Signed in as <span style={{ color: 'var(--text)' }}>{me?.email ?? '…'}</span>
@@ -562,11 +550,10 @@ export default function Admin() {
             Sign out
           </button>
         </div>
-      </div>
+      </SettingsSection>
 
       {status && (
-        <div className="card" style={{ padding: 18 }}>
-          <h2 className="sect">System</h2>
+        <SettingsSection id="system" title="System" defaultOpen style={{ marginBottom: 0 }}>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>{k}</span>
@@ -579,7 +566,7 @@ export default function Admin() {
               <span>{status.last_sync.status}</span>
             </div>
           )}
-        </div>
+        </SettingsSection>
       )}
     </div>
   )

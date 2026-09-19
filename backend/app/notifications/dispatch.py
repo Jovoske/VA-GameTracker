@@ -20,6 +20,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -43,6 +44,14 @@ log = get_logger(__name__)
 CURSOR_KEY = "notify_cursor"
 MAX_PER_USER = 5
 FEED_URL = "/animals"
+
+
+def sighting_url(species_id: str, image_id: uuid.UUID | None) -> str:
+    """Where a tap on one species' banner lands: that species' gallery, opened on
+    the photo the notification is about. Nobody wants to be dropped at the top of
+    the app and made to find the picture they were just told about."""
+    query = urlencode({"species": species_id, **({"image": str(image_id)} if image_id else {})})
+    return f"{FEED_URL}?{query}"
 
 
 @dataclass
@@ -183,7 +192,8 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
                     title, body = compose(d, tz)
                     notes.append(Notification(
                         user_id=pref.user_id, kind="sighting", title=title, body=body,
-                        url=FEED_URL, species_id=d.species_id, image_id=d.latest_image_id,
+                        url=sighting_url(d.species_id, d.latest_image_id),
+                        species_id=d.species_id, image_id=d.latest_image_id,
                         created_at=now,
                     ))
             db.add_all(notes)

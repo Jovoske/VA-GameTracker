@@ -392,3 +392,11 @@ main.page { padding: 16px; }
 .pattern-comparison th:first-child { text-align: left; }
 .pattern-comparison thead { color: var(--text-dim); font-size: 11px; }
 .pattern-comparison small { display: block; color: var(--text-dim); margin-top: 4px; }
+
+/* Settings: every card folds behind its heading (SettingsSection). */
+.settings-section { margin-bottom: 14px; }
+.settings-section-title { margin: 0; }
+.settings-section-head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 14px 18px; background: transparent; border: 0; color: var(--text); font: inherit; font-weight: 600; letter-spacing: -0.01em; text-align: left; cursor: pointer; }
+.settings-section-head .settings-section-name { flex: 1; min-width: 0; }
+.settings-section-head .sect-note { white-space: nowrap; }
+.settings-section-body { padding: 0 18px 18px; }

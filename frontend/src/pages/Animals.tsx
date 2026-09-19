@@ -1,5 +1,6 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, imageUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
@@ -50,12 +51,36 @@ export default function Animals() {
   // Index into galleryImgs of the photo open in the viewer.
   const [zoom, setZoom] = useState<number | null>(null)
 
+  // A sighting notification lands here as /animals?species=…&image=…: open that
+  // species' gallery on that photo, then drop the query so closing the viewer or
+  // pressing back behaves as if the person had browsed there themselves.
+  const [params, setParams] = useSearchParams()
+  const deepLink = useRef<{ species: string; image: string | null } | null>(
+    params.get('species') ? { species: params.get('species')!, image: params.get('image') } : null,
+  )
+
   function loadSpecies() {
     setSpErr('')
     setSpLoading(true)
-    api<SpeciesRow[]>('/species/spotted').then(setSpecies).catch((e) => setSpErr(e.message)).finally(() => setSpLoading(false))
+    api<SpeciesRow[]>('/species/spotted').then((rows) => {
+      setSpecies(rows)
+      const want = deepLink.current
+      if (!want) return
+      const sp = rows.find((r) => r.id === want.species)
+      if (sp) openGallery(sp, null)
+      else { deepLink.current = null; setParams({}, { replace: true }) }
+    }).catch((e) => setSpErr(e.message)).finally(() => setSpLoading(false))
   }
   useEffect(loadSpecies, [])
+  useEffect(() => {
+    const want = deepLink.current
+    if (!want || !galleryImgs) return
+    deepLink.current = null
+    setParams({}, { replace: true })
+    if (galleryImgs.length === 0) return
+    const at = want.image ? galleryImgs.findIndex((im) => im.image_id === want.image) : -1
+    setZoom(at >= 0 ? at : 0)
+  }, [galleryImgs, setParams])
   useRefetchOnReturn(loadSpecies, 120_000)
 
   async function openGallery(sp: SpeciesRow, label: string | null) {

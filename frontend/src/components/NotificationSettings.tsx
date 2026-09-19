@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ageLabel, api } from '../api'
 import {
   currentSubscription,
@@ -7,6 +8,7 @@ import {
   subscribeThisDevice,
   unsubscribeThisDevice,
 } from '../push'
+import SettingsSection from './SettingsSection'
 import Toggle from './Toggle'
 
 type SpeciesPref = { id: string; common_name: string; selected: boolean; detections: number }
@@ -187,15 +189,8 @@ export default function NotificationSettings() {
   else deviceLine = 'This device is not subscribed yet.'
 
   return (
-    <div className="card" style={{ padding: 18, marginBottom: 14 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <h2 className="sect">Notifications</h2>
-        {s && s.species.length > 0 && (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-            {selected} of {s.species.length} animals
-          </div>
-        )}
-      </div>
+    <SettingsSection id="notifications" title="Notifications"
+      summary={s && s.species.length > 0 ? `${selected} of ${s.species.length} animals` : undefined}>
       <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
         A push on your phone when a camera catches an animal you care about. One message per
         species per sync, with the camera and the time, and never for photos older than a day.
@@ -282,7 +277,11 @@ export default function NotificationSettings() {
               {feed.items.map((n) => (
                 <div key={n.id} style={{ ...row, alignItems: 'flex-start' }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontSize: 14 }}>{n.title}</div>
+                    {n.url ? (
+                      <Link to={n.url} style={{ fontSize: 14, color: 'var(--text)', textDecoration: 'underline', textUnderlineOffset: 3 }}>{n.title}</Link>
+                    ) : (
+                      <div style={{ fontSize: 14 }}>{n.title}</div>
+                    )}
                     <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.4 }}>{n.body}</div>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', whiteSpace: 'nowrap' }}>
@@ -299,6 +298,6 @@ export default function NotificationSettings() {
           )}
         </>
       )}
-    </div>
+    </SettingsSection>
   )
 }
