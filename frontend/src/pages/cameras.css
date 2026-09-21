@@ -21,3 +21,52 @@
 .camera-name-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .camera-name-buttons .btn { width: auto; min-height: 44px; padding: 8px 14px; font-size: 13px; }
 .camera-name-error { color: var(--skip); font-size: 13px; line-height: 1.5; margin: 8px 0 0; overflow-wrap: anywhere; }
+
+/* ── page ── */
+.cam-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.cam-head-title { margin: 0; flex-shrink: 0; }
+.cam-sync-msg { font-size: 12px; color: var(--text-dim); flex: 1; min-width: 0; transition: opacity var(--d-fast) var(--ease-out); }
+.cam-sync-btn { width: auto; padding: 8px 14px; flex-shrink: 0; }
+.cam-error { padding: 12px; margin-bottom: 12px; font-size: 13px; color: var(--skip); }
+.cam-list { display: flex; flex-direction: column; gap: 12px; }
+
+/* ── one camera ── */
+.cam-card { padding: 14px; }
+.cam-card-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.cam-health { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin-left: auto; white-space: nowrap; }
+.cam-health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.cam-last-seen { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+
+.cam-strip { display: flex; gap: 6px; margin-top: 10px; transition: opacity 110ms var(--ease-out); }
+.cam-thumb-wrap { position: relative; flex-shrink: 0; transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out); }
+.cam-thumb { height: 74px; width: 100px; object-fit: cover; border-radius: var(--r-ctl); cursor: pointer; background: var(--surface-2); display: block; }
+.cam-thumb-tag {
+  position: absolute; bottom: 3px; left: 3px;
+  font-size: 9px; background: rgba(0,0,0,0.62); color: #fff;
+  padding: 1px 5px; border-radius: var(--r-chip);
+}
+.cam-thumb-tag--label { max-width: 116px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cam-flag {
+  position: absolute; top: 3px; right: 3px; width: 26px; height: 26px;
+  border-radius: var(--r-ctl); border: none; cursor: pointer;
+  font-size: 15px; line-height: 26px; padding: 0; font-weight: 700;
+}
+.cam-strip-empty { font-size: 13px; color: var(--text-dim); }
+
+.cam-empties-toggle {
+  margin-top: 10px; background: none; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: var(--r-ctl); padding: 6px 10px; min-height: 36px; cursor: pointer; font-size: 12px;
+}
+.cam-empties-toggle[aria-pressed='true'] { background: var(--surface-2); color: var(--text); }
+
+/* ── the fold ── */
+.cam-details { margin-top: 10px; font-size: 12px; color: var(--text-dim); }
+.cam-details summary { cursor: pointer; padding: 6px 0; min-height: 32px; display: flex; align-items: center; color: var(--text-dim); list-style: none; }
+.cam-details summary::-webkit-details-marker { display: none; }
+.cam-details summary::before { content: '▸'; display: inline-block; width: 14px; font-size: 11px; transition: transform var(--d-fast) var(--ease-out); }
+.cam-details[open] summary::before { transform: rotate(90deg); }
+.cam-details summary:focus-visible { outline: 2px solid var(--go); outline-offset: 4px; border-radius: 4px; }
+.cam-details-list { margin: 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 16px; }
+.cam-details-list > div { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.cam-details-list dt { color: var(--text-dim); }
+.cam-details-list dd { margin: 0; color: var(--text); text-align: right; }

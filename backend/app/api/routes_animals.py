@@ -106,7 +106,7 @@ def get_animal(
 ) -> dict:
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "Individual not found")
+        raise HTTPException(404, "Animal not found.")
     sightings = db.execute(
         select(
             Image.id,
@@ -160,7 +160,7 @@ def patch_animal(
 ) -> dict:
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "Individual not found")
+        raise HTTPException(404, "Animal not found.")
     if body.label is not None:
         ind.label = body.label.strip() or ind.label
     if body.status is not None:
@@ -197,7 +197,7 @@ def merge_animals(
     """Fold source individuals into the target — a user assertion they're the same animal."""
     target = db.get(Individual, body.target_id)
     if target is None:
-        raise HTTPException(404, "Target individual not found")
+        raise HTTPException(404, "The animal to merge into was not found.")
     moved = 0
     for sid in body.source_ids:
         if sid == body.target_id:
@@ -228,7 +228,7 @@ def confirm_animal(
 ) -> dict:
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "Individual not found")
+        raise HTTPException(404, "Animal not found.")
     db.execute(
         update(DetectionIndividual)
         .where(DetectionIndividual.individual_id == individual_id)

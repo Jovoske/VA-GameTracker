@@ -65,7 +65,7 @@ def _sync_work(db: Session) -> None:
         recompute_camera_nights(db)
     except Exception as exc:
         db.rollback()
-        error = f"Sync pipeline failed ({type(exc).__name__})"
+        error = f"Sync failed ({type(exc).__name__})"
     # Provider imports each keep a diagnostic log. This final summary gives the
     # Sync button a combined count after both providers and the AI pass finish.
     now = datetime.now(timezone.utc)
@@ -135,10 +135,10 @@ class CameraNameBody(BaseModel):
         if value is None:
             return None
         if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value):
-            raise ValueError("Camera name cannot contain control characters")
+            raise ValueError("Camera name has hidden characters in it. Retype it.")
         value = value.strip()
         if not 1 <= len(value) <= 100:
-            raise ValueError("Camera name must contain between 1 and 100 characters")
+            raise ValueError("Camera name must be 1 to 100 characters.")
         return value
 
 
@@ -150,12 +150,12 @@ def rename_camera(
     db: Session = Depends(get_db),
 ) -> dict:
     if user.role not in {"admin", "member"}:
-        raise HTTPException(403, "Only estate admins and members can rename cameras")
+        raise HTTPException(403, "Only estate admins and members can rename cameras.")
     camera = db.scalar(select(Camera).where(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ).with_for_update().execution_options(populate_existing=True))
     if camera is None:
-        raise HTTPException(404, "Camera not found")
+        raise HTTPException(404, "Camera not found.")
     # Local imports have no vendor label, so retain their initial name as default.
     if not camera.provider_name:
         camera.provider_name = camera.name
@@ -172,7 +172,7 @@ def rename_camera(
 @router.post("/sync")
 def trigger_sync(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "A sync is already running — new photos will appear shortly."}
+        return {"status": "busy", "note": "Already checking. New photos will show shortly."}
     background.add_task(_run_locked, _sync_work)
     return {"status": "started"}
 
@@ -184,7 +184,7 @@ def trigger_backfill(
     _: User = Depends(get_current_admin),
 ) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "The pipeline is already running — try again later."}
+        return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
 
     def work(db: Session) -> None:
         from app.ingestion.sync import backfill_all
@@ -199,7 +199,7 @@ def trigger_backfill(
 @router.post("/scan")
 def trigger_scan(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "The pipeline is already running — try again later."}
+        return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
 
     def work(db: Session) -> None:
         from app.ai.empty_filter import scan_unprocessed
@@ -240,7 +240,7 @@ def set_location(
 ) -> dict:
     cam = db.get(Camera, camera_id)
     if cam is None:
-        raise HTTPException(404, "Camera not found")
+        raise HTTPException(404, "Camera not found.")
     cam.lat = body.lat
     cam.lon = body.lng
     db.commit()

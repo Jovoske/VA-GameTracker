@@ -46,7 +46,7 @@ type Img = {
   sex: string | null
 }
 
-// Compose species + group composition (+ sex once the vision pass has run) into one label.
+// Species + group make-up (+ sex once known) as one short label.
 function classLabel(im: Img): string {
   const sp = im.species || ''
   const n = im.group_size || 0
@@ -71,18 +71,6 @@ function batteryColor(p: number | null): string {
   if (p < 50) return 'var(--marginal)'
   return 'var(--go)'
 }
-function healthMeta(status: string): { label: string; color: string } {
-  switch (status) {
-    case 'offline':
-      return { label: 'OFFLINE', color: 'var(--skip)' }
-    case 'out_of_credits':
-      return { label: 'NO CREDITS', color: 'var(--marginal)' }
-    case 'low_battery':
-      return { label: 'LOW BATTERY', color: 'var(--marginal)' }
-    default:
-      return { label: 'OK', color: 'var(--go)' }
-  }
-}
 function creditColor(count: number | null, limit: number | null): string {
   if (count == null || limit == null || limit === 0) return 'var(--text-dim)'
   const frac = count / limit
@@ -93,9 +81,35 @@ function creditColor(count: number | null, limit: number | null): string {
 function timeAgo(ts: string | null): string {
   if (!ts) return 'never'
   const diff = (Date.now() - new Date(ts).getTime()) / 1000
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 3600) return `${Math.max(1, Math.floor(diff / 60))} min ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
+}
+/** "yesterday", "Tuesday" or "3 Sep": when the camera last spoke to us. */
+function sinceLabel(ts: string): string {
+  const d = new Date(ts)
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000)
+  if (days < 1) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' })
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+/** Camera health in words a hunter uses, not a status code. */
+function healthWords(c: Camera): { label: string; color: string; ok: boolean } {
+  const status = c.health?.status ?? 'ok'
+  switch (status) {
+    case 'offline':
+      return {
+        label: c.last_report_at ? `Quiet since ${sinceLabel(c.last_report_at)}` : 'Never checked in',
+        color: 'var(--skip)', ok: false,
+      }
+    case 'out_of_credits':
+      return { label: 'Out of photo credits', color: 'var(--marginal)', ok: false }
+    case 'low_battery':
+      return { label: 'Battery low', color: 'var(--marginal)', ok: false }
+    default:
+      return { label: 'Sending photos', color: 'var(--go)', ok: true }
+  }
 }
 
 type Zoom = { photos: LightboxPhoto[]; idx: number }
@@ -119,11 +133,11 @@ function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value
   async function save(name: string | null) {
     if (saving) return
     if (name !== null && !name.trim()) {
-      setError('Enter a camera name.')
+      setError('Type a name first.')
       return
     }
     if (name !== null && /[\p{Cc}\p{Cf}]/u.test(name)) {
-      setError('Use a name without hidden control characters.')
+      setError('That name has hidden characters in it. Retype it.')
       return
     }
     setSaving(true)
@@ -135,11 +149,11 @@ function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value
         body: JSON.stringify({ name: name === null ? null : name.trim() }),
       })
       onSaved(updated)
-      setMessage(name === null ? `Using imported name: ${updated.name}.` : `Camera renamed to ${updated.name}.`)
+      setMessage(name === null ? `Back to the camera's own name: ${updated.name}.` : `Renamed to ${updated.name}.`)
       close()
     } catch (e) {
       const detail = (e as Error).message
-      setError(`Could not save the camera name. ${detail && !detail.includes('[object Object]') ? detail : 'Check the name and try again.'}`)
+      setError(`Could not save the name. ${detail && !detail.includes('[object Object]') ? detail : 'Try again.'}`)
     } finally {
       setSaving(false)
     }
@@ -185,17 +199,17 @@ function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value
           />
           <p id={`${fieldId}-hint`} className="camera-name-hint">
             {camera.name_is_custom && camera.provider_name
-              ? `Imported name: ${camera.provider_name}. Your name stays after syncing.`
-              : 'Names are imported automatically. A name you save here stays after syncing.'}
+              ? `The camera calls itself ${camera.provider_name}. Your name stays after a sync.`
+              : 'Your name stays after a sync.'}
           </p>
           <div className="camera-name-buttons">
             <button className="btn" type="submit" disabled={saving || !draft.trim()}>
-              {saving ? 'Saving…' : 'Save name'}
+              {saving ? 'Saving…' : 'Save'}
             </button>
             <button className="camera-name-action" type="button" onClick={close} disabled={saving}>Cancel</button>
             {camera.name_is_custom && camera.provider_name && (
               <button className="camera-name-action" type="button" onClick={() => void save(null)} disabled={saving}>
-                Use imported name
+                Use camera's name
               </button>
             )}
           </div>
@@ -207,15 +221,25 @@ function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value
   )
 }
 
-/** What the viewer says is in the frame, and where it came from. */
 function toPhoto(cam: string, im: Img): LightboxPhoto {
   return {
     id: im.id,
     file_url: im.file_url as string,
     captured_at: im.captured_at,
     camera: cam,
-    label: im.is_empty_frame ? 'No animal detected' : classLabel(im) || 'Species not identified',
+    label: im.is_empty_frame ? 'No animal' : classLabel(im) || 'Unknown animal',
   }
+}
+
+/** The one line that matters under the name: what the camera last saw, and when. */
+function lastSeenLine(c: Camera, imgs: Img[]): string {
+  const latest = imgs.find((im) => im.is_empty_frame !== true)
+  if (latest) {
+    const what = classLabel(latest) || 'Unknown animal'
+    return `Last seen: ${what}, ${timeAgo(latest.captured_at)}`
+  }
+  if (c.last_capture) return `Last photo ${timeAgo(c.last_capture)}`
+  return 'No photos yet'
 }
 
 export default function Cameras() {
@@ -258,16 +282,14 @@ export default function Cameras() {
   }, [])
   useRefetchOnReturn(loadCameras)
 
-  // Reviewing empties turns a horizontal scroll strip into a wrapped grid — the
-  // photos stay the same but the shape of the block does not, and snapping
-  // between the two reads as the page breaking. A short fade over the reflow
-  // hides the double-exposure; the layout changes while nothing is on screen.
+  // Showing empties turns the scroll strip into a wrapped grid. A short fade
+  // over the reflow hides the jump.
   function toggleHidden(camId: string) {
     const next = !showHidden[camId]
     setSwapping(camId)
     window.setTimeout(() => {
       setShowHidden((p) => ({ ...p, [camId]: next }))
-      loadImages(camId, next).catch(() => setActionErr('Could not load these photos. Try changing the filter again.'))
+      loadImages(camId, next).catch(() => setActionErr('Could not load those photos. Try again.'))
       requestAnimationFrame(() => setSwapping(null))
     }, 110)
   }
@@ -277,7 +299,7 @@ export default function Cameras() {
     setFlagging((s) => new Set(s).add(imgId))
     try {
       // The photo leaves while the write is in flight, so the strip does not
-      // simply re-render minus one frame with no account of where it went.
+      // simply re-render minus one frame.
       await Promise.all([
         api(`/images/${imgId}/flag`, {
           method: 'POST',
@@ -287,7 +309,7 @@ export default function Cameras() {
       ])
       await loadImages(camId, !!showHidden[camId])
     } catch {
-      setActionErr('Could not save the photo review or refresh the list. Reload the cameras to check its status before trying again.')
+      setActionErr('Could not save that. Reload and try again.')
     }
     setFlagging((s) => {
       const n = new Set(s)
@@ -298,11 +320,11 @@ export default function Cameras() {
 
   async function syncNow() {
     setSyncing(true)
-    setSyncMsg('Contacting camera providers…')
+    setSyncMsg('Checking for new photos…')
     try {
       const r = await api<{ status: string; note?: string }>('/cameras/sync', { method: 'POST' })
       if (r.status === 'busy') {
-        setSyncMsg(r.note || 'A sync is already running.')
+        setSyncMsg(r.note || 'Already checking. New photos will show shortly.')
       } else {
         // Poll the sync log until this run finishes, so the button reports a real result.
         let done = false
@@ -312,19 +334,19 @@ export default function Cameras() {
             const s = await api<{ status: string; images_downloaded?: number }>('/cameras/sync/status')
             if (s.status === 'ok') {
               const n = s.images_downloaded ?? 0
-              setSyncMsg(n > 0 ? `Done. ${n} new photo${n === 1 ? '' : 's'}.` : 'Done. No new photos.')
+              setSyncMsg(n > 0 ? `Done. ${n} new photo${n === 1 ? '' : 's'}.` : 'Done. Nothing new.')
               done = true
             } else if (s.status === 'error') {
-              setSyncMsg('Sync failed. See Settings for details.')
+              setSyncMsg('Sync failed. Check Settings.')
               done = true
             } else {
-              setSyncMsg('Syncing…')
+              setSyncMsg('Checking…')
             }
           } catch {
-            /* transient — keep polling */
+            /* transient: keep polling */
           }
         }
-        if (!done) setSyncMsg('Still running in the background. Photos will appear as they arrive.')
+        if (!done) setSyncMsg('Still running. Photos will show as they arrive.')
       }
     } catch (e) {
       setSyncMsg((e as Error).message)
@@ -335,114 +357,54 @@ export default function Cameras() {
 
   return (
     <div>
-      {/* No wrap and a message slot that is always there: the status text used to
-          appear mid-sync and shove the button it was reporting on out of reach. */}
-      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12, gap: 10 }}>
-        <div style={{ fontSize: 18, fontWeight: 700, flexShrink: 0 }}>Cameras</div>
-        <span
-          style={{
-            fontSize: 12,
-            color: 'var(--text-dim)',
-            flex: 1,
-            minWidth: 0,
-            opacity: syncMsg ? 1 : 0,
-            transition: 'opacity var(--d-fast) var(--ease-out)',
-          }}
-        >
-          {syncMsg}
-        </span>
+      {/* A message slot that is always there, so the status text never shoves
+          the button it reports on out of reach. */}
+      <div className="cam-head">
+        <h1 className="page-title cam-head-title">Cameras</h1>
+        <span className="cam-sync-msg" style={{ opacity: syncMsg ? 1 : 0 }}>{syncMsg}</span>
         <button
-          className="btn"
-          style={{ width: 'auto', padding: '8px 14px', flexShrink: 0 }}
+          className="btn cam-sync-btn"
           onClick={syncNow}
           disabled={syncing}
         >
-          {/* A SPYPOINT sync can run for a minute. A label alone leaves the user
-              deciding whether a dead button or a slow camera network is to blame. */}
           {syncing && <span className="btn-progress" aria-hidden="true" />}
           <span style={{ position: 'relative' }}>{syncing ? 'Syncing…' : 'Sync now'}</span>
         </button>
       </div>
       {err && (
-        <div className="card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--skip)' }}>
-          Could not load cameras: {err}
-          <button className="text-action" onClick={loadCameras}>Retry loading cameras</button>
+        <div className="card cam-error">
+          Cameras did not load. {err}
+          <button className="text-action" onClick={loadCameras}>Try again</button>
         </div>
       )}
-      <p className="page-intro">Check camera health and browse the latest 80 photos per camera. Open a photo to view details or review photos with no animal detected.</p>
       <div role="status" className="sr-only">{syncMsg}</div>
-      {actionErr && <div className="status-panel" role="alert">{actionErr}<button className="text-action" onClick={() => { setActionErr(''); loadCameras() }}>Reload cameras</button></div>}
-      {loading && cameras.length === 0 && <div className="status-panel" role="status">Loading cameras and photos…</div>}
-      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras connected yet</strong><p>Connect your SPYPOINT account in Settings, then choose Sync now to import your cameras and photos.</p><a href="/settings">Open Settings →</a></div>}
+      {actionErr && <div className="status-panel" role="alert">{actionErr}<button className="text-action" onClick={() => { setActionErr(''); loadCameras() }}>Reload</button></div>}
+      {loading && cameras.length === 0 && <div className="status-panel" role="status">Loading cameras…</div>}
+      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras yet</strong><p>Connect your camera account in Settings, then tap Sync now.</p><a href="/settings">Open Settings</a></div>}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="cam-list">
         {cameras.map((c) => {
           const hidden = !!showHidden[c.id]
           const imgs = (images[c.id] || []).filter((im) => im.file_url)
+          const health = healthWords(c)
+          const animalPhotos = Math.max(0, c.image_count - c.empty_count)
           return (
-            <div key={c.id} className="card" style={{ padding: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div key={c.id} className="card cam-card">
+              <div className="cam-card-head">
                 <CameraNameEditor camera={c} onSaved={(updated) => setCameras((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))} />
-                <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{c.model}</div>
-                {c.health && c.health.status !== 'ok' && (
-                  <span
-                    style={{
-                      fontSize: 10, fontWeight: 700, letterSpacing: '.04em', color: '#06210C',
-                      background: healthMeta(c.health.status).color, borderRadius: 'var(--r-chip)', padding: '2px 7px',
-                    }}
-                  >
-                    {healthMeta(c.health.status).label}
-                  </span>
-                )}
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: 14, fontSize: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span style={{ color: batteryColor(c.battery_pct) }}>Battery {c.battery_pct == null ? 'unknown' : `${c.battery_pct}%`}</span>
-                  <span style={{ color: 'var(--text-dim)' }}>Signal {c.signal_pct == null ? 'unknown' : `${c.signal_pct}%`}</span>
-                  {c.photo_limit != null && (
-                    <span style={{ color: creditColor(c.photo_count, c.photo_limit) }}>
-                      Plan usage: {c.photo_count ?? '?'}/{c.photo_limit} photos
-                    </span>
-                  )}
-                  <span style={{ color: 'var(--text-dim)' }}>
-                    {Math.max(0, c.image_count - c.empty_count)} photos not marked empty · Latest photo: {timeAgo(c.last_capture)}
-                  </span>
-                </div>
+                <span className={`cam-health${health.ok ? '' : ' cam-health--warn'}`} style={{ color: health.color }}>
+                  <span className="cam-health-dot" style={{ background: health.color }} aria-hidden="true" />
+                  {health.label}
+                </span>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 5, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                <span>checked in {timeAgo(c.last_report_at)}</span>
-                {c.sd_total_mb ? <span>SD {Math.round(((c.sd_used_mb ?? 0) / c.sd_total_mb) * 100)}% used</span> : null}
-                {c.plan_name ? <span>{c.plan_name} plan</span> : null}
-                {c.health && c.health.status !== 'ok' ? (
-                  <span style={{ color: healthMeta(c.health.status).color }}>{c.health.detail}</span>
-                ) : null}
-              </div>
-
-              {c.empty_count > 0 && (
-                <button
-                  onClick={() => toggleHidden(c.id)}
-                  style={{
-                    marginTop: 10,
-                    background: hidden ? 'var(--surface-2)' : 'none',
-                    border: '1px solid var(--border)',
-                    color: 'var(--text-dim)',
-                    borderRadius: 'var(--r-ctl)',
-                    padding: '4px 10px',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                  }}
-                >
-                  {hidden ? 'Hide photos with no animal detected' : `Review ${c.empty_count} photos marked empty`}
-                </button>
-              )}
+              <div className="cam-last-seen">{lastSeenLine(c, imgs)}</div>
 
               <div
+                className="cam-strip"
                 style={{
-                  display: 'flex',
-                  gap: 6,
-                  marginTop: 10,
                   overflowX: hidden ? 'visible' : 'auto',
                   flexWrap: hidden ? 'wrap' : 'nowrap',
                   opacity: swapping === c.id ? 0 : 1,
-                  transition: 'opacity 110ms var(--ease-out)',
                 }}
               >
                 {imgs.map((im) => {
@@ -451,19 +413,17 @@ export default function Cameras() {
                   return (
                     <div
                       key={im.id}
+                      className="cam-thumb-wrap"
                       style={{
-                        position: 'relative',
-                        flexShrink: 0,
                         opacity: leaving ? 0 : 1,
                         transform: leaving ? 'scale(0.92)' : 'scale(1)',
-                        transition: 'opacity 180ms var(--ease-out), transform 180ms var(--ease-out)',
                       }}
                     >
                       <img
-                        className="pressable"
+                        className="pressable cam-thumb"
                         role="button"
                         tabIndex={0}
-                        aria-label={`Open photo from ${c.name}: ${im.species || 'Species not identified'}`}
+                        aria-label={`Open photo from ${c.name}: ${isEmpty ? 'no animal' : classLabel(im) || 'unknown animal'}`}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                         src={imageUrl(im.file_url as string)}
                         alt={im.species || 'trail-camera photo'}
@@ -472,35 +432,18 @@ export default function Cameras() {
                           setZoom({ photos: imgs.map((x) => toPhoto(c.name, x)), idx: imgs.indexOf(im) })
                         }}
                         style={{
-                          height: 74,
-                          width: 100,
-                          objectFit: 'cover',
-                          borderRadius: 'var(--r-ctl)',
-                          cursor: 'pointer',
-                          background: 'var(--surface-2)',
                           opacity: isEmpty ? 0.4 : 1,
                           border: im.reviewed ? '2px solid var(--teal)' : 'none',
                         }}
                       />
                       {hidden && (
                         <button
+                          className="cam-flag"
                           onClick={() => flag(c.id, im.id, !isEmpty)}
                           disabled={leaving}
-                          aria-label={isEmpty ? 'Mark photo as containing an animal' : 'Mark photo as empty'}
-                          title={isEmpty ? 'Mark as animal (keep)' : 'Mark as empty (hide)'}
+                          aria-label={isEmpty ? 'Keep this photo: there is an animal in it' : 'Hide this photo: nothing in it'}
+                          title={isEmpty ? 'Keep (animal)' : 'Hide (empty)'}
                           style={{
-                            position: 'absolute',
-                            top: 3,
-                            right: 3,
-                            width: 26,
-                            height: 26,
-                            borderRadius: 'var(--r-ctl)',
-                            border: 'none',
-                            cursor: 'pointer',
-                            fontSize: 15,
-                            lineHeight: '26px',
-                            padding: 0,
-                            fontWeight: 700,
                             background: isEmpty ? 'var(--go)' : 'rgba(0,0,0,0.6)',
                             color: isEmpty ? '#06210C' : '#fff',
                           }}
@@ -508,47 +451,38 @@ export default function Cameras() {
                           {isEmpty ? '+' : '×'}
                         </button>
                       )}
-                      {hidden && isEmpty && im.animal_conf != null && (
-                        <div
-                          style={{
-                            position: 'absolute',
-                            bottom: 3,
-                            left: 3,
-                            fontSize: 9,
-                            background: 'rgba(0,0,0,0.6)',
-                            color: '#fff',
-                            padding: '1px 4px',
-                            borderRadius: 'var(--r-chip)',
-                          }}
-                        >
-                          {Math.round(im.animal_conf * 100)}%
-                        </div>
+                      {hidden && isEmpty && im.animal_conf != null && im.animal_conf >= 0.05 && (
+                        <div className="cam-thumb-tag">Maybe</div>
                       )}
                       {!isEmpty && im.species && (
-                        <div
-                          style={{
-                            position: 'absolute',
-                            bottom: 3,
-                            left: 3,
-                            fontSize: 9,
-                            background: 'rgba(0,0,0,0.62)',
-                            color: '#fff',
-                            padding: '1px 5px',
-                            borderRadius: 'var(--r-chip)',
-                            maxWidth: 116,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {classLabel(im)}
-                        </div>
+                        <div className="cam-thumb-tag cam-thumb-tag--label">{classLabel(im)}</div>
                       )}
                     </div>
                   )
                 })}
-                {imgs.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{images[c.id] == null ? 'Loading photos…' : hidden ? 'No downloaded photos available.' : 'No photos in this view. Review photos marked empty, or sync for new photos.'}</div>}
+                {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? 'Loading photos…' : hidden ? 'No photos yet.' : 'No animal photos yet. Tap Sync now to check for new ones.'}</div>}
               </div>
+
+              {c.empty_count > 0 && (
+                <button className="cam-empties-toggle" onClick={() => toggleHidden(c.id)} aria-pressed={hidden}>
+                  {hidden ? 'Hide empty photos' : `Show ${c.empty_count} empty photo${c.empty_count === 1 ? '' : 's'}`}
+                </button>
+              )}
+
+              <details className="cam-details">
+                <summary>Details</summary>
+                <dl className="cam-details-list">
+                  <div><dt>Battery</dt><dd style={{ color: batteryColor(c.battery_pct) }}>{c.battery_pct == null ? 'Unknown' : `${c.battery_pct}%`}</dd></div>
+                  <div><dt>Signal</dt><dd>{c.signal_pct == null ? 'Unknown' : `${c.signal_pct}%`}</dd></div>
+                  <div><dt>Last check-in</dt><dd>{timeAgo(c.last_report_at)}</dd></div>
+                  {c.photo_limit != null && (
+                    <div><dt>Photo plan</dt><dd style={{ color: creditColor(c.photo_count, c.photo_limit) }}>{c.photo_count ?? '?'} of {c.photo_limit} used{c.plan_name ? ` (${c.plan_name})` : ''}</dd></div>
+                  )}
+                  {c.sd_total_mb ? <div><dt>SD card</dt><dd>{Math.round(((c.sd_used_mb ?? 0) / c.sd_total_mb) * 100)}% full</dd></div> : null}
+                  <div><dt>Photos</dt><dd>{animalPhotos} with animals{c.empty_count > 0 ? `, ${c.empty_count} empty` : ''}</dd></div>
+                  {c.model ? <div><dt>Model</dt><dd>{c.model}</dd></div> : null}
+                </dl>
+              </details>
             </div>
           )
         })}

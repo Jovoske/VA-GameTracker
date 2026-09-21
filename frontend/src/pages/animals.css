@@ -1,0 +1,93 @@
+.an-page { max-width: 720px; margin: 0 auto; }
+.an-dim { color: var(--text-dim); font-size: 13px; }
+.an-strong { color: var(--text); }
+.an-error { color: var(--skip); font-size: 13px; margin-bottom: 10px; }
+
+/* ── species list ── */
+.an-species-card { padding: 18px; margin-bottom: 18px; }
+.an-species-row { display: flex; gap: 12px; align-items: center; padding: 10px 0; }
+.an-species-row + .an-species-row { border-top: 1px solid var(--border); }
+.an-species-thumb {
+  width: 56px; height: 56px; border-radius: var(--r-ctl); overflow: hidden;
+  background: var(--surface-2); flex-shrink: 0; cursor: pointer;
+}
+.an-species-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.an-species-body { flex: 1; min-width: 0; }
+.an-species-head { display: flex; flex-direction: column; gap: 2px; cursor: pointer; }
+.an-species-name { font-size: 15px; font-weight: 600; }
+.an-species-meta { font-size: 12px; color: var(--text-dim); }
+.an-species-arrow { color: var(--text-dim); font-size: 17px; cursor: pointer; padding-left: 2px; }
+
+.an-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.an-chips--full { width: 100%; margin-top: 0; }
+.an-chip {
+  font-size: 12px; background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--r-ctl); padding: 5px 10px; cursor: pointer;
+}
+.an-chip--on { background: var(--go); color: #06210C; font-weight: 700; }
+
+/* ── the fold ── */
+.an-fold { margin-bottom: 18px; }
+.an-fold > summary {
+  cursor: pointer; font-weight: 600; font-size: 14px; padding: 10px 0; min-height: 44px;
+  display: flex; align-items: center; gap: 6px; list-style: none;
+}
+.an-fold > summary::-webkit-details-marker { display: none; }
+.an-fold > summary::before { content: '▸'; display: inline-block; width: 14px; font-size: 12px; color: var(--text-dim); transition: transform var(--d-fast) var(--ease-out); }
+.an-fold[open] > summary::before { transform: rotate(90deg); }
+.an-fold > summary:focus-visible { outline: 2px solid var(--go); outline-offset: 4px; border-radius: 4px; }
+.an-fold-body { padding-top: 4px; }
+.an-fold-note { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin: 0 0 12px; }
+
+.an-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 12px; }
+.an-btn {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--r-ctl); padding: 6px 10px; min-height: 36px; font-size: 12px; cursor: pointer;
+}
+.an-btn--right { margin-left: auto; }
+.an-selbar {
+  padding: 10px 14px; margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
+  position: sticky; top: 8px; z-index: 5; font-size: 13px;
+}
+.an-empty { padding: 16px; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+
+/* ── animal cards ── */
+.an-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.an-animal {
+  padding: 0; overflow: hidden; cursor: pointer;
+  transition: outline-color var(--d-fast) var(--ease-out), transform var(--d-press) var(--ease-out);
+}
+.an-animal-photo { position: relative; height: 110px; background: var(--surface-2); }
+.an-animal-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.an-animal-check {
+  position: absolute; top: 6px; left: 6px; width: 18px; height: 18px; border-radius: var(--r-chip);
+  border: 1px solid rgba(255,255,255,.6); display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: #fff;
+}
+.an-animal-confirmed {
+  position: absolute; top: 6px; right: 6px; font-size: 10px; background: var(--go); color: #000;
+  border-radius: var(--r-chip); padding: 1px 5px; font-weight: 700;
+}
+.an-animal-count {
+  position: absolute; bottom: 6px; right: 6px; font-size: 10px; background: rgba(0,0,0,.6); color: #fff;
+  border-radius: var(--r-chip); padding: 1px 5px;
+}
+.an-animal-body { padding: 8px; }
+.an-animal-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.an-animal-meta { font-size: 11px; color: var(--text-dim); }
+
+/* ── gallery ── */
+.an-gallery {
+  padding: 0; max-width: 760px; width: 100%; margin: auto; overflow: hidden;
+  display: flex; flex-direction: column; max-height: 90vh;
+}
+.an-gallery-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.an-gallery-title { font-weight: 700; font-size: 15px; }
+.an-gallery-body { overflow-y: auto; padding: 12px; }
+.an-gallery-status { padding: 8px; }
+.an-gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.an-gallery-item { background: var(--surface-2); border-radius: var(--r-ctl); overflow: hidden; cursor: pointer; }
+.an-gallery-item img { width: 100%; height: 104px; object-fit: cover; display: block; }
+.an-gallery-caption { padding: 4px 7px; font-size: 11px; color: var(--text-dim); display: flex; justify-content: space-between; gap: 6px; }
+.an-gallery-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-gallery-date { flex-shrink: 0; }

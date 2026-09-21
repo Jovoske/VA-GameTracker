@@ -139,7 +139,7 @@ def set_huntable(
     """Turn a species on/off for hunting advice (admin). Does not affect stats or tracking."""
     sp = db.get(Species, species_id)
     if sp is None:
-        raise HTTPException(404, "Species not found")
+        raise HTTPException(404, "Species not found.")
     sp.huntable = body.huntable
     db.commit()
     return {"id": sp.id, "common_name": sp.common_name, "huntable": sp.huntable}
