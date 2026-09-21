@@ -13,9 +13,15 @@ exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Function
 class PatternCopyTests(unittest.TestCase):
     def test_comparison_is_actual_averages_not_mislabelled_percent(self):
         pairs = [(i, 10 if i < 10 else 15 if i < 20 else 20) for i in range(30)]
-        result = namespace['_driver']('moon_illum', 'Moon illumination', 'higher moon illumination', 'lower moon illumination', pairs)
+        result = namespace['_driver'](
+            'moon_illum', 'Moonlight', 'a bright moon', 'a dark moon', pairs
+        )
         self.assertEqual(result['effect_pct'], 67)  # existing forecast weight preserved
-        self.assertIn('20.0 vs 10.0 detections per recording day', result['statement'])
+        self.assertEqual(
+            result['statement'],
+            'About 20.0 sightings a day with a bright moon, about 10.0 with a dark moon.',
+        )
+        self.assertEqual(result['favours'], 'a bright moon')
         self.assertNotIn('%', result['statement'])
         self.assertNotIn('×', result['statement'])
         self.assertEqual([b['days'] for b in result['buckets']], [10, 10, 10])
