@@ -57,7 +57,7 @@ def _validate_polygon(polygon: dict) -> None:
         raise HTTPException(422, "polygon must be a GeoJSON Polygon")
     pts = geo.ring(polygon)
     if len(pts) < 3:
-        raise HTTPException(422, "A zone needs at least three points")
+        raise HTTPException(422, "Tap at least three points around the area.")
     for lat, lon in pts:
         if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
             raise HTTPException(422, "Coordinates out of range (expected GeoJSON lon,lat order)")
@@ -77,7 +77,7 @@ def create_zone(
     _validate_polygon(body.polygon)
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
-        raise HTTPException(400, "No estate configured yet")
+        raise HTTPException(400, "Set up the estate first.")
     z = Zone(
         estate_id=estate.id, kind=body.kind, name=body.name.strip(),
         polygon=body.polygon, notes=body.notes, created_by=user.id,
@@ -95,7 +95,7 @@ def update_zone(
 ) -> dict:
     z = db.get(Zone, zone_id)
     if z is None:
-        raise HTTPException(404, "Zone not found")
+        raise HTTPException(404, "That area isn't on the map.")
     data = body.model_dump(exclude_unset=True)
     if "polygon" in data and data["polygon"] is not None:
         _validate_polygon(data["polygon"])
@@ -111,7 +111,7 @@ def delete_zone(
 ) -> None:
     z = db.get(Zone, zone_id)
     if z is None:
-        raise HTTPException(404, "Zone not found")
+        raise HTTPException(404, "That area isn't on the map.")
     db.delete(z)
     db.commit()
 
@@ -198,12 +198,12 @@ def refresh_terrain(_: User = Depends(get_current_user), db: Session = Depends(g
     try:
         grid = fetch_grid(db, _s.estate_lat, _s.estate_lon, force=True)
     except Exception as e:
-        raise HTTPException(502, f"Elevation service failed: {e}")
+        raise HTTPException(502, f"Couldn't download the hill shape. {e}")
     els = grid.elevations
     return {
         "points": len(els),
         "min_m": round(min(els)),
         "max_m": round(max(els)),
         "relief_m": round(max(els) - min(els)),
-        "note": "Terrain loaded — drainage advice now works on calm evenings.",
+        "note": "Hill shape loaded. Wind advice now works on calm evenings.",
     }

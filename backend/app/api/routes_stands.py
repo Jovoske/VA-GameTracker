@@ -104,7 +104,7 @@ def bootstrap_stands(
     """
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
-        raise HTTPException(400, "No estate configured yet")
+        raise HTTPException(400, "Set up the estate first.")
 
     taken = {s.camera_id for s in db.scalars(select(Stand)).all() if s.camera_id}
     created = []
@@ -122,9 +122,8 @@ def bootstrap_stands(
         "created": [s.name for s in created],
         "skipped": len(taken),
         "note": (
-            "Positions copied from the cameras — drag each stand to where you "
-            "actually sit. Approach arcs are unset, so wind advice stays quiet "
-            "until you set them."
+            "Each stand is placed at its camera. Move it to where you actually sit. "
+            "Wind advice starts once you set the directions animals come in from."
         ),
     }
 
@@ -135,9 +134,9 @@ def create_stand(
 ) -> dict:
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
-        raise HTTPException(400, "No estate configured yet")
+        raise HTTPException(400, "Set up the estate first.")
     if body.camera_id and db.get(Camera, body.camera_id) is None:
-        raise HTTPException(404, "Camera not found")
+        raise HTTPException(404, "That camera isn't on the app.")
     stand = Stand(estate_id=estate.id, **body.model_dump())
     db.add(stand)
     db.commit()
@@ -153,7 +152,7 @@ def update_stand(
 ) -> dict:
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "Stand not found")
+        raise HTTPException(404, "That stand isn't on the app.")
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(stand, k, v)
     db.commit()
@@ -166,13 +165,13 @@ def delete_stand(
 ) -> None:
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "Stand not found")
+        raise HTTPException(404, "That stand isn't on the app.")
     sits = db.scalar(select(func.count(Sit.id)).where(Sit.stand_id == stand_id))
     if sits:
         raise HTTPException(
             409,
-            f"{sits} recorded sit(s) reference this stand. Deleting would erase that "
-            "history — rename it instead.",
+            f"{sits} sit{'' if sits == 1 else 's'} recorded at this stand. Deleting it would wipe "
+            "that history. Rename it instead.",
         )
     db.delete(stand)
     db.commit()
@@ -234,7 +233,7 @@ def claim_stand(
     """
     stand = db.get(Stand, body.stand_id)
     if stand is None:
-        raise HTTPException(404, "Stand not found")
+        raise HTTPException(404, "That stand isn't on the app.")
 
     night = tonight()
     existing = db.scalars(
@@ -245,7 +244,7 @@ def claim_stand(
         if other.stand_id == stand.id:
             if other.user_id == user.id:
                 return _sit_out(other, stand.name)  # idempotent re-claim
-            raise HTTPException(409, f"{stand.name} is already claimed tonight.")
+            raise HTTPException(409, f"{stand.name} is already claimed tonight by another hunter.")
 
     # Safety interlock: never put two people in each other's fire lanes. Only
     # fires when both stands actually have recorded arcs — absent geometry must
@@ -257,8 +256,8 @@ def claim_stand(
         ):
             raise HTTPException(
                 409,
-                f"{stand.name} shares a shooting arc with {other_stand.name}, which is "
-                "already claimed tonight. Pick another stand.",
+                f"{stand.name} and {other_stand.name} share a shooting arc, and "
+                f"{other_stand.name} is taken tonight. Pick another stand.",
             )
 
     # Record what the app told them about the wind, so the advice can be scored later.
@@ -297,9 +296,9 @@ def update_sit(
 ) -> dict:
     sit = db.get(Sit, sit_id)
     if sit is None:
-        raise HTTPException(404, "Sit not found")
+        raise HTTPException(404, "That sit isn't on the app.")
     if sit.user_id and sit.user_id != user.id and user.role != "admin":
-        raise HTTPException(403, "That sit belongs to someone else")
+        raise HTTPException(403, "That sit is another hunter's.")
     if body.outcome not in OUTCOMES:
         raise HTTPException(422, f"outcome must be one of {', '.join(OUTCOMES)}")
 
@@ -321,7 +320,7 @@ def start_sit(
 ) -> dict:
     sit = db.get(Sit, sit_id)
     if sit is None:
-        raise HTTPException(404, "Sit not found")
+        raise HTTPException(404, "That sit isn't on the app.")
     if sit.started_at is None:
         sit.started_at = datetime.now(timezone.utc)
     db.commit()
@@ -340,7 +339,7 @@ def suggested_arcs(
     """
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "Stand not found")
+        raise HTTPException(404, "That stand isn't on the app.")
     return suggest_approach_arcs(db, stand)
 
 
@@ -351,5 +350,5 @@ def stand_dark_exit(
     """When to walk out. Stands die from how you leave them, not how you arrive."""
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "Stand not found")
+        raise HTTPException(404, "That stand isn't on the app.")
     return dark_exit(db, stand)

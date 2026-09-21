@@ -1,0 +1,18 @@
+/* Stands page. Base rules live in map/map.css; these are additions and overrides. */
+.stand-tonight { font-size: 15px; line-height: 1.5; color: #e7eae5; margin: 0 0 14px; }
+.stand-entry-top h2 { margin: 0 0 5px; }
+.stand-entry-top .stand-state { display: block; }
+.stand-wind-line { font-size: 14px; font-weight: 500; line-height: 1.5; margin: 12px 0 14px; }
+.stand-entry > .map-button--primary { width: 100%; }
+.stand-entry .map-actions { margin-top: 0; }
+.stand-entry .map-actions .map-button--primary { flex: 1; }
+.stand-outcome, .stand-wind { margin: 12px 0 0; }
+.stand-outcome summary, .stand-wind summary { list-style: none; display: flex; align-items: center; gap: 8px; }
+.stand-outcome summary::-webkit-details-marker, .stand-wind summary::-webkit-details-marker { display: none; }
+.stand-outcome summary::before, .stand-wind summary::before { content: '▸'; font-size: 11px; color: #a5b0a9; }
+.stand-outcome[open] summary::before, .stand-wind[open] summary::before { content: '▾'; }
+.stand-outcome-buttons { margin-top: 6px; }
+.stand-outcome-buttons .map-button { min-height: 52px; }
+.stand-wind p { margin: 6px 0 10px; }
+.stand-wind-when { display: block; font-size: 11px; color: #87988d; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+.stand-wind a { color: #cbbc9b; font-size: 13px; }
