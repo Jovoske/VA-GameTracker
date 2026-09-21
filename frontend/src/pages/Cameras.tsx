@@ -247,7 +247,15 @@ export default function Cameras() {
   const [images, setImages] = useState<Record<string, Img[]>>({})
   const [showHidden, setShowHidden] = useState<Record<string, boolean>>({})
   const [syncing, setSyncing] = useState(false)
-  const [syncMsg, setSyncMsg] = useState('')
+  // What the last check came to, so the line under the button reads as a
+  // result and not a running commentary: green when photos came in, red when
+  // it failed, quiet otherwise. Good news clears itself after a moment.
+  const [sync, setSync] = useState<{ state: 'idle' | 'running' | 'ok' | 'quiet' | 'error'; msg: string }>({ state: 'idle', msg: '' })
+  useEffect(() => {
+    if (sync.state !== 'ok' && sync.state !== 'quiet') return
+    const t = setTimeout(() => setSync({ state: 'idle', msg: '' }), 8000)
+    return () => clearTimeout(t)
+  }, [sync])
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
   const [actionErr, setActionErr] = useState('')
@@ -320,13 +328,13 @@ export default function Cameras() {
 
   async function syncNow() {
     setSyncing(true)
-    setSyncMsg('Checking for new photos…')
+    setSync({ state: 'running', msg: 'Asking the cameras for new photos…' })
     try {
       const r = await api<{ status: string; note?: string }>('/cameras/sync', { method: 'POST' })
       if (r.status === 'busy') {
-        setSyncMsg(r.note || 'Already checking. New photos will show shortly.')
+        setSync({ state: 'running', msg: r.note || 'Already checking. New photos show up as they arrive.' })
       } else {
-        // Poll the sync log until this run finishes, so the button reports a real result.
+        // Poll the sync log until this run finishes, so the line reports a real result.
         let done = false
         for (let i = 0; i < 24 && !done; i++) {
           await new Promise((res) => setTimeout(res, 2500))
@@ -334,22 +342,24 @@ export default function Cameras() {
             const s = await api<{ status: string; images_downloaded?: number }>('/cameras/sync/status')
             if (s.status === 'ok') {
               const n = s.images_downloaded ?? 0
-              setSyncMsg(n > 0 ? `Done. ${n} new photo${n === 1 ? '' : 's'}.` : 'Done. Nothing new.')
+              setSync(n > 0
+                ? { state: 'ok', msg: `${n} new photo${n === 1 ? '' : 's'} came in.` }
+                : { state: 'quiet', msg: 'Nothing new since last time.' })
               done = true
             } else if (s.status === 'error') {
-              setSyncMsg('Sync failed. Check Settings.')
+              setSync({ state: 'error', msg: 'Could not reach the cameras. Check the camera login in Settings.' })
               done = true
             } else {
-              setSyncMsg('Checking…')
+              setSync({ state: 'running', msg: 'Still checking…' })
             }
           } catch {
             /* transient: keep polling */
           }
         }
-        if (!done) setSyncMsg('Still running. Photos will show as they arrive.')
+        if (!done) setSync({ state: 'quiet', msg: 'Taking a while. Photos show up as they arrive.' })
       }
     } catch (e) {
-      setSyncMsg((e as Error).message)
+      setSync({ state: 'error', msg: `Could not start the check. ${(e as Error).message}` })
     }
     await loadCameras()
     setSyncing(false)
@@ -357,19 +367,19 @@ export default function Cameras() {
 
   return (
     <div>
-      {/* A message slot that is always there, so the status text never shoves
-          the button it reports on out of reach. */}
+      {/* Title and one quiet button on a row of their own; the result of the
+          check gets its own line underneath, where it can be read and coloured. */}
       <div className="cam-head">
         <h1 className="page-title cam-head-title">Cameras</h1>
-        <span className="cam-sync-msg" style={{ opacity: syncMsg ? 1 : 0 }}>{syncMsg}</span>
-        <button
-          className="btn cam-sync-btn"
-          onClick={syncNow}
-          disabled={syncing}
-        >
-          {syncing && <span className="btn-progress" aria-hidden="true" />}
-          <span style={{ position: 'relative' }}>{syncing ? 'Syncing…' : 'Sync now'}</span>
+        <button type="button" className="cam-sync-btn" onClick={syncNow} disabled={syncing} aria-busy={syncing}>
+          {syncing ? 'Checking…' : 'Check for new photos'}
         </button>
+      </div>
+      <div className={`cam-sync-status cam-sync-status--${sync.state}`} role="status" aria-live="polite">
+        {sync.state === 'running' && <span className="cam-sync-spinner" aria-hidden="true" />}
+        {sync.state === 'ok' && <span className="cam-sync-glyph" aria-hidden="true">✓</span>}
+        {sync.state === 'error' && <span className="cam-sync-glyph" aria-hidden="true">!</span>}
+        <span>{sync.msg}</span>
       </div>
       {err && (
         <div className="card cam-error">
@@ -377,10 +387,9 @@ export default function Cameras() {
           <button className="text-action" onClick={loadCameras}>Try again</button>
         </div>
       )}
-      <div role="status" className="sr-only">{syncMsg}</div>
       {actionErr && <div className="status-panel" role="alert">{actionErr}<button className="text-action" onClick={() => { setActionErr(''); loadCameras() }}>Reload</button></div>}
       {loading && cameras.length === 0 && <div className="status-panel" role="status">Loading cameras…</div>}
-      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras yet</strong><p>Connect your camera account in Settings, then tap Sync now.</p><a href="/settings">Open Settings</a></div>}
+      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras yet</strong><p>Add your camera login in Settings, then tap Check for new photos.</p><a href="/settings">Open Settings</a></div>}
 
       <div className="cam-list">
         {cameras.map((c) => {
@@ -460,7 +469,7 @@ export default function Cameras() {
                     </div>
                   )
                 })}
-                {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? 'Loading photos…' : hidden ? 'No photos yet.' : 'No animal photos yet. Tap Sync now to check for new ones.'}</div>}
+                {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? 'Loading photos…' : hidden ? 'No photos yet.' : 'No animal photos yet. Tap Check for new photos.'}</div>}
               </div>
 
               {c.empty_count > 0 && (
