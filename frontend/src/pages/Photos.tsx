@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, imageUrl } from '../api'
 import PhotoLightbox from '../components/PhotoLightbox'
 import { useRefetchOnReturn } from '../hooks'
@@ -215,6 +215,10 @@ export default function Photos() {
           {loadingMore ? 'Loading…' : 'Show older photos'}
         </button>
       )}
+
+      <p style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 18 }}>
+        <Link to="/animals" style={{ color: 'inherit' }}>Animals by species and named animals</Link>
+      </p>
 
       {zoom != null && photos && (
         <PhotoLightbox

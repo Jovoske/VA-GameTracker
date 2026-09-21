@@ -7,10 +7,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
+from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.core.db import get_db
 from app.health import camera_health
@@ -256,8 +257,8 @@ def camera_images(
     db: Session = Depends(get_db),
 ) -> list[dict]:
     q = select(Image).where(Image.camera_id == camera_id)
-    if not include_empty:
-        q = q.where(Image.is_empty_frame.isnot(True))
+    # Photos of nothing but hidden species never show; empties only on request.
+    q = q.where(or_(Image.is_empty_frame.is_(True), VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
     rows = db.scalars(q.order_by(Image.captured_at.desc()).limit(limit)).all()
     ids = [i.id for i in rows]
     det_map: dict = {}

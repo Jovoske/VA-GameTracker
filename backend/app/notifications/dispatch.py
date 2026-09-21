@@ -43,7 +43,7 @@ log = get_logger(__name__)
 
 CURSOR_KEY = "notify_cursor"
 MAX_PER_USER = 5
-FEED_URL = "/animals"
+FEED_URL = "/photos"
 
 
 def sighting_url(species_id: str, image_id: uuid.UUID | None) -> str:
@@ -163,6 +163,7 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
             Detection.created_at > since,
             Detection.created_at <= newest,
             Detection.species_id.isnot(None),
+            Species.hidden.is_(False),
             Image.captured_at > lookback,
         )
         .order_by(Image.captured_at)

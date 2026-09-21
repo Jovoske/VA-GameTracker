@@ -80,8 +80,8 @@ def test_compose_many_cameras_lists_them_busiest_first():
 
 def test_sighting_url_opens_the_species_gallery_on_the_photo():
     image = uuid.UUID("12345678-1234-5678-1234-567812345678")
-    assert sighting_url("wild_boar", image) == f"/animals?species=wild_boar&image={image}"
-    assert sighting_url("red deer", None) == "/animals?species=red+deer"
+    assert sighting_url("wild_boar", image) == f"/photos?species=wild_boar&image={image}"
+    assert sighting_url("red deer", None) == "/photos?species=red+deer"
 
 
 def test_compose_summary_when_a_run_has_many_species():
@@ -205,7 +205,7 @@ def test_only_people_who_asked_for_that_animal_are_told(db_session, monkeypatch)
     assert n.species_id == "wild_boar"
     assert n.image_id == img.id
     assert n.push_status == "sent"
-    assert n.url == f"/animals?species=wild_boar&image={img.id}"
+    assert n.url == f"/photos?species=wild_boar&image={img.id}"
 
     assert len(rec.calls) == 1
     user_id, payload = rec.calls[0]

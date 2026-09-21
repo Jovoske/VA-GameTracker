@@ -47,7 +47,7 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
             "selected": s.id in chosen,
             "detections": int(counts.get(s.id, 0)),
         }
-        for s in db.scalars(select(Species)).all()
+        for s in db.scalars(select(Species).where(Species.hidden.is_(False))).all()
     ]
     # most-seen first — the animals that actually turn up sit at the top
     species.sort(key=lambda r: (-r["detections"], r["common_name"]))

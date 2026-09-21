@@ -79,6 +79,7 @@ def _correlations(db: Session) -> list[dict]:
     sp_rows = db.execute(
         select(Detection.species_id, Species.common_name, func.count(Detection.id))
         .join(Species, Species.id == Detection.species_id)
+        .where(Species.hidden.is_(False))
         .group_by(Detection.species_id, Species.common_name)
         .order_by(func.count(Detection.id).desc()).limit(2)
     ).all()
@@ -129,6 +130,7 @@ def _composition(db: Session) -> list[dict]:
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
         .join(Camera, Camera.id == Image.camera_id)
+        .where(Species.hidden.is_(False))
         .group_by(
             Detection.species_id, Species.common_name, Detection.sex,
             Detection.group_type, Camera.name,

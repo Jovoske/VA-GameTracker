@@ -23,6 +23,7 @@ type Species = {
   id: string
   common_name: string
   huntable: boolean
+  hidden: boolean
   is_priority: boolean
   detections: number
 }
@@ -252,6 +253,19 @@ export default function Admin() {
     setSavingId(null)
   }
 
+  // Hidden animals (rabbits) leave the whole app: photos, counts, alerts, advice.
+  async function hideSpecies(s: Species, hidden: boolean) {
+    setSavingId(s.id)
+    const before = s
+    setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, hidden, huntable: hidden ? false : x.huntable } : x)))
+    try {
+      await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ hidden }) })
+    } catch {
+      setSpecies((list) => list.map((x) => (x.id === s.id ? before : x)))
+    }
+    setSavingId(null)
+  }
+
   async function checkUpdates() {
     setChecking(true)
     try {
@@ -271,19 +285,21 @@ export default function Admin() {
       ]
     : []
 
-  const onCount = species.filter((s) => s.huntable).length
+  const shown = species.filter((s) => !s.hidden)
+  const hiddenOnes = species.filter((s) => s.hidden)
+  const onCount = shown.filter((s) => s.huntable).length
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <h1 className="page-title">Settings</h1>
 
       <SettingsSection id="advice" title="Animals in the advice"
-        summary={species.length > 0 ? `${onCount} of ${species.length} on` : undefined}>
-        <p className="settings-hint">Turn off anything you don't hunt or that's out of season.</p>
+        summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
+        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
         {species.length === 0 ? (
           <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
         ) : (
-          species.map((s) => (
+          shown.map((s) => (
             <div
               key={s.id}
               style={{
@@ -302,14 +318,34 @@ export default function Admin() {
                   {s.detections} sighting{s.detections === 1 ? '' : 's'}
                 </div>
               </div>
-              <Toggle
-                on={s.huntable}
-                disabled={savingId === s.id}
-                onChange={() => toggleSpecies(s)}
-                label={`${s.common_name} in the advice`}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button type="button" style={smallBtn} disabled={savingId === s.id}
+                  aria-label={`Hide ${s.common_name} everywhere`} onClick={() => hideSpecies(s, true)}>
+                  Hide
+                </button>
+                <Toggle
+                  on={s.huntable}
+                  disabled={savingId === s.id}
+                  onChange={() => toggleSpecies(s)}
+                  label={`${s.common_name} in the advice`}
+                />
+              </div>
             </div>
           ))
+        )}
+        {hiddenOnes.length > 0 && (
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 4 }}>Hidden everywhere</div>
+            {hiddenOnes.map((s) => (
+              <div key={s.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '6px 0' }}>
+                <div style={{ fontSize: 14, color: 'var(--text-dim)' }}>{s.common_name}</div>
+                <button type="button" style={smallBtn} disabled={savingId === s.id}
+                  aria-label={`Show ${s.common_name} again`} onClick={() => hideSpecies(s, false)}>
+                  Show again
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </SettingsSection>
 
