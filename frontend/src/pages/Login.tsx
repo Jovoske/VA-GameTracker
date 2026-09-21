@@ -18,7 +18,7 @@ export default function Login() {
       await login(email, password)
       nav('/')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed')
+      setError(err instanceof Error ? err.message : "Couldn't sign in")
     } finally {
       setBusy(false)
     }
@@ -26,16 +26,14 @@ export default function Login() {
 
   return (
     <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', padding: 24 }}>
-      <form onSubmit={onSubmit} className="card" style={{ width: 340, padding: 24 }}>
-        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
+      <form onSubmit={onSubmit} className="card" style={{ width: 340, maxWidth: '100%', padding: 24 }}>
+        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 20 }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
-        </div>
-        <div style={{ color: 'var(--text-dim)', fontSize: 13, marginBottom: 20 }}>
-          Turn your trail cameras into a hunting forecast.
         </div>
 
         {expired && (
           <div
+            role="status"
             style={{
               fontSize: 13,
               color: 'var(--sand)',
@@ -46,21 +44,24 @@ export default function Login() {
               lineHeight: 1.45,
             }}
           >
-            Your session expired. Please sign in again.
+            You were signed out. Sign in again.
           </div>
         )}
 
-        <label style={{ fontSize: 12, color: 'var(--text-dim)' }}>Email</label>
+        <label htmlFor="login-email" style={{ fontSize: 12, color: 'var(--text-dim)' }}>Email</label>
         <input
+          id="login-email"
           className="input"
           style={{ margin: '6px 0 14px' }}
+          type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="username"
         />
 
-        <label style={{ fontSize: 12, color: 'var(--text-dim)' }}>Password</label>
+        <label htmlFor="login-password" style={{ fontSize: 12, color: 'var(--text-dim)' }}>Password</label>
         <input
+          id="login-password"
           className="input"
           style={{ margin: '6px 0 14px' }}
           type="password"
@@ -69,7 +70,7 @@ export default function Login() {
           autoComplete="current-password"
         />
 
-        {error && <div style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+        {error && <div role="alert" style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
         <button className="btn" disabled={busy}>
           {busy ? 'Signing in…' : 'Sign in'}

@@ -59,13 +59,13 @@ def test_compose_one_camera_names_it_in_the_title():
     d.add(uuid.uuid4(), T0, "PL19")
     title, body = compose(d, MADRID)
     assert title == "Wild boar at PL19"
-    assert body == "2 photos, latest 22:14."
+    assert body == "2 photos, last one 22:14."
 
 
 def test_compose_single_photo_is_singular():
     d = SpeciesDigest("fox", "Fox")
     d.add(uuid.uuid4(), T0, "MP14-waterhole")
-    assert compose(d, MADRID) == ("Fox at MP14-waterhole", "1 photo, latest 22:14.")
+    assert compose(d, MADRID) == ("Fox at MP14-waterhole", "1 photo at 22:14.")
 
 
 def test_compose_many_cameras_lists_them_busiest_first():
@@ -75,7 +75,7 @@ def test_compose_many_cameras_lists_them_busiest_first():
     d.add(uuid.uuid4(), T0, "MP14")
     title, body = compose(d, MADRID)
     assert title == "Red deer on 2 cameras"
-    assert body == "3 photos at MP14 and PL15B, latest 22:14."
+    assert body == "3 photos at MP14 and PL15B, last one 22:14."
 
 
 def test_sighting_url_opens_the_species_gallery_on_the_photo():
@@ -92,8 +92,8 @@ def test_compose_summary_when_a_run_has_many_species():
             d.add(uuid.uuid4(), T0 - timedelta(minutes=i), "PL19")
         ds.append(d)
     title, body = compose_summary(ds, MADRID)
-    assert title == "6 new sightings, 3 species"
-    assert body == "Wild boar, Fox and Badger, latest 22:14."
+    assert title == "6 new sightings, 3 animals"
+    assert body == "Wild boar, Fox and Badger, last one 22:14."
 
 
 def test_vapid_public_key_is_an_uncompressed_p256_point():
@@ -201,7 +201,7 @@ def test_only_people_who_asked_for_that_animal_are_told(db_session, monkeypatch)
     n = notes[0]
     assert n.user_id == users["boar"].id
     assert n.title == "Wild boar at PL19"
-    assert n.body.startswith("2 photos, latest ")
+    assert n.body.startswith("2 photos, last one ")
     assert n.species_id == "wild_boar"
     assert n.image_id == img.id
     assert n.push_status == "sent"
@@ -291,7 +291,7 @@ def test_many_species_in_one_run_collapse_to_a_summary(db_session, monkeypatch):
     result = dispatch_new_sightings(db_session, now=t1)
     assert result["notifications"] == 1
     n = db_session.query(Notification).one()
-    assert n.title == "6 new sightings, 6 species"
+    assert n.title == "6 new sightings, 6 animals"
     assert n.species_id is None
     assert rec.calls[0][1]["tag"] == "sighting-summary"
 

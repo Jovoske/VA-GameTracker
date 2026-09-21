@@ -38,7 +38,7 @@ def sex_pass(
 ) -> dict:
     """Kick off the cloud-vision sex pass (stag/hind + boar sex). Needs ANTHROPIC_API_KEY."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(400, "Set ANTHROPIC_API_KEY in .env to enable sex identification")
+        raise HTTPException(400, "Add ANTHROPIC_API_KEY to .env first")
     background.add_task(_run_sex_pass)
     return {"status": "started", "note": "Labels appear in Cameras over a few minutes."}
 
@@ -70,7 +70,7 @@ def version_check(_: User = Depends(get_current_admin)) -> dict:
         "update_available": bool(lat_t and lat_t > cur_t),
         # The server pulls from GitHub itself (deploy/update.ps1, every 10 min), so an
         # update needs nothing on the host — it only has to be pushed.
-        "update_command": "Push to main — the server pulls and applies it within 10 minutes.",
+        "update_command": "Push to main. The server picks it up within 10 minutes.",
     }
 
 

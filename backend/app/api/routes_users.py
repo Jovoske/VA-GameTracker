@@ -41,9 +41,9 @@ def create_user(
     if len(body.password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     if body.role not in ("member", "admin"):
-        raise HTTPException(400, "Role must be member or admin")
+        raise HTTPException(400, "Pick Member or Admin")
     if db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(400, "A user with that email already exists")
+        raise HTTPException(400, "Someone with that email already has a login")
     u = User(
         estate_id=admin.estate_id, email=email,
         password_hash=hash_password(body.password), role=body.role,
@@ -61,11 +61,11 @@ def delete_user(
     if u is None:
         raise HTTPException(404, "User not found")
     if u.id == admin.id:
-        raise HTTPException(400, "You can't delete your own account")
+        raise HTTPException(400, "You can't remove yourself")
     if u.role == "admin":
         admins = db.scalar(select(func.count(User.id)).where(User.role == "admin")) or 0
         if admins <= 1:
-            raise HTTPException(400, "Can't delete the last admin")
+            raise HTTPException(400, "Keep at least one admin")
     db.delete(u)
     db.commit()
     return {"status": "deleted", "email": u.email}

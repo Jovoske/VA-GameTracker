@@ -112,16 +112,18 @@ def _join(names: list[str]) -> str:
 def compose(d: SpeciesDigest, tz: ZoneInfo) -> tuple[str, str]:
     """(title, body) for one species in one run.
 
-    Camera first in the title when there is one — "Wild boar at PL19" is what a hunter
-    reads off a locked screen — and the count when there are several.
+    Reads like a text from a friend: "Wild boar at PL19" / "2 photos, last one 22:14."
+    Camera in the title when there is one, the count when there are several.
     """
     cams = [c for c, _ in d.cameras.most_common()]
     n = len(d.images)
-    photos = f"{n} photo{'s' if n != 1 else ''}"
     when = d.latest_at.astimezone(tz).strftime("%H:%M") if d.latest_at else "just now"
+    if n == 1:
+        return f"{d.name} at {cams[0]}", f"1 photo at {when}."
+    photos = f"{n} photos"
     if len(cams) == 1:
-        return f"{d.name} at {cams[0]}", f"{photos}, latest {when}."
-    return f"{d.name} on {len(cams)} cameras", f"{photos} at {_join(cams)}, latest {when}."
+        return f"{d.name} at {cams[0]}", f"{photos}, last one {when}."
+    return f"{d.name} on {len(cams)} cameras", f"{photos} at {_join(cams)}, last one {when}."
 
 
 def compose_summary(digests: list[SpeciesDigest], tz: ZoneInfo) -> tuple[str, str]:
@@ -130,8 +132,8 @@ def compose_summary(digests: list[SpeciesDigest], tz: ZoneInfo) -> tuple[str, st
     latest = max((d.latest_at for d in digests if d.latest_at), default=None)
     when = latest.astimezone(tz).strftime("%H:%M") if latest else "just now"
     return (
-        f"{n} new sightings, {len(digests)} species",
-        f"{_join(names)}, latest {when}.",
+        f"{n} new sightings, {len(digests)} animals",
+        f"{_join(names)}, last one {when}.",
     )
 
 

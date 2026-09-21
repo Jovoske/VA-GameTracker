@@ -53,12 +53,12 @@ const row = {
 } as const
 
 /**
- * Settings → Notifications.
+ * Settings → Alerts on my phone.
  *
- * Two independent switches, deliberately: the account-level "Sighting alerts" (do I
- * want these at all, and about which animals) and this device's subscription. A
- * hunter with a phone and a tablet turns alerts on once and subscribes each device
- * from that device; turning alerts off silences all of them.
+ * Two independent switches: the account-level "Alerts" (do I want these at all,
+ * and about which animals) and this device's push subscription. Alerts are turned
+ * on once; each phone or tablet is then added from that device. Alerts off
+ * silences all of them.
  */
 export default function NotificationSettings() {
   const [s, setS] = useState<Settings | null>(null)
@@ -109,7 +109,7 @@ export default function NotificationSettings() {
         if (support.ok) {
           await subscribeThisDevice(s.public_key)
           setDevice('subscribed')
-          setMsg('On. This device will be told about new sightings.')
+          setMsg('On. This phone will get alerts.')
         }
       } else {
         await unsubscribeThisDevice()
@@ -129,7 +129,7 @@ export default function NotificationSettings() {
     try {
       await subscribeThisDevice(s.public_key)
       setDevice('subscribed')
-      setMsg('This device is now subscribed.')
+      setMsg('This phone will get alerts.')
     } catch (e) {
       setMsg((e as Error).message)
     }
@@ -164,8 +164,8 @@ export default function NotificationSettings() {
       )
       setMsg(
         r.sent
-          ? `Sent to ${r.sent} device${r.sent === 1 ? '' : 's'}. It can take a few seconds to show.`
-          : `Could not deliver to ${r.subscriptions} device${r.subscriptions === 1 ? '' : 's'}.`,
+          ? `Sent to ${r.sent} device${r.sent === 1 ? '' : 's'}. Give it a few seconds.`
+          : `Didn't get through to ${r.subscriptions} device${r.subscriptions === 1 ? '' : 's'}.`,
       )
       refreshFeed()
     } catch (e) {
@@ -180,25 +180,22 @@ export default function NotificationSettings() {
   let deviceLine: string
   if (!support.ok) deviceLine = support.reason
   else if (perm === 'denied')
-    deviceLine = 'Notifications are blocked for GameSense in this browser. Allow them in the site or phone settings to subscribe.'
-  else if (device === 'checking') deviceLine = 'Checking this device…'
+    deviceLine = 'Blocked in this browser. Allow notifications for GameSense in your phone settings.'
+  else if (device === 'checking') deviceLine = 'Checking this phone…'
   else if (device === 'subscribed')
     deviceLine = s && s.subscriptions > 1
-      ? `This device is subscribed (${s.subscriptions} devices in total).`
-      : 'This device is subscribed.'
-  else deviceLine = 'This device is not subscribed yet.'
+      ? `This phone gets alerts (${s.subscriptions} devices in total).`
+      : 'This phone gets alerts.'
+  else deviceLine = 'This phone is not getting alerts yet.'
 
   return (
-    <SettingsSection id="notifications" title="Notifications"
+    <SettingsSection id="notifications" title="Alerts on my phone"
       summary={s && s.species.length > 0 ? `${selected} of ${s.species.length} animals` : undefined}>
-      <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
-        A push on your phone when a camera catches an animal you care about. One message per
-        species per sync, with the camera and the time, and never for photos older than a day.
-      </div>
+      <p className="settings-hint">A message when a camera catches an animal you picked.</p>
 
       {loadErr && !s ? (
         <div role="alert" style={{ fontSize: 13, color: 'var(--skip)', padding: '8px 0' }}>
-          Couldn't load notification settings: {loadErr}
+          Couldn't load alert settings: {loadErr}
         </div>
       ) : !s ? (
         <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
@@ -206,31 +203,31 @@ export default function NotificationSettings() {
         <>
           <div style={row}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 14 }}>Sighting alerts</div>
+              <div style={{ fontSize: 14 }}>Alerts</div>
               <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>{deviceLine}</div>
             </div>
             <Toggle
               on={s.enabled}
               disabled={busy}
               onChange={() => setEnabled(!s.enabled)}
-              label={s.enabled ? 'Sighting alerts on. Click to turn off.' : 'Sighting alerts off. Click to turn on.'}
+              label="Alerts"
             />
           </div>
 
           {s.enabled && support.ok && perm !== 'denied' && device === 'not_subscribed' && (
             <div style={{ padding: '4px 0 8px' }}>
               <button onClick={subscribeHere} disabled={busy} style={smallBtn}>
-                Subscribe this device
+                Get alerts on this phone
               </button>
             </div>
           )}
 
           <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
-            Notify me about
+            Which animals
           </div>
           {s.species.length === 0 ? (
             <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>
-              No animals identified yet. They appear here as the cameras see them.
+              No animals yet. They show up here as the cameras see them.
             </div>
           ) : (
             s.species.map((sp) => (
@@ -247,11 +244,7 @@ export default function NotificationSettings() {
                   on={sp.selected}
                   disabled={savingId === sp.id}
                   onChange={() => toggleSpecies(sp)}
-                  label={
-                    sp.selected
-                      ? `Notifying about ${sp.common_name}. Click to stop.`
-                      : `Not notifying about ${sp.common_name}. Click to start.`
-                  }
+                  label={`Alerts about ${sp.common_name}`}
                 />
               </div>
             ))
@@ -262,7 +255,7 @@ export default function NotificationSettings() {
               onClick={sendTest}
               disabled={busy || device !== 'subscribed'}
               style={{ ...smallBtn, opacity: device !== 'subscribed' ? 0.6 : 1 }}
-              title={device === 'subscribed' ? 'Push a test message to your devices' : 'Subscribe a device first'}
+              title={device === 'subscribed' ? 'Send a test alert to your devices' : 'Turn on alerts on a phone first'}
             >
               Send a test
             </button>
