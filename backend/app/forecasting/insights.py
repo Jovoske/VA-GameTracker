@@ -49,6 +49,12 @@ def _outlook(days: int = 7) -> list[dict]:
         })
     return out
 
+
+def _clock(hour: int) -> str:
+    """Plain clock time for a sentence: 0 reads as midnight, 21 as 21:00."""
+    return "midnight" if hour == 0 else f"{hour:02d}:00"
+
+
 def _correlations(db: Session) -> list[dict]:
     out: list[dict] = []
     total = db.scalar(select(func.count(Detection.id))) or 0
@@ -64,8 +70,8 @@ def _correlations(db: Session) -> list[dict]:
     w = _best_window(by_hour, sittable_only=False)
     out.append({
         "kind": "time",
-        "statement": f"The busiest camera hours were {w['start_hour']:02d}:00–{w['end_hour']:02d}:00, "
-                     f"with {w['share_pct']}% of recorded sightings.",
+        "statement": f"Your cameras are busiest between {_clock(w['start_hour'])} "
+                     f"and {_clock(w['end_hour'])}.",
         "strength": w["share_pct"] / 100, "sample": total,
     })
 
@@ -73,6 +79,7 @@ def _correlations(db: Session) -> list[dict]:
     sp_rows = db.execute(
         select(Detection.species_id, Species.common_name, func.count(Detection.id))
         .join(Species, Species.id == Detection.species_id)
+        .where(Species.hidden.is_(False))
         .group_by(Detection.species_id, Species.common_name)
         .order_by(func.count(Detection.id).desc()).limit(2)
     ).all()
@@ -84,8 +91,8 @@ def _correlations(db: Session) -> list[dict]:
         sw = _best_window({int(x): int(c) for x, c in rows}, sittable_only=False)
         out.append({
             "kind": "time",
-            "statement": f"The busiest camera hours for {name.lower()} were "
-                         f"{sw['start_hour']:02d}:00–{sw['end_hour']:02d}:00.",
+            "statement": f"The cameras see {name.lower()} mostly between "
+                         f"{_clock(sw['start_hour'])} and {_clock(sw['end_hour'])}.",
             "strength": sw["share_pct"] / 100, "sample": int(cnt),
         })
 
@@ -101,9 +108,13 @@ def _correlations(db: Session) -> list[dict]:
         top2 = sum(int(c) for _, c in cam_rows[:2])
         share = round(top2 / total * 100)
         names = " and ".join(n for n, _ in cam_rows[:2])
+        statement = (
+            f"Most of the action is at {names}. The other cameras see far less."
+            if share >= 50 else f"{names} are your busiest cameras."
+        )
         out.append({
             "kind": "location",
-            "statement": f"{names} recorded {share}% of all camera sightings.",
+            "statement": statement,
             "strength": share / 100, "sample": total,
         })
     return out
@@ -119,6 +130,7 @@ def _composition(db: Session) -> list[dict]:
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
         .join(Camera, Camera.id == Image.camera_id)
+        .where(Species.hidden.is_(False))
         .group_by(
             Detection.species_id, Species.common_name, Detection.sex,
             Detection.group_type, Camera.name,

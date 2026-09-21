@@ -400,3 +400,5 @@ main.page { padding: 16px; }
 .settings-section-head .settings-section-name { flex: 1; min-width: 0; }
 .settings-section-head .sect-note { white-space: nowrap; }
 .settings-section-body { padding: 0 18px 18px; }
+/* The one plain line a settings section is allowed before its switches. */
+.settings-hint { margin: 0 0 8px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }

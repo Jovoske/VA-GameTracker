@@ -18,7 +18,7 @@ export type LightboxPhoto = {
   file_url: string
   captured_at: string
   camera: string
-  /** What is in the frame: "Stag", "Sow + piglets (4)", "No animal detected". */
+  /** What is in the frame: "Stag", "Sow + piglets (4)", "No animal". */
   label: string
 }
 
@@ -305,11 +305,11 @@ export default function PhotoLightbox({
             className="ov-tool"
             onClick={toggleZoom}
             aria-label={view.s > 1 ? 'Fit photo to screen' : 'Zoom in'}
-            title={view.s > 1 ? 'Fit to screen' : 'Zoom in — or double-tap, pinch, or scroll on the photo'}
+            title={view.s > 1 ? 'Fit to screen' : 'Zoom in. Double-tap or pinch works too'}
           >
             {view.s > 1 ? <MagnifyingGlassMinusIcon size={20} /> : <MagnifyingGlassPlusIcon size={20} />}
           </button>
-          <button className="ov-tool" onClick={download} disabled={saving} aria-label="Download photo" title="Download photo">
+          <button className="ov-tool" onClick={download} disabled={saving} aria-label="Save photo" title="Save photo">
             <DownloadSimpleIcon size={20} />
           </button>
         </>
@@ -330,7 +330,7 @@ export default function PhotoLightbox({
             onPointerCancel={pointerCancel}
             style={{ cursor: view.s > 1 ? 'grab' : 'default' }}
           >
-            {imgError && <div role="alert" className="lb-status">Could not load this photo. Try another photo or go back.</div>}
+            {imgError && <div role="alert" className="lb-status">This photo did not load. Try the next one.</div>}
             {!imgReady && !imgError && <span role="status" className="lb-status">Loading photo…</span>}
             <img
               ref={imgRef}

@@ -80,7 +80,7 @@ def test_missing_arcs_are_not_treated_as_zero():
         )
         assert v.status == "no_geometry"
         assert v.is_advice is False
-        assert "yours to solve" in v.text
+        assert "judge the wind yourself" in v.text
 
 
 def test_missing_wind_is_reported_not_guessed():

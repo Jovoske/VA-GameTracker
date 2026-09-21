@@ -26,6 +26,7 @@ def list_species(_: User = Depends(get_current_user), db: Session = Depends(get_
             "id": s.id,
             "common_name": s.common_name,
             "huntable": s.huntable,
+            "hidden": s.hidden,
             "is_priority": s.is_priority,
             "detections": int(counts.get(s.id, 0)),
         }
@@ -50,7 +51,7 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
         )
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
-        .where(Image.original_path.isnot(None))
+        .where(Image.original_path.isnot(None), Species.hidden.is_(False))
         .group_by(Detection.species_id, Species.common_name, Detection.sex, Detection.group_type)
     ).all()
 
@@ -126,7 +127,8 @@ def species_images(
 
 
 class HuntableBody(BaseModel):
-    huntable: bool
+    huntable: bool | None = None
+    hidden: bool | None = None
 
 
 @router.patch("/{species_id}")
@@ -136,10 +138,24 @@ def set_huntable(
     _: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Turn a species on/off for hunting advice (admin). Does not affect stats or tracking."""
+    """Admin switches for one species.
+
+    huntable: in or out of the hunting advice; photos and counts unaffected.
+    hidden: out of the app altogether (photos, counts, alerts, advice). Hiding also
+    takes the species out of the advice; showing it again leaves it out of the
+    advice until switched back on, so nothing reappears in Tonight unasked.
+    """
     sp = db.get(Species, species_id)
     if sp is None:
-        raise HTTPException(404, "Species not found")
-    sp.huntable = body.huntable
+        raise HTTPException(404, "Species not found.")
+    if body.huntable is not None:
+        sp.huntable = body.huntable
+    if body.hidden is not None:
+        sp.hidden = body.hidden
+        if body.hidden:
+            sp.huntable = False
     db.commit()
-    return {"id": sp.id, "common_name": sp.common_name, "huntable": sp.huntable}
+    return {
+        "id": sp.id, "common_name": sp.common_name,
+        "huntable": sp.huntable, "hidden": sp.hidden,
+    }

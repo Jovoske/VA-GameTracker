@@ -45,15 +45,15 @@ def image_file(
     # short-lived per-image signed URLs remain the better answer.
     raw = (creds.credentials if creds else None) or token
     if not raw:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to view photos.")
     try:
         decode_token(raw)
     except jwt.PyJWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired. Sign in again.")
 
     image = db.get(Image, image_id)
     if image is None or not image.original_path or not os.path.exists(image.original_path):
-        raise HTTPException(404, "Image file not found")
+        raise HTTPException(404, "Photo not found.")
     if download:
         # Content-Disposition: attachment, so the lightbox's Download button saves
         # a file instead of opening the photo in a tab the user then has to leave.
@@ -80,7 +80,7 @@ def flag_image(
     """Manual override of the detector. Sticky — the auto-scan won't touch it again."""
     image = db.get(Image, image_id)
     if image is None:
-        raise HTTPException(404, "Image not found")
+        raise HTTPException(404, "Photo not found.")
     image.is_empty_frame = body.is_empty
     image.reviewed = True
     db.commit()

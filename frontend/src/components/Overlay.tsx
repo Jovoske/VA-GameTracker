@@ -55,7 +55,7 @@ export default function Overlay({
   zIndex = 50,
   style,
   label = 'Photo gallery',
-  backLabel = 'Back to page',
+  backLabel = 'Back',
   tools,
   children,
 }: {

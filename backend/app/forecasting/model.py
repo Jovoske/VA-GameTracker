@@ -252,7 +252,10 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     out = []
     if not top.get("producing", True):
         out.append({
-            "text": f"Camera not sending fresh photos — going on {top['nights_present']} nights of history",
+            "text": (
+                f"Camera is not sending photos right now. Going on "
+                f"{top['nights_present']} nights of history."
+            ),
             "impact": "•",
         })
     elif top["recent_nights"] > 0:
@@ -265,7 +268,10 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     # Moon/weather are handled by the data-driven tonight drivers (condition_reasons),
     # so they're not hardcoded here — keeps the "why" consistent with the learned patterns.
     w = top["best_window"]
-    out.append({"text": f"Peak window {w['start_hour']:02d}:00–{w['end_hour']:02d}:00", "impact": "++"})
+    out.append({
+        "text": f"Best hours {w['start_hour']:02d}:00 to {w['end_hour']:02d}:00",
+        "impact": "++",
+    })
     return out
 
 
@@ -299,9 +305,12 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     cond = _tonight_conditions(now)
     if not forecasts:
         if species_ids:
-            reason = "None of the selected species has been recorded on a reporting camera."
+            reason = "No camera has seen the animals you picked yet."
         else:
-            reason = "No animal data from reporting cameras." if alerts else "No animal data yet."
+            reason = (
+                "The cameras that are sending have not seen any animals yet."
+                if alerts else "No sightings yet."
+            )
         # NO_DATA, not SKIP: we have nothing to say about the ground, which is not the
         # same as telling somebody their evening isn't worth having.
         return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": total_nights,
@@ -363,8 +372,8 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         "exposure": {
             "excluded_nights": skipped,
             "note": (
-                f"{skipped} night{'s' if skipped != 1 else ''} left out — the cameras "
-                "could not vouch for them, so they are not counted either way."
+                f"{skipped} night{'s' if skipped != 1 else ''} left out because the "
+                "camera was not watching."
             ) if skipped else "",
         },
         "verdict": _verdict(top["probability"], top["active_nights"]),
@@ -382,15 +391,15 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
             "classes": top_classes,
             "nights_present": top["nights_present"], "active_nights": top["active_nights"],
             "reason": (
-                f"{top['species']} seen on {top['nights_present']} of "
-                f"{top['active_nights']} nights this camera was watching."
+                f"{top['species']} seen {top['nights_present']} of "
+                f"{top['active_nights']} nights at this camera."
             ),
             # The reference class belongs in the sentence, not a footnote: a bare
             # percentage reads as "my chance of a shot tonight", which is not what
             # was measured.
             "caveat": (
-                "That is what the camera sees over a whole night. You'll be there "
-                "for part of it, and the wind is yours to solve."
+                "The camera watches all night. You will be there a few hours, "
+                "so pick the best hours and mind the wind."
             ),
         },
         "conditions": cond,

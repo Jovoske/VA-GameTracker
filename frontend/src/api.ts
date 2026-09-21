@@ -39,12 +39,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     if (!window.location.pathname.startsWith('/login')) {
       window.location.assign('/login?expired=1')
     }
-    throw new Error('Session expired. Please sign in again.')
+    throw new Error('You were signed out. Sign in again.')
   }
 
   if (!resp.ok) {
     const detail = await resp.json().catch(() => ({}))
-    throw new Error(detail.detail || `HTTP ${resp.status}`)
+    throw new Error(detail.detail || `Something went wrong (${resp.status})`)
   }
   // DELETEs answer 204 with no body — resp.json() on that rejects and the caller
   // never gets to refresh, which reads as "the button did nothing".

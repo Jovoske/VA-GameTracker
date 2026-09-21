@@ -196,6 +196,12 @@ class Species(Base):
     huntable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
+    # Hidden species are out of the app altogether: no photos, no counts, no alerts,
+    # no advice. Rabbits on a deer estate. The photos stay on disk and in the table,
+    # so unhiding brings everything back.
+    hidden: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
 
 class Image(Base):

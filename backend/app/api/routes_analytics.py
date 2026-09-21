@@ -6,6 +6,7 @@ from sqlalchemy import Integer, cast, extract, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.core.db import get_db
 from app.enrichment.astro import moon_phase, solar
@@ -13,7 +14,8 @@ from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-_ANIMAL = Image.is_empty_frame.isnot(True)
+# Animal frames, minus photos of nothing but hidden species (see visibility.py).
+_ANIMAL = VISIBLE_ANIMAL
 _TZ = settings.estate_timezone
 
 
@@ -62,6 +64,7 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
     sp_rows = db.execute(
         select(Species.common_name, func.count(Detection.id))
         .join(Detection, Detection.species_id == Species.id)
+        .where(Species.hidden.is_(False))
         .group_by(Species.common_name)
         .order_by(func.count(Detection.id).desc())
     ).all()

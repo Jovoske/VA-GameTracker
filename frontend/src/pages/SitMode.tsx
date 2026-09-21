@@ -3,20 +3,13 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 
 /**
- * Sit Mode — the one interaction that works in a high seat at midnight.
+ * Sit Mode: the screen that works in a high seat at midnight.
  *
- * Design constraints come from the physical situation, not from taste:
- *  - True black on OLED, amber only. A non-black background is a lit rectangle in
- *    a dark high seat: it costs battery and concealment. Green/red would be worse
- *    than useless under a red headlamp, where green reads near-black and red reads
- *    white — a colour-coded control there inverts its own meaning.
- *  - Two controls, both enormous. Cold hands, gloves, one hand already occupied.
+ *  - True black on OLED, amber only. Green and red are unreadable under a red
+ *    headlamp, so colour never carries meaning here.
+ *  - Big controls. Cold hands, gloves, one hand already busy.
  *  - No imagery. Nothing to load, nothing to light up the seat.
- *  - Writes queue locally if the tap fails, because the valley has no signal and
- *    losing the outcome loses the only ground truth this app ever gets.
- *
- * This is simultaneously the night-ergonomics feature and the ForecastOutcome
- * write path. They turned out to be the same feature.
+ *  - Writes queue locally if the tap fails; the valley has no signal.
  */
 
 const QUEUE_KEY = 'gs_sit_queue'
@@ -26,6 +19,17 @@ type Sit = {
   stand: string | null
   outcome: string
   started_at: string | null
+  wind_status: string | null
+  wind_text: string | null
+}
+
+// Short wind headline. The saved sentence from the reservation goes underneath.
+const WIND_HEAD: Record<string, string> = {
+  clean: 'Wind is right',
+  scent_carries: 'Wind is wrong',
+  too_light: 'Wind too light to call',
+  no_wind_data: 'No wind forecast',
+  no_geometry: 'Wind not set up for this stand',
 }
 
 function queueWrite(sitId: string, outcome: string) {
@@ -66,6 +70,17 @@ const AMBER = '#FFB000'
 // that you are not holding a phone up in the cold wondering if it heard you.
 const HOLD_MS = 1200
 
+const footButton: React.CSSProperties = {
+  flex: 1,
+  minHeight: 64,
+  background: 'transparent',
+  border: 'none',
+  color: AMBER,
+  fontSize: 15,
+  letterSpacing: '.05em',
+  cursor: 'pointer',
+}
+
 export default function SitMode() {
   const { sitId } = useParams()
   const nav = useNavigate()
@@ -77,9 +92,7 @@ export default function SitMode() {
   const holdTimer = useRef<number | null>(null)
   const flashTimer = useRef<number | null>(null)
   // A completed hold has already recorded "nothing". Lifting your finger then
-  // fires the button's click, which used to record "seen" straight over the top
-  // of it — so holding logged the opposite of what it says on the button, and
-  // the only ground truth this app ever gets was being written wrong.
+  // fires the button's click, which must not record "seen" over the top of it.
   const holdFired = useRef(false)
 
   useEffect(() => {
@@ -105,16 +118,13 @@ export default function SitMode() {
     }
   }, [sitId])
 
-  // Signal comes back mid-sit more often than not — a shift in the seat is enough.
-  // Drain the queue there and then, and say so: the whole reason this screen keeps
-  // a local queue is that losing a night's outcomes loses the only ground truth
-  // the forecast is ever scored against, and the user deserves to see it land.
+  // Signal often comes back mid-sit. Drain the queue there and then, and say so.
   useEffect(() => {
     const onOnline = async () => {
       const n = await flushSitQueue()
       if (n <= 0) return
       setPending((p) => Math.max(0, p - n))
-      setFlash(`Signal is back. ${n} entr${n === 1 ? 'y' : 'ies'} sent.`)
+      setFlash(`Back online. ${n} report${n === 1 ? '' : 's'} sent.`)
       if (flashTimer.current) window.clearTimeout(flashTimer.current)
       flashTimer.current = window.setTimeout(() => setFlash(''), 3500)
     }
@@ -144,7 +154,7 @@ export default function SitMode() {
       setHolding(false)
       // Two pulses, because at this point you are not looking at the screen.
       if (navigator.vibrate) navigator.vibrate([25, 60, 25])
-      record('nothing', 'Logged: nothing yet')
+      record('nothing', 'Saved: nothing so far')
     }, HOLD_MS)
   }
   function cancelHold() {
@@ -158,8 +168,10 @@ export default function SitMode() {
       holdFired.current = false
       return
     }
-    record('seen', 'Logged: seen')
+    record('seen', 'Saved: saw animals')
   }
+
+  const windHead = sit?.wind_status ? WIND_HEAD[sit.wind_status] : null
 
   return (
     <div
@@ -177,15 +189,20 @@ export default function SitMode() {
     >
       <div style={{ padding: '16px 18px', borderBottom: `1px solid ${AMBER}33` }}>
         <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>
-          {sit?.stand ?? 'SIT'}
+          {sit?.stand ?? 'Your sit'}
         </div>
         <div style={{ fontSize: 34, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
           {clock.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
         </div>
+        {(windHead || sit?.wind_text) && (
+          <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.4 }}>
+            {windHead && <div style={{ fontWeight: 600 }}>{windHead}</div>}
+            {sit?.wind_text && <div style={{ opacity: 0.8 }}>{sit.wind_text}</div>}
+          </div>
+        )}
         {/* Both lines keep their space whether or not they have anything to say.
-            They sit directly above the button, and a line appearing used to shove
-            the whole target down the screen at the exact moment a thumb was
-            coming off it. */}
+            They sit directly above the button, and a line appearing would shove
+            the target down the screen as a thumb comes off it. */}
         <div
           style={{
             display: 'flex',
@@ -197,12 +214,11 @@ export default function SitMode() {
           }}
         >
           <span style={{ opacity: flash ? 1 : 0, transition: 'opacity var(--d-fast) var(--ease-out)' }}>
-            {flash || ' '}
+            {flash || ' '}
           </span>
           <span style={{ marginLeft: 'auto', fontSize: 12, opacity: pending > 0 ? 0.85 : 0 }}>
-            {/* Held space, not held text: an invisible "0 waiting for signal"
-                still gets read out loud. */}
-            {pending > 0 ? `${pending} waiting for signal` : ''}
+            {/* Held space, not held text: an invisible "0 saved" would still be read out. */}
+            {pending > 0 ? `${pending} saved, no signal` : ''}
           </span>
         </div>
       </div>
@@ -215,6 +231,7 @@ export default function SitMode() {
         onPointerUp={cancelHold}
         onPointerLeave={cancelHold}
         onPointerCancel={cancelHold}
+        aria-label="Saw animals. Hold to save: saw nothing"
         style={{
           flex: 1,
           position: 'relative',
@@ -229,10 +246,8 @@ export default function SitMode() {
           touchAction: 'none',   /* a hold must not become a scroll */
         }}
       >
-        {/* The hold's only evidence. It is a progress readout rather than
-            decoration, so it stays on under reduced motion — a 1.2s wait with
-            nothing happening is indistinguishable from a control that is broken.
-            Fills at a constant rate (linear); lets go fast when you do. */}
+        {/* The hold's only evidence. It is a progress readout, not decoration, so
+            it stays on under reduced motion. Fills at a constant rate. */}
         <span
           aria-hidden="true"
           style={{
@@ -248,31 +263,30 @@ export default function SitMode() {
           }}
         />
         <span style={{ position: 'relative' }}>
-          TAP = SEEN
-          <span style={{ display: 'block', fontSize: 15, fontWeight: 400, marginTop: 14, opacity: 0.8 }}>
-            hold = nothing yet
+          SAW ANIMALS
+          <span style={{ display: 'block', fontSize: 15, fontWeight: 400, marginTop: 14, opacity: 0.8, letterSpacing: 0 }}>
+            Tap. Or hold for “saw nothing”.
           </span>
         </span>
       </button>
 
-      <button
-        onClick={async () => {
-          await flushSitQueue()
-          nav('/stands')
-        }}
-        style={{
-          minHeight: 64,
-          background: 'transparent',
-          border: 'none',
-          borderTop: `1px solid ${AMBER}33`,
-          color: AMBER,
-          fontSize: 15,
-          letterSpacing: '.05em',
-          cursor: 'pointer',
-        }}
-      >
-        END SIT
-      </button>
+      <div style={{ display: 'flex', borderTop: `1px solid ${AMBER}33` }}>
+        <button
+          onClick={() => record('shot', 'Saved: shot')}
+          style={{ ...footButton, borderRight: `1px solid ${AMBER}33` }}
+        >
+          SHOT
+        </button>
+        <button
+          onClick={async () => {
+            await flushSitQueue()
+            nav('/stands')
+          }}
+          style={footButton}
+        >
+          END SIT
+        </button>
+      </div>
     </div>
   )
 }

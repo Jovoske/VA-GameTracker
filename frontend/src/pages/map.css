@@ -1,0 +1,3 @@
+/* Map page. Base rules live in map/map.css; these are additions and overrides. */
+.map-wind-reading em { font-style: normal; font-size: 13px; color: #a5b0a9; }
+.map-detail .stand-wind-label { font-size: 15px; line-height: 1.45; }

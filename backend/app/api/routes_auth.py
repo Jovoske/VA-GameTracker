@@ -17,7 +17,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user = db.scalar(select(User).where(User.email == body.email))
     if user is None or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong email or password")
     token = create_access_token(str(user.id), {"role": user.role})
     return TokenResponse(access_token=token)
 
@@ -39,7 +39,7 @@ def change_password(
     db: Session = Depends(get_db),
 ) -> dict:
     if not verify_password(body.current_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not your current password")
     if len(body.new_password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must be at least 8 characters")
     user.password_hash = hash_password(body.new_password)

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ageLabel, api, apiCached } from '../api'
 import { useRefetchOnReturn, useReveal } from '../hooks'
+import './tonight.css'
 
 type Overview = {
   totals: { sightings: number; empty: number; nights: number; cameras: number }
@@ -17,6 +19,7 @@ type Wind = { status: string; text: string; is_advice: boolean }
 type Calibration = { available: boolean; n_evaluated: number; statement?: string; beats_baseline?: boolean }
 type Forecast = {
   verdict: Verdict
+  reason?: string
   changed?: Changed
   wind?: Wind
   calibration?: Calibration
@@ -66,15 +69,14 @@ type Alert = { type: string; severity: string; title: string; text: string }
 type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detections: number }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
+const hours = (w: { start_hour: number; end_hour: number }) => `${hh(w.start_hour)} to ${hh(w.end_hour)}`
 
-// Verdict states are carried by WORD and SHAPE; colour is a redundant third channel.
-// GO/MARGINAL/SKIP were also commands, which turns every blank evening into a broken
-// promise. These describe the ground and leave the decision with the hunter.
+// Verdict states are carried by word and shape; colour is a third channel.
 const VERDICTS: Record<Verdict, { label: string; glyph: string; color: string }> = {
-  BEST_ODDS: { label: 'BEST ODDS', glyph: '▲', color: 'var(--v-best)' },
-  WORTH_A_LOOK: { label: 'WORTH A LOOK', glyph: '◐', color: 'var(--v-look)' },
-  QUIET: { label: 'QUIET', glyph: '○', color: 'var(--v-quiet)' },
-  NO_DATA: { label: 'NO DATA', glyph: '▨', color: 'var(--v-quiet)' },
+  BEST_ODDS: { label: 'Best odds', glyph: '▲', color: 'var(--v-best)' },
+  WORTH_A_LOOK: { label: 'Worth a look', glyph: '◐', color: 'var(--v-look)' },
+  QUIET: { label: 'Quiet', glyph: '○', color: 'var(--v-quiet)' },
+  NO_DATA: { label: 'Not enough to say', glyph: '▨', color: 'var(--v-quiet)' },
 }
 const verdictOf = (v: string) => VERDICTS[v as Verdict] ?? VERDICTS.NO_DATA
 const verdictColor = (v: string) => verdictOf(v).color
@@ -90,12 +92,11 @@ export default function Tonight() {
   const requestId = useRef(0)
   const [planAt, setPlanAt] = useState<string | null>(null)
   // True while a species chip has changed the question but the answer has not
-  // caught up yet. See the chip handler below.
+  // caught up yet.
   const [settling, setSettling] = useState(false)
 
-  // Which quarry the verdict is ranked for. Empty = every species left on in
-  // Settings, which is the old behaviour and stays the default. Kept in
-  // localStorage because it is a standing preference, not a per-visit choice.
+  // Which animals the verdict is ranked for. Empty = every species left on in
+  // Settings. Kept in localStorage because it is a standing preference.
   const [species, setSpecies] = useState<SpeciesOpt[]>([])
   const [picked, setPicked] = useState<string[]>(() => {
     try {
@@ -109,12 +110,9 @@ export default function Tonight() {
     const request = ++requestId.current
     setErr('')
     const q = sel.length ? `?species=${encodeURIComponent(sel.join(','))}` : ''
-    // Changing the quarry rewrites the whole verdict. Dimming the old answer for
-    // the moment it takes says "this is the previous question's answer" without
-    // tearing the card out and letting the page jump.
     if (settle) setSettling(true)
-    // Paint from the last good plan first; refresh underneath. A hunter in a valley
-    // with no bars still gets the verdict, clearly labelled with its age.
+    // Paint from the last good plan first; refresh underneath. No signal in the
+    // valley still gets a verdict, labelled with its age.
     apiCached<Forecast>(`/forecast/tonight${q}`)
       .then(({ data, at }) => {
         if (request !== requestId.current) return
@@ -129,12 +127,14 @@ export default function Tonight() {
       .finally(() => { if (request === requestId.current) setSettling(false) })
     api<Overview>('/analytics/overview').then(setD).catch(() => setD(null))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
-  }
-  useEffect(() => {
-    load()
+    // Refetched with the plan, so a species switched on in Settings shows up here
+    // on the way back without a reload.
     api<SpeciesOpt[]>('/species')
       .then((all) => setSpecies(all.filter((s) => s.huntable && s.detections > 0)))
       .catch(() => {})
+  }
+  useEffect(() => {
+    load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   useRefetchOnReturn(() => load())
@@ -145,375 +145,302 @@ export default function Tonight() {
     localStorage.setItem('gs_species_filter', JSON.stringify(next))
     load(next, true)
   }
+  function pickAll() {
+    setPicked([])
+    localStorage.setItem('gs_species_filter', '[]')
+    load([], true)
+  }
 
-  // The verdict is what the app is for, so it gets one quiet entrance when it
-  // first lands and nothing at all on any refresh after that.
   const verdictIn = useReveal(!!f)
   const grown = useReveal(!!d)
 
-  if (err && !f) return <div className="status-panel" role="alert">Could not load tonight's forecast: {err}<button className="text-action" onClick={() => load()}>Retry forecast</button></div>
-  if (!f) return <div className="status-panel" role="status">Loading tonight's forecast…</div>
+  if (err && !f) return <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
+  if (!f) return <div className="status-panel" role="status">Working out tonight…</div>
 
   const c = f.conditions
   const r = f.recommended
-  const vc = verdictColor(f.verdict)
+  const v = verdictOf(f.verdict)
   const maxH = Math.max(...(d?.by_hour ?? []).map((x) => x.count), 1)
   const maxCam = Math.max(...(d?.by_camera ?? []).map((x) => x.sightings), 1)
   const maxSp = Math.max(...(d?.by_species ?? []).map((x) => x.count), 1)
   const bw = d?.best_window ?? { start_hour: 0, end_hour: 0, share_pct: 0 }
   const inWindow = (hr: number) =>
     bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour
+  const stale = planAt ? Date.now() - new Date(planAt).getTime() > 12 * 3600e3 : false
+  const hasNumbers = !!(f.where && f.where.length > 0) || !!f.calibration?.statement || !!d
 
   return (
-    <div style={{ maxWidth: 560, margin: '0 auto' }}>
+    <div className="tonight">
       <h1 className="page-title">Tonight</h1>
-      <p className="page-intro">Compare expected activity near your cameras, then choose a stand. Forecasts use recorded sightings and current conditions.</p>
-      {err && <div className="status-panel" role="alert">Could not refresh the forecast. Showing the previous result.<button className="text-action" onClick={() => load()}>Retry forecast</button></div>}
+      {err && <div className="status-panel" role="alert">Could not refresh. Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
 
-      {/* What are you after? Ranking the ground by the commonest animal on it is the
-          wrong answer when you have come out for boar. Chips list only species left
-          on in Settings that the cameras have actually recorded. */}
-      {species.length > 1 && (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
-          <button
-            aria-pressed={picked.length === 0}
-            onClick={() => {
-              setPicked([])
-              localStorage.setItem('gs_species_filter', '[]')
-              load([], true)
-            }}
-            style={{
-              fontSize: 12, borderRadius: 'var(--r-pill)', padding: '5px 12px', cursor: 'pointer',
-              border: '1px solid var(--border)',
-              background: picked.length === 0 ? 'var(--go)' : 'transparent',
-              color: picked.length === 0 ? '#06210C' : 'var(--text-dim)',
-              fontWeight: picked.length === 0 ? 700 : 400,
-            }}
-          >
-            All enabled species
-          </button>
-          {species.map((s) => {
-            const on = picked.includes(s.id)
-            return (
+      {/* Which animals the ground is ranked for. Chips list only species left on
+          in Settings that the cameras have actually recorded. */}
+      {species.length > 0 && (
+        <div className="tn-after" role="group" aria-label="I'm after">
+          <div className="tn-after-label" aria-hidden="true">I'm after</div>
+          <div className="tn-chips">
+            <button className="tn-chip" aria-pressed={picked.length === 0} onClick={pickAll}>
+              Anything
+            </button>
+            {species.map((s) => (
               <button
                 key={s.id}
-                aria-pressed={on}
+                className="tn-chip"
+                aria-pressed={picked.includes(s.id)}
                 onClick={() => toggleSpecies(s.id)}
                 title={`${s.detections} sightings`}
-                style={{
-                  fontSize: 12, borderRadius: 'var(--r-pill)', padding: '5px 12px', cursor: 'pointer',
-                  border: '1px solid var(--border)',
-                  background: on ? 'var(--go)' : 'transparent',
-                  color: on ? '#06210C' : 'var(--text-dim)',
-                  fontWeight: on ? 700 : 400,
-                }}
               >
                 {s.common_name}
               </button>
-            )
-          })}
+            ))}
+            <Link to="/settings" className="tn-chip-edit">Edit list</Link>
+          </div>
         </div>
       )}
 
-      {/* Age of what you are reading. In decision support the freshness of the data
-          IS data; a stale plan presented as current is the failure mode. */}
       {planAt && (
-        <div
-          style={{
-            fontSize: 12,
-            padding: '7px 12px',
-            marginBottom: 12,
-            borderRadius: 'var(--r-ctl)',
-            background: 'var(--surface-2)',
-            color: 'var(--text-dim)',
-            border: `1px solid ${
-              Date.now() - new Date(planAt).getTime() > 12 * 3600e3 ? 'var(--v-look)' : 'var(--border)'
-            }`,
-          }}
-        >
-          Plan from {ageLabel(planAt)}
-        </div>
+        <p className="tn-fresh" data-stale={stale}>
+          Plan from {ageLabel(planAt)}{stale ? ', may be out of date' : ''}
+        </p>
       )}
 
-      {alerts.length > 0 && (
-        <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <h2 className="sect">Alerts</h2>
-          {alerts.map((a, i) => {
-            const col =
-              a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
-            return (
-              <div
-                key={i}
-                style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: i < alerts.length - 1 ? 10 : 0 }}
-              >
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: col, marginTop: 5, flexShrink: 0 }} />
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{a.title}</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{a.text}</div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
-      {/* Cameras that aren't sending. Their silence is not evidence of no animals, so
-          it is reported as a hardware fact rather than folded into the ranking. */}
-      {f.alerts && f.alerts.length > 0 && (
-        <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-          <h2 className="sect">Cameras not reporting</h2>
-          {f.alerts.map((a, i) => (
-            <div
-              key={a.camera}
-              style={{ display: 'flex', gap: 10, alignItems: 'baseline', marginBottom: i < (f.alerts?.length ?? 0) - 1 ? 8 : 0 }}
-            >
-              <span style={{ fontSize: 13, fontWeight: 600, minWidth: 96 }}>{a.camera}</span>
-              <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>{a.detail}</span>
-            </div>
-          ))}
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.45 }}>
-            These stands keep their historical ranking. A camera out of photo credits still
-            has animals in front of it.
-          </div>
-        </div>
-      )}
-
-      {/* ── Verdict hero ───────────────────────────── */}
-      <div
-        className={`card hero-enter${settling ? ' settling' : ''}`}
+      {/* ── The decision ───────────────────────────── */}
+      <section
+        className={`card tn-verdict hero-enter${settling ? ' settling' : ''}`}
         data-in={verdictIn}
-        style={{ padding: 18, marginBottom: 14, borderTop: `3px solid ${vc}` }}
+        style={{ borderTop: `3px solid ${v.color}` }}
+        aria-labelledby="tn-verdict-h"
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 22, color: vc, lineHeight: 1 }}>{verdictOf(f.verdict).glyph}</span>
-          <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.02em' }}>
-            {verdictOf(f.verdict).label}
-            {r && <span style={{ color: 'var(--text-dim)' }}> · {r.camera}</span>}
+        <div className="tn-verdict-head">
+          <span className="tn-verdict-glyph" style={{ color: v.color }} aria-hidden="true">{v.glyph}</span>
+          <div>
+            <h2 id="tn-verdict-h" className="tn-verdict-label">{v.label}</h2>
+            {r && <div className="tn-verdict-cam">{r.camera}</div>}
           </div>
         </div>
+
+        {!r && f.reason && <p className="tn-reason">{f.reason}</p>}
 
         {r && (
           <>
-            <div style={{ fontSize: 16, fontWeight: 600, marginTop: 12 }}>{r.species}</div>
-            {/* Natural frequency, reference class inside the sentence. No headline
-                percentage: a percentage reads as "my chance of a shot tonight", which
-                is not what was measured. */}
-            <div style={{ fontSize: 14, marginTop: 4, lineHeight: 1.45 }}>{r.reason}</div>
-            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.45 }}>{r.caveat}</div>
+            <div className="tn-hours"><small>Best hours</small>{hours(r.best_window)}</div>
+            <div className="tn-species">{r.species}</div>
+            <div className="tn-reason">{r.reason}</div>
+            <div className="tn-caveat">{r.caveat}</div>
 
-            {/* Wind, with its competence boundary stated. Dimmed when the app is
-                declining to call it, so "too light to call" never reads like advice. */}
             {f.wind?.text && (
-              <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                <span style={{ fontSize: 11, color: 'var(--text-dim)', flexShrink: 0, width: 52 }}>Wind</span>
+              <div className="tn-line">
+                <span className="tn-line-k">Wind</span>
                 <span
-                  style={{
-                    fontSize: 14,
-                    lineHeight: 1.45,
-                    color: f.wind.status === 'scent_carries' ? 'var(--v-look)' : 'var(--text)',
-                    opacity: f.wind.is_advice ? 1 : 0.7,
-                  }}
+                  className="tn-line-v"
+                  data-tone={f.wind.status === 'scent_carries' ? 'warn' : undefined}
+                  data-soft={!f.wind.is_advice}
                 >
                   {f.wind.text}
                 </span>
               </div>
             )}
 
-            {/* The one comparison a hunter cannot make from memory. Never blank: a
-                decision aid that goes silent teaches the user that silence means
-                broken, so "nothing changed" is said out loud. */}
             {f.changed?.text && (
-              <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                <span style={{ fontSize: 11, color: 'var(--text-dim)', flexShrink: 0, width: 52 }}>Changed</span>
-                <span
-                  style={{
-                    fontSize: 14,
-                    lineHeight: 1.45,
-                    color: f.changed.kind === 'camera_down' ? 'var(--marginal)' : 'var(--text)',
-                  }}
-                >
+              <div className="tn-line">
+                <span className="tn-line-k">Changed</span>
+                <span className="tn-line-v" data-tone={f.changed.kind === 'camera_down' ? 'down' : undefined}>
                   {f.changed.text}
                 </span>
               </div>
             )}
 
-            {r.classes && r.classes.length > 0 && (
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
-                {r.classes.map((cl) => (
-                  <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '2px 8px' }}>
-                    {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13, marginTop: 12 }}>
-              <span style={{ color: 'var(--go)', fontWeight: 600 }}>
-                {hh(r.best_window.start_hour)}–{hh(r.best_window.end_hour)}
-              </span>
-              {c.moon_illum != null && <span style={{ color: 'var(--text-dim)' }}>{c.moon_illum}% moon</span>}
-              {c.darkness_minutes != null && (
-                <span style={{ color: 'var(--text-dim)' }}>{Math.round(c.darkness_minutes / 60)} h dark</span>
-              )}
+            <div className="tn-cond">
+              {c.moon_illum != null && <span>{c.moon_illum}% moon</span>}
+              {c.darkness_minutes != null && <span>{Math.round(c.darkness_minutes / 60)} h of dark</span>}
               {c.wind_dir_deg != null && (
-                <span style={{ color: 'var(--text-dim)' }}>
-                  {compass(c.wind_dir_deg)} {Math.round(c.wind_speed_kmh ?? 0)} km/h
-                </span>
+                <span>Wind {compass(c.wind_dir_deg)} {Math.round(c.wind_speed_kmh ?? 0)} km/h</span>
               )}
             </div>
 
             {f.factors && f.factors.length > 0 && (
-              <div style={{ marginTop: 14 }}>
-                <h2 className="sect" style={{ marginBottom: 8 }}>Why</h2>
+              <div className="tn-why">
+                <h3 className="sect" style={{ marginBottom: 8 }}>Why</h3>
                 {f.factors.map((fac, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 8, fontSize: 13, marginBottom: 6 }}>
-                    <span style={{ color: impactColor(fac.impact), fontVariantNumeric: 'tabular-nums', minWidth: 26 }}>
-                      {fac.impact}
-                    </span>
+                  <div key={i} className="tn-why-row">
+                    <span className="tn-why-impact" style={{ color: impactColor(fac.impact) }}>{fac.impact}</span>
                     <span style={{ flex: 1 }}>{fac.text}</span>
                   </div>
                 ))}
               </div>
+            )}
+
+            {r.classes && r.classes.length > 0 && (
+              <>
+                <h3 className="sect" style={{ marginTop: 14, marginBottom: 6 }}>Seen here</h3>
+                <div className="tn-classes" style={{ marginTop: 0 }}>
+                  {r.classes.map((cl) => (
+                    <span key={cl.label} className="tn-class">
+                      {cl.label} <span>×{cl.count}</span>
+                    </span>
+                  ))}
+                </div>
+              </>
             )}
           </>
         )}
 
         {f.alternates.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <h2 className="sect" style={{ marginBottom: 8 }}>Other camera locations</h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <h3 className="sect" style={{ marginBottom: 8 }}>Other places</h3>
+            <div className="tn-alts">
               {f.alternates.map((a) => (
-                <div
-                  key={a.camera}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '8px 11px' }}
-                >
-                  <span style={{ color: verdictColor(a.verdict), fontSize: 13, width: 14, flexShrink: 0 }}>
+                <div key={a.camera} className="tn-alt">
+                  <span className="tn-alt-glyph" style={{ color: verdictColor(a.verdict) }} aria-hidden="true">
                     {verdictOf(a.verdict).glyph}
                   </span>
-                  <span style={{ flex: 1, fontSize: 13 }}>
-                    {a.camera} · {a.species}
-                  </span>
-                  {/* A fraction, not a percentage — the sample size stays visible. */}
-                  <span style={{ fontSize: 12, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                    Seen on {a.nights_present} of {a.active_nights} monitored nights
-                  </span>
+                  <span className="tn-alt-name">{a.camera} · {a.species}</span>
+                  <span className="tn-alt-seen">Seen {a.nights_present} of {a.active_nights} nights</span>
                 </div>
               ))}
             </div>
           </div>
         )}
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 14, lineHeight: 1.5 }}>
-          Early forecast from {f.nights_of_data} nights. It sharpens as more accumulate.
-          {/* An exclusion nobody is told about is indistinguishable from the bug it
-              replaced, so the count is stated rather than quietly applied. */}
+
+        <div className="tn-foot">
+          From {f.nights_of_data} nights of camera photos.
           {f.exposure?.note && <> {f.exposure.note}</>}
         </div>
-      </div>
+      </section>
 
-      {/* ── What to expect, by stand ───────────────── */}
-      {f.where && f.where.length > 0 && (
-        <div className={`block${settling ? ' settling' : ''}`}>
-          <h2 className="sect">Recent activity by camera</h2>
-          {f.where.map((w) => (
-            <div key={w.camera} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
-              <span style={{ color: verdictColor(w.verdict), fontSize: 13, width: 14, marginTop: 3, flexShrink: 0 }}>
-                {verdictOf(w.verdict).glyph}
-              </span>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 14, fontWeight: 600 }}>{w.camera}</span>
-                  <span style={{ fontSize: 12, color: verdictColor(w.verdict), fontWeight: 600 }}>
-                    {verdictOf(w.verdict).label}
-                  </span>
-                  <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-                    {hh(w.best_window.start_hour)}–{hh(w.best_window.end_hour)}
-                  </span>
-                  <span style={{ fontSize: 12, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                    Seen on {w.nights_present} of {w.active_nights} monitored nights
-                  </span>
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 5 }}>
-                  {w.classes.length === 0 && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>No group type identified</span>}
-                  {w.classes.map((cl) => (
-                    <span key={cl.label} style={{ fontSize: 12, background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', padding: '2px 8px' }}>
-                      {cl.label} <span style={{ color: 'var(--text-dim)' }}>×{cl.count}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
+      {/* Cameras that are not sending. Their silence is a hardware fact, not an
+          empty wood, so it is reported rather than folded into the ranking. */}
+      {f.alerts && f.alerts.length > 0 && (
+        <section className="card tn-card" aria-labelledby="tn-cams-h">
+          <h2 id="tn-cams-h" className="sect">Cameras not sending</h2>
+          {f.alerts.map((a) => (
+            <div key={a.camera} className="tn-camrow">
+              <span className="tn-camrow-name">{a.camera}</span>
+              <span className="tn-camrow-detail">{a.detail}</span>
             </div>
           ))}
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
-            Group types identified in camera photos. Repeated photos can show the same animals; counts do not represent unique individuals.
-          </div>
-        </div>
+          <div className="tn-note">These are ranked on what they saw before they stopped.</div>
+        </section>
       )}
 
-      {/* Track record: what replaced the invented confidence figure. It is a measured
-          hit rate against camera-nights, and it is withheld entirely until there is
-          enough scored history for it to mean anything. */}
-      {f.calibration?.statement && (
-        <div className="block">
-          <h2 className="sect">Track record</h2>
-          <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>
-        </div>
-      )}
-
-      {d && (
-        <>
-          {/* ── Activity by hour ───────────────────────── */}
-          <div className="block">
-            <h2 className="sect">Activity by hour <span className="sect-note">local time, peak window in green</span></h2>
-            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 120 }}>
-              {d.by_hour.map((x) => (
-                <div key={x.hour} title={`${hh(x.hour)}: ${x.count}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
-                  <div className="bar-y" style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: 'var(--r-chip) var(--r-chip) 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
+      {alerts.length > 0 && (
+        <section className="card tn-card" aria-labelledby="tn-alerts-h">
+          <h2 id="tn-alerts-h" className="sect">Alerts</h2>
+          {alerts.map((a, i) => {
+            const col =
+              a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
+            return (
+              <div key={i} className="tn-alert">
+                <span className="tn-alert-dot" style={{ background: col }} aria-hidden="true" />
+                <div>
+                  <div className="tn-alert-title">{a.title}</div>
+                  <div className="tn-alert-text">{a.text}</div>
                 </div>
-              ))}
-            </div>
-            <div style={{ display: 'flex', gap: 2, marginTop: 4 }}>
-              {d.by_hour.map((x) => (
-                <div key={x.hour} style={{ flex: 1, textAlign: 'center', fontSize: 9, color: 'var(--text-dim)' }}>
-                  {x.hour % 6 === 0 ? x.hour : ''}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* ── By camera ──────────────────────────────── */}
-          <div className="block">
-            <h2 className="sect">Sightings by camera</h2>
-            {d.by_camera.map((cam) => (
-              <div key={cam.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                <div style={{ width: 130, fontSize: 13 }}>{cam.name}</div>
-                <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
-                  <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? cam.sightings / maxCam : 0})` }} />
-                </div>
-                <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{cam.sightings}</div>
               </div>
-            ))}
-          </div>
+            )
+          })}
+        </section>
+      )}
 
-          {/* ── By species ─────────────────────────────── */}
-          {d.by_species.length > 0 && (
-            <div className="block">
-              <h2 className="sect">Species</h2>
-              {d.by_species.slice(0, 8).map((s) => (
-                <div key={s.species} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                  <div style={{ width: 130, fontSize: 13 }}>{s.species}</div>
-                  <div style={{ flex: 1, height: 8, background: 'var(--surface-2)', borderRadius: 'var(--r-chip)', overflow: 'hidden' }}>
-                    <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? s.count / maxSp : 0})` }} />
+      {/* ── The numbers, folded away ───────────────── */}
+      {hasNumbers && (
+        <details className="tn-details">
+          <summary>Show the numbers</summary>
+
+          {f.where && f.where.length > 0 && (
+            <div className={`block${settling ? ' settling' : ''}`}>
+              <h2 className="sect">Every camera</h2>
+              {f.where.map((w) => (
+                <div key={w.camera} className="tn-where">
+                  <span className="tn-where-glyph" style={{ color: verdictColor(w.verdict) }} aria-hidden="true">
+                    {verdictOf(w.verdict).glyph}
+                  </span>
+                  <div style={{ flex: 1 }}>
+                    <div className="tn-where-head">
+                      <span className="tn-where-name">{w.camera}</span>
+                      <span className="tn-where-verdict" style={{ color: verdictColor(w.verdict) }}>
+                        {verdictOf(w.verdict).label}
+                      </span>
+                      <span className="tn-where-meta">{hours(w.best_window)}</span>
+                      <span className="tn-where-meta">Seen {w.nights_present} of {w.active_nights} nights</span>
+                    </div>
+                    <div className="tn-classes" style={{ marginTop: 5 }}>
+                      {w.classes.length === 0 && <span className="tn-where-meta">No group type identified</span>}
+                      {w.classes.map((cl) => (
+                        <span key={cl.label} className="tn-class">
+                          {cl.label} <span>×{cl.count}</span>
+                        </span>
+                      ))}
+                    </div>
                   </div>
-                  <div style={{ width: 36, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{s.count}</div>
                 </div>
               ))}
+              <div className="tn-note" style={{ marginTop: 4 }}>
+                Counts are photos, not animals. The same animal can show up many times.
+              </div>
             </div>
           )}
 
-          <div style={{ color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', lineHeight: 1.6 }}>
-            {d.totals.sightings} photos not marked empty · {d.totals.empty} empty photos excluded · {d.totals.nights} nights of data
-          </div>
-        </>
+          {f.calibration?.statement && (
+            <div className="block">
+              <h2 className="sect">How often this has been right</h2>
+              <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>
+            </div>
+          )}
+
+          {d && (
+            <>
+              <div className="block">
+                <h2 className="sect">Sightings by hour <span className="sect-note">busiest hours in green</span></h2>
+                <div className="tn-bars-y">
+                  {d.by_hour.map((x) => (
+                    <div key={x.hour} title={`${hh(x.hour)}: ${x.count}`}>
+                      <div className="bar-y" style={{ height: `${(x.count / maxH) * 100}%`, minHeight: x.count ? 2 : 0, background: inWindow(x.hour) ? 'var(--go)' : 'var(--surface-2)', borderRadius: 'var(--r-chip) var(--r-chip) 0 0', transform: `scaleY(${grown ? 1 : 0})` }} />
+                    </div>
+                  ))}
+                </div>
+                <div className="tn-bars-x">
+                  {d.by_hour.map((x) => (
+                    <div key={x.hour}>{x.hour % 6 === 0 ? x.hour : ''}</div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="block">
+                <h2 className="sect">Sightings by camera</h2>
+                {d.by_camera.map((cam) => (
+                  <div key={cam.name} className="tn-hrow">
+                    <div className="tn-hrow-name">{cam.name}</div>
+                    <div className="tn-hrow-track">
+                      <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? cam.sightings / maxCam : 0})` }} />
+                    </div>
+                    <div className="tn-hrow-n">{cam.sightings}</div>
+                  </div>
+                ))}
+              </div>
+
+              {d.by_species.length > 0 && (
+                <div className="block">
+                  <h2 className="sect">Sightings by animal</h2>
+                  {d.by_species.slice(0, 8).map((s) => (
+                    <div key={s.species} className="tn-hrow">
+                      <div className="tn-hrow-name">{s.species}</div>
+                      <div className="tn-hrow-track">
+                        <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--sand)', transform: `scaleX(${grown ? s.count / maxSp : 0})` }} />
+                      </div>
+                      <div className="tn-hrow-n">{s.count}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="tn-totals">
+                {d.totals.sightings} photos with animals · {d.totals.empty} empty photos set aside · {d.totals.nights} nights
+              </div>
+            </>
+          )}
+        </details>
       )}
     </div>
   )

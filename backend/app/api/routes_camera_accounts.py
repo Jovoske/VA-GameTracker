@@ -128,16 +128,16 @@ def add_account(
     username = body.username.strip()
     provider_label = "UBox Pro" if body.provider == "ubox" else "SPYPOINT"
     if not username or not body.password:
-        raise HTTPException(400, f"{provider_label} email and password are required")
+        raise HTTPException(400, f"Enter your {provider_label} email and password")
     if user.estate_id is None:
-        raise HTTPException(400, "Join an estate before connecting a camera account")
+        raise HTTPException(400, "Join an estate before adding a camera login")
     if db.scalar(
         select(CameraAccount).where(
             CameraAccount.username == username,
             CameraAccount.provider == body.provider,
         )
     ):
-        raise HTTPException(400, f"That {provider_label} account is already connected")
+        raise HTTPException(400, f"That {provider_label} login is already added")
 
     # Verify before saving — a typo'd login should fail loudly now,
     # not silently every 15 minutes in the sync log.
@@ -154,7 +154,7 @@ def add_account(
             client.login()
             n_cams = len(client.list_cameras())
         except SpypointError as e:
-            raise HTTPException(400, f"SPYPOINT rejected that login: {e}") from e
+            raise HTTPException(400, f"SPYPOINT did not accept that login: {e}") from e
         finally:
             client.close()
 
@@ -173,7 +173,7 @@ def add_account(
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        raise HTTPException(409, "This account could not be saved; refresh and try again") from e
+        raise HTTPException(409, "Could not save that login. Refresh and try again.") from e
     account_id = str(acct.id)
 
     # Pull this account's cameras + recent history right away (respects the pipeline lock;
@@ -213,11 +213,7 @@ def add_account(
         "ubox_max_images_per_day": acct.ubox_max_images_per_day,
         "import_started": started,
         "note": f"Connected — {provider_label} reports {n_cams} camera(s). "
-        + (
-            "Importing photos now; they'll appear over the next minutes."
-            if started
-            else "Photos will import on the next scheduled sync."
-        ),
+        + ("Fetching photos now." if started else "Photos come in on the next fetch."),
     }
 
 
@@ -232,9 +228,11 @@ def update_import_settings(
     if acct is None or acct.estate_id != user.estate_id:
         raise HTTPException(404, "Account not found")
     if user.role != "admin" and acct.owner_user_id != user.id:
-        raise HTTPException(403, "Only the owner or an admin can change import settings")
+        raise HTTPException(
+            403, "Only whoever added this login, or an admin, can change its limits"
+        )
     if acct.provider != "ubox":
-        raise HTTPException(400, "Import limits apply to UBox Pro accounts only")
+        raise HTTPException(400, "Photo limits only apply to UBox Pro logins")
     acct.ubox_min_interval_seconds = body.ubox_min_interval_seconds
     acct.ubox_max_images_per_day = body.ubox_max_images_per_day
     db.commit()
@@ -242,7 +240,7 @@ def update_import_settings(
         "id": str(acct.id),
         "ubox_min_interval_seconds": acct.ubox_min_interval_seconds,
         "ubox_max_images_per_day": acct.ubox_max_images_per_day,
-        "note": "Import limits saved. They apply on the next sync; existing photos stay.",
+        "note": "Limits saved. They apply from the next fetch.",
     }
 
 
@@ -254,7 +252,7 @@ def remove_account(
     if acct is None or acct.estate_id != user.estate_id:
         raise HTTPException(404, "Account not found")
     if user.role != "admin" and acct.owner_user_id != user.id:
-        raise HTTPException(403, "Only the owner or an admin can remove this account")
+        raise HTTPException(403, "Only whoever added this login, or an admin, can remove it")
     # Keep the cameras and every photo already ingested — history belongs to the estate.
     db.execute(update(Camera).where(Camera.account_id == acct.id).values(account_id=None))
     db.delete(acct)

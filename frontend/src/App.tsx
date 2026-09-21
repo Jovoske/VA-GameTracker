@@ -7,6 +7,7 @@ import Animals from './pages/Animals'
 import Cameras from './pages/Cameras'
 import Insights from './pages/Insights'
 import Login from './pages/Login'
+import Photos from './pages/Photos'
 import Tonight from './pages/Tonight'
 import SitMode from './pages/SitMode'
 import Stands from './pages/Stands'
@@ -47,6 +48,7 @@ export default function App() {
       >
         <Route path="/" element={<Tonight />} />
         <Route path="/cameras" element={<Cameras />} />
+        <Route path="/photos" element={<Photos />} />
         <Route path="/stands" element={<Stands />} />
         <Route
           path="/map"

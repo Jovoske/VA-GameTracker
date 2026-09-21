@@ -4,7 +4,7 @@ import { ChartLineUpIcon } from '@phosphor-icons/react/dist/csr/ChartLineUp'
 import { CrosshairIcon } from '@phosphor-icons/react/dist/csr/Crosshair'
 import { MapTrifoldIcon } from '@phosphor-icons/react/dist/csr/MapTrifold'
 import { MoonStarsIcon } from '@phosphor-icons/react/dist/csr/MoonStars'
-import { PawPrintIcon } from '@phosphor-icons/react/dist/csr/PawPrint'
+import { ImagesIcon } from '@phosphor-icons/react/dist/csr/Images'
 import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
@@ -25,11 +25,11 @@ import { setToken } from '../api'
  */
 const TABS: { to: string; label: string; Ico: Icon; end?: boolean }[] = [
   { to: '/', label: 'Tonight', Ico: MoonStarsIcon, end: true },
+  { to: '/photos', label: 'Photos', Ico: ImagesIcon },
   { to: '/stands', label: 'Stands', Ico: CrosshairIcon },
   { to: '/cameras', label: 'Cameras', Ico: CameraIcon },
   { to: '/map', label: 'Map', Ico: MapTrifoldIcon },
   { to: '/insights', label: 'Insights', Ico: ChartLineUpIcon },
-  { to: '/animals', label: 'Animals', Ico: PawPrintIcon },
   { to: '/settings', label: 'Settings', Ico: SlidersHorizontalIcon },
 ]
 

@@ -23,6 +23,7 @@ type Species = {
   id: string
   common_name: string
   huntable: boolean
+  hidden: boolean
   is_priority: boolean
   detections: number
 }
@@ -65,7 +66,7 @@ function UboxImportFields({
 }) {
   return (
     <fieldset style={{ border: 0, margin: 0, padding: 0 }} disabled={disabled}>
-      <legend style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Photo import limits</legend>
+      <legend style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Photo limits</legend>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
         <label htmlFor={`${prefix}-interval`} style={{ flex: '1 1 170px', fontSize: 13 }}>
           Minimum gap (seconds)
@@ -83,10 +84,7 @@ function UboxImportFields({
         </label>
       </div>
       <div id={`${prefix}-help`} style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5, marginTop: 8 }}>
-        Applied separately to each camera, per day in the estate's time zone. GameSense skips snapshots that
-        are too close together or over the daily limit before downloading or running AI.
-        This can skip sightings. Your camera keeps capturing normally; originals remain
-        available only as long as UBox Pro retains them.
+        Per camera, per day. Photos too close together or over the limit are not fetched, so some sightings can be missed.
       </div>
     </fieldset>
   )
@@ -188,7 +186,7 @@ export default function Admin() {
       })
       setNewAcct({ ...newAcct, username: '', password: '', label: '' })
       setAccounts(await api<CamAccount[]>('/camera-accounts'))
-      setAcctMsg(r.note || 'Connected')
+      setAcctMsg(r.note || 'Added')
     } catch (e) {
       setAcctMsg((e as Error).message)
     }
@@ -218,7 +216,7 @@ export default function Admin() {
   }
 
   async function delAccount(a: CamAccount) {
-    if (!window.confirm(`Disconnect ${a.label}? Its photos stay, but new ones stop syncing.`)) return
+    if (!window.confirm(`Remove ${a.label}? Photos already fetched stay. New ones stop.`)) return
     setAcctMsg('')
     try {
       await api(`/camera-accounts/${a.id}`, { method: 'DELETE' })
@@ -255,6 +253,19 @@ export default function Admin() {
     setSavingId(null)
   }
 
+  // Hidden animals (rabbits) leave the whole app: photos, counts, alerts, advice.
+  async function hideSpecies(s: Species, hidden: boolean) {
+    setSavingId(s.id)
+    const before = s
+    setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, hidden, huntable: hidden ? false : x.huntable } : x)))
+    try {
+      await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ hidden }) })
+    } catch {
+      setSpecies((list) => list.map((x) => (x.id === s.id ? before : x)))
+    }
+    setSavingId(null)
+  }
+
   async function checkUpdates() {
     setChecking(true)
     try {
@@ -269,28 +280,26 @@ export default function Admin() {
     ? [
         ['Cameras', status.cameras],
         ['Photos', status.images],
-        ['Detections', status.detections],
-        ['Empty frames filtered', status.empty],
+        ['Animals spotted', status.detections],
+        ['Empty photos skipped', status.empty],
       ]
     : []
 
-  const onCount = species.filter((s) => s.huntable).length
+  const shown = species.filter((s) => !s.hidden)
+  const hiddenOnes = species.filter((s) => s.hidden)
+  const onCount = shown.filter((s) => s.huntable).length
 
   return (
     <div style={{ maxWidth: 560, margin: '0 auto' }}>
       <h1 className="page-title">Settings</h1>
 
-      <SettingsSection id="advice" title="Hunting advice"
-        summary={species.length > 0 ? `${onCount} of ${species.length} shown` : undefined}>
-        <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 8 }}>
-          Choose which animals appear in Tonight's recommendation and the outlook. Turn off
-          anything out of season or that you don't hunt: ibex when it's closed, say, or
-          rabbits. The stats keep tracking every species regardless; this only shapes the advice.
-        </div>
+      <SettingsSection id="advice" title="Animals in the advice"
+        summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
+        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
         {species.length === 0 ? (
           <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
         ) : (
-          species.map((s) => (
+          shown.map((s) => (
             <div
               key={s.id}
               style={{
@@ -309,24 +318,42 @@ export default function Admin() {
                   {s.detections} sighting{s.detections === 1 ? '' : 's'}
                 </div>
               </div>
-              <Toggle
-                on={s.huntable}
-                disabled={savingId === s.id}
-                onChange={() => toggleSpecies(s)}
-                label={s.huntable ? 'Shown in advice. Click to hide.' : 'Hidden from advice. Click to show.'}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button type="button" style={smallBtn} disabled={savingId === s.id}
+                  aria-label={`Hide ${s.common_name} everywhere`} onClick={() => hideSpecies(s, true)}>
+                  Hide
+                </button>
+                <Toggle
+                  on={s.huntable}
+                  disabled={savingId === s.id}
+                  onChange={() => toggleSpecies(s)}
+                  label={`${s.common_name} in the advice`}
+                />
+              </div>
             </div>
           ))
+        )}
+        {hiddenOnes.length > 0 && (
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 4 }}>Hidden everywhere</div>
+            {hiddenOnes.map((s) => (
+              <div key={s.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '6px 0' }}>
+                <div style={{ fontSize: 14, color: 'var(--text-dim)' }}>{s.common_name}</div>
+                <button type="button" style={smallBtn} disabled={savingId === s.id}
+                  aria-label={`Show ${s.common_name} again`} onClick={() => hideSpecies(s, false)}>
+                  Show again
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </SettingsSection>
 
       <NotificationSettings />
 
-      <SettingsSection id="accounts" title="Camera accounts">
-        <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-          Connect a SPYPOINT or UBox Pro account and its cameras join the estate, with photos, AI detection and
-          forecasts included. Guests can add their own account here.
-        </div>
+      <SettingsSection id="accounts" title="Camera logins"
+        summary={accounts.length > 0 ? `${accounts.length} login${accounts.length === 1 ? '' : 's'}` : undefined}>
+        <p className="settings-hint">Add a SPYPOINT or UBox Pro login and its cameras join the estate.</p>
         {accounts.map((a) => (
           <div key={a.id} style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
@@ -343,7 +370,7 @@ export default function Admin() {
               </div>
               {a.can_remove && (
                 <button type="button" onClick={() => delAccount(a)} style={smallBtn}
-                  disabled={limitsBusy} aria-label={`Disconnect ${a.label}`}>Disconnect</button>
+                  disabled={limitsBusy} aria-label={`Remove ${a.label}`}>Remove</button>
               )}
             </div>
             {a.provider === 'ubox' && editingLimits?.id !== a.id && (
@@ -353,7 +380,7 @@ export default function Admin() {
                   {' '}up to {a.ubox_max_images_per_day} photos/day.
                 </div>
                 {a.can_edit && <button type="button" style={smallBtn} disabled={limitsBusy}
-                  aria-label={`Edit import limits for ${a.label}`}
+                  aria-label={`Edit photo limits for ${a.label}`}
                   onClick={() => setEditingLimits({
                     id: a.id, interval: String(a.ubox_min_interval_seconds), daily: String(a.ubox_max_images_per_day),
                   })}>Edit limits</button>}
@@ -361,13 +388,13 @@ export default function Admin() {
             )}
             {a.provider === 'ubox' && a.last_import && (
               <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.5, marginTop: 8 }}>
-                Last import{a.last_import.at ? ` (${new Date(a.last_import.at).toLocaleString()})` : ''}:
+                Last fetch{a.last_import.at ? ` (${new Date(a.last_import.at).toLocaleString()})` : ''}:
                 {' '}{a.last_import.downloaded} photos added,
-                {' '}{a.last_import.interval_skipped} skipped by minimum gap,
-                {' '}{a.last_import.daily_limit_skipped} skipped by daily limit.
-                {a.last_import.no_image > 0 && ` ${a.last_import.no_image} events had no snapshot.`}
-                {a.last_import.failed > 0 && ` ${a.last_import.failed} photos could not be imported.`}
-                {a.last_import.error && <div style={{ marginTop: 4 }}>Import problem: {a.last_import.error}</div>}
+                {' '}{a.last_import.interval_skipped} skipped (too close together),
+                {' '}{a.last_import.daily_limit_skipped} skipped (daily limit).
+                {a.last_import.no_image > 0 && ` ${a.last_import.no_image} had no photo.`}
+                {a.last_import.failed > 0 && ` ${a.last_import.failed} failed.`}
+                {a.last_import.error && <div style={{ marginTop: 4 }}>Problem: {a.last_import.error}</div>}
               </div>
             )}
             {a.provider === 'ubox' && editingLimits?.id === a.id && (
@@ -388,7 +415,7 @@ export default function Admin() {
         <form onSubmit={(e) => { e.preventDefault(); void addAccount() }}
           style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
           <label htmlFor="camera-provider" style={{ fontSize: 13 }}>
-            Camera provider
+            Camera brand
             <select id="camera-provider" className="input" value={newAcct.provider} disabled={acctBusy}
               style={{ marginTop: 5 }}
               onChange={(e) => setNewAcct({ ...newAcct, provider: e.target.value as CameraProvider })}>
@@ -409,7 +436,7 @@ export default function Admin() {
               onChange={(e) => setNewAcct({ ...newAcct, password: e.target.value })} autoComplete="new-password" />
           </label>
           <label htmlFor="camera-label" style={{ fontSize: 13 }}>
-            Label (optional)
+            Name (optional)
             <input id="camera-label" className="input" placeholder="e.g. Marco's cameras" value={newAcct.label}
               disabled={acctBusy} style={{ marginTop: 5 }}
               onChange={(e) => setNewAcct({ ...newAcct, label: e.target.value })} />
@@ -420,18 +447,16 @@ export default function Admin() {
           )}
           <button className="btn" type="submit" style={{ width: 'auto', padding: '9px 14px' }}
             disabled={acctBusy || !newAcct.username.trim() || !newAcct.password}>
-            {acctBusy ? `Checking with ${providerName(newAcct.provider)}…` : 'Connect account'}
+            {acctBusy ? `Checking with ${providerName(newAcct.provider)}…` : 'Add login'}
           </button>
         </form>
         {acctMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
       </SettingsSection>
 
       {me?.role === 'admin' && (
-        <SettingsSection id="people" title="People">
-          <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-            Who can sign in. Guests get "member": they see everything and can connect their own
-            cameras, but can't change settings or manage people.
-          </div>
+        <SettingsSection id="people" title="Who can sign in"
+          summary={users.length > 0 ? `${users.length} ${users.length === 1 ? 'person' : 'people'}` : undefined}>
+          <p className="settings-hint">Members see everything and can add camera logins. Admins can also change settings.</p>
           {users.map((u) => (
             <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderTop: '1px solid var(--border)' }}>
               <div style={{ flex: 1, minWidth: 0, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -440,19 +465,19 @@ export default function Admin() {
               <span style={{ fontSize: 11, color: u.role === 'admin' ? 'var(--sand)' : 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '1px 7px' }}>
                 {u.role}
               </span>
-              {!u.is_you && <button onClick={() => delUser(u)} style={smallBtn}>Remove</button>}
+              {!u.is_you && <button onClick={() => delUser(u)} style={smallBtn} aria-label={`Remove ${u.email}`}>Remove</button>}
             </div>
           ))}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
-            <input className="input" placeholder="Guest email (their login name)" value={newUser.email}
+            <input className="input" placeholder="Email" aria-label="Email for the new person" value={newUser.email}
               onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} autoComplete="off" />
-            <input className="input" placeholder="Password for them (min 8 chars)" value={newUser.password}
+            <input className="input" placeholder="Password (at least 8 characters)" aria-label="Password for the new person" value={newUser.password}
               onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} autoComplete="new-password" />
             <div style={{ display: 'flex', gap: 8 }}>
-              <select className="input" style={{ width: 130 }} value={newUser.role}
+              <select className="input" style={{ width: 130 }} value={newUser.role} aria-label="Role"
                 onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
-                <option value="member">member</option>
-                <option value="admin">admin</option>
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
               </select>
               <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
                 onClick={addUser} disabled={!newUser.email || newUser.password.length < 8}>
@@ -464,11 +489,11 @@ export default function Admin() {
         </SettingsSection>
       )}
 
-      <SettingsSection id="password" title="Change password" defaultOpen>
+      <SettingsSection id="password" title="Password">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <input className="input" placeholder="Current password" type="password" value={pw.current}
+          <input className="input" placeholder="Current password" aria-label="Current password" type="password" value={pw.current}
             onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
-          <input className="input" placeholder="New password (min 8 chars)" type="password" value={pw.next}
+          <input className="input" placeholder="New password (at least 8 characters)" aria-label="New password" type="password" value={pw.next}
             onChange={(e) => setPw({ ...pw, next: e.target.value })} autoComplete="new-password" />
           <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
             onClick={changePw} disabled={!pw.current || pw.next.length < 8}>
@@ -478,7 +503,7 @@ export default function Admin() {
         {pwMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
       </SettingsSection>
 
-      <SettingsSection id="version" title="Version" defaultOpen>
+      <SettingsSection id="version" title="App version" summary={version ? `v${version}` : undefined}>
         <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
         <button
           className="btn"
@@ -497,7 +522,7 @@ export default function Admin() {
                 <div style={{ color: 'var(--go)' }}>
                   Update available: {check.latest} (you have {check.current})
                 </div>
-                <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>Deployment is automatic:</div>
+                <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>How to update:</div>
                 <code
                   style={{
                     display: 'block',
@@ -519,26 +544,23 @@ export default function Admin() {
         )}
       </SettingsSection>
 
-      <SettingsSection id="ai" title="AI labelling" defaultOpen>
-        <div style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: 10 }}>
-          Identify sex on red deer (stag / hind) and wild boar using cloud vision. Uses your
-          ANTHROPIC_API_KEY and costs a little API credit per photo; only un-sexed animals are processed.
-        </div>
+      <SettingsSection id="ai" title="Photo labelling">
+        <p className="settings-hint">Marks red deer as stag or hind, and wild boar as male or female, on photos not labelled yet.</p>
         <button
           className="btn"
           style={{ width: 'auto', padding: '8px 14px' }}
           onClick={runSexPass}
           disabled={sexBusy}
         >
-          {sexBusy ? 'Starting…' : 'Identify deer / boar sex'}
+          {sexBusy ? 'Starting…' : 'Label stags, hinds and boar'}
         </button>
         {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
       </SettingsSection>
 
-      <SettingsSection id="account" title="Account" defaultOpen>
+      <SettingsSection id="account" title="Signed in as" defaultOpen>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 13, color: 'var(--text-dim)', flex: 1, minWidth: 0 }}>
-            Signed in as <span style={{ color: 'var(--text)' }}>{me?.email ?? '…'}</span>
+          <div style={{ fontSize: 14, flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
+            {me?.email ?? '…'}
           </div>
           <button
             onClick={() => {
@@ -553,7 +575,7 @@ export default function Admin() {
       </SettingsSection>
 
       {status && (
-        <SettingsSection id="system" title="System" defaultOpen style={{ marginBottom: 0 }}>
+        <SettingsSection id="system" title="System" style={{ marginBottom: 0 }}>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>{k}</span>
@@ -562,7 +584,7 @@ export default function Admin() {
           ))}
           {status.last_sync && (
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
-              <span style={{ color: 'var(--text-dim)' }}>Last sync</span>
+              <span style={{ color: 'var(--text-dim)' }}>Last photo fetch</span>
               <span>{status.last_sync.status}</span>
             </div>
           )}

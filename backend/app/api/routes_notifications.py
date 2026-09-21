@@ -47,7 +47,7 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
             "selected": s.id in chosen,
             "detections": int(counts.get(s.id, 0)),
         }
-        for s in db.scalars(select(Species)).all()
+        for s in db.scalars(select(Species).where(Species.hidden.is_(False))).all()
     ]
     # most-seen first — the animals that actually turn up sit at the top
     species.sort(key=lambda r: (-r["detections"], r["common_name"]))
@@ -190,12 +190,12 @@ def send_test(user: User = Depends(get_current_user), db: Session = Depends(get_
     """Push a test message to every device this user has subscribed."""
     if _subscription_count(db, user) == 0:
         raise HTTPException(
-            400, "No device is subscribed yet. Turn notifications on from the device first."
+            400, "No phone is getting alerts yet. Turn alerts on from that phone first."
         )
     now = datetime.now(timezone.utc)
     n = Notification(
-        user_id=user.id, kind="test", title="GameSense test",
-        body="Notifications are reaching this device.", url="/settings", created_at=now,
+        user_id=user.id, kind="test", title="Test alert",
+        body="Alerts are working on this phone.", url="/settings", created_at=now,
     )
     db.add(n)
     db.flush()

@@ -36,14 +36,14 @@ SCOPES = [("all", "All animals"), ("wild_boar", "Wild boar"), ("red_deer", "Red 
 
 # key, label, description-when-high, description-when-low
 _VARS = [
-    ("moon_illum", "Moon illumination", "higher moon illumination", "lower moon illumination"),
-    ("pressure", "Pressure", "higher pressure", "lower pressure"),
+    ("moon_illum", "Moonlight", "a bright moon", "a dark moon"),
+    ("pressure", "Pressure", "high pressure", "low pressure"),
     ("pressure_trend", "Pressure trend", "rising pressure", "falling pressure"),
-    ("temp", "Temperature", "warmer nights", "cooler nights"),
-    ("wind", "Wind", "windier nights", "calm nights"),
-    ("rain", "Rain", "wetter nights", "drier nights"),
-    ("cloud", "Cloud cover", "higher cloud cover", "lower cloud cover"),
-    ("darkness", "Night duration", "longer nights", "shorter nights"),
+    ("temp", "Temperature", "warm weather", "cool weather"),
+    ("wind", "Wind", "wind", "still air"),
+    ("rain", "Rain", "rain", "dry weather"),
+    ("cloud", "Cloud cover", "cloud", "clear skies"),
+    ("darkness", "Dark hours", "a long night", "a short night"),
 ]
 
 
@@ -176,8 +176,8 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
     # Its denominator is the overall mean, NOT the low group. It must never be
     # presented as a percent increase or a ratio between groups.
     statement = (
-        f"Recorded {hi_rate:.1f} vs {lo_rate:.1f} detections per recording day: "
-        f"{hi_desc} compared with {lo_desc}."
+        f"About {hi_rate:.1f} sightings a day with {hi_desc}, "
+        f"about {lo_rate:.1f} with {lo_desc}."
     )
     return {
         "factor": label,
@@ -291,7 +291,12 @@ def tonight_multiplier(drivers: list[dict], feats: dict) -> tuple[float, list[di
         mult *= (1 + weight) if favourable else (1 - weight)
         if len(reasons) < TONIGHT_MAX_REASONS:
             if favourable:
-                reasons.append({"text": f"Tonight favours it — {d['favours']}", "impact": "++" if weight > 0.12 else "+"})
+                reasons.append({
+                    "text": f"Tonight brings {d['favours']}. That helps.",
+                    "impact": "++" if weight > 0.12 else "+",
+                })
             else:
-                reasons.append({"text": f"Tonight's {d['factor'].lower()} works against it", "impact": "-"})
+                reasons.append({
+                    "text": f"Not helped by tonight's {d['factor'].lower()}.", "impact": "-",
+                })
     return max(0.6, min(1.5, mult)), reasons

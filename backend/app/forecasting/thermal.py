@@ -82,14 +82,14 @@ def regime(
     if grid is None:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": "No terrain loaded, so drainage cannot be worked out.",
+            "text": "No terrain map loaded, so the slope wind cannot be worked out.",
         }
 
     slope = slope_at(grid, lat, lon)
     if slope is None or slope.get("downhill_deg") is None or slope["slope_pct"] < MIN_SLOPE_PCT:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": "Ground is near flat here — no fall line to drain along.",
+            "text": "Ground is near flat here. No slope for cold air to run down.",
             "slope": slope,
         }
 
@@ -97,8 +97,8 @@ def regime(
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
             "text": (
-                f"Overcast ({round(cloud_pct)}%) holds the day's heat in, so the slope "
-                "will not drain properly tonight. Nothing reliable to tell you."
+                f"Overcast ({round(cloud_pct)}%), so the slope wind will be weak tonight. "
+                "Check it yourself."
             ),
             "slope": slope,
         }
@@ -133,10 +133,9 @@ def regime(
             "slope": slope,
             "confidence": "moderate" if settled else "low",
             "text": (
-                f"Forecast is calm, so the slope decides: cold air drains "
-                f"{compass(downhill)} downhill at roughly {speed} km/h "
-                f"({slope['slope_pct']}% fall). "
-                + ("" if settled else "It is still turning over around dusk, so expect it to swing. ")
+                f"Forecast is calm, so the slope decides. Cold air runs downhill to the "
+                f"{compass(downhill)} at about {round(speed)} km/h. "
+                + ("" if settled else "It is still settling around dusk and may swing. ")
                 + "Your scent goes with it."
             ),
         }
@@ -149,8 +148,7 @@ def regime(
         "slope": slope,
         "confidence": "low",
         "text": (
-            f"Calm and sunny — air is being drawn up the slope toward "
-            f"{compass(uphill)}. It will reverse and run back down within the hour "
-            "either side of sunset."
+            f"Calm and sunny, so air is moving up the slope toward the "
+            f"{compass(uphill)}. It will turn and run back downhill around sunset."
         ),
     }

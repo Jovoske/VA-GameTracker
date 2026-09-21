@@ -50,7 +50,7 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
 
     cameras = {c.id: c.name for c in db.scalars(select(Camera).where(Camera.active.is_(True))).all()}
     if not cameras:
-        return {"kind": "none", "camera": None, "text": "No cameras configured yet."}
+        return {"kind": "none", "camera": None, "text": "No cameras set up yet."}
 
     # A camera that has gone off the air outranks everything else on this screen.
     for cam_id, name in cameras.items():
@@ -61,8 +61,8 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
                 return {
                     "kind": "camera_down",
                     "camera": name,
-                    "text": f"{name} sent nothing last night — treat its silence as unknown, "
-                            "not as an empty wood.",
+                    "text": f"{name} sent nothing last night. Unknown whether anything "
+                            "came through.",
                 }
 
     visits = visits_by_night(db)
@@ -116,17 +116,17 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
             cand = {
                 "kind": "gone_quiet",
                 "camera": name,
-                "text": f"{name} has been quiet {silent} nights — it usually sees "
+                "text": f"{name} has been quiet for {silent} nights. It usually sees "
                         f"{median:.0f} a night.",
             }
             score = 50 + silent
         elif median > 0 and abs(tonight_count - median) / max(median, 1) >= 0.5:
-            direction = "up" if tonight_count > median else "down"
+            direction = "busier" if tonight_count > median else "quieter"
             cand = {
                 "kind": "shift",
                 "camera": name,
-                "text": f"{name} was {direction} last night: {tonight_count} vs a usual "
-                        f"{median:.0f}.",
+                "text": f"{name} was {direction} than usual last night: {tonight_count} "
+                        f"visits against a usual {median:.0f}.",
             }
             score = 10 + abs(tonight_count - median)
         else:
@@ -140,5 +140,5 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
     return {
         "kind": "none",
         "camera": None,
-        "text": "Nothing changed — much the same as the last few nights.",
+        "text": "Nothing changed. Much the same as the last few nights.",
     }
