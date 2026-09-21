@@ -116,7 +116,7 @@ def test_payload_no_longer_carries_a_fabricated_confidence(db_session, monkeypat
     # The replacement: a countable fraction with its reference class stated.
     assert rec["active_nights"] == 20
     assert rec["nights_present"] == 10
-    assert "10 of 20 nights this camera was watching" in rec["reason"]
+    assert "10 of 20 nights at this camera" in rec["reason"]
     assert "camera" in rec["caveat"].lower()
 
 

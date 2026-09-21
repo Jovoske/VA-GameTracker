@@ -230,4 +230,4 @@ def test_excluded_nights_are_reported_not_hidden(db_session, monkeypatch):
     out = forecast_tonight(db_session)
     assert out["exposure"]["excluded_nights"] == 2
     assert "2 nights left out" in out["exposure"]["note"]
-    assert "not counted either way" in out["exposure"]["note"]
+    assert "camera was not watching" in out["exposure"]["note"]

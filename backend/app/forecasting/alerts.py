@@ -45,8 +45,8 @@ def compute_alerts(db: Session) -> list[dict]:
         w = rec["best_window"]
         alerts.append({
             "type": "opportunity", "severity": "high", "title": "Strong night ahead",
-            "text": f"{round(rec['probability'] * 100)}% {rec['species']} at {rec['camera']}, "
-                    f"best {w['start_hour']:02d}:00–{w['end_hour']:02d}:00.",
+            "text": f"{rec['species']} at {rec['camera']}. "
+                    f"Best hours {w['start_hour']:02d}:00 to {w['end_hour']:02d}:00.",
         })
 
     # 2. Recent priority-species sightings (last 48h)
@@ -63,7 +63,8 @@ def compute_alerts(db: Session) -> list[dict]:
     for name, cnt, last in rows[:4]:
         alerts.append({
             "type": "sighting", "severity": "info", "title": name,
-            "text": f"{int(cnt)} sighting{'s' if cnt != 1 else ''} in 48h, latest {_ago(last, now)}.",
+            "text": f"Seen {int(cnt)} time{'s' if cnt != 1 else ''} in the last 2 days, "
+                    f"last one {_ago(last, now)}.",
         })
 
     # 3. Camera health — a camera that can't send photos is a fault, never a "pattern".
@@ -78,17 +79,18 @@ def compute_alerts(db: Session) -> list[dict]:
             reset = f" Resets {reset_on}."
             alerts.append({
                 "type": "camera", "severity": "warn", "title": f"{c.name} out of photo credits",
-                "text": f"Hit its monthly limit ({c.photo_count}/{c.photo_limit}) and stopped sending.{reset}",
+                "text": f"Used up its monthly photos ({c.photo_count} of {c.photo_limit}) "
+                        f"and has stopped sending.{reset}",
             })
         elif h["status"] == "offline":
             alerts.append({
                 "type": "camera", "severity": "warn", "title": f"{c.name} offline",
-                "text": f"{h['detail']} — check battery and signal on your next visit.",
+                "text": f"{h['detail']}. Check battery and signal on your next visit.",
             })
         elif h["status"] == "low_battery":
             alerts.append({
                 "type": "camera", "severity": "warn", "title": f"{c.name} battery low",
-                "text": f"{c.battery_pct}% left — bring batteries on your next visit.",
+                "text": f"{c.battery_pct}% left. Bring batteries on your next visit.",
             })
 
     # 4. Pattern break — a HEALTHY camera gone quiet (only then is silence meaningful)
@@ -104,7 +106,7 @@ def compute_alerts(db: Session) -> list[dict]:
         if producing and int(cnt) >= 15 and last and last < now - timedelta(days=3):
             alerts.append({
                 "type": "quiet", "severity": "warn", "title": f"{name} quiet",
-                "text": f"No animals in {_dur(last, now)} — unusual for this camera.",
+                "text": f"Nothing for {_dur(last, now)}. This camera usually sees more.",
             })
 
     return alerts

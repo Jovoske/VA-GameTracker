@@ -80,7 +80,7 @@ def assess(
     if wind_dir_deg is None or wind_speed_kmh is None:
         return WindVerdict(
             status="no_wind_data",
-            text=f"No wind data for tonight — check it yourself before sitting {stand_name}.",
+            text=f"No wind forecast tonight. Check it yourself before you sit {stand_name}.",
         )
 
     scent_bearing = normalise(wind_dir_deg + 180.0)
@@ -92,8 +92,8 @@ def assess(
             status="too_light",
             scent_bearing=scent_bearing,
             text=(
-                f"Wind {from_txt} {speed} km/h — too light to call. Thermals will decide "
-                "this one; read them at the truck."
+                f"Wind {from_txt} {speed} km/h, too light to call. Thermals will decide "
+                "it. Check at the truck."
             ),
         )
 
@@ -102,8 +102,8 @@ def assess(
             status="no_geometry",
             scent_bearing=scent_bearing,
             text=(
-                f"Wind {from_txt} {speed} km/h — no approach arcs recorded for "
-                f"{stand_name}, so this one's yours to solve."
+                f"Wind {from_txt} {speed} km/h. {stand_name} has no approach directions "
+                "set, so judge the wind yourself."
             ),
         )
 
@@ -118,8 +118,8 @@ def assess(
                 scent_bearing=scent_bearing,
                 conflicting_approach=float(approach),
                 text=(
-                    f"Wind {from_txt} {speed} km/h — your scent carries straight into the "
-                    f"{compass(approach)} approach at {stand_name}.{divert}"
+                    f"Wind {from_txt} {speed} km/h, wrong for {stand_name}. Your scent blows "
+                    f"straight into the {compass(approach)} approach.{divert}"
                 ),
             )
 
@@ -127,8 +127,8 @@ def assess(
         status="clean",
         scent_bearing=scent_bearing,
         text=(
-            f"Wind {from_txt} {speed} km/h — clean for {stand_name}. Your scent goes "
-            f"{compass(scent_bearing)}, away from the approaches."
+            f"Wind {from_txt} {speed} km/h, clean for {stand_name}. Your scent goes "
+            f"{compass(scent_bearing)}, away from where they come in."
         ),
     )
 
