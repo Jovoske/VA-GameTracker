@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ageLabel, api, apiCached } from '../api'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 
@@ -129,12 +130,14 @@ export default function Tonight() {
       .finally(() => { if (request === requestId.current) setSettling(false) })
     api<Overview>('/analytics/overview').then(setD).catch(() => setD(null))
     api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
-  }
-  useEffect(() => {
-    load()
+    // Refetched with the plan, so a species switched on in Settings shows up here
+    // on the way back without a reload.
     api<SpeciesOpt[]>('/species')
       .then((all) => setSpecies(all.filter((s) => s.huntable && s.detections > 0)))
       .catch(() => {})
+  }
+  useEffect(() => {
+    load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   useRefetchOnReturn(() => load())
@@ -172,8 +175,10 @@ export default function Tonight() {
 
       {/* What are you after? Ranking the ground by the commonest animal on it is the
           wrong answer when you have come out for boar. Chips list only species left
-          on in Settings that the cameras have actually recorded. */}
-      {species.length > 1 && (
+          on in Settings that the cameras have actually recorded. The row stays even
+          with one animal on, so it is obvious where the choice lives and where to
+          add to it; it used to vanish below two, which read as a missing feature. */}
+      {species.length > 0 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
           <button
             aria-pressed={picked.length === 0}
@@ -212,6 +217,9 @@ export default function Tonight() {
               </button>
             )
           })}
+          <Link to="/settings" style={{ fontSize: 12, color: 'var(--text-dim)', padding: '5px 6px', textDecoration: 'underline', textUnderlineOffset: 3 }}>
+            Edit list
+          </Link>
         </div>
       )}
 
