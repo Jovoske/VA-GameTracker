@@ -2,17 +2,21 @@
 .camera-name--editing { flex-basis: 100%; }
 .camera-name-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
 .camera-name-title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+/* Quiet: a name is renamed once a season, so the control should not compete
+   with the name. Padding keeps the touch target at 44px without the box. */
 .camera-name-action {
   background: transparent;
-  color: var(--go);
-  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border: 0;
   border-radius: var(--r-ctl);
-  padding: 8px 10px;
+  padding: 12px 8px;
   min-height: 44px;
-  font-size: 13px;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
   cursor: pointer;
 }
-.camera-name-action:hover:not(:disabled) { background: var(--surface-2); }
+.camera-name-action:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
 .camera-name-action:disabled { opacity: 0.6; cursor: default; }
 .camera-name-form { width: min(100%, 430px); margin-top: 8px; }
 .camera-name-form label { display: block; font-size: 13px; margin-bottom: 6px; }
@@ -23,10 +27,31 @@
 .camera-name-error { color: var(--skip); font-size: 13px; line-height: 1.5; margin: 8px 0 0; overflow-wrap: anywhere; }
 
 /* ── page ── */
-.cam-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.cam-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
 .cam-head-title { margin: 0; flex-shrink: 0; }
-.cam-sync-msg { font-size: 12px; color: var(--text-dim); flex: 1; min-width: 0; transition: opacity var(--d-fast) var(--ease-out); }
-.cam-sync-btn { width: auto; padding: 8px 14px; flex-shrink: 0; }
+.cam-sync-btn {
+  flex-shrink: 0;
+  min-height: 40px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--go);
+  background: transparent;
+  border: 1px solid var(--go);
+  border-radius: var(--r-ctl);
+  cursor: pointer;
+}
+.cam-sync-btn:hover:not(:disabled) { background: var(--surface-2); }
+.cam-sync-btn:disabled { color: var(--text-dim); border-color: var(--border); cursor: default; }
+/* The result line: always present so the list never jumps, coloured by outcome. */
+.cam-sync-status { display: flex; align-items: center; gap: 8px; min-height: 22px; margin-bottom: 12px; font-size: 13px; color: var(--text-dim); }
+.cam-sync-status--ok { color: var(--go); }
+.cam-sync-status--error { color: var(--skip); }
+.cam-sync-glyph { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%; border: 1.5px solid currentColor; font-size: 12px; font-weight: 700; line-height: 1; }
+.cam-sync-spinner { width: 14px; height: 14px; flex-shrink: 0; border: 2px solid var(--border); border-top-color: var(--go); border-radius: 50%; animation: cam-spin 0.8s linear infinite; }
+@keyframes cam-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cam-sync-spinner { animation: none; border-top-color: var(--border); } }
 .cam-error { padding: 12px; margin-bottom: 12px; font-size: 13px; color: var(--skip); }
 .cam-list { display: flex; flex-direction: column; gap: 12px; }
 
