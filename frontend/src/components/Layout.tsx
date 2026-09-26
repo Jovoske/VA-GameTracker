@@ -6,9 +6,10 @@ import { MapTrifoldIcon } from '@phosphor-icons/react/dist/csr/MapTrifold'
 import { MoonStarsIcon } from '@phosphor-icons/react/dist/csr/MoonStars'
 import { ImagesIcon } from '@phosphor-icons/react/dist/csr/Images'
 import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { setToken } from '../api'
+import { confirmLeave } from '../map/draftGuard'
 
 /**
  * Icons are drawn, from one family, at one weight.
@@ -52,13 +53,30 @@ export default function Layout() {
     document.title = t ? `GameSense · ${t.label}` : 'GameSense'
   }, [loc.pathname])
 
+  // The map fills the screen down to the tab bar, so it needs the bar's real height:
+  // it changes with the home-indicator inset and with the text size.
+  const tabbar = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const el = tabbar.current
+    if (!el) return
+    const measure = () => document.documentElement.style.setProperty('--tabbar-h', `${el.offsetHeight}px`)
+    measure()
+    const watch = new ResizeObserver(measure)
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [])
+
   function logout() {
+    if (!confirmLeave()) return
     setToken(null)
     nav('/login')
   }
+  // An unsaved bedding outline asks before a tab takes you away from it.
+  const guard = (e: React.MouseEvent) => { if (!confirmLeave()) e.preventDefault() }
+  const onMap = loc.pathname === '/map'
 
   return (
-    <div style={{ maxWidth: loc.pathname === '/map' ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
+    <div className={onMap ? 'layout layout--map' : 'layout'} style={{ maxWidth: onMap ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
       <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="appbar">
         <div style={{ fontWeight: 600, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
@@ -68,7 +86,7 @@ export default function Layout() {
         {/* Desktop / tablet: links in the header. On phones the bottom tab bar takes over. */}
         <nav className="topnav" aria-label="Main navigation">
           {TABS.map((t) => (
-            <NavLink key={t.to} to={t.to} end={t.end} style={({ isActive }) => linkStyle(isActive)}>
+            <NavLink key={t.to} to={t.to} end={t.end} onClick={guard} style={({ isActive }) => linkStyle(isActive)}>
               {t.label}
             </NavLink>
           ))}
@@ -100,9 +118,9 @@ export default function Layout() {
       </main>
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
-      <nav className="tabbar" aria-label="Main navigation">
+      <nav className="tabbar" aria-label="Main navigation" ref={tabbar}>
         {TABS.map(({ to, label, Ico, end }) => (
-          <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'active' : '')}>
+          <NavLink key={to} to={to} end={end} onClick={guard} className={({ isActive }) => (isActive ? 'active' : '')}>
             {({ isActive }) => (
               <>
                 <span className="ico">
