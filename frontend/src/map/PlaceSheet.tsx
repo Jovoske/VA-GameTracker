@@ -13,7 +13,7 @@ const WIND_HEAD: Record<string, string> = {
 }
 
 /** An error that appears inside the sheet scrolls itself into view, so it is never below the fold. */
-function InlineError({ text }: { text: string }) {
+export function InlineError({ text }: { text: string }) {
   const el = useRef<HTMLParagraphElement>(null)
   useEffect(() => { el.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) }, [text])
   return <p ref={el} className="map-inline-error" role="alert">{text}</p>
@@ -62,7 +62,7 @@ function RemoveControl({ name, onRemove }: { name: string; onRemove: () => Promi
   </div>
 }
 
-function RenameControl({ name, onRename }: { name: string; onRename: (name: string) => Promise<void> }) {
+export function RenameControl({ name, onRename, maxLength = 80 }: { name: string; onRename: (name: string) => Promise<void>; maxLength?: number }) {
   const [value, setValue] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -73,7 +73,7 @@ function RenameControl({ name, onRename }: { name: string; onRename: (name: stri
     try { await onRename(value.trim()); setValue(null) } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
   return <form className="map-rename" onSubmit={e => { e.preventDefault(); save() }}>
-    <label className="map-field">New name<input maxLength={80} value={value} disabled={busy} onChange={e => setValue(e.target.value)} /></label>
+    <label className="map-field">New name<input maxLength={maxLength} value={value} disabled={busy} onChange={e => setValue(e.target.value)} /></label>
     <div className="map-actions"><button className="map-button map-button--primary" disabled={busy || !value.trim()}>{busy ? 'Saving…' : err ? 'Try again' : 'Save name'}</button><button type="button" className="map-button" disabled={busy} onClick={() => { setValue(null); setErr('') }}>Cancel</button></div>
     {err && <InlineError text={err} />}
   </form>

@@ -26,6 +26,8 @@ export const BASE_SOURCES = BASES.map(b => b.source)
 export const CATASTRO = 'catastro'
 // Catastro only draws parcels from about this zoom; further out it sends blank tiles.
 export const CATASTRO_MINZOOM = 15
+// Camera photos show from this zoom in; further out each camera is its plain mark.
+export const CALLOUT_ZOOM = 13
 
 const WMTS = (service: string, layer: string, format: string) =>
   `https://www.ign.es/wmts/${service}?service=WMTS&request=GetTile&version=1.0.0&layer=${layer}&style=default&tilematrixset=GoogleMapsCompatible&tilematrix={z}&tilerow={y}&tilecol={x}&format=${format}`
@@ -78,7 +80,7 @@ export function showCatastro(map: Map, on: boolean) {
 // Per-viewer conveniences only. Storage can be missing or throw (private mode,
 // blocked site data), and the map must still open with sensible defaults.
 export type MapPrefs = { base: BaseId; catastro: boolean; bigPins: boolean; layers: Layers }
-const DEFAULT_LAYERS: Layers = { bedding: true, wind: true, exposure: false, routes: false }
+const DEFAULT_LAYERS: Layers = { bedding: true, wind: true, exposure: false, routes: false, photos: true }
 const KEY = { base: 'gs_map_base', catastro: 'gs_map_catastro', bigPins: 'gs_map_big_pins', layers: 'gs_map_layers' }
 
 function read(key: string): string | null {

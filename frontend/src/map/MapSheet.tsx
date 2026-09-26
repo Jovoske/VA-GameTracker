@@ -5,7 +5,7 @@ import { NavigationArrowIcon } from '@phosphor-icons/react/dist/csr/NavigationAr
 import { PolygonIcon } from '@phosphor-icons/react/dist/csr/Polygon'
 import { RulerIcon } from '@phosphor-icons/react/dist/csr/Ruler'
 import type { ReactNode } from 'react'
-import { BASES, CATASTRO_MINZOOM, type BaseId, type MapPrefs } from './basemaps'
+import { BASES, CALLOUT_ZOOM, CATASTRO_MINZOOM, type BaseId, type MapPrefs } from './basemaps'
 import type { Layers } from './layers'
 
 export type Unplaced = { kind: 'stand' | 'camera'; id: string; name: string }
@@ -68,6 +68,8 @@ export default function MapSheet({ prefs, onPrefs, onRetryBase, zoom, baseNote, 
         <span><i className="key-stand" />Stand</span><span><i className="key-camera" />Camera</span>
         <span><i className="key-wind key-wind--clean" />Scent goes away from bedding</span><span><i className="key-wind key-wind--carries" />Scent reaches bedding</span>
       </div>
+      <SwitchRow label="Camera photos" note={prefs.layers.photos && zoom < CALLOUT_ZOOM ? 'Zoom in closer to see them.' : 'Each camera’s latest animal photo, and how many are new to you.'}
+        on={prefs.layers.photos} onChange={layer('photos')} />
       <SwitchRow label="Wind arrows" note="Where scent goes from each stand." on={prefs.layers.wind} onChange={layer('wind')} />
       <SwitchRow label="Bedding" note="Where the animals lie up." on={prefs.layers.bedding} onChange={layer('bedding')} />
       <SwitchRow label="Scent-safe ground" note="About scent reaching bedding, not shooting safety." on={prefs.layers.exposure} onChange={layer('exposure')} />

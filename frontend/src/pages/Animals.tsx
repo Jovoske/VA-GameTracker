@@ -1,7 +1,7 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, imageUrl } from '../api'
+import { api, thumbUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
 import { useRefetchOnReturn } from '../hooks'
@@ -222,7 +222,7 @@ export default function Animals() {
             >
               {sp.thumb_image_id && (
                 <img
-                  src={imageUrl(`/api/images/${sp.thumb_image_id}/file`)}
+                  src={thumbUrl(sp.thumb_image_id)}
                   loading="lazy"
                   alt={sp.name}
                 />
@@ -325,7 +325,7 @@ export default function Animals() {
                     <div className="an-animal-photo">
                       {a.thumb_image_id && (
                         <img
-                          src={imageUrl(`/api/images/${a.thumb_image_id}/file`)}
+                          src={thumbUrl(a.thumb_image_id)}
                           loading="lazy"
                           alt={a.label}
                         />
@@ -407,7 +407,7 @@ export default function Animals() {
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                     onClick={() => setZoom(i)}
                   >
-                    <img src={imageUrl(im.file_url)} loading="lazy" alt={im.label} />
+                    <img src={thumbUrl(im.image_id)} loading="lazy" alt={im.label} />
                     <div className="an-gallery-caption">
                       <span className="an-gallery-label">{im.label}</span>
                       <span className="an-gallery-date">

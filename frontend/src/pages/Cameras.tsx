@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, imageUrl } from '../api'
+import { api, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { useRefetchOnReturn } from '../hooks'
 import './cameras.css'
@@ -434,7 +434,7 @@ export default function Cameras() {
                         tabIndex={0}
                         aria-label={`Open photo from ${c.name}: ${isEmpty ? 'no animal' : classLabel(im) || 'unknown animal'}`}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
-                        src={imageUrl(im.file_url as string)}
+                        src={thumbUrl(im.id)}
                         alt={im.species || 'trail-camera photo'}
                         loading="lazy"
                         onClick={() => {

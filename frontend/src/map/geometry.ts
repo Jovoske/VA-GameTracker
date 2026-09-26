@@ -1,6 +1,15 @@
-// No photo count here on purpose: the API's `sightings` counts frames, bursts and
-// hidden species included, and anything a hunter reads counts visits instead.
-export type Camera = { id: string; name: string; lat: number | null; lng: number | null; battery_pct: number | null; signal_pct?: number | null; last_capture?: string | null }
+// A camera as the map has it (GET /map/cameras): its newest photo worth showing,
+// how many photos are new to you, and last night in visits, never in frames.
+export type CameraHealth = { status: string; detail: string; producing: boolean; hours_since_report: number | null }
+export type LatestPhoto = { image_id: string; captured_at: string; species_id: string | null; label: string }
+export type Visits = { species_id: string | null; label: string; visits: number }
+export type Camera = {
+  id: string; name: string; lat: number | null; lon: number | null
+  battery_pct: number | null; signal_pct: number | null; last_report_at: string | null
+  health: CameraHealth; can_rename: boolean
+  latest: LatestPhoto | null; new_count: number
+  last_night: Visits[]; last_night_watched: boolean | null
+}
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string }
 export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }

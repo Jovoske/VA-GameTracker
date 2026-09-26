@@ -5,12 +5,50 @@ import type maplibregl from 'maplibre-gl'
  * names have room to show.
  */
 export type PinKind = 'stand' | 'camera'
-export type PinRef = { kind: PinKind; id: string; name: string; lon: number; lat: number }
+/** `photo` is a camera's latest photo (its small copy's URL), drawn over its point. */
+export type PinRef = { kind: PinKind; id: string; name: string; lon: number; lat: number; photo?: string | null }
 export type Pin = { marker: maplibregl.Marker; pin: PinRef }
 
 export const PIN_ICONS: Record<PinKind, string> = {
   stand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 21V8l7-5 7 5v13M4 11h16M8 21v-6h8v6"/></svg>',
   camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="4"/><path d="M8 6V3h8v3"/></svg>',
+}
+
+/**
+ * A camera's latest photo over its point, as WeHunt draws trail cameras: a framed
+ * thumbnail with a small pointer down to the camera, and a count of the photos that
+ * are new to you. The camera's own mark stays as the point the photo points at.
+ * The page's `data-callouts` decides whether the photo shows (it collapses to the
+ * plain camera mark further out, or when "Camera photos" is off). A photo that
+ * fails to load (no signal) falls back to the plain mark rather than an empty frame.
+ */
+export function addCallout(el: HTMLElement, src: string) {
+  const callout = document.createElement('span')
+  callout.className = 'map-callout'
+  const img = document.createElement('img')
+  img.className = 'map-callout-img'
+  img.alt = ''
+  img.decoding = 'async'
+  img.draggable = false
+  img.addEventListener('error', () => el.classList.add('photo-failed'))
+  img.src = src
+  callout.append(img, badge('map-badge--callout'))
+  el.prepend(callout)
+  // The same count on the plain mark, for when the photo is not showing.
+  el.querySelector('.map-pin-icon')?.append(badge('map-badge--dot'))
+  el.classList.add('has-photo')
+}
+function badge(variant: string) {
+  const b = document.createElement('span')
+  b.className = `map-badge ${variant}`
+  b.hidden = true
+  return b
+}
+/** Put the "new" count on a camera pin ('5', '99+'), or take it off at 0. */
+export function paintBadge(el: HTMLElement, count: number, name: string) {
+  const text = count >= 99 ? '99+' : String(count)
+  el.querySelectorAll<HTMLElement>('.map-badge').forEach(b => { b.textContent = count > 0 ? text : ''; b.hidden = count <= 0 })
+  el.setAttribute('aria-label', `Camera: ${name}${count > 0 ? `, ${count >= 99 ? '99 or more' : count} new photo${count === 1 ? '' : 's'}` : ''}`)
 }
 
 const within = (r: DOMRect, x: number, y: number) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
@@ -41,6 +79,8 @@ export function pinsAt(pins: Pin[], x: number, y: number): PinRef[] {
 export function declutterLabels(pins: Pin[]) {
   const els = pins.map(p => p.marker.getElement())
   const icons = els.map(el => (el.querySelector('.map-pin-icon') ?? el).getBoundingClientRect())
+  // A camera's photo is in the way of a name as much as a pin is. Hidden ones measure 0.
+  const photos = els.map(el => el.querySelector('.map-callout')?.getBoundingClientRect()).map(r => r?.width ? r : null)
   const rank = (el: HTMLElement) => el.classList.contains('is-selected') ? 0 : el.dataset.kind === 'camera' ? 1 : 2
   const order = els.map((_, i) => i).sort((a, b) => rank(els[a]) - rank(els[b]))
   const kept: DOMRect[] = []
@@ -51,7 +91,7 @@ export function declutterLabels(pins: Pin[]) {
     let r = label.getBoundingClientRect()
     // Not shown at this zoom: nothing to decide.
     if (!r.width) continue
-    const clashes = (box: DOMRect) => rank(els[i]) > 0 && (icons.some((b, j) => j !== i && overlaps(box, b)) || kept.some(k => overlaps(box, k)))
+    const clashes = (box: DOMRect) => rank(els[i]) > 0 && (icons.some((b, j) => j !== i && overlaps(box, b)) || photos.some((b, j) => !!b && j !== i && overlaps(box, b)) || kept.some(k => overlaps(box, k)))
     if (clashes(r)) {
       label.classList.add('is-flipped')
       r = label.getBoundingClientRect()

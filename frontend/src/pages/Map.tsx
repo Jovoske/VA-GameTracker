@@ -6,9 +6,9 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useBlocker, useSearchParams } from 'react-router-dom'
-import { api } from '../api'
+import { api, thumbUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
-import { BASE_SOURCES, CATASTRO, baseLabel, baseSource, mapStyle, readPrefs, retryBase, showBase, showCatastro, writePrefs, type BaseId, type MapPrefs } from '../map/basemaps'
+import { BASE_SOURCES, CALLOUT_ZOOM, CATASTRO, baseLabel, baseSource, mapStyle, readPrefs, retryBase, showBase, showCatastro, writePrefs, type BaseId, type MapPrefs } from '../map/basemaps'
 import BottomSheet, { type Snap } from '../map/BottomSheet'
 import { CameraBody, CameraHeader } from '../map/CameraSheet'
 import CrosshairEditor, { Crosshair, useMapCenter, type Editing } from '../map/CrosshairEditor'
@@ -18,7 +18,7 @@ import { addLayers, fitEstate, renderLayers } from '../map/layers'
 import MapFab from '../map/MapFab'
 import MapSheet, { type Unplaced } from '../map/MapSheet'
 import { PickBody, PickHeader } from '../map/PickSheet'
-import { PIN_ICONS, declutterLabels, pinsAt, type Pin, type PinRef } from '../map/pins'
+import { PIN_ICONS, addCallout, declutterLabels, paintBadge, pinsAt, type Pin, type PinRef } from '../map/pins'
 import { StandBody, StandHeader, ZoneBody, ZoneHeader } from '../map/PlaceSheet'
 import ScalePill from '../map/ScalePill'
 import { useMeasure } from '../map/useMeasure'
@@ -88,6 +88,10 @@ export default function MapPage() {
   const activeBaseRef = useRef(activeBase); activeBaseRef.current = activeBase
   const paramsRef = useRef(params); paramsRef.current = params
   const requestId = useRef(0)
+  // Cameras opened this visit whose "new" count is cleared here before the server's
+  // next answer says so: null while the call is out, then when it answered.
+  const seen = useRef(new Map<string, number | null>())
+  const [seenTick, setSeenTick] = useState(0)
   const saving = useRef(false)
   const saveCtl = useRef<AbortController | null>(null)
   const lastCorner = useRef({ t: 0, x: 0, y: 0 })
@@ -102,10 +106,13 @@ export default function MapPage() {
 
   const load = useCallback(async () => {
     const request = ++requestId.current
+    const started = Date.now()
     setLoading(true); setErr('')
     try {
-      const [next, cams] = await Promise.all([api<MapData>('/map/tonight', { timeoutMs: LOAD_TIMEOUT_MS }), api<Camera[]>('/cameras', { timeoutMs: LOAD_TIMEOUT_MS })])
+      const [next, cams] = await Promise.all([api<MapData>('/map/tonight', { timeoutMs: LOAD_TIMEOUT_MS }), api<Camera[]>('/map/cameras', { timeoutMs: LOAD_TIMEOUT_MS })])
       if (request !== requestId.current) return
+      // A count asked for after the camera was marked seen already knows it.
+      for (const [id, at] of seen.current) if (at != null && at < started) seen.current.delete(id)
       setData(next); setCameras(cams)
     } catch (e) {
       if (request !== requestId.current) return
@@ -232,8 +239,7 @@ export default function MapPage() {
       fitEstate(instance, data, cameras)
       fitted.current = true
       const focus = selected?.kind === 'stand' ? data.stands.find(s => s.id === selected.id) : selected?.kind === 'camera' ? cameras.find(c => c.id === selected.id) : null
-      const lon = focus && ('lon' in focus ? focus.lon : focus.lng), lat = focus?.lat
-      if (validLngLat(lon, lat)) reveal(lon as number, lat as number, true)
+      if (focus && validLngLat(focus.lon, focus.lat)) reveal(focus.lon as number, focus.lat as number, true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, data, cameras, prefs.layers, selected])
@@ -244,9 +250,10 @@ export default function MapPage() {
     if (!instance || !stage) return
     const w = stage.clientWidth, h = stage.clientHeight, wide = w >= 641
     const p = instance.project([lon, lat])
-    // Room for the pin and its name above the sheet's middle height, and off the edges.
+    // Room for the pin and its name above the sheet's middle height, clear of the
+    // round buttons at the sides, and room above for a camera's photo.
     const covered = wide ? p.x < 480 && p.y > h * .5 - 90 : p.y > h * .5 - 90
-    if (!always && !covered && p.x > 40 && p.x < w - 40 && p.y > 40) return
+    if (!always && !covered && p.x > 72 && p.x < w - 72 && p.y > 110) return
     instance.easeTo({ center: [lon, lat], zoom: always ? Math.max(16, instance.getZoom()) : instance.getZoom(), offset: wide ? [Math.min(230, w / 4), -h * .1] : [0, -h * .25], duration: always ? 0 : 300 })
   }
   /** Room around the estate for Fit: clear of an open sheet, below it on a phone, beside it on a wider screen. */
@@ -293,12 +300,15 @@ export default function MapPage() {
       const icon = document.createElement('span'); icon.className = 'map-pin-icon'; icon.innerHTML = PIN_ICONS[pin.kind]
       const label = document.createElement('span'); label.className = 'map-pin-label'; label.textContent = pin.name
       el.append(icon, label)
+      if (pin.photo) addCallout(el, pin.photo)
       el.addEventListener('click', e => {
         e.stopPropagation()
         if (editRef.current || measureRef.current.on) return
         // A camera usually sits by a stand, so at estate zoom their pins overlap. A tap
-        // on more than one asks which. A key press (no pointer) means this pin.
-        const here = e.detail ? pinsAt(markers.current, e.clientX, e.clientY) : []
+        // on more than one asks which. A key press (no pointer) means this pin, and so
+        // does a tap on a camera's photo, which only ever belongs to that camera.
+        const onPhoto = (e.target as HTMLElement).closest('.map-callout')
+        const here = e.detail && !onPhoto ? pinsAt(markers.current, e.clientX, e.clientY) : []
         if (here.length > 1) { setSelected(null); setSettingsOpen(false); setPick(here); setSnap('half'); setSelKey(k => k + 1) }
         else selectRef.current(pin)
       })
@@ -306,8 +316,27 @@ export default function MapPage() {
     }
     // Cameras go on last, so where a pin overlaps they are on top: they're what the team opens the map for.
     data.stands.forEach(s => { if (validLngLat(s.lon, s.lat)) add({ kind: 'stand', id: s.id, name: s.name, lon: s.lon!, lat: s.lat! }) })
-    cameras.forEach(c => { if (validLngLat(c.lng, c.lat)) add({ kind: 'camera', id: c.id, name: c.name, lon: c.lng!, lat: c.lat! }) })
+    cameras.forEach(c => { if (validLngLat(c.lon, c.lat)) add({ kind: 'camera', id: c.id, name: c.name, lon: c.lon!, lat: c.lat!, photo: c.latest ? thumbUrl(c.latest.image_id) : null }) })
   }, [ready, data, cameras])
+
+  // Each camera's "new" count: nothing for a camera opened since the counts came in.
+  useEffect(() => {
+    for (const { marker, pin } of markers.current) {
+      const cam = pin.kind === 'camera' ? cameras.find(c => c.id === pin.id) : null
+      if (cam) paintBadge(marker.getElement(), seen.current.has(cam.id) ? 0 : cam.new_count, cam.name)
+    }
+  }, [ready, data, cameras, seenTick])
+
+  // Opening a camera's sheet marks its photos seen, for this person only.
+  const openCamera = selected?.kind === 'camera' ? selected.id : null
+  useEffect(() => {
+    if (!openCamera) return
+    const marks = seen.current
+    marks.set(openCamera, null); setSeenTick(t => t + 1)
+    // Failed or not, the next load after this answers with the server's own count.
+    const answered = () => { if (marks.has(openCamera)) marks.set(openCamera, Date.now()) }
+    api(`/cameras/${openCamera}/seen`, { method: 'POST', timeoutMs: SAVE_TIMEOUT_MS }).then(answered, answered)
+  }, [openCamera, selKey])
 
   useEffect(() => {
     const inert = !!editing || measure.on
@@ -321,7 +350,7 @@ export default function MapPage() {
     }
   }, [ready, data, cameras, selected, editing, measure.on])
   // Names that would land on another pin stay hidden (after the pins above are in place).
-  useEffect(() => { declutterSoon() }, [ready, data, cameras, selected, zoom, prefs.bigPins, declutterSoon])
+  useEffect(() => { declutterSoon() }, [ready, data, cameras, selected, zoom, prefs.bigPins, prefs.layers.photos, declutterSoon])
 
   // While drawing, a double tap must not zoom and add a corner at once (B-13).
   useEffect(() => {
@@ -409,6 +438,11 @@ export default function MapPage() {
     catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
     await load(); setNotice('Renamed.')
   }
+  async function renameCamera(id: string, name: string) {
+    try { await api(`/cameras/${id}/name`, { method: 'PATCH', body: JSON.stringify({ name }), timeoutMs: SAVE_TIMEOUT_MS }) }
+    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
+    await load(); setNotice('Renamed.')
+  }
   async function loadTerrain() {
     setTerrainBusy(true); setTerrainErr('')
     try { await api('/terrain/refresh', { method: 'POST' }); await load(); setNotice('Hill shape loaded.') }
@@ -426,7 +460,7 @@ export default function MapPage() {
   const windWord = !data ? (loading ? 'Checking…' : 'Wind not loaded') : from != null ? `From the ${direction(from)}` : speed == null ? 'No wind forecast' : 'Too light to call'
   const unplaced: Unplaced[] = [
     ...(data?.stands ?? []).filter(s => !validLngLat(s.lon, s.lat)).map(s => ({ kind: 'stand' as const, id: s.id, name: s.name })),
-    ...cameras.filter(c => !validLngLat(c.lng, c.lat)).map(c => ({ kind: 'camera' as const, id: c.id, name: c.name })),
+    ...cameras.filter(c => !validLngLat(c.lon, c.lat)).map(c => ({ kind: 'camera' as const, id: c.id, name: c.name })),
   ]
   const placedCount = (data?.stands.length ?? 0) + cameras.length - unplaced.length
   const emptyEstate = !!data && !editing && placedCount === 0 && !data.zones.length
@@ -461,7 +495,8 @@ export default function MapPage() {
       <span className="map-wind-speed"><strong>{speed == null || !data ? '—' : Math.round(speed)}</strong><span>km/h</span></span>
       <span className="map-wind-chevron" aria-hidden="true">{windOpen ? '▴' : '▾'}</span>
     </button>
-    <div className="map-stage" ref={stageRef} data-editing={editing ? 'true' : undefined} data-labels={zoom >= LABEL_ZOOM ? 'on' : undefined}>
+    <div className="map-stage" ref={stageRef} data-editing={editing ? 'true' : undefined} data-labels={zoom >= LABEL_ZOOM ? 'on' : undefined}
+      data-callouts={!prefs.layers.photos ? undefined : zoom >= CALLOUT_ZOOM ? 'on' : 'dots'}>
       <div className="map-canvas-wrap">
         <div ref={mapEl} className="map-canvas" aria-label="Estate map. Drag to move, pinch to zoom." />
         {windOpen && <div id="map-wind-more" className="map-wind-more">
@@ -531,7 +566,8 @@ export default function MapPage() {
           {stand && <StandBody stand={stand} scentRange={data!.scent_range_m} admin={admin}
             onMove={() => startEdit({ kind: 'stand', id: stand.id, name: stand.name, at: [stand.lon, stand.lat] })}
             onRemove={() => remove('stand', stand.id)} onRename={name => rename(stand.id, name)} />}
-          {camera && <CameraBody camera={camera} admin={admin} onMove={() => startEdit({ kind: 'camera', id: camera.id, name: camera.name, at: [camera.lng, camera.lat] })} />}
+          {camera && <CameraBody camera={camera} admin={admin} onRename={name => renameCamera(camera.id, name)}
+            onMove={() => startEdit({ kind: 'camera', id: camera.id, name: camera.name, at: [camera.lon, camera.lat] })} />}
           {zone && <ZoneBody zone={zone} admin={admin} onRemove={() => remove('zone', zone.id)} />}
         </BottomSheet>}
       </div>

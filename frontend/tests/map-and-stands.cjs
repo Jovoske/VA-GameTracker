@@ -12,13 +12,23 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const stands=[{id:'s1',name:'Ridge overlook',lat:39.094,lon:-1.362,claimed_tonight:false,claimed_by:null},{id:'s2',name:'Oak hollow',lat:39.098,lon:-1.357,claimed_tonight:true,claimed_by:'me'},{id:'s3',name:'South track',lat:39.091,lon:-1.355,claimed_tonight:true,claimed_by:'other'}];
  const sits=[{id:'cancelled',stand_id:'s1',user_id:'me',outcome:'cancelled'},{id:'mine',stand_id:'s2',user_id:'me',outcome:'unreported',started_at:null,wind_text:'Saved wind check.'},{id:'other',stand_id:'s3',user_id:'other',outcome:'unreported',started_at:null}];
  // The track camera sits a few metres from South track: at estate zoom their pins overlap.
- const cameras=[{id:'c1',name:'Valley camera',lat:39.095,lng:-1.358,battery_pct:72,last_capture:new Date(Date.now()-3*3600e3).toISOString()},{id:'c2',name:'Track camera',lat:39.0911,lng:-1.3551,battery_pct:40,last_capture:null}];
- const writes=[];
+ // The map's cameras (GET /map/cameras): Valley has a photo, three of them new to you, and
+ // last night in visits; Track has no photo yet.
+ const ok={status:'ok',detail:'Reporting normally',producing:true,hours_since_report:1};
+ const shotAt=new Date(Date.now()-3*3600e3).toISOString();
+ const cameras=[{id:'c1',name:'Valley camera',lat:39.095,lon:-1.358,battery_pct:72,signal_pct:65,last_report_at:shotAt,health:ok,can_rename:true,latest:{image_id:'i1',captured_at:shotAt,species_id:'wild_boar',label:'Sounder'},new_count:3,last_night:[{species_id:'wild_boar',label:'Wild boar',visits:2},{species_id:'red_deer',label:'Red deer',visits:1}],last_night_watched:true},
+  {id:'c2',name:'Track camera',lat:39.0911,lon:-1.3551,battery_pct:15,signal_pct:null,last_report_at:shotAt,health:{...ok,status:'low_battery'},can_rename:true,latest:null,new_count:0,last_night:[],last_night_watched:true}];
+ const strip=[0,1,2].map(i=>({image_id:'i'+(i+1),file_url:`/api/images/i${i+1}/file`,captured_at:new Date(Date.now()-(3+i)*3600e3).toISOString(),camera:'Valley camera',camera_id:'c1',label:'Sounder',species_id:'wild_boar',group_size:4}));
+ const writes=[],seen=[];
  const data=()=>({conditions:{wind_dir_deg:315,wind_speed_kmh:12},airflow:{source:'synoptic',wind_dir_deg:315,wind_speed_kmh:12},zones:[{id:'z1',name:'Pine cover',kind:'bedding',polygon:{type:'Polygon',coordinates:[[[-1.354,39.097],[-1.351,39.098],[-1.349,39.096],[-1.354,39.097]]]}}],stands:stands.map(s=>({...s,wind:{status:s.id==='s3'?'unknown':'clean',source:s.id==='s3'?'unknown':'synoptic',scent_bearing:135,speed_kmh:12,range_m:320,half_deg:22.5,text:'Estimated scent travels southeast, away from mapped bedding.'},approaches:[]})),safe_ground:{status:'ok',cells:[]},routes:[],scent_range_m:320,terrain_loaded:true});
- let offline=false;
+ let offline=false;const images=[];
+ const tile=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==','base64');
  await page.route('**/api/**',async route=>{
  const request=route.request(),u=new URL(request.url()),method=request.method();
- if(offline&&/\/api\/(map\/tonight|cameras)$/.test(u.pathname))return route.abort('internetdisconnected');
+ if(offline&&/\/api\/map\/(tonight|cameras)$/.test(u.pathname))return route.abort('internetdisconnected');
+ if(/\/api\/images\/[^/]+\/(thumb|file)$/.test(u.pathname)){images.push(u.pathname);return route.fulfill({contentType:'image/png',body:tile})}
+ // Opening a camera marks it seen: not an edit, so kept apart from the writes.
+ if(method==='POST'&&/\/api\/cameras\/[^/]+\/seen$/.test(u.pathname)){seen.push(u.pathname);const c=cameras.find(x=>u.pathname.includes(x.id));if(c)c.new_count=0;return route.fulfill({json:{}})}
  if(method!=='GET'){
  const body=request.postDataJSON();writes.push({path:u.pathname,method,body});
  if(u.pathname==='/api/stands'){stands.push({id:'s4',...body,claimed_tonight:false,claimed_by:null});return route.fulfill({json:{id:'s4'}})}
@@ -26,13 +36,12 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  if(u.pathname==='/api/sits/new'){sits.find(s=>s.id==='new').outcome=body.outcome;stands[0].claimed_tonight=false;stands[0].claimed_by=null;return route.fulfill({json:{}})}
  return route.fulfill({json:{}})
  }
- let result=u.pathname==='/api/map/tonight'?data():u.pathname==='/api/cameras'?cameras:u.pathname==='/api/auth/me'?{id:'me',role:'admin'}:u.pathname==='/api/stands'?stands:u.pathname==='/api/sits'?sits:undefined;
+ let result=u.pathname==='/api/map/tonight'?data():u.pathname==='/api/map/cameras'?cameras:u.pathname==='/api/photos'?{items:u.searchParams.get('cameras')==='c1'?strip:[],next_before:null}:u.pathname==='/api/auth/me'?{id:'me',role:'admin'}:u.pathname==='/api/stands'?stands:u.pathname==='/api/sits'?sits:undefined;
  if(result===undefined)return route.fulfill({status:404,json:{detail:'Not Found'}});
  await route.fulfill({json:result});
  });
  // Base-map tiles are stubbed: this checks the app's map, not whether IGN or Esri answer today.
  // `failing` takes a base down; `failOdd` fails every other column of the aerial tiles.
- const tile=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==','base64');
  const failing=new Set();let failOdd=false,tiles=0;
  await page.route(/ign\.es|catastro\.meh\.es|arcgisonline/,r=>{
  tiles++;const u=r.request().url(),kind=/catastro/.test(u)?'catastro':/pnoa/.test(u)?'aerial':/mapa-raster/.test(u)?'topo':'world';
@@ -85,15 +94,29 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  await page.keyboard.press('Escape');await page.waitForTimeout(400);assert.equal(await page.locator('.bsheet').count(),0);
  // S1-M1: a camera beside a stand is on top, and a tap on the pair asks which one.
  await page.getByRole('button',{name:'Fit the estate'}).click();await page.waitForTimeout(600);
- const cam=await page.locator('.map-pin[aria-label="Camera: Track camera"] .map-pin-icon').boundingBox();
+ const cam=await page.locator('.map-pin[aria-label^="Camera: Track camera"] .map-pin-icon').boundingBox();
  await page.mouse.click(cam.x+cam.width/2,cam.y+cam.height/2);await page.locator('.bsheet[aria-label="Which one?"]').waitFor();
  assert.deepEqual((await page.locator('.map-pick-row').allInnerTexts()).map(t=>t.split('\n')[0]),['Track camera','South track']);
  await page.locator('.map-pick-row').first().click();await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
- // S1-M2: the camera's header is when it last took a photo and its battery, never a photo count.
- assert.equal(await page.locator('.bsheet .bsheet-meta').innerText(),'No photos yet · Battery 40%');
+ // S1-M2: the camera's header is when it last had an animal on it, never a photo count.
+ assert.equal(await page.locator('.bsheet .bsheet-meta').innerText(),'No animal photos yet');
+ assert.equal(await page.locator('.cam-sheet-numbers summary').innerText(),'Battery low');
+ assert.equal(await page.locator('.cam-sheet-night').innerText(),'Nothing on camera last night');
  await page.keyboard.press('Escape');await page.waitForTimeout(400);
- await page.getByRole('button',{name:'Camera: Valley camera',exact:true}).click();
- assert.equal(await page.locator('.bsheet .bsheet-meta').innerText(),'Last photo 3 h ago · Battery 72%');
+ // Stage 2: a camera with a photo is its photo on the map, with how many are new to you.
+ const valley=page.locator('.map-pin[data-id="c1"]');
+ assert.equal(await valley.locator('.map-badge--callout').innerText(),'3');
+ assert.equal(await valley.getAttribute('aria-label'),'Camera: Valley camera, 3 new photos');
+ await valley.locator('.map-callout').click();await page.locator('.bsheet[aria-label="Camera: Valley camera"]').waitFor();
+ assert.match(await page.locator('.bsheet .bsheet-meta').innerText(),/^Last photo .+ \(3 h ago\)$/);
+ assert.equal(await page.locator('.cam-sheet-night').innerText(),'Last night: Wild boar · 2 visits, Red deer · 1 visit');
+ await page.waitForTimeout(300);assert.deepEqual(seen,['/api/cameras/c2/seen','/api/cameras/c1/seen'],'each camera opened is marked seen');assert.equal(await valley.locator('.map-badge--callout').isHidden(),true,'opening it clears the count');
+ await page.locator('.cam-strip-tile').first().waitFor();assert.equal(await page.locator('.cam-strip-tile').count(),3);
+ assert.ok(images.length>0&&images.every(p=>p.endsWith('/thumb')),'the map and the strip use small copies');
+ await page.locator('.cam-strip-tile').nth(1).click();await page.locator('.ov[role="dialog"]').waitFor();
+ assert.ok(images.some(p=>p==='/api/images/i2/file'),'the viewer opens the full photo');
+ await page.keyboard.press('Escape');await page.waitForTimeout(300);assert.equal(await page.locator('.bsheet').count(),1,'back to the sheet');
+ assert.equal(await page.getByRole('link',{name:'See all photos'}).getAttribute('href'),'/photos?camera=c1');
  await page.keyboard.press('Escape');await page.waitForTimeout(400);
 
  await page.getByRole('button',{name:'Map type, layers and tools',exact:true}).click();await page.getByRole('button',{name:/Add a stand/}).click();
@@ -124,6 +147,6 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const other=page.locator('#stand-s3');await other.waitFor();assert.equal(await other.getByRole('button').count(),0,'Other hunter reservations have no write controls');
  const free=page.locator('#stand-s1');await free.getByRole('button',{name:'Reserve',exact:true}).click();await free.getByRole('button',{name:'Cancel',exact:true}).waitFor();await free.getByRole('button',{name:'Cancel',exact:true}).click();await free.getByRole('button',{name:'Reserve',exact:true}).waitFor();
  if(process.env.UX_SCREENSHOTS)await page.screenshot({path:process.env.UX_SCREENSHOTS+'/stands-mobile.png',fullPage:true});
- assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/sheet snaps/layers, tile error and Try again keep every layer, Esri fallback and retry, overlapping pins ask which, camera header, crosshair draft/save, Back guards an outline, offline wind bar, mobile overflow, reservation ownership, cancelled reservations.');
+ assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/sheet snaps/layers, tile error and Try again keep every layer, Esri fallback and retry, overlapping pins ask which, camera header, camera photo and new count, seen clears it, strip thumbs open the viewer, crosshair draft/save, Back guards an outline, offline wind bar, mobile overflow, reservation ownership, cancelled reservations.');
  } finally { await browser.close() }
 })().catch(e=>{console.error(e);process.exit(1)});

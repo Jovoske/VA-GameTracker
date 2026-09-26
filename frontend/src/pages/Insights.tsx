@@ -1,7 +1,7 @@
 import { MoonIcon } from '@phosphor-icons/react/dist/csr/Moon'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, imageUrl } from '../api'
+import { api, thumbUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
 import WeatherPatterns, { type Patterns } from '../components/WeatherPatterns'
@@ -217,7 +217,7 @@ export default function Insights() {
                     onClick={() => setZoom(i)}
                     style={{ background: 'var(--surface-2)', borderRadius: 'var(--r-ctl)', overflow: 'hidden', cursor: 'pointer' }}
                   >
-                    <img src={imageUrl(im.file_url)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
+                    <img src={thumbUrl(im.image_id)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.camera}</span>
                       <span>{new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>

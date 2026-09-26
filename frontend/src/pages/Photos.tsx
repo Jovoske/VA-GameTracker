@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, imageUrl } from '../api'
+import { api, thumbUrl } from '../api'
 import PhotoLightbox from '../components/PhotoLightbox'
 import { useRefetchOnReturn } from '../hooks'
 import './photos.css'
@@ -197,7 +197,7 @@ export default function Photos() {
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => setZoom(g.start + j)}
               >
-                <img src={imageUrl(p.file_url)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
+                <img src={thumbUrl(p.image_id)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
                 <div className="photos-tile-meta">
                   <span className="photos-tile-label">{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
                   <span className="photos-tile-when">{timeOf(p.captured_at)}</span>

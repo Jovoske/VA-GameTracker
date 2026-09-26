@@ -1,6 +1,6 @@
 import type { Map, GeoJSONSource, ExpressionSpecification, PaddingOptions } from 'maplibre-gl'
 import { validLngLat, windGeometry, windToken, type Camera, type MapData } from './geometry'
-export type Layers = { bedding: boolean; wind: boolean; exposure: boolean; routes: boolean }
+export type Layers = { bedding: boolean; wind: boolean; exposure: boolean; routes: boolean; photos: boolean }
 export const empty: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 
 /**
@@ -60,7 +60,7 @@ export function renderLayers(map: Map, data: MapData, layers: Layers, selectedSt
 export function fitEstate(map: Map, data: MapData, cameras: Camera[], duration = 0, padding: number | PaddingOptions = 72) {
   // A bad coordinate from the API must not throw here: fitBounds on lat 1000 blanks the page (B-08).
   const points: [number, number][] = [
-    ...cameras.flatMap(c => validLngLat(c.lng, c.lat) ? [[c.lng!, c.lat!] as [number, number]] : []),
+    ...cameras.flatMap(c => validLngLat(c.lon, c.lat) ? [[c.lon!, c.lat!] as [number, number]] : []),
     ...data.stands.flatMap(s => validLngLat(s.lon, s.lat) ? [[s.lon!, s.lat!] as [number, number]] : []),
     ...data.zones.flatMap(z => z.polygon.coordinates[0].filter(p => validLngLat(p[0], p[1])).map(p => [p[0], p[1]] as [number, number])),
   ]

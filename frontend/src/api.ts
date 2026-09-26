@@ -22,6 +22,16 @@ export function imageUrl(path: string): string {
   return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
 }
 
+/** A photo's small copy, for every grid, strip and the map.
+ *
+ * A 320px-wide WebP the server makes once and the phone keeps for a year, so a
+ * page of tiles costs a few hundred KB instead of a page of originals on a weak
+ * signal. The photo viewer still opens `file_url`, the full photo.
+ */
+export function thumbUrl(imageId: string): string {
+  return imageUrl(`/api/images/${imageId}/thumb`)
+}
+
 /** What a hunter reads instead of the browser's own "Failed to fetch" or "Load failed". */
 export const NO_SIGNAL = 'No signal. Try again when you have a connection.'
 export const NO_ANSWER = 'No answer from the server.'
