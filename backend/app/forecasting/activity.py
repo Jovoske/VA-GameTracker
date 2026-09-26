@@ -14,12 +14,17 @@ walked there in the time, the two visits are linked. The map labels that a guess
 
 Both count visits from visits.list_visits, so their numbers agree with each other
 and with the camera sheet.
+
+**Last night.** The app's new day starts at 06:00, but the map's night runs on to
+08:00, so from 06:00 to 08:00 "last night" is still going. It is shown anyway, marked
+`so_far`: that is when the team first looks at what came past, and last night so far
+says more than the night before it.
 """
 from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, select
@@ -57,6 +62,11 @@ PART_WORDS = {
 
 def _local(at: datetime) -> datetime:
     return at.astimezone(ZoneInfo(settings.estate_timezone))
+
+
+def still_running(night: date, now: datetime | None = None) -> bool:
+    """Whether the map's night of `night` hasn't reached 08:00 yet."""
+    return (now or datetime.now(UTC)) < map_night_window(night)[1]
 
 
 def peak_window(hours: list[int], part: str) -> tuple[str | None, float]:
@@ -142,16 +152,18 @@ def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
 
 def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_with: int,
                   blind: int, checking: int, part: str, peak: str | None, share: float,
-                  times: list[datetime]) -> str:
+                  times: list[datetime], so_far: bool = False) -> str:
     """The one line the card leads with: "Wild boar on 5 of 7 nights, mostly 21–23 h".
 
     `who` is the species ("Wild boar") or "Animals" for all of them. The count of
     nights is the nights that counted; when that is fewer than the period, it says
     why ("it was working", "checked so far"), so 3 of 5 never reads as 3 of 7.
-    A few visits are given by their times, which say more than a window.
+    A few visits are given by their times, which say more than a window. `so_far`:
+    last night hasn't reached 08:00 yet, and the one-night read says so.
     """
     when = PART_WORDS[part]
-    lower = who[0].lower() + who[1:]
+    # Mid-sentence: "No roe deer", not the stored "Roe Deer".
+    lower = who.lower()
     if not watched:
         if checking:
             return ("Still checking last night’s photos." if nights == 1
@@ -169,12 +181,13 @@ def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_wi
     elif visits > 1:
         tail = ", at no set time"
     if nights == 1:
+        night = "last night so far" if so_far else "last night"
         if not visits:
             nothing = "Nothing on camera" if who == "Animals" else f"No {lower}"
-            return f"{nothing}{' ' + when if when else ''} last night."
+            return f"{nothing}{' ' + when if when else ''} {night}."
         noun = "animal" if who == "Animals" else lower
         plural = "" if visits == 1 else "s"
-        return f"{visits} {noun} visit{plural}{' ' + when if when else ''} last night{tail}"
+        return f"{visits} {noun} visit{plural}{' ' + when if when else ''} {night}{tail}"
     qualifier = " it was working" if blind else " checked so far" if checking else ""
     if not visits:
         none = "No animals" if who == "Animals" else f"No {lower}"
@@ -183,16 +196,18 @@ def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_wi
 
 
 def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: int, part: str,
-             species: str | None = None, species_label: str | None = None) -> dict:
+             species: str | None = None, species_label: str | None = None,
+             now: datetime | None = None) -> dict:
     """Per camera: visits per watched night over the last `nights`, and a one-line read.
 
     `species` None is every species, and `species_label` is the chosen one's name
     ("Wild boar"). `part` is a key of visits.PARTS. Only visits on nights the camera
     was watching count, so visits / watched_nights is honest. `species_options` are
     the named species seen in the period whatever the filters, busiest first, for
-    the filter chips.
+    the filter chips. `so_far` is true while the last night hasn't reached 08:00.
     """
     period = [last_night - timedelta(days=i) for i in range(nights - 1, -1, -1)]
+    so_far = still_running(last_night, now)
     ids = [c.id for c in cameras]
     start, end = map_night_window(period[0])[0], map_night_window(period[-1])[1]
     visits = list_visits(db, start=start, end=end, camera_ids=ids) if ids else []
@@ -202,6 +217,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
     seen: Counter = Counter()
     labels: dict = {}
     for v in visits:
+        # Never None: list_visits reads no daytime frames.
         v["map_night"] = map_night_of(v["first_at"])
         v["hour"] = _local(v["first_at"]).hour
         if v["species_id"] and v["map_night"] is not None:
@@ -247,8 +263,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
             "read": activity_read(
                 who=who, visits=len(mine), watched=len(counted), nights=nights,
                 nights_with=nights_with, blind=blind, checking=checking, part=part, peak=peak,
-                share=share,
-                times=[v["first_at"] for v in mine],
+                share=share, times=[v["first_at"] for v in mine], so_far=so_far,
             ),
         })
     return {
@@ -259,6 +274,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
         "species_label": who if species else None,
         "first_night": period[0].isoformat(),
         "last_night": period[-1].isoformat(),
+        "so_far": so_far,
         "species_options": [
             {"species_id": sid, "label": labels[sid], "visits": n}
             for sid, n in sorted(seen.items(), key=lambda kv: (-kv[1], labels[kv[0]]))
@@ -343,8 +359,12 @@ def replay(db: Session, *, cameras: list[Camera], night: date) -> dict:
 
 
 def replay_nights(db: Session, *, cameras: list[Camera], last_night: date,
-                  limit: int) -> list[dict]:
-    """The last `limit` finished nights, newest first, with how many visits each had."""
+                  limit: int, now: datetime | None = None) -> list[dict]:
+    """The last `limit` nights, newest first, with how many visits each had.
+
+    Each has `so_far`, true for a night that hasn't reached 08:00 yet (only last
+    night, and only from 06:00 to 08:00): its count is still growing.
+    """
     ids = [c.id for c in cameras]
     first = last_night - timedelta(days=limit - 1)
     counts: Counter = Counter()
@@ -355,5 +375,8 @@ def replay_nights(db: Session, *, cameras: list[Camera], last_night: date,
             if night is not None:
                 counts[night] += 1
     nights = [last_night - timedelta(days=i) for i in range(limit)]
-    return [{"night": n.isoformat(), "visits": counts[n]} for n in nights]
+    return [
+        {"night": n.isoformat(), "visits": counts[n], "so_far": still_running(n, now)}
+        for n in nights
+    ]
 

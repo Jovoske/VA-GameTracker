@@ -222,7 +222,7 @@ export default function MapPage() {
       // it. With a camera's sheet open, the circle opens that camera's sheet instead.
       if (viewRef.current === 'activity') {
         const { x, y } = e.point, pad = 14
-        const hit = instance.queryRenderedFeatures([[x - pad, y - pad], [x + pad, y + pad]], { layers: ['activity-circles', 'activity-quiet'] })[0]
+        const hit = instance.queryRenderedFeatures([[x - pad, y - pad], [x + pad, y + pad]], { layers: ['activity-circles', 'activity-quiet', 'activity-checking'] })[0]
         const id = hit?.properties?.id ? String(hit.properties.id) : null
         const pin = id ? markers.current.find(m => m.pin.kind === 'camera' && m.pin.id === id)?.pin : undefined
         if (sheetOpenRef.current) { if (pin) selectRef.current(pin); else chooseRef.current(null) }
@@ -550,7 +550,7 @@ export default function MapPage() {
   const modeBar = view !== 'cameras' && !editing && !sheet
   const replay = useReplay(mapObj, ready, view === 'replay', modeBar, cameras, setReplayPhoto)
   function setView(next: View) {
-    setViewState(next); setSelected(null); setPick(null); setSettingsOpen(false); setReplayPhoto(null)
+    setViewState(next); setSelected(null); setPick(null); setSettingsOpen(false); setReplayPhoto(null); setWindOpen(false)
     if (next !== 'activity') act.pick(null)
   }
   function openCameraSheet(id: string) {
@@ -558,9 +558,22 @@ export default function MapPage() {
     if (c && validLngLat(c.lon, c.lat)) select({ kind: 'camera', id, name: c.name, lon: c.lon!, lat: c.lat! })
     else choose({ kind: 'camera', id })
   }
-  const activityEmpty = view === 'activity' && !!act.data && !act.loading && !act.err
-    ? act.data.cameras.every(c => !c.watched_nights) ? 'No camera was working in this period, so there is nothing to show.'
-      : act.data.cameras.every(c => !c.visits) ? 'No visits in this period.' : '' : ''
+  // Nothing to draw, in words. Photos still waiting for the detector are not a
+  // camera that wasn't working: at dawn last night's newest photos often are.
+  const activityEmpty = (() => {
+    const a = act.data
+    if (view !== 'activity' || !a || act.loading || act.err) return ''
+    const checking = a.cameras.filter(c => c.checking_nights > 0).length, one = a.nights === 1
+    if (a.cameras.every(c => !c.watched_nights)) {
+      if (checking) return `Still checking ${one ? 'last night’s' : 'the'} photos. Look again in a few minutes.`
+      return `No camera was working ${one ? 'last night' : 'in this period'}, so there is nothing to show.`
+    }
+    if (a.cameras.every(c => !c.visits)) {
+      if (checking) return `No visits so far. Still checking the photos from ${checking === 1 ? '1 camera' : `${checking} cameras`}.`
+      return one && a.so_far ? 'No visits last night so far.' : 'No visits in this period.'
+    }
+    return ''
+  })()
   const onSheetHeight = useCallback((px: number) => {
     const stage = stageRef.current
     if (!stage) return
@@ -580,7 +593,9 @@ export default function MapPage() {
 
   return <div className="map-page" style={{ '--pin-scale': prefs.bigPins ? 1.25 : 1 } as CSSProperties}>
     <h1 className="sr-only">Map</h1>
-    <button type="button" className="map-windbar" aria-expanded={windOpen} aria-controls="map-wind-more" onClick={() => setWindOpen(v => !v)}>
+    {/* Tonight's wind says nothing about where the game was, and the views that show
+        that turn the wind off: the map gets the room instead. */}
+    {view === 'cameras' && <button type="button" className="map-windbar" aria-expanded={windOpen} aria-controls="map-wind-more" onClick={() => setWindOpen(v => !v)}>
       <span className="wind-direction" aria-hidden="true"><svg viewBox="0 0 40 40" style={{ transform: from == null ? undefined : `rotate(${downwind(from) - bearing}deg)` }}><circle cx="20" cy="20" r="18" />{from != null && <path d="M20 29V11m-6 6 6-6 6 6" />}</svg></span>
       <span className="map-wind-reading">
         <span>{air?.source === 'katabatic' ? 'Calm evening. Cold air sliding downhill' : air?.source === 'anabatic' ? 'Calm and sunny. Air drifting uphill' : 'Wind tonight'}</span>
@@ -589,13 +604,13 @@ export default function MapPage() {
       </span>
       <span className="map-wind-speed"><strong>{speed == null || !data ? '—' : Math.round(speed)}</strong><span>km/h</span></span>
       <span className="map-wind-chevron" aria-hidden="true">{windOpen ? '▴' : '▾'}</span>
-    </button>
+    </button>}
     <div className="map-stage" ref={stageRef} data-editing={editing ? 'true' : undefined} data-labels={zoom >= LABEL_ZOOM ? 'on' : undefined}
       data-view={view === 'cameras' ? undefined : view}
       data-callouts={!prefs.layers.photos || view !== 'cameras' ? undefined : zoom >= CALLOUT_ZOOM ? 'on' : 'dots'}>
       <div className="map-canvas-wrap">
         <div ref={mapEl} className="map-canvas" aria-label="Estate map. Drag to move, pinch to zoom." />
-        {windOpen && <div id="map-wind-more" className="map-wind-more">
+        {windOpen && view === 'cameras' && <div id="map-wind-more" className="map-wind-more">
           {!data && <p>{loading ? 'Getting tonight’s wind…' : 'The wind comes with the map. It shows once the map loads.'}</p>}
           {air?.text && <p>{air.text}</p>}
           <p>Arrows show where scent goes from each stand. Tap a stand to see how far it carries.</p>

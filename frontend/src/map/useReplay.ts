@@ -18,11 +18,17 @@ const words = (what: string, e: Failure) => e.offline ? `No signal, so ${what} d
  */
 export const showFor = (speed: number) => Math.max(30, speed * 1.5)
 const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
-/** The part of the map a photo or a label can use: not under the round buttons on the
- * right, nor the scale at the top. */
+/** The part of the map a photo or a label can use: not under the scale at the top, nor
+ * the round buttons on the right (a column, or on a phone on its side a row along the top). */
 function clearArea(map: maplibregl.Map): DOMRect {
   const r = map.getCanvas().getBoundingClientRect()
-  return new DOMRect(r.left, r.top + 40, Math.max(0, r.width - 68), Math.max(0, r.height - 40))
+  const fabs = map.getContainer().parentElement?.querySelector('.map-fabs--right')?.getBoundingClientRect()
+  let top = 40, right = 68
+  if (fabs?.width) {
+    if (fabs.height >= fabs.width) right = Math.max(0, r.right - fabs.left + 8)
+    else { top = Math.max(top, fabs.bottom - r.top + 8); right = 0 }
+  }
+  return new DOMRect(r.left, r.top + top, Math.max(0, r.width - right), Math.max(0, r.height - top))
 }
 type Side = 'above' | 'below' | 'right' | 'left'
 const SIDES: Side[] = ['above', 'below', 'right', 'left']
@@ -110,7 +116,8 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
   useEffect(() => { if (on && night) loadNight(night) }, [on, night, loadNight])
   useEffect(() => { if (!active) setPlaying(false) }, [active])
 
-  function setNight(next: string) { setPlaying(false); setData(null); tRef.current = 0; setTState(0); setNightState(next) }
+  // The same night again is no change: clearing it would wait for a load that never comes.
+  function setNight(next: string) { if (next === night) return; setPlaying(false); setData(null); tRef.current = 0; setTState(0); setNightState(next) }
 
   // Playback: the night's clock runs `speed` minutes per second of real time.
   useEffect(() => {
@@ -256,8 +263,9 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
         if (len < 110) return []
         const el = document.createElement('span')
         el.className = 'map-link-tag'
-        // The photos at both ends already say which animal.
-        el.textContent = 'Likely went this way'
+        // The photos at both ends already say which animal; this says it is a guess,
+        // which on a phone on its side is all there is room to say.
+        el.textContent = 'Likely went this way (a guess)'
         el.title = `${x.l.label}: likely went this way. A guess.`
         const marker = new maplibregl.Marker({ element: el }).setLngLat(a).addTo(map)
         const half = el.getBoundingClientRect().width / 2 - 8

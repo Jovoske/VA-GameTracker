@@ -2,13 +2,11 @@ import { PauseIcon } from '@phosphor-icons/react/dist/csr/Pause'
 import { PlayIcon } from '@phosphor-icons/react/dist/csr/Play'
 import { createPortal } from 'react-dom'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
-import { SPEEDS, clock, minutesInto, nightLabel } from './activity'
+import { SPEEDS, clock, hourMarks, minutesInto, nightLabel } from './activity'
 import type { Camera } from './geometry'
 import type { useReplay } from './useReplay'
 
 const STEP = 5
-// Hour marks under the timeline, in minutes after 18:00.
-const MARKS = [0, 180, 360, 540, 720, 840]
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /**
@@ -34,15 +32,17 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
     id: v.image_id, file_url: `/api/images/${v.image_id}/file`, captured_at: v.at,
     camera: names.get(v.camera_id) ?? '', label: v.group_size > 1 ? `${v.label} (${v.group_size})` : v.label,
   }))
-  const status = r.err ? null : !r.data ? (r.nights && !r.nights.length ? 'No nights yet' : 'Loading…')
+  // Nothing is loading once a load has failed: the error and its Try again say it all.
+  const status = r.err || r.nightsErr ? null : !r.data ? (r.nights && !r.nights.length ? 'No nights yet' : 'Loading…')
     : empty ? 'No visits' : `${r.soFar} of ${plural(r.visits.length, 'visit')}`
+  const marks = r.data ? hourMarks(r.data.start, r.data.end) : []
   return <section className="mode-bar mode-bar--replay" aria-label="Replay a night">
     <div className="mode-bar-row">
       <label className="replay-night">
         <span className="sr-only">Night</span>
         <select value={r.night ?? ''} disabled={!r.nights?.length} onChange={e => r.setNight(e.target.value)}>
-          {!r.nights && <option value="">Loading nights…</option>}
-          {r.nights?.map((n, i) => <option key={n.night} value={n.night}>{nightLabel(n.night, i === 0)} · {n.visits ? plural(n.visits, 'visit') : 'nothing'}</option>)}
+          {!r.nights && <option value="">{r.nightsErr ? 'Nights didn’t load' : 'Loading nights…'}</option>}
+          {r.nights?.map((n, i) => <option key={n.night} value={n.night}>{nightLabel(n.night, i === 0, n.so_far)} · {n.visits ? plural(n.visits, 'visit') : 'nothing'}</option>)}
         </select>
       </label>
       <button type="button" className="mode-bar-x" aria-label="Close replay, back to the camera photos" onClick={onClose}>
@@ -73,17 +73,18 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
       <input type="range" min={0} max={r.total} step={1} value={Math.round(r.t)} disabled={!r.data}
         aria-label="Time of night" aria-valuetext={`${now}, ${status ?? ''}`} onChange={e => r.setT(Number(e.target.value))} />
       <div className="replay-hours" aria-hidden="true">
-        {MARKS.map(m => <span key={m} style={{ left: pct(m) }}>{start != null ? clock(start + m * 60_000).slice(0, 2) : ''}</span>)}
+        {marks.map(x => <span key={x.m} style={{ left: pct(x.m) }}>{x.label}</span>)}
       </div>
     </div>
     <div className="replay-foot">
       <div className="mode-seg replay-speed" role="radiogroup" aria-label="Speed">
         {SPEEDS.map(s => <button key={s.id} type="button" role="radio" aria-checked={r.speed === s.id} title={s.note} aria-label={`${s.label}: ${s.note.toLowerCase()}`} onClick={() => r.setSpeed(s.id)}>{s.label}</button>)}
       </div>
+      {/* On a phone on its side only the guess line stays: it is what says the arrow is a guess. */}
       <p className="replay-note">
-        <span>{SPEEDS.find(s => s.id === r.speed)?.note}.</span>
-        {!!r.data?.links.length && <span><i className="replay-note-arrow" aria-hidden="true" />Likely went this way: a guess, from the same animal at the next camera within 3 h.</span>}
-        {r.offMap > 0 && <span>{plural(r.offMap, 'visit')} at cameras not on the map.</span>}
+        <span className="replay-note-speed">{SPEEDS.find(s => s.id === r.speed)?.note}.</span>
+        {!!r.data?.links.length && <span className="replay-note-guess"><i className="replay-note-arrow" aria-hidden="true" />Likely went this way: a guess, from the same animal at the next camera within 3 h.</span>}
+        {r.offMap > 0 && <span className="replay-note-off">{plural(r.offMap, 'visit')} at cameras not on the map.</span>}
       </p>
     </div>
     {photo != null && viewer[photo] && createPortal(

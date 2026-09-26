@@ -29,13 +29,18 @@ export function addLayers(map: Map) {
   map.addLayer({ id: 'routes-line', type: 'line', source: 'routes', paint: { 'line-color': c.camera, 'line-width': 1.5, 'line-dasharray': [2, 3], 'line-opacity': .7 } })
   // Activity: one colour, area for visits a night (activity.ts). A camera that was
   // watching and saw nothing is a small empty ring: a real zero, not a missing one.
-  map.addLayer({ id: 'activity-circles', type: 'circle', source: 'activity', filter: ['!', ['get', 'quiet']], paint: {
+  // One whose photos are still being checked is a fainter, wider ring: not yet known.
+  map.addLayer({ id: 'activity-circles', type: 'circle', source: 'activity', filter: ['==', ['get', 'mark'], 'visits'], paint: {
     'circle-radius': ['get', 'r'], 'circle-color': c.teal, 'circle-opacity': .35,
     'circle-stroke-color': ['case', ['get', 'picked'], c.text, c.teal], 'circle-stroke-width': ['case', ['get', 'picked'], 3, 2],
   } })
-  map.addLayer({ id: 'activity-quiet', type: 'circle', source: 'activity', filter: ['get', 'quiet'], paint: {
+  map.addLayer({ id: 'activity-quiet', type: 'circle', source: 'activity', filter: ['==', ['get', 'mark'], 'quiet'], paint: {
     'circle-radius': ['get', 'r'], 'circle-opacity': 0,
     'circle-stroke-color': ['case', ['get', 'picked'], c.text, c.quiet], 'circle-stroke-width': 2,
+  } })
+  map.addLayer({ id: 'activity-checking', type: 'circle', source: 'activity', filter: ['==', ['get', 'mark'], 'checking'], paint: {
+    'circle-radius': ['get', 'r'], 'circle-opacity': 0,
+    'circle-stroke-color': c.text, 'circle-stroke-opacity': ['case', ['get', 'picked'], .9, .4], 'circle-stroke-width': 1.5,
   } })
   // Replay: where the same species likely went next. Faint and dashed: a guess.
   map.addLayer({ id: 'replay-links-halo', type: 'line', source: 'replay-links', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': c.bg, 'line-width': 5, 'line-opacity': ['*', .45, ['get', 'o']] } })

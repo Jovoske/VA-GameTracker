@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.api.routes_map import last_completed_night
 from app.core.security import create_access_token
-from app.forecasting.activity import activity, likely_paths, replay
+from app.forecasting.activity import activity, likely_paths, replay, replay_nights, still_running
 from app.forecasting.exposure import visits_by_night
 from app.forecasting.visits import list_visits, map_night_window
 from app.models import Camera, CameraNight, Detection, Estate, Image, Species, User
@@ -49,6 +49,9 @@ def estate(db_session):
         Species(id="wild_boar", common_name="Wild Boar", is_priority=True),
         Species(id="red_deer", common_name="Red Deer", is_priority=True),
         Species(id="fox", common_name="Fox"),
+        # Stored as the classifier names them: title-cased.
+        Species(id="roe_deer", common_name="Roe Deer"),
+        Species(id="badger", common_name="Badger"),
         Species(id="lagomorph", common_name="Rabbit", hidden=True),
     ])
     db_session.commit()
@@ -191,6 +194,88 @@ def test_the_camera_sheet_and_the_activity_map_agree_on_last_night(client, db_se
         "wild_boar": 3, "red_deer": 1, "fox": 1,
     }
     assert act["read"].startswith("5 animal visits last night")
+
+
+def test_a_visit_under_way_at_dusk_or_eight_is_the_same_visit_on_every_view(
+    db_session, estate,
+):
+    """The day between two nights ends a visit, whichever range is asked for."""
+    cam = _camera(db_session, estate)
+    week = _week()
+    _watched(db_session, cam, week)
+    mid, late = week[3], week[5]
+    # A badger from 17:40 to 18:25 that evening: on the map, a visit at 18:05.
+    for at in (_at(mid, 18) - timedelta(minutes=20), _at(mid, 18, 5), _at(mid, 18, 25)):
+        _photo(db_session, cam, at, ("badger",))
+    # A fox from 07:50 into the day: a visit at 07:50 of one frame.
+    _photo(db_session, cam, _at(late, 7, 50), ("fox",))
+    _photo(db_session, cam, _at(late, 8, 10), ("fox",))
+
+    def act(last, nights, species):
+        got = activity(db_session, cameras=[cam], last_night=last, nights=nights, part="all",
+                       species=species)["cameras"][0]
+        return got["visits"], got["read"]
+
+    assert act(mid, 1, "badger") == (1, "1 badger visit last night, at 18:05")
+    assert act(NIGHT, 7, "badger") == (1, "Badger on 1 of 7 nights, at 18:05")
+    assert act(late, 1, "fox") == (1, "1 fox visit last night, at 07:50")
+    assert act(NIGHT, 7, "fox") == (1, "Fox on 1 of 7 nights, at 07:50")
+    played = {
+        n: [(v["label"], v["at"], v["last_at"], v["frames"])
+            for v in replay(db_session, cameras=[cam], night=n)["visits"]]
+        for n in (mid, late)
+    }
+    assert played == {
+        mid: [("Badger", _at(mid, 18, 5), _at(mid, 18, 25), 2)],
+        late: [("Fox", _at(late, 7, 50), _at(late, 7, 50), 1)],
+    }
+    listed = {n["night"]: n["visits"] for n in replay_nights(
+        db_session, cameras=[cam], last_night=NIGHT, limit=7)}
+    assert (listed[mid.isoformat()], listed[late.isoformat()]) == (1, 1)
+    assert sum(listed.values()) == 2
+
+
+def test_species_read_mid_sentence_in_lower_case(db_session, estate):
+    cam = _camera(db_session, estate)
+    _watched(db_session, cam, [NIGHT])
+
+    def read(**kw):
+        got = activity(db_session, cameras=[cam], last_night=NIGHT, nights=1, part="all", **kw)
+        return got["cameras"][0]["read"]
+
+    # With the label the endpoint passes, and with the one the visits carry.
+    assert read(species="roe_deer", species_label="Roe Deer") == "No roe deer last night."
+    _photo(db_session, cam, _at(NIGHT, 21), ("roe_deer",))
+    assert read(species="roe_deer") == "1 roe deer visit last night, at 21:00"
+
+
+def test_last_night_is_marked_so_far_until_eight(db_session, estate):
+    """From 06:00 the app calls it last night, but the map's night runs to 08:00."""
+    cam = _camera(db_session, estate)
+    _watched(db_session, cam, [NIGHT])
+    _photo(db_session, cam, _at(NIGHT, 21))
+    seven, eight = _at(NIGHT, 7), _at(NIGHT, 8)
+    assert last_completed_night(seven) == NIGHT
+    assert still_running(NIGHT, seven) and not still_running(NIGHT, eight)
+
+    def act(now):
+        return activity(db_session, cameras=[cam], last_night=NIGHT, nights=1, part="all",
+                        now=now)
+
+    early = act(seven)
+    assert early["so_far"] is True
+    assert early["cameras"][0]["read"] == "1 animal visit last night so far, at 21:00"
+    later = act(eight)
+    assert later["so_far"] is False
+    assert later["cameras"][0]["read"] == "1 animal visit last night, at 21:00"
+    got = activity(db_session, cameras=[cam], last_night=NIGHT, nights=1, part="all",
+                   species="red_deer", species_label="Red deer", now=seven)
+    assert got["cameras"][0]["read"] == "No red deer last night so far."
+
+    listed = replay_nights(db_session, cameras=[cam], last_night=NIGHT, limit=3, now=seven)
+    assert [(n["visits"], n["so_far"]) for n in listed] == [(1, True), (0, False), (0, False)]
+    assert not replay_nights(db_session, cameras=[cam], last_night=NIGHT, limit=1,
+                             now=eight)[0]["so_far"]
 
 
 # ── the activity map ────────────────────────────────────────────────────────
@@ -356,6 +441,7 @@ def test_activity_endpoint_is_for_everyone_and_checks_its_filters(client, db_ses
     assert body["hours"] == [18, 22]
     assert body["last_night"] == night.isoformat()
     assert body["first_night"] == (night - timedelta(days=29)).isoformat()
+    assert isinstance(body["so_far"], bool)
     charca = next(c for c in body["cameras"] if c["name"] == "Charca")
     assert (charca["lat"], charca["visits"], charca["watched_nights"], charca["per_night"]) == (
         CHARCA[0], 1, 30, 0.03,
@@ -444,7 +530,8 @@ def test_replay_endpoints(client, db_session, estate):
 
     r = client.get("/api/map/replay/nights?limit=3", headers=headers)
     assert r.status_code == 200, r.text
-    assert r.json() == [
+    assert [n.pop("so_far") for n in r.json()][1:] == [False, False]
+    assert [{k: v for k, v in n.items() if k != "so_far"} for n in r.json()] == [
         {"night": night.isoformat(), "visits": 1},
         {"night": (night - timedelta(days=1)).isoformat(), "visits": 0},
         {"night": (night - timedelta(days=2)).isoformat(), "visits": 2},

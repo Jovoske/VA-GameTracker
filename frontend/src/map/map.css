@@ -308,6 +308,8 @@
 }
 
 /* ── Activity and Replay: the cameras' visits, docked under the map ── */
+/* No wind header over these views: the map's own top corners are rounded instead. */
+@media (min-width: 641px) { .map-stage[data-view] { border-radius: var(--r-card); } }
 /* Stands are landmarks here, not things to open. */
 .map-stage[data-view] .map-pin--stand { opacity: .5; }
 .map-stage[data-view] .map-pin--stand .map-pin-icon { width: calc(20px * var(--pin-scale)); height: calc(20px * var(--pin-scale)); }
@@ -332,7 +334,7 @@
 .mode-chips::-webkit-scrollbar { display: none; }
 .mode-chips button { flex: 0 0 auto; min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: var(--r-pill); background: transparent; color: var(--text-dim); font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; }
 .mode-chips button[aria-checked='true'] { background: var(--go); border-color: var(--go); color: var(--on-go); font-weight: 700; }
-.mode-legend { display: flex; align-items: center; gap: 4px 12px; }
+.mode-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .mode-legend-key { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
 .mode-legend-key svg { flex-shrink: 0; }
 .mode-legend-dot { fill: color-mix(in srgb, var(--teal) 35%, transparent); stroke: var(--teal); stroke-width: 2; }
@@ -380,10 +382,11 @@
 .replay-now { display: flex; flex-direction: column; align-items: flex-end; margin: 0 0 0 auto; min-width: 0; text-align: right; line-height: 1.15; }
 .replay-now strong { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
 .replay-now span { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
-/* The timeline is a real slider over the whole bar width: drag anywhere on it. The
-   ticks sit inside the thumb's travel (half a thumb in from each end). */
+/* The timeline is a real slider over the whole bar width: drag anywhere on it. Its
+   handle is a 44 px puck, a glove's width. The ticks sit inside the handle's travel
+   (half a handle in from each end). */
 .replay-track { position: relative; height: 62px; }
-.replay-ticks, .replay-hours { position: absolute; left: 16px; right: 16px; pointer-events: none; }
+.replay-ticks, .replay-hours { position: absolute; left: 22px; right: 22px; pointer-events: none; }
 .replay-ticks { top: 6px; height: 32px; }
 .replay-ticks i { position: absolute; top: 3px; bottom: 3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text-dim); opacity: .5; }
 .replay-ticks i.is-past { background: var(--teal); opacity: 1; }
@@ -392,9 +395,9 @@
 .replay-track input[type='range'] { position: absolute; inset: 0 0 auto; width: 100%; height: 44px; margin: 0; background: transparent; -webkit-appearance: none; appearance: none; cursor: pointer; touch-action: none; }
 .replay-track input[type='range']:disabled { cursor: default; opacity: .5; }
 .replay-track input[type='range']::-webkit-slider-runnable-track { height: 4px; border-radius: var(--r-pill); background: var(--border); }
-.replay-track input[type='range']::-webkit-slider-thumb { -webkit-appearance: none; width: 32px; height: 32px; margin-top: -14px; border-radius: 50%; background: var(--text); border: 4px solid var(--teal); box-shadow: 0 2px 8px rgb(0 0 0 / .5); }
+.replay-track input[type='range']::-webkit-slider-thumb { -webkit-appearance: none; box-sizing: border-box; width: 44px; height: 44px; margin-top: -20px; border-radius: 50%; background: radial-gradient(circle, var(--text) 0 8px, var(--surface-2) 9px); border: 3px solid var(--teal); box-shadow: 0 2px 8px rgb(0 0 0 / .5); }
 .replay-track input[type='range']::-moz-range-track { height: 4px; border-radius: var(--r-pill); background: var(--border); }
-.replay-track input[type='range']::-moz-range-thumb { width: 24px; height: 24px; border-radius: 50%; background: var(--text); border: 4px solid var(--teal); }
+.replay-track input[type='range']::-moz-range-thumb { box-sizing: border-box; width: 44px; height: 44px; border-radius: 50%; background: radial-gradient(circle, var(--text) 0 8px, var(--surface-2) 9px); border: 3px solid var(--teal); }
 .replay-track input[type='range']:focus-visible { outline: none; }
 .replay-track input[type='range']:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--teal); }
 .replay-controls { display: flex; align-items: center; gap: 8px; }
@@ -412,21 +415,30 @@
   .mode-bar--activity .mode-bar-row > .mode-seg, .mode-bar--activity > .mode-seg { max-width: 560px; }
   .mode-bar--replay .mode-bar-row > .replay-night { flex: 0 1 420px; margin-right: auto; }
 }
-/* A phone on its side: each bar in two rows, so the map keeps some height. */
+/* A phone on its side: each bar in two rows, so the map keeps some height. What must
+   stay is kept in one line: what the circles' size means, and that an arrow is a guess. */
 @media (max-height: 500px) {
   .mode-bar { gap: 6px; padding: 6px 12px 8px; }
-  .mode-legend, .replay-note { display: none; }
-  .mode-bar--activity { display: grid; grid-template-columns: 1fr 1.2fr; grid-template-areas: 'period parts' 'chips chips'; gap: 6px 10px; }
+  .mode-bar--activity { display: grid; grid-template-columns: 1fr 1.2fr; grid-template-areas: 'period parts' 'chips legend'; gap: 6px 10px; }
   .mode-bar--activity > .mode-bar-row { grid-area: period; }
   .mode-bar--activity > .mode-seg--parts { grid-area: parts; }
-  .mode-bar--activity > .mode-chips { grid-area: chips; }
-  .mode-bar--replay { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; grid-template-areas: 'night controls speed' 'track track track'; gap: 2px 12px; align-items: center; }
+  .mode-bar--activity > .mode-chips { grid-area: chips; margin-right: 0; padding-right: 0; }
+  .mode-bar--activity > .mode-legend { grid-area: legend; min-width: 0; }
+  .mode-legend-key { display: none; }
+  .mode-legend small { min-width: 0; }
+  .mode-bar--replay { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; grid-template-areas: 'night controls speed' 'track track track' 'note note note'; gap: 2px 12px; align-items: center; }
   .mode-bar--replay > .mode-bar-row { grid-area: night; }
   .mode-bar--replay > .replay-controls { grid-area: controls; }
-  .mode-bar--replay > .replay-foot { grid-area: speed; }
-  .mode-bar--replay > .replay-track { grid-area: track; height: 56px; }
+  .mode-bar--replay > .replay-foot { display: contents; }
+  .mode-bar--replay .replay-speed { grid-area: speed; }
+  .mode-bar--replay .replay-note { grid-area: note; min-width: 0; }
+  .replay-note-speed, .replay-note-off { display: none; }
+  .replay-note:not(:has(.replay-note-guess)) { display: none; }
+  .replay-note-guess { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mode-bar--replay > .replay-track { grid-area: track; height: 58px; }
   .mode-bar--replay > .map-inline-error { grid-column: 1 / -1; }
-  .replay-hours { top: 40px; }
-  .replay-play { min-height: 48px; }
   .replay-now strong { font-size: 20px; }
+  /* The round buttons on the right go in a row along the top: a column is taller
+     than the map left above a bar. */
+  .map-stage[data-view] .map-fabs--right { flex-direction: row-reverse; }
 }

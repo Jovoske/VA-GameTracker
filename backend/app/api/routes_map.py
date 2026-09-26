@@ -283,9 +283,11 @@ def map_activity(
 ) -> dict:
     """Where the game is: visits per watched night at each camera.
 
-    `nights` is 1 (the last finished night), 7 or 30, counted back from last
-    night. `part` is dusk 18-22, night 22-03, dawn 03-08 or all of 18-08, by local
-    hour. `species` is a species id or "all". Per camera: visits, the nights it was
+    `nights` is 1 (last night), 7 or 30, counted back from last night. Last night
+    is the one the app's day (from 06:00) calls last night; the map's night runs on
+    to 08:00, so until then `so_far` is true and the one-night reads say so. `part`
+    is dusk 18-22, night 22-03, dawn 03-08 or all of 18-08, by local hour.
+    `species` is a species id or "all". Per camera: visits, the nights it was
     watching (watched_nights) and how many of those had a visit (nights_with),
     per_night (null when it watched none), the busiest two hours (peak, '21–23'),
     the species behind the count, and `read`, the line the map leads with. Nights a
@@ -311,8 +313,9 @@ def map_activity(
 def map_replay_nights(
     user: CurrentUser, db: DB, limit: Annotated[int, Query(ge=1, le=60)] = 14,
 ) -> list[dict]:
-    """The last `limit` finished nights, newest first, each with its number of visits
-    (18:00-08:00, every camera and species). Any role."""
+    """The last `limit` nights, newest first, each with its number of visits
+    (18:00-08:00, every camera and species). From 06:00 to 08:00 the newest is
+    still going: it is marked `so_far`. Any role."""
     return replay_nights(
         db, cameras=_estate_cameras(db, user), last_night=last_completed_night(), limit=limit,
     )

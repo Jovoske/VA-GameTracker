@@ -43,7 +43,8 @@ export type ActivityCamera = {
 }
 export type Activity = {
   nights: Nights; part: Part; species: string; species_label: string | null
-  first_night: string; last_night: string
+  /** so_far: last night hasn't reached 08:00 yet, so its count is still growing. */
+  first_night: string; last_night: string; so_far: boolean
   species_options: SpeciesVisits[]; cameras: ActivityCamera[]
 }
 export type ActivityFilters = { nights: Nights; part: Part; species: string }
@@ -52,37 +53,46 @@ export const activityPath = (f: ActivityFilters) => `/map/activity?species=${enc
 
 // Circle AREA is visits a night, so a camera with four times the visits reads as
 // four times the ink, not sixteen. At 1 a night the radius is 12 px. Big feeders
-// stop growing at 38 px so they don't bury the cameras around them, and nothing is
-// smaller than 8 px, so every circle shows around its camera's 12 px dot.
+// stop growing at 10 a night (38 px) so they don't bury the cameras around them,
+// and nothing is smaller than 8 px, so every circle shows around its camera's 12 px dot.
 const R_ONE = 12
-const R_MAX = 38
+export const TOP_RATE = 10
+const R_MAX = R_ONE * Math.sqrt(TOP_RATE)
 const R_MIN = 8
 // A camera that was working and saw nothing: an empty ring just round its dot.
 const R_QUIET = 9
+// A camera whose photos are still being checked: a faint ring a little wider.
+const R_CHECKING = 13
 export const circleRadius = (perNight: number) => Math.min(R_MAX, Math.max(R_MIN, R_ONE * Math.sqrt(perNight)))
 // The legend's two sizes: a round number at or above the busiest camera, and one
 // about a fifth of it, so both circles in the key look like circles on the map.
-// Never below 1 every 2 nights: smaller rates all get the smallest circle.
-const LADDER = [0.5, 1, 2, 5, 10, 20]
+// Never below 1 every 2 nights: smaller rates all get the smallest circle. Never
+// above TOP_RATE: circles stop growing there, so the key says "10+ a night".
+const LADDER = [0.5, 1, 2, 5, TOP_RATE]
 export function legendSizes(max: number): [number, number] {
   const big = LADDER.findIndex(v => v >= max)
   const i = big < 0 ? LADDER.length - 1 : Math.max(2, big)
   return [LADDER[i - 2], LADDER[i]]
 }
-export const rateWords = (perNight: number) =>
-  perNight >= 1 ? `${perNight % 1 ? perNight.toFixed(1) : perNight} a night` : `1 every ${Math.round(1 / perNight)} nights`
+/** "2 a night", "0.8 a night", "1 every 3 nights": never "every 1 nights". */
+export function rateWords(perNight: number): string {
+  if (!(perNight > 0)) return 'none'
+  const every = Math.round(1 / perNight)
+  return every >= 2 ? `1 every ${every} nights` : `${Math.round(perNight * 10) / 10} a night`
+}
 
-/** The activity circles (GL layers 'activity-circles' and 'activity-quiet'). */
+/** The activity circles (GL layers 'activity-circles', 'activity-quiet' and 'activity-checking'). */
 export function drawActivity(map: MlMap, data: Activity | null, picked: string | null) {
   const features: GeoJSON.Feature[] = []
   for (const c of data?.cameras ?? []) {
-    if (!validLngLat(c.lon, c.lat) || c.per_night == null) continue
+    if (!validLngLat(c.lon, c.lat)) continue
     const geometry: GeoJSON.Point = { type: 'Point', coordinates: [c.lon!, c.lat!] }
+    const base = { id: c.camera_id, picked: c.camera_id === picked }
     // A camera that was working and saw nothing is a real zero: a small empty ring.
-    // One that wasn't working gets no mark at all; its card says why.
-    features.push({ type: 'Feature', geometry, properties: {
-      id: c.camera_id, quiet: c.visits === 0, r: c.visits ? circleRadius(c.per_night) : R_QUIET, picked: c.camera_id === picked,
-    } })
+    // One whose photos are still with the detector gets a faint ring until they are
+    // checked. One that wasn't working gets no mark at all; its card says why.
+    if (c.per_night != null) features.push({ type: 'Feature', geometry, properties: { ...base, mark: c.visits ? 'visits' : 'quiet', r: c.visits ? circleRadius(c.per_night) : R_QUIET } })
+    else if (c.checking_nights) features.push({ type: 'Feature', geometry, properties: { ...base, mark: 'checking', r: R_CHECKING } })
   }
   setSource(map, 'activity', features)
 }
@@ -91,7 +101,8 @@ export function drawActivity(map: MlMap, data: Activity | null, picked: string |
 export type ReplayVisit = { at: string; last_at: string; camera_id: string; species_id: string | null; label: string; group_size: number; frames: number; image_id: string }
 export type ReplayLink = { from_camera_id: string; to_camera_id: string; species_id: string; label: string; from_at: string; to_at: string }
 export type Replay = { night: string; start: string; end: string; visits: ReplayVisit[]; links: ReplayLink[] }
-export type ReplayNight = { night: string; visits: number }
+/** so_far: last night, before 08:00, when it is still going. */
+export type ReplayNight = { night: string; visits: number; so_far?: boolean }
 /** Minutes of the night that pass in one second of playback. Real time would take 14 hours. */
 export const SPEEDS: { id: number; label: string; note: string }[] = [
   { id: 1, label: '1×', note: 'An hour in a minute' },
@@ -102,10 +113,24 @@ export const minutesInto = (iso: string, start: string) => (Date.parse(iso) - Da
 const pad = (n: number) => String(n).padStart(2, '0')
 /** 24-hour clock, as the rest of the map ("mostly 21–23 h"). */
 export const clock = (ms: number) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
-export function nightLabel(night: string, first: boolean): string {
+export function nightLabel(night: string, first: boolean, soFar = false): string {
   const d = new Date(`${night}T12:00:00`)
   const day = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-  return first ? `Last night · ${day}` : day
+  return first ? `Last night${soFar ? ' (so far)' : ''} · ${day}` : day
+}
+/**
+ * The hours under the timeline: every third hour on the clock (18, 21, 00, 03, 06)
+ * and the end, each at its minute of the night. Read off the clock, not fixed
+ * steps: the nights the clocks change are 13 and 15 hours long.
+ */
+export function hourMarks(start: string, end: string): { m: number; label: string }[] {
+  const s = Date.parse(start), e = Date.parse(end), out: { m: number; label: string }[] = []
+  for (let t = s; t < e; t += 3_600_000) {
+    const h = new Date(t).getHours()
+    if (h % 3 === 0 && !out.some(x => x.label === pad(h))) out.push({ m: (t - s) / 60_000, label: pad(h) })
+  }
+  out.push({ m: (e - s) / 60_000, label: pad(new Date(e).getHours()) })
+  return out
 }
 
 /**

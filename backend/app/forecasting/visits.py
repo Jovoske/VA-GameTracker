@@ -15,7 +15,10 @@ still waiting for the detector is not a visit yet: most of them turn out empty.
 The map's night runs 18:00 to 08:00 local time, the replay's timeline, so first
 light (dawn, 03-08) belongs to the night before it. The app's night key
 (exposure.night_expr) agrees on everything up to 06:00; each visit also carries that
-key as `night`, for the statistics that are keyed by it.
+key as `night`, for the statistics that are keyed by it. The map reads only frames
+inside its nights (list_visits), so the day between two nights ends every visit: a
+badger that turned up at 17:40 and stayed past 18:00 is a visit at 18:05 on the one
+night and on the week alike.
 """
 from __future__ import annotations
 
@@ -94,7 +97,8 @@ def part_hours(part: str) -> list[int]:
 
 
 def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
-               camera_ids: list | None = None, species_id: str | None = None):
+               camera_ids: list | None = None, species_id: str | None = None,
+               map_nights: bool = False):
     """One row per visit, as a subquery.
 
     Columns: camera_id, species_id, common_name, night (the app's night key of its
@@ -102,8 +106,10 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
     it, 1 when nobody counted), image_id (its first frame).
 
     Only frames in [start, end) are read, so a visit that began before `start` is
-    counted from its first frame inside the range. A photo holding a hidden species
-    and a visible one counts once, as the visible one.
+    counted from its first frame inside the range. With `map_nights`, only frames
+    inside the map's nights (18:00-08:00) are, so however many nights the range
+    spans, each visit is what reading its own night alone would give. A photo
+    holding a hidden species and a visible one counts once, as the visible one.
     """
     named = (
         select(Detection.image_id, Detection.species_id, Species.common_name, Detection.group_size)
@@ -116,6 +122,8 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
         conditions.append(Image.captured_at >= start)
     if end is not None:
         conditions.append(Image.captured_at < end)
+    if map_nights:
+        conditions.append(in_map_night())
     if camera_ids is not None:
         conditions.append(Image.camera_id.in_(camera_ids))
     if species_id is not None:
@@ -180,13 +188,17 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
 
 def list_visits(db: Session, *, start: datetime, end: datetime, camera_ids: list | None = None,
                 species_id: str | None = None) -> list[dict]:
-    """Every visit whose frames fall in [start, end), earliest first.
+    """Every visit whose frames fall in [start, end) and inside the map's nights,
+    earliest first.
 
     Each is {camera_id, species_id, label, night, first_at, last_at, frames,
     max_group, image_id}. The label is the species in the Photos tiles' words
-    ("Wild boar"), or "Animal" for a kept photo nobody has named.
+    ("Wild boar"), or "Animal" for a kept photo nobody has named. Daytime frames
+    are not read, so a visit never starts in the day: the activity map, the replay
+    and its list of nights count the same visits whatever range they ask for.
     """
-    v = visit_rows(start=start, end=end, camera_ids=camera_ids, species_id=species_id)
+    v = visit_rows(start=start, end=end, camera_ids=camera_ids, species_id=species_id,
+                   map_nights=True)
     rows = db.execute(select(v).order_by(v.c.first_at, v.c.camera_id, v.c.species_id)).all()
     return [
         {

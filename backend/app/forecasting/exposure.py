@@ -22,7 +22,8 @@ counts arrivals instead, and `group_size` recovers the herd.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, cast, func, select, text
 from sqlalchemy.orm import Session
@@ -54,6 +55,11 @@ CREDIT_BLIND_DAYS = 7
 def night_expr(col=Image.captured_at):
     """SQL expression for the night an image belongs to."""
     return func.date(func.timezone(_TZ, col) - NIGHT_SHIFT)
+
+
+def night_key_start(night: date) -> datetime:
+    """The first moment night_expr puts on `night`: 06:00 local that morning."""
+    return datetime.combine(night, time(6), tzinfo=ZoneInfo(_TZ))
 
 
 def local_hour(col=Image.captured_at):
@@ -189,7 +195,8 @@ def excluded_nights(db: Session, camera_id=None) -> int:
 # ── independent visits ──────────────────────────────────────────────────────
 
 
-def visits_by_night(db: Session, *, camera_id=None, species_id=None) -> dict:
+def visits_by_night(db: Session, *, camera_id=None, species_id=None,
+                    start: datetime | None = None, end: datetime | None = None) -> dict:
     """{(night, camera_id, species_id): {frames, visits, animals}}
 
     A visit is an arrival: consecutive detections of the same species at the same
@@ -199,11 +206,18 @@ def visits_by_night(db: Session, *, camera_id=None, species_id=None) -> dict:
     nobody has named is an unnamed (None) visit. A visit belongs to the night of its
     first frame. `animals` uses group_size, which the pipeline already computes per
     frame and which nothing has ever used.
+
+    Only frames in [start, end) are read. Without them this is every photo ever
+    taken, which grows with the archive: a caller that wants a month should start
+    a whole night before the first night it keeps (night_key_start of that night
+    before), so a visit already under way is counted on its own night, not cut
+    in two at `start`.
     """
     # Imported here: visits reads VISIT_GAP and night_expr from this module.
     from app.forecasting.visits import visit_rows
 
-    v = visit_rows(camera_ids=[camera_id] if camera_id else None, species_id=species_id)
+    v = visit_rows(start=start, end=end, camera_ids=[camera_id] if camera_id else None,
+                   species_id=species_id)
     rows = db.execute(
         select(
             v.c.night, v.c.camera_id, v.c.species_id,

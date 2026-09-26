@@ -18,9 +18,10 @@ export function ActivityBar({ filters, onFilters, data, onClose }: {
     ? [{ species_id: filters.species, label: data?.species === filters.species && data.species_label ? data.species_label : 'This animal', visits: 0 }] : []
   const chips = [...chosen, ...options]
   const rates = (data?.cameras ?? []).flatMap(c => c.per_night ? [c.per_night] : [])
-  const [small, big] = legendSizes(Math.max(0, ...rates))
-  const key = (rate: number) => { const r = circleRadius(rate), d = Math.ceil(r * 2 + 4)
-    return <span className="mode-legend-key"><svg width={d} height={d} aria-hidden="true"><circle className="mode-legend-dot" cx={d / 2} cy={d / 2} r={r} /></svg>{rateWords(rate)}</span> }
+  const top = Math.max(0, ...rates)
+  const [small, big] = legendSizes(top)
+  const key = (rate: number, words: string) => { const r = circleRadius(rate), d = Math.ceil(r * 2 + 4)
+    return <span className="mode-legend-key"><svg width={d} height={d} aria-hidden="true"><circle className="mode-legend-dot" cx={d / 2} cy={d / 2} r={r} /></svg>{words}</span> }
   return <section className="mode-bar mode-bar--activity" aria-label="Activity">
     <div className="mode-bar-row">
       <div className="mode-seg" role="radiogroup" aria-label="How far back">
@@ -40,8 +41,9 @@ export function ActivityBar({ filters, onFilters, data, onClose }: {
       {chips.map(o => <button key={o.species_id} type="button" role="radio" aria-checked={filters.species === o.species_id} onClick={() => onFilters({ ...filters, species: o.species_id! })}>{o.label}</button>)}
     </div>
     <div className="mode-legend" aria-label="What the circles mean">
-      {key(small)}{key(big)}
-      <small>Visits a night the camera was working. Nights it wasn’t are left out.</small>
+      {/* Circles stop growing at TOP_RATE, so a busier camera is "10+" in the key. */}
+      {key(small, rateWords(small))}{key(big, top > big ? `${big}+ a night` : rateWords(big))}
+      <small>Circle size: visits a night the camera was working. Nights it wasn’t are left out.</small>
     </div>
   </section>
 }
