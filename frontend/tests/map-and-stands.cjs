@@ -16,8 +16,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  // last night in visits; Track has no photo yet.
  const ok={status:'ok',detail:'Reporting normally',producing:true,hours_since_report:1};
  const shotAt=new Date(Date.now()-3*3600e3).toISOString();
- const cameras=[{id:'c1',name:'Valley camera',lat:39.095,lon:-1.358,battery_pct:72,signal_pct:65,last_report_at:shotAt,health:ok,can_rename:true,latest:{image_id:'i1',captured_at:shotAt,species_id:'wild_boar',label:'Sounder'},new_count:3,last_night:[{species_id:'wild_boar',label:'Wild boar',visits:2},{species_id:'red_deer',label:'Red deer',visits:1}],last_night_watched:true},
-  {id:'c2',name:'Track camera',lat:39.0911,lon:-1.3551,battery_pct:15,signal_pct:null,last_report_at:shotAt,health:{...ok,status:'low_battery'},can_rename:true,latest:null,new_count:0,last_night:[],last_night_watched:true}];
+ const cameras=[{id:'c1',name:'Valley camera',lat:39.095,lon:-1.358,battery_pct:72,signal_pct:65,last_report_at:shotAt,health:ok,can_rename:true,latest:{image_id:'i1',captured_at:shotAt,species_id:'wild_boar',label:'Sounder'},new_count:3,last_night:[{species_id:'wild_boar',label:'Wild boar',visits:2},{species_id:'red_deer',label:'Red deer',visits:1}],last_night_status:'watched'},
+  {id:'c2',name:'Track camera',lat:39.0911,lon:-1.3551,battery_pct:15,signal_pct:null,last_report_at:shotAt,health:{...ok,status:'low_battery'},can_rename:true,latest:null,new_count:0,last_night:[],last_night_status:'watched'}];
  const strip=[0,1,2].map(i=>({image_id:'i'+(i+1),file_url:`/api/images/i${i+1}/file`,captured_at:new Date(Date.now()-(3+i)*3600e3).toISOString(),camera:'Valley camera',camera_id:'c1',label:'Sounder',species_id:'wild_boar',group_size:4}));
  const writes=[],seen=[];
  const data=()=>({conditions:{wind_dir_deg:315,wind_speed_kmh:12},airflow:{source:'synoptic',wind_dir_deg:315,wind_speed_kmh:12},zones:[{id:'z1',name:'Pine cover',kind:'bedding',polygon:{type:'Polygon',coordinates:[[[-1.354,39.097],[-1.351,39.098],[-1.349,39.096],[-1.354,39.097]]]}}],stands:stands.map(s=>({...s,wind:{status:s.id==='s3'?'unknown':'clean',source:s.id==='s3'?'unknown':'synoptic',scent_bearing:135,speed_kmh:12,range_m:320,half_deg:22.5,text:'Estimated scent travels southeast, away from mapped bedding.'},approaches:[]})),safe_ground:{status:'ok',cells:[]},routes:[],scent_range_m:320,terrain_loaded:true});
@@ -143,10 +143,22 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  offline=true;await page.reload();await page.getByText('No signal, so the map didn’t load.').waitFor({timeout:15000});
  assert.match(await page.locator('.map-windbar').innerText(),/Wind not loaded/);offline=false;
 
+ // S2R-3: last night's line says how far to trust it. Frames still being checked are not
+ // a quiet night nor a dead camera; a camera out of credits may not have sent everything.
+ cameras[1].last_night_status='checking';cameras[0].last_night_status='incomplete';
+ await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
+ assert.equal(await page.locator('.cam-sheet-night').innerText(),'Still checking last night’s photos.');
+ await page.goto(base+'/map?camera=c1');await page.locator('.bsheet[aria-label="Camera: Valley camera"]').waitFor();
+ assert.equal(await page.locator('.cam-sheet-night').innerText(),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nOut of photo credits last night, so this may not be everything.');
+ cameras[1].last_night_status='blind';cameras[1].health={...ok,status:'offline',producing:false};cameras[1].last_report_at=new Date(Date.now()-3*86400e3).toISOString();
+ await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
+ assert.equal(await page.locator('.cam-sheet-status--warn').first().innerText(),'Not checking in. Last heard 3 d ago.');
+ assert.match(await page.locator('.cam-sheet-night').innerText(),/^No photos from last night\. The camera may not have been working/);
+
  await page.goto(base+'/stands');
  const other=page.locator('#stand-s3');await other.waitFor();assert.equal(await other.getByRole('button').count(),0,'Other hunter reservations have no write controls');
  const free=page.locator('#stand-s1');await free.getByRole('button',{name:'Reserve',exact:true}).click();await free.getByRole('button',{name:'Cancel',exact:true}).waitFor();await free.getByRole('button',{name:'Cancel',exact:true}).click();await free.getByRole('button',{name:'Reserve',exact:true}).waitFor();
  if(process.env.UX_SCREENSHOTS)await page.screenshot({path:process.env.UX_SCREENSHOTS+'/stands-mobile.png',fullPage:true});
- assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/sheet snaps/layers, tile error and Try again keep every layer, Esri fallback and retry, overlapping pins ask which, camera header, camera photo and new count, seen clears it, strip thumbs open the viewer, crosshair draft/save, Back guards an outline, offline wind bar, mobile overflow, reservation ownership, cancelled reservations.');
+ assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/sheet snaps/layers, tile error and Try again keep every layer, Esri fallback and retry, overlapping pins ask which, camera header, camera photo and new count, seen clears it, strip thumbs open the viewer, last night worded by how far to trust it, crosshair draft/save, Back guards an outline, offline wind bar, mobile overflow, reservation ownership, cancelled reservations.');
  } finally { await browser.close() }
 })().catch(e=>{console.error(e);process.exit(1)});

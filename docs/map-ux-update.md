@@ -6,14 +6,24 @@ The cameras' output is now on the map, WeHunt-style (`docs/wehunt-features.md`, 
 
 - **Each camera is its latest photo.** Every placed camera shows its newest animal photo as a 56 px framed thumbnail, with a pointer down to the camera. A white count shows the photos that are new to *you* ("5", "99+"). A camera with no photo keeps its plain round mark. Further out than zoom 13 the photos collapse to the round marks, which still carry the count. Map sheet → Show on map → **Camera photos** turns the photos and counts off, and the phone remembers the choice. A photo that doesn't load (no signal) leaves the plain mark, not an empty frame.
 - **"New" is per person** and kept on the server (`camera_views`, migration `0017_camera_views`). Opening a camera's sheet calls `POST /api/cameras/{id}/seen`, which any role may do, and the count clears. A camera you have never opened counts the last 24 hours.
+  - What `/seen` records is the arrival stamp of the camera's newest photo, not the time you looked. A sync stamps its photos with its own start and shows them when it commits, so a photo that was still on its way when you looked counts as new once it shows. The SPYPOINT sync now commits camera by camera, as the UBox sync does, so each camera's photos show as soon as that camera is done.
+  - New also means recent: only photos taken since a few days before the newest one you had seen. A late upload from a camera that was out of signal is news; a history import (a new account's two months, an admin backfill) doesn't light up the badge.
+  - Only photos the detector has checked and kept count, and only they become the camera's map photo. Most frames turn out empty, so an unchecked one would show grass and a count that drops back 15 minutes later. The camera strip asks `/photos?checked=true` for the same reason; the Photos page still shows everything.
+  - The count reads an index on `images (camera_id, created_at)` (migration `0018_image_arrivals`) and stops at 100. With 200,000 photos, `/map/cameras` takes about 50 ms rather than 500–700 ms.
 - **The camera sheet** (`map/CameraSheet.tsx`) shows:
   - the name, and "Last photo 21:40 (2 h ago)";
   - battery and signal in words, with the numbers one tap away, and a line when the camera isn't checking in or is out of credits;
-  - **"Last night: Wild boar · 2 visits, Red deer · 1 visit"**. These are visits, not frames, over 18:00–06:00 of the last finished night. If nothing came, it says "Nothing on camera last night", unless the camera wasn't demonstrably working, and then it says so instead of calling the night quiet;
+  - **"Last night: Wild boar · 2 visits, Red deer · 1 visit"**. These are visits, not frames, over 18:00–06:00 of the last finished night, in the same words as the photo tiles. A kept photo nobody has named yet is an "Animal" visit. `last_night_status` says how far to trust the list, and the line follows it:
+    - the camera was working and nothing came: "Nothing on camera last night";
+    - frames still waiting for the detector: "Still checking last night's photos." (or a note under the visits);
+    - it ran out of photo credits partway: "…so this may not be everything";
+    - it sent nothing and may have been down: "No photos from last night. The camera may not have been working, so that isn't a quiet night.";
   - a strip of its latest photos, one tile per burst, that opens the photo viewer;
   - **See all photos**, which opens Photos on this camera;
   - Move (admins) and Rename (admins and members).
-- **One call for the map.** `GET /api/map/cameras` returns every camera's position, health, latest photo, new count and last night in three queries, whatever the number of cameras. Hidden species and photos marked "nothing in it" never show and never count, not even as a camera's thumbnail.
+- **A tap on a camera's photo** opens that camera, unless another pin is under the finger (zoomed in, a photo can cover a stand close by); then it asks "Which one?", as a tap on overlapping pins does.
+- **The photo viewer** loads the photos either side of the one showing, so a swipe doesn't stop on "Loading photo…".
+- **One call for the map.** `GET /api/map/cameras` returns every camera's position, health, latest photo, new count and last night in four queries, whatever the number of cameras. Hidden species and photos marked "nothing in it" never show and never count, not even as a camera's thumbnail.
 - **Small copies of photos.** `GET /api/images/{id}/thumb` (same sign-in as `/file`) serves a 320 px-wide WebP. It is made on first request with EXIF rotation applied, kept under `MEDIA_ROOT/thumbs/`, and recorded in `images.thumbnail_path`. It is cached for a year (`immutable`). If it can't be made, the original is sent uncached, and the small copy outlives an original that retention has pruned. Photos, Cameras, Animals, the Insights drill-down, the map and the camera strip all use it. The photo viewer still opens the full photo (C-04, I-18, J-14 for grids).
 
 ## September 2026: the map as the page (WeHunt-style)

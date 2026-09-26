@@ -40,19 +40,32 @@ const batteryWords = (pct: number | null) => pct == null ? 'Battery unknown' : p
 const signalWords = (pct: number | null) => pct == null ? null : pct < 30 ? 'Signal weak' : pct < 60 ? 'Signal fair' : 'Signal strong'
 const visitWords = (n: number) => `${n} visit${n === 1 ? '' : 's'}`
 
-/** "Last night: Wild boar · 2 visits, Red deer · 1 visit", or why there is nothing to say. */
-export function lastNightLine(c: Camera): { text: string; warn: boolean } {
-  if (c.last_night.length) return { text: `Last night: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, warn: false }
+type NightLine = { text: string; note: string | null; tone: 'plain' | 'quiet' | 'warn' }
+
+/**
+ * "Last night: Wild boar · 2 visits, Red deer · 1 visit", or why there is nothing to
+ * say, with a note when the list may not be everything. An empty list only reads as
+ * a quiet night when the camera was working and its photos have all been checked.
+ */
+export function lastNightLine(c: Camera): NightLine {
+  const s = c.last_night_status
+  if (c.last_night.length) {
+    const note = s === 'checking' ? 'Still checking the rest of last night’s photos.'
+      : s === 'incomplete' ? 'Out of photo credits last night, so this may not be everything.' : null
+    return { text: `Last night: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
+  }
+  if (s === 'checking') return { text: 'Still checking last night’s photos.', note: null, tone: 'quiet' }
+  if (s === 'incomplete') return { text: 'Nothing on camera last night, but it was out of photo credits, so this may not be everything.', note: null, tone: 'warn' }
   // A camera that was down saw nothing because it couldn't, not because nothing came.
-  const blind = c.last_night_watched === false || (c.last_night_watched == null && !c.health.producing)
+  const blind = s === 'blind' || (s == null && !c.health.producing)
   return blind
-    ? { text: 'No photos from last night. The camera may not have been working, so that isn’t a quiet night.', warn: true }
-    : { text: 'Nothing on camera last night', warn: false }
+    ? { text: 'No photos from last night. The camera may not have been working, so that isn’t a quiet night.', note: null, tone: 'warn' }
+    : { text: 'Nothing on camera last night', note: null, tone: 'plain' }
 }
 
 /** What is wrong with the camera, in words, or null when it is working. */
 function trouble(c: Camera): string | null {
-  if (c.health.status === 'offline') return c.last_report_at ? `Not checking in. Last heard from ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'
+  if (c.health.status === 'offline') return c.last_report_at ? `Not checking in. Last heard ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'
   if (c.health.status === 'out_of_credits') return 'Out of photo credits. New photos won’t come through until the plan renews.'
   return null
 }
@@ -78,7 +91,8 @@ function PhotoStrip({ camera }: { camera: Camera }) {
   const load = useCallback(() => {
     const id = ++request.current
     setErr('')
-    api<{ items: Photo[] }>(`/photos?cameras=${encodeURIComponent(camera.id)}&limit=${FRAMES}`, { timeoutMs: LOAD_TIMEOUT_MS })
+    // Checked frames only, like the map's photo: an unchecked one is most likely grass.
+    api<{ items: Photo[] }>(`/photos?cameras=${encodeURIComponent(camera.id)}&limit=${FRAMES}&checked=true`, { timeoutMs: LOAD_TIMEOUT_MS })
       .then(page => { if (id === request.current) setPhotos(page.items) })
       .catch((e: Failure) => {
         if (id !== request.current) return
@@ -141,7 +155,10 @@ export function CameraBody({ camera, admin, onMove, onRename }: {
         {camera.last_report_at && ` · Checked in ${ageLabel(camera.last_report_at)}`}
       </p>
     </details>
-    <p className={`cam-sheet-night${night.warn ? ' cam-sheet-night--warn' : ''}`}>{night.text}</p>
+    <p className={`cam-sheet-night${night.tone === 'plain' ? '' : ` cam-sheet-night--${night.tone}`}`}>
+      {night.text}
+      {night.note && <span className="cam-sheet-night-note">{night.note}</span>}
+    </p>
     <PhotoStrip camera={camera} />
     <Link className="map-button map-button--primary map-button--big" to={`/photos?camera=${encodeURIComponent(camera.id)}`}>See all photos</Link>
     {(admin || camera.can_rename) && <div className="map-actions map-actions--admin">

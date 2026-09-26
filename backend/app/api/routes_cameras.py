@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
+from app.api.routes_map import seen_mark
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.core.db import get_db
@@ -180,15 +181,18 @@ def mark_seen(
     """You opened this camera: its photos so far are no longer new to you.
 
     Any signed-in role, viewers included: it records what this person has looked
-    at, not anything about the camera. The database's clock stamps it, the same
-    clock that stamps each photo's arrival, so the two always compare fairly.
+    at, not anything about the camera. What it records is the arrival stamp of the
+    camera's newest photo, not the time now, so a photo a running sync is still
+    storing counts as new once it shows (routes_map.seen_mark).
     """
     camera = db.scalar(select(Camera.id).where(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
         raise HTTPException(404, "Camera not found.")
-    stmt = pg_insert(CameraView).values(user_id=user.id, camera_id=camera_id, seen_at=func.now())
+    stmt = pg_insert(CameraView).values(
+        user_id=user.id, camera_id=camera_id, seen_at=seen_mark(camera_id),
+    )
     seen_at = db.scalar(
         stmt.on_conflict_do_update(
             index_elements=[CameraView.user_id, CameraView.camera_id],

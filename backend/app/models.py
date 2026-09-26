@@ -128,11 +128,14 @@ class Camera(Base):
 
 
 class CameraView(Base):
-    """When each person last opened each camera on the map.
+    """What each person had of each camera when they last opened it on the map.
 
-    That moment is what makes a photo "new" to them: the count on a camera's map
-    callout is its photos that arrived since. Per person, because the team does not
-    look at the same cameras at the same time. No row means never opened.
+    seen_at is the arrival stamp (images.created_at) of the camera's newest photo at
+    that moment, not the clock: a photo stored by a sync that began before you looked
+    carries an earlier stamp than your look, and must still count as new (see
+    routes_map.seen_mark). The count on a camera's map callout is its photos that
+    arrived after it. Per person, because the team does not look at the same cameras
+    at the same time. No row means never opened.
     """
 
     __tablename__ = "camera_views"
@@ -246,6 +249,8 @@ class Image(Base):
         Index("ix_images_camera_captured", "camera_id", "captured_at"),
         # camera-first index is useless for global min/max/date_trunc scans
         Index("ix_images_captured_at", text("captured_at DESC")),
+        # A camera's newest arrival and what arrived since: the map's "new" count.
+        Index("ix_images_camera_created", "camera_id", "created_at"),
     )
 
 

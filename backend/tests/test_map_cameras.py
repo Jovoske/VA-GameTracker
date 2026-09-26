@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image as PImage
-from sqlalchemy import select
+from sqlalchemy import create_engine, insert, select, text
 
 from app.api import routes_images
 from app.api.routes_map import NEW_CAP, last_completed_night, night_window
@@ -50,9 +50,10 @@ def media(tmp_path, monkeypatch):
 def estate(db_session):
     e = Estate(name="Piedras Lisas", timezone="Europe/Madrid", lat=39.09, lon=-1.36)
     db_session.add(e)
+    # Named the way the classifier stores them (title case); the map says "Wild boar".
     db_session.add_all([
-        Species(id="wild_boar", common_name="Wild boar", is_priority=True),
-        Species(id="red_deer", common_name="Red deer", is_priority=True),
+        Species(id="wild_boar", common_name="Wild Boar", is_priority=True),
+        Species(id="red_deer", common_name="Red Deer", is_priority=True),
         Species(id="lagomorph", common_name="Rabbit", hidden=True),
     ])
     db_session.commit()
@@ -85,7 +86,11 @@ def _jpeg(path, size=(640, 480), orientation: int | None = None):
 
 
 def _photo(db, cam, at, species=("wild_boar",), *, empty=False, created=None, path="photo.jpg"):
-    """One frame. `species` are the detections in it; () is an animal nobody named."""
+    """One frame. `species` are the detections in it; () is an animal nobody named.
+
+    `empty` is the detector's verdict: False kept, True "nothing in it", None not
+    checked yet.
+    """
     img = Image(camera_id=cam.id, captured_at=at, original_path=path, is_empty_frame=empty,
                 created_at=created or at + timedelta(minutes=20))
     db.add(img)
@@ -247,6 +252,84 @@ def test_seen_is_only_for_this_estates_cameras(client, db_session, estate):
     assert "Theirs" not in _map(client, headers)
 
 
+def test_a_photo_stored_while_you_look_still_counts_as_new(client, db_session, estate):
+    """A sync stamps its photos with its own start, then shows them when it commits.
+
+    Opening the camera in between must not swallow them: the photo wasn't there to
+    see, so once it shows it is new.
+    """
+    member, headers = _user(db_session, estate, "member")
+    now = datetime.now(UTC)
+    cams = {
+        "Charca": _camera(db_session, estate).id,
+        "Empty": _camera(db_session, estate, "Empty").id,
+    }
+    _photo(db_session, db_session.get(Camera, cams["Charca"]), now - timedelta(hours=2),
+           created=now - timedelta(hours=2))
+    # Nothing of this test's own left open: every request below starts after the sync.
+    db_session.commit()
+
+    sync = create_engine(db_session.get_bind().url)
+    try:
+        with sync.connect() as conn, conn.begin():
+            began = conn.scalar(text("SELECT now()"))
+            stored = {}
+            for name, cam_id in cams.items():
+                stored[name] = conn.scalar(insert(Image).values(
+                    camera_id=cam_id, captured_at=now - timedelta(minutes=10),
+                    original_path="boar.jpg", is_empty_frame=False,
+                ).returning(Image.id))
+                conn.execute(insert(Detection).values(
+                    image_id=stored[name], species_id="wild_boar", species_conf=0.9,
+                ))
+            # The hunter opens both cameras while the sync is still downloading.
+            for cam_id in cams.values():
+                r = client.post(f"/api/cameras/{cam_id}/seen", headers=headers)
+                assert r.status_code == 200
+                assert datetime.fromisoformat(r.json()["seen_at"]) < began
+            before = _map(client, headers)
+            assert before["Charca"]["new_count"] == 0 and before["Empty"]["new_count"] == 0
+        # Committed: the photos show, and are new to the hunter who opened the cameras.
+        after = _map(client, headers)
+        assert after["Charca"]["latest"]["image_id"] == str(stored["Charca"])
+        assert after["Charca"]["new_count"] == 1
+        assert after["Empty"]["new_count"] == 1
+    finally:
+        sync.dispose()
+
+    # Opening them now clears them.
+    for cam_id in cams.values():
+        client.post(f"/api/cameras/{cam_id}/seen", headers=headers)
+    after = _map(client, headers)
+    assert after["Charca"]["new_count"] == 0 and after["Empty"]["new_count"] == 0
+    assert len(db_session.scalars(
+        select(CameraView).where(CameraView.user_id == member.id)).all()) == 2
+
+
+def test_a_history_import_does_not_light_up_the_badge(client, db_session, estate):
+    """A backfill stores months-old photos today. They are new to the app, not news."""
+    _, headers = _user(db_session, estate, "member")
+    _, never = _user(db_session, estate, "viewer")
+    cam = _camera(db_session, estate)
+    now = datetime.now(UTC)
+    last = _photo(db_session, cam, now - timedelta(hours=3), created=now - timedelta(hours=3))
+    client.post(f"/api/cameras/{cam.id}/seen", headers=headers)
+    db_session.add_all([
+        Image(camera_id=cam.id, captured_at=now - timedelta(days=160, minutes=i),
+              original_path="april.jpg", is_empty_frame=False, created_at=now)
+        for i in range(150)
+    ])
+    db_session.commit()
+    for h in (headers, never):
+        got = _map(client, h)["Charca"]
+        assert got["latest"]["image_id"] == str(last.id)
+        assert got["new_count"] == (0 if h is headers else 1)
+
+    # A camera out of signal for two days delivers them late: those are news.
+    _photo(db_session, cam, now - timedelta(days=2), created=now)
+    assert _map(client, headers)["Charca"]["new_count"] == 1
+
+
 # ── latest photo and last night ─────────────────────────────────────────────
 
 
@@ -307,22 +390,111 @@ def test_last_night_counts_visits_not_frames(client, db_session, estate):
     ]
 
 
-def test_last_night_says_whether_the_camera_was_watching(client, db_session, estate):
+def test_last_night_says_how_far_to_trust_it(client, db_session, estate):
     _, headers = _user(db_session, estate)
+    night = last_completed_night()
+    start, _ = night_window(night)
     up = _camera(db_session, estate, "Up")
     down = _camera(db_session, estate, "Down")
     _camera(db_session, estate, "No record")
-    night = last_completed_night()
+    checking = _camera(db_session, estate, "Checking")
+    fresh = _camera(db_session, estate, "Fresh")
+    credits = _camera(db_session, estate, "Credits")
     db_session.add_all([
         CameraNight(camera_id=up.id, night=night, exposure_state="PRESUMED_UP"),
         CameraNight(camera_id=down.id, night=night, exposure_state="UNKNOWN"),
+        CameraNight(camera_id=checking.id, night=night, exposure_state="UNPROCESSED", frames=2),
+        CameraNight(camera_id=credits.id, night=night, exposure_state="UNKNOWN", frames=1),
     ])
     db_session.commit()
+    # Frames that came in overnight and the detector hasn't reached: there were
+    # photos, so "the camera may not have been working" would be wrong.
+    _photo(db_session, checking, start + timedelta(hours=5), (), empty=None)
+    _photo(db_session, checking, start + timedelta(hours=6), (), empty=True)
+    # All checked before the hourly rebuild of camera_nights has a row for the night.
+    _photo(db_session, fresh, start + timedelta(hours=2), (), empty=True)
+    # Out of photo credits partway through the night: it sent a boar, and maybe not all.
+    _photo(db_session, credits, start + timedelta(hours=1))
+
     cams = _map(client, headers)
-    assert cams["Up"]["last_night"] == [] and cams["Up"]["last_night_watched"] is True
-    assert cams["Down"]["last_night_watched"] is False
-    assert cams["No record"]["last_night_watched"] is None
+    status = {name: (c["last_night_status"], c["last_night"]) for name, c in cams.items()}
+    assert status["Up"] == ("watched", [])
+    assert status["Down"] == ("blind", [])
+    assert status["No record"] == (None, [])
+    assert status["Checking"] == ("checking", [])
+    assert status["Fresh"] == ("watched", [])
+    assert status["Credits"] == (
+        "incomplete", [{"species_id": "wild_boar", "label": "Wild boar", "visits": 1}],
+    )
     assert cams["No record"]["latest"] is None and cams["No record"]["new_count"] == 0
+
+
+def test_a_kept_photo_nobody_has_named_is_an_animal_visit(client, db_session, estate):
+    """The detector kept it and the species pass hasn't named it (or couldn't).
+
+    It is the camera's photo, labelled "Animal", so last night must not say nothing came.
+    """
+    _, headers = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    start, _ = night_window(last_completed_night())
+    at = start + timedelta(hours=5, minutes=30)
+    burst = {_photo(db_session, cam, at, ()).id for _ in range(2)}
+    _photo(db_session, cam, start + timedelta(hours=1), ("lagomorph",))  # hidden: never counts
+    _photo(db_session, cam, start + timedelta(hours=2), ("red_deer",))
+
+    got = _map(client, headers)["Charca"]
+    assert got["latest"]["image_id"] in {str(i) for i in burst}
+    assert got["latest"]["label"] == "Animal"
+    assert got["last_night"] == [
+        {"species_id": "red_deer", "label": "Red deer", "visits": 1},
+        {"species_id": None, "label": "Animal", "visits": 1},
+    ]
+    assert got["last_night_status"] == "watched"
+
+
+def test_a_frame_the_detector_has_not_checked_is_not_on_the_map_yet(client, db_session, estate):
+    """Most frames turn out empty: an unchecked one is neither the map photo nor new."""
+    _, headers = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    now = datetime.now(UTC)
+    boar = _photo(db_session, cam, now - timedelta(hours=1), created=now - timedelta(minutes=50))
+    frame = _photo(db_session, cam, now - timedelta(minutes=5), (), empty=None,
+                   created=now - timedelta(minutes=4))
+
+    got = _map(client, headers)["Charca"]
+    assert got["latest"]["image_id"] == str(boar.id)
+    assert got["new_count"] == 1
+
+    # The detector marks it empty: nothing changes.
+    frame.is_empty_frame = True
+    db_session.commit()
+    got = _map(client, headers)["Charca"]
+    assert got["latest"]["image_id"] == str(boar.id) and got["new_count"] == 1
+
+    # Or it keeps it: now it is the camera's photo, and new.
+    frame.is_empty_frame = False
+    db_session.commit()
+    got = _map(client, headers)["Charca"]
+    assert got["latest"]["image_id"] == str(frame.id) and got["latest"]["label"] == "Animal"
+    assert got["new_count"] == 2
+
+
+def test_the_camera_sheets_strip_agrees_with_the_map(client, db_session, estate):
+    """The strip asks /photos for checked frames only; the Photos page still sees all."""
+    _, headers = _user(db_session, estate, "viewer")
+    cam = _camera(db_session, estate)
+    now = datetime.now(UTC)
+    boar = _photo(db_session, cam, now - timedelta(hours=1))
+    frame = _photo(db_session, cam, now - timedelta(minutes=5), (), empty=None)
+
+    def feed(query=""):
+        r = client.get(f"/api/photos?cameras={cam.id}{query}", headers=headers)
+        assert r.status_code == 200, r.text
+        return [p["image_id"] for p in r.json()["items"]]
+
+    assert feed() == [str(frame.id), str(boar.id)]
+    assert feed("&checked=true") == [str(boar.id)]
+    assert _map(client, headers)["Charca"]["latest"]["image_id"] == feed("&checked=true")[0]
 
 
 def test_map_cameras_carries_position_health_and_who_may_rename(client, db_session, estate):

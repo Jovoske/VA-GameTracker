@@ -33,6 +33,14 @@ def _columns(engine, table: str) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
+def _index(engine, table: str, name: str) -> list[str] | None:
+    """The columns of index `name` on `table`, or None when there is no such index."""
+    for ix in inspect(engine).get_indexes(table):
+        if ix["name"] == name:
+            return ix["column_names"]
+    return None
+
+
 @requires_db
 def test_fresh_upgrade_head_succeeds(fresh_db):
     command.upgrade(alembic_config(fresh_db), "head")
@@ -55,6 +63,7 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert "species_ids" in _columns(eng, "notification_prefs")
         assert set(_columns(eng, "camera_views")) == {"user_id", "camera_id", "seen_at"}
         assert "thumbnail_path" in images
+        assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
     finally:
         eng.dispose()
 
@@ -107,6 +116,7 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "details" in _columns(eng, "sync_log")
         assert _columns(eng, "camera_views")
         assert "thumbnail_path" in _columns(eng, "images")
+        assert _index(eng, "images", "ix_images_camera_created")
     finally:
         eng.dispose()
 
@@ -389,5 +399,53 @@ def test_camera_views_upgrade_down_and_up_again_keeping_the_photos(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert set(_columns(eng, "camera_views")) == {"user_id", "camera_id", "seen_at"}
         assert "thumbnail_path" in _columns(eng, "images")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_image_arrivals_index_upgrade_down_and_up_again(fresh_db):
+    """0018 on a real 0017 database: the index the map's "new" count reads."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0017_camera_views")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM, index included; restore the 0017 shape first.
+            c.execute(text("DROP INDEX ix_images_camera_created"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),'photo.jpg',false)"
+            ), {"c": camera_id})
+        assert _index(eng, "images", "ix_images_camera_created") is None
+
+        command.upgrade(cfg, "head")
+        assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0017_camera_views")
+        assert _index(eng, "images", "ix_images_camera_created") is None
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0017_camera_views")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
     finally:
         eng.dispose()

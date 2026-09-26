@@ -56,10 +56,17 @@ def feed(
     cameras: str | None = Query(None, description="Comma-separated camera ids; omit for all"),
     before: datetime | None = Query(None, description="Only photos taken before this instant"),
     limit: int = Query(60, ge=1, le=200),
+    checked: bool = Query(
+        False, description="Only photos the detector has checked and kept, as on the map",
+    ),
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Newest first. `next_before` pages on; it is null on the last page."""
+    """Newest first. `next_before` pages on; it is null on the last page.
+
+    `checked` leaves out frames the detector hasn't reached yet (most turn out
+    empty): the camera sheet's strip asks for it so it agrees with the map's photo.
+    """
     species_ids = _csv(species)
     camera_ids = []
     for c in _csv(cameras):
@@ -81,6 +88,8 @@ def feed(
         )
     if camera_ids:
         q = q.where(Image.camera_id.in_(camera_ids))
+    if checked:
+        q = q.where(Image.is_empty_frame.is_(False))
     if before is not None:
         q = q.where(Image.captured_at < before)
     rows = db.execute(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit + 1)).all()

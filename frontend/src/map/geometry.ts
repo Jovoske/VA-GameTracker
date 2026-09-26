@@ -3,12 +3,16 @@
 export type CameraHealth = { status: string; detail: string; producing: boolean; hours_since_report: number | null }
 export type LatestPhoto = { image_id: string; captured_at: string; species_id: string | null; label: string }
 export type Visits = { species_id: string | null; label: string; visits: number }
+// How far to trust last night's list (routes_map.night_status): working, so an empty
+// list is a quiet night; frames still being checked; out of credits partway; or
+// nothing sent and maybe not working. null is no record either way.
+export type NightStatus = 'watched' | 'checking' | 'incomplete' | 'blind'
 export type Camera = {
   id: string; name: string; lat: number | null; lon: number | null
   battery_pct: number | null; signal_pct: number | null; last_report_at: string | null
   health: CameraHealth; can_rename: boolean
   latest: LatestPhoto | null; new_count: number
-  last_night: Visits[]; last_night_watched: boolean | null
+  last_night: Visits[]; last_night_status: NightStatus | null
 }
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string }

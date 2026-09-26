@@ -259,6 +259,8 @@
 .cam-sheet-numbers p { margin: -4px 0 6px; }
 .cam-sheet-night { margin: 0 0 12px; font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--text); }
 .cam-sheet-night--warn { font-weight: 400; font-size: 14px; color: var(--marginal); }
+.cam-sheet-night--quiet { font-weight: 400; font-size: 14px; color: var(--text-dim); }
+.cam-sheet-night-note { display: block; margin-top: 2px; font-weight: 400; font-size: 13px; color: var(--text-dim); }
 .cam-strip-msg { margin: 0 0 14px; min-height: 44px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
 .cam-strip-row { display: flex; gap: 8px; margin: 0 -16px 14px; padding: 0 16px 4px; scroll-padding: 0 16px; list-style: none; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; }
 .cam-strip-row::-webkit-scrollbar { display: none; }

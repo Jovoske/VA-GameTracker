@@ -305,10 +305,12 @@ export default function MapPage() {
         e.stopPropagation()
         if (editRef.current || measureRef.current.on) return
         // A camera usually sits by a stand, so at estate zoom their pins overlap. A tap
-        // on more than one asks which. A key press (no pointer) means this pin, and so
-        // does a tap on a camera's photo, which only ever belongs to that camera.
+        // on more than one asks which; a key press (no pointer) means this pin. A
+        // camera's photo stands above its pin and can cover a stand close by when
+        // zoomed in, so a tap on it is that camera plus whatever pin is under it.
         const onPhoto = (e.target as HTMLElement).closest('.map-callout')
-        const here = e.detail && !onPhoto ? pinsAt(markers.current, e.clientX, e.clientY) : []
+        const here = e.detail ? pinsAt(markers.current, e.clientX, e.clientY) : []
+        if (onPhoto && here.length && !here.some(p => p.kind === pin.kind && p.id === pin.id)) here.unshift(pin)
         if (here.length > 1) { setSelected(null); setSettingsOpen(false); setPick(here); setSnap('half'); setSelKey(k => k + 1) }
         else selectRef.current(pin)
       })

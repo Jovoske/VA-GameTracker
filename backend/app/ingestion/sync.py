@@ -186,7 +186,7 @@ def _run(db: Session, *, label: str, per_camera) -> dict:
 
     sync_row = SyncLog(status="running", started_at=datetime.now(timezone.utc))
     db.add(sync_row)
-    db.flush()
+    db.commit()  # so a camera that fails and rolls back cannot take the log with it
 
     total = 0
     ok_accounts = 0
@@ -199,19 +199,26 @@ def _run(db: Session, *, label: str, per_camera) -> dict:
             cameras = client.list_cameras()
             log.info(f"{label}.cameras_found", account=acct["username"], count=len(cameras))
             for cam in cameras:
+                # One commit per camera, as the UBox sync does: its photos show as
+                # soon as it is done rather than when every account is, and each one's
+                # arrival stamp (the transaction's start) stays close to that moment.
                 try:
                     res = per_camera(db, client, estate.id, cam, acct["id"])
+                    db.commit()
                     results.append(res)
                     total += res.get("downloaded", res.get("new", 0))
                 except Exception as e:
+                    db.rollback()
                     log.error(f"{label}.camera_failed", camera=cam.name, error=str(e))
                     results.append({"camera": cam.name, "error": str(e)})
             if acct["id"] is not None:
                 row = db.get(CameraAccount, acct["id"])
                 if row is not None:
                     row.last_sync_at = datetime.now(timezone.utc)
+            db.commit()
             ok_accounts += 1
         except Exception as e:
+            db.rollback()
             errors.append(f"{acct['username']}: {e}")
             log.error(f"{label}.account_failed", account=acct["username"], error=str(e))
         finally:

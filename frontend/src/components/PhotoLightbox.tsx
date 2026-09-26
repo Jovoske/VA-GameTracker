@@ -75,6 +75,17 @@ export default function PhotoLightbox({
   const pan = useRef<{ x: number; y: number; v0: View; moved: boolean } | null>(null)
   const lastTap = useRef<{ t: number; x: number; y: number } | null>(null)
 
+  // The photos either side load while this one is looked at, so a swipe on a weak
+  // signal shows the next at once rather than "Loading photo…" (audit C-04).
+  useEffect(() => {
+    for (const near of [photos[idx + 1], photos[idx - 1]]) {
+      if (!near) continue
+      const img = new Image()
+      img.decoding = 'async'
+      img.src = imageUrl(near.file_url)
+    }
+  }, [idx, photos])
+
   // Keyboard: ← → to move, + − 0 to zoom. Escape belongs to Overlay, so that
   // every panel in the app answers it rather than only this one.
   useEffect(() => {
