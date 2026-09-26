@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api, thumbUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
+import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import './animals.css'
 
@@ -22,6 +23,7 @@ type SpImg = {
   camera: string
   label: string
   group_size: number | null
+  notes_count: number
 }
 type Animal = {
   id: string
@@ -408,6 +410,7 @@ export default function Animals() {
                     onClick={() => setZoom(i)}
                   >
                     <img src={thumbUrl(im.image_id)} loading="lazy" alt={im.label} />
+                    <NoteMark count={im.notes_count} />
                     <div className="an-gallery-caption">
                       <span className="an-gallery-label">{im.label}</span>
                       <span className="an-gallery-date">
@@ -425,11 +428,12 @@ export default function Animals() {
       {/* ── Fullscreen photo ──────────────────────────────── */}
       {zoom != null && galleryImgs && (
         <PhotoLightbox
-          photos={galleryImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label }))}
+          photos={galleryImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label, notes_count: im.notes_count }))}
           start={zoom}
           backLabel="Back to gallery"
           zIndex={60}
           onClose={() => setZoom(null)}
+          onNotesChange={(id, n) => setGalleryImgs((imgs) => imgs && imgs.map((im) => (im.image_id === id ? { ...im, notes_count: n } : im)))}
         />
       )}
     </div>

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
-import { ageLabel, api, thumbUrl } from '../api'
+import { ageLabel, api, thumbUrl, whenLabel } from '../api'
+import CameraAlertRow from '../components/CameraAlerts'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { validLngLat, type Camera } from './geometry'
 import { RenameControl } from './PlaceSheet'
 
@@ -23,18 +25,8 @@ const STRIP = 12
 const FRAMES = 36
 const LOAD_TIMEOUT_MS = 20_000
 
-type Photo = { image_id: string; file_url: string; captured_at: string; camera: string; label: string }
+type Photo = { image_id: string; file_url: string; captured_at: string; camera: string; label: string; notes_count: number }
 type Failure = Error & { offline?: boolean; timeout?: boolean }
-
-/** "21:40" today, "Tue 21:40" this week, "4 Sep 21:40" before that. */
-export function whenLabel(iso: string): string {
-  const d = new Date(iso)
-  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  const days = (Date.now() - d.getTime()) / 86_400_000
-  if (d.toDateString() === new Date().toDateString()) return time
-  if (days < 6) return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
-  return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`
-}
 
 const batteryWords = (pct: number | null) => pct == null ? 'Battery unknown' : pct < 20 ? 'Battery low' : pct < 50 ? 'Battery half' : 'Battery good'
 const signalWords = (pct: number | null) => pct == null ? null : pct < 30 ? 'Signal weak' : pct < 60 ? 'Signal fair' : 'Signal strong'
@@ -79,8 +71,9 @@ export function CameraHeader({ camera }: { camera: Camera }) {
   </>
 }
 
-/** The camera's latest photos, newest first, each opening the photo viewer. */
-function PhotoStrip({ camera }: { camera: Camera }) {
+/** The camera's latest photos, newest first, each opening the photo viewer.
+ * `notesTick` changes when a note is added or removed elsewhere on the sheet. */
+function PhotoStrip({ camera, notesTick, onNotes }: { camera: Camera; notesTick: number; onNotes: () => void }) {
   const [photos, setPhotos] = useState<Photo[] | null>(null)
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
@@ -100,13 +93,13 @@ function PhotoStrip({ camera }: { camera: Camera }) {
       })
   }, [camera.id])
   useEffect(() => { setPhotos(null); setZoom(null) }, [camera.id])
-  useEffect(() => { load(); return () => { request.current++ } }, [load, newest])
+  useEffect(() => { load(); return () => { request.current++ } }, [load, newest, notesTick])
 
   // A refresh that fails keeps the photos already shown; only an empty strip says so.
   if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={load}>Try again</button></p>
   if (!photos) return <p className="cam-strip-msg" role="status">Loading photos…</p>
   if (!photos.length) return <p className="cam-strip-msg">No animal photos from this camera yet.</p>
-  const viewer: LightboxPhoto[] = photos.map(p => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label }))
+  const viewer: LightboxPhoto[] = photos.map(p => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count }))
   // One tile per burst (frames stamped the same second), opening on its first frame;
   // the viewer still pages through every frame.
   const tiles: { at: number; frames: number }[] = []
@@ -122,27 +115,34 @@ function PhotoStrip({ camera }: { camera: Camera }) {
         return <li key={p.image_id}>
           <button type="button" className="cam-strip-tile" aria-label={`${p.label}, ${whenLabel(p.captured_at)}${frames > 1 ? `, ${frames} frames` : ''}. Open photo.`} onClick={() => setZoom(at)}>
             <img src={thumbUrl(p.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
+            <NoteMark count={p.notes_count} />
             <span aria-hidden="true">{whenLabel(p.captured_at)}{frames > 1 && <b>×{frames}</b>}</span>
           </button>
         </li>
       })}
     </ul>
     {/* Over everything, the tab bar included: the sheet sits inside the map. */}
-    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel={`Back to ${camera.name}`} onClose={() => setZoom(null)} />, document.body)}
+    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel={`Back to ${camera.name}`} onClose={() => setZoom(null)}
+      onNotesChange={(id, n) => { setPhotos(ps => ps && ps.map(p => p.image_id === id ? { ...p, notes_count: n } : p)); onNotes() }} />, document.body)}
   </>
 }
 
-export function CameraBody({ camera, admin, onMove, onRename }: {
+export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
   camera: Camera
   admin: boolean
   onMove: () => void
   onRename: (name: string) => Promise<void>
+  /** The camera's alert switch saved: keep the map's copy in step. */
+  onAlerts: (alerts: boolean, enabled: boolean) => void
 }) {
   const placed = validLngLat(camera.lon, camera.lat)
   const signal = signalWords(camera.signal_pct)
   const problem = trouble(camera)
   const night = lastNightLine(camera)
   const low = camera.battery_pct != null && camera.battery_pct < 20
+  // A note added from the photo strip shows in the "Worth a look" strip, and back.
+  const [notesTick, setNotesTick] = useState(0)
+  const [stripTick, setStripTick] = useState(0)
   return <>
     {!placed && <p className="map-detail-copy">Not on the map yet.{admin ? '' : ' An admin can place it.'}</p>}
     {problem && <p className="cam-sheet-status cam-sheet-status--warn">{problem}</p>}
@@ -159,8 +159,18 @@ export function CameraBody({ camera, admin, onMove, onRename }: {
       {night.text}
       {night.note && <span className="cam-sheet-night-note">{night.note}</span>}
     </p>
-    <PhotoStrip camera={camera} />
+    <PhotoStrip camera={camera} notesTick={stripTick} onNotes={() => setNotesTick(t => t + 1)} />
+    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={notesTick} backLabel={`Back to ${camera.name}`}
+      onChange={() => setStripTick(t => t + 1)} />
     <Link className="map-button map-button--primary map-button--big" to={`/photos?camera=${encodeURIComponent(camera.id)}`}>See all photos</Link>
+    <div className="cam-sheet-alerts">
+      <CameraAlertRow id={camera.id} name={camera.name} alerts={camera.alerts} label="Alerts from this camera"
+        note={camera.alerts ? 'A message when it catches an animal you picked' : 'Muted for you. The team still hears from it.'}
+        onSaved={r => onAlerts(r.alerts, r.enabled)} />
+      {!camera.alerts_enabled && <p className="cam-sheet-alerts-off">
+        Your alerts are off, so nothing comes from any camera. <Link to="/settings#notifications">Turn them on in Settings</Link>
+      </p>}
+    </div>
     {(admin || camera.can_rename) && <div className="map-actions map-actions--admin">
       {admin && <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>}
       {camera.can_rename && <RenameControl name={camera.name} onRename={onRename} maxLength={100} />}

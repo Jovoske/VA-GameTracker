@@ -5,12 +5,17 @@ import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } f
 import { imageUrl } from '../api'
 import { useReducedMotion } from '../hooks'
 import Overlay from './Overlay'
+import PhotoNotesPanel from './PhotoNotes'
 
 /**
  * The one photo viewer. Cameras, the species gallery on Animals and the class
  * gallery on Insights all open photos through this, so paging, zoom, download
  * and the back button behave the same everywhere. There used to be three: one
  * with paging and two that were a bare <img> you could only look at.
+ *
+ * Under the photo are the team's notes on it and, for members and admins, the
+ * "Worth a look" button (PhotoNotes). That band has a fixed height, so the photo
+ * keeps its place as you page between photos with and without notes.
  */
 
 export type LightboxPhoto = {
@@ -20,6 +25,8 @@ export type LightboxPhoto = {
   camera: string
   /** What is in the frame: "Stag", "Sow + piglets (4)", "No animal". */
   label: string
+  /** The team's notes on it, when the list knows; 0 spares a call per photo. */
+  notes_count?: number
 }
 
 /**
@@ -49,15 +56,21 @@ export default function PhotoLightbox({
   backLabel,
   zIndex,
   onClose,
+  onNotesChange,
 }: {
   photos: LightboxPhoto[]
   start?: number
   backLabel: string
   zIndex?: number
   onClose: () => void
+  /** A note was added or removed here: the photo's count now, for its tile and strips. */
+  onNotesChange?: (imageId: string, count: number) => void
 }) {
   const [idx, setIdx] = useState(Math.min(Math.max(0, start), photos.length - 1))
   const im = photos[idx]
+  // Counts changed in this viewer, so paging back to a photo shows its new notes
+  // even when the list that opened the viewer doesn't keep count itself.
+  const [counts, setCounts] = useState<Record<string, number>>({})
   const [imgReady, setImgReady] = useState(false)
   const [imgError, setImgError] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -90,6 +103,9 @@ export default function PhotoLightbox({
   // every panel in the app answers it rather than only this one.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Typing a note is not paging or zooming.
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       if (e.key === 'ArrowLeft') step(-1)
       if (e.key === 'ArrowRight') step(1)
       if (e.key === '+' || e.key === '=') setView((v) => zoomAt(v.s * 1.5, { x: 0, y: 0 }, v, true))
@@ -381,6 +397,17 @@ export default function PhotoLightbox({
               {idx + 1} / {photos.length}
             </span>
           </div>
+          <PhotoNotesPanel
+            key={im.id}
+            imageId={im.id}
+            label={im.label}
+            camera={im.camera}
+            count={counts[im.id] ?? im.notes_count}
+            onCount={(id, n) => {
+              setCounts((c) => ({ ...c, [id]: n }))
+              onNotesChange?.(id, n)
+            }}
+          />
           <button
             className="lb-nav"
             style={{ left: 8 }}

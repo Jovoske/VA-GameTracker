@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, thumbUrl } from '../api'
-import PhotoLightbox from '../components/PhotoLightbox'
+import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import './photos.css'
 
 /**
  * Every animal photo from every camera, newest first. Pick the animals and
  * cameras you want with the chips, or none for everything. Empty frames and
- * hidden animals (Settings) never appear here.
+ * hidden animals (Settings) never appear here. Above them, the photos the team
+ * marked "Worth a look", once there are any.
  */
 
 type Filters = {
@@ -24,8 +26,14 @@ type Photo = {
   label: string
   species_id: string | null
   group_size: number | null
+  notes_count: number
 }
 type Page = { items: Photo[]; next_before: string | null }
+type Failure = Error & { status?: number }
+
+const toViewer = (p: Photo): LightboxPhoto => ({
+  id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count,
+})
 
 const PICK_KEY = 'gs.photos.pick'
 const PAGE = 60
@@ -65,6 +73,11 @@ export default function Photos() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
+  // A photo a link named that isn't in the loaded pages: opened on its own.
+  const [single, setSingle] = useState<Photo | null>(null)
+  const [notice, setNotice] = useState('')
+  // Bumped when a note changes from the grid, so the strip above asks again.
+  const [notesTick, setNotesTick] = useState(0)
   const wantImage = useRef<string | null>(params.get('image'))
   const request = useRef(0)
   const sentinel = useRef<HTMLDivElement>(null)
@@ -94,15 +107,27 @@ export default function Photos() {
   useEffect(load, [load])
   useRefetchOnReturn(load, 120_000)
 
-  // Open the photo a notification pointed at, once it is in the list.
+  // Open the photo a notification pointed at: in the list when it is on the first
+  // page, otherwise asked for by itself (a push tapped the next morning can be
+  // many pages down by then).
   useEffect(() => {
     const want = wantImage.current
     if (!want || !photos) return
     wantImage.current = null
     setParams({}, { replace: true })
     const at = photos.findIndex((p) => p.image_id === want)
-    if (at >= 0) setZoom(at)
+    if (at >= 0) { setZoom(at); return }
+    api<Photo>(`/photos/${encodeURIComponent(want)}`, { timeoutMs: 20_000 })
+      .then(setSingle)
+      .catch((e: Failure) => setNotice(e.status === 404 || e.status === 422
+        ? 'That photo isn’t available any more.'
+        : `Couldn’t open that photo. ${e.message}`))
   }, [photos, setParams])
+
+  /** A note was added or removed in a viewer: the tile's marker and the strip follow. */
+  const notesChanged = useCallback((id: string, n: number) => {
+    setPhotos((prev) => prev && prev.map((p) => (p.image_id === id ? { ...p, notes_count: n } : p)))
+  }, [])
 
   const loadMore = useCallback(() => {
     if (!nextBefore || loadingMore) return
@@ -148,6 +173,9 @@ export default function Photos() {
   return (
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
       <h1 className="page-title">Photos</h1>
+
+      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>}
+      <HighlightStrip refreshKey={notesTick} backLabel="Back to photos" onChange={notesChanged} />
 
       <div className="photos-filters">
         <div className="photos-filter-row">
@@ -198,6 +226,7 @@ export default function Photos() {
                 onClick={() => setZoom(g.start + j)}
               >
                 <img src={thumbUrl(p.image_id)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
+                <NoteMark count={p.notes_count} />
                 <div className="photos-tile-meta">
                   <span className="photos-tile-label">{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
                   <span className="photos-tile-when">{timeOf(p.captured_at)}</span>
@@ -222,10 +251,19 @@ export default function Photos() {
 
       {zoom != null && photos && (
         <PhotoLightbox
-          photos={photos.map((p) => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label }))}
+          photos={photos.map(toViewer)}
           start={zoom}
           backLabel="Back to photos"
           onClose={() => setZoom(null)}
+          onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
+        />
+      )}
+      {single && (
+        <PhotoLightbox
+          photos={[toViewer(single)]}
+          backLabel="Back to photos"
+          onClose={() => setSingle(null)}
+          onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
         />
       )}
     </div>

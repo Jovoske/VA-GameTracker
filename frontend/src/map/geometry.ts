@@ -13,6 +13,8 @@ export type Camera = {
   health: CameraHealth; can_rename: boolean
   latest: LatestPhoto | null; new_count: number
   last_night: Visits[]; last_night_status: NightStatus | null
+  // This camera's alert switch for you (false: muted), and whether your alerts are on at all.
+  alerts: boolean; alerts_enabled: boolean
 }
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string }

@@ -8,14 +8,17 @@ import {
   subscribeThisDevice,
   unsubscribeThisDevice,
 } from '../push'
+import CameraAlertRow from './CameraAlerts'
 import SettingsSection from './SettingsSection'
 import Toggle from './Toggle'
 
 type SpeciesPref = { id: string; common_name: string; selected: boolean; detections: number }
+type CameraPref = { id: string; name: string; alerts: boolean }
 type Settings = {
   enabled: boolean
   configured: boolean
   species: SpeciesPref[]
+  cameras: CameraPref[]
   public_key: string
   subscriptions: number
 }
@@ -248,6 +251,28 @@ export default function NotificationSettings() {
                 />
               </div>
             ))
+          )}
+
+          {s.cameras.length > 0 && (
+            <>
+              <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
+                Cameras
+              </div>
+              <p className="settings-hint">
+                Every camera is on. Mute a busy one, like a feeder, and you hear nothing from it. Only for you.
+              </p>
+              {s.cameras.map((c) => (
+                <CameraAlertRow
+                  key={c.id}
+                  id={c.id}
+                  name={c.name}
+                  alerts={c.alerts}
+                  onSaved={(r) => setS((cur) => cur && {
+                    ...cur, cameras: cur.cameras.map((x) => (x.id === c.id ? { ...x, alerts: r.alerts } : x)),
+                  })}
+                />
+              ))}
+            </>
           )}
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>

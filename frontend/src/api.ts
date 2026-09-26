@@ -149,6 +149,33 @@ export function ageLabel(iso: string): string {
   return `${Math.round(hrs / 24)} d ago`
 }
 
+/** "21:40" today, "Tue 21:40" this week, "4 Sep 21:40" before that. */
+export function whenLabel(iso: string): string {
+  const d = new Date(iso)
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const days = (Date.now() - d.getTime()) / 86_400_000
+  if (d.toDateString() === new Date().toDateString()) return time
+  if (days < 6) return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
+  return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`
+}
+
+export type Me = { id: string; email: string; role: 'admin' | 'member' | 'viewer' }
+let meCache: { token: string | null; at: number; p: Promise<Me> } | null = null
+
+/** Who is signed in, asked once per sign-in (and again after a failure or an hour).
+ *
+ * The photo viewer opens from six places and each needs to know whether this person
+ * may mark a photo; one shared answer saves six calls on a weak signal. */
+export function whoAmI(): Promise<Me> {
+  const token = getToken()
+  if (meCache && meCache.token === token && Date.now() - meCache.at < 3_600_000) return meCache.p
+  const p = api<Me>('/auth/me', { timeoutMs: 20_000 })
+  const entry = { token, at: Date.now(), p }
+  meCache = entry
+  p.catch(() => { if (meCache === entry) meCache = null })
+  return p
+}
+
 export async function login(email: string, password: string): Promise<void> {
   const data = await api<{ access_token: string }>('/auth/login', {
     method: 'POST',

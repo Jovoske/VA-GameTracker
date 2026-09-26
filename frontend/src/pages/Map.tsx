@@ -684,6 +684,7 @@ export default function MapPage() {
             onMove={() => startEdit({ kind: 'stand', id: stand.id, name: stand.name, at: [stand.lon, stand.lat] })}
             onRemove={() => remove('stand', stand.id)} onRename={name => rename(stand.id, name)} />}
           {camera && <CameraBody camera={camera} admin={admin} onRename={name => renameCamera(camera.id, name)}
+            onAlerts={(alerts, enabled) => setCameras(cs => cs.map(c => c.id === camera.id ? { ...c, alerts, alerts_enabled: enabled } : c))}
             onMove={() => startEdit({ kind: 'camera', id: camera.id, name: camera.name, at: [camera.lon, camera.lat] })} />}
           {zone && <ZoneBody zone={zone} admin={admin} onRemove={() => remove('zone', zone.id)} />}
         </BottomSheet>}

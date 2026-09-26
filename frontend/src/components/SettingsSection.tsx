@@ -1,5 +1,5 @@
 import { CaretDownIcon } from '@phosphor-icons/react/dist/csr/CaretDown'
-import { type CSSProperties, type ReactNode, useId, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 import { useReducedMotion } from '../hooks'
 
 /**
@@ -36,7 +36,14 @@ export default function SettingsSection({
   style?: CSSProperties
   children: ReactNode
 }) {
-  const [open, setOpen] = useState(() => remembered(id, defaultOpen))
+  // A link to /settings#<id> (the map's "Turn them on in Settings") opens this one.
+  const linked = typeof window !== 'undefined' && window.location.hash === `#${id}`
+  const [open, setOpen] = useState(() => linked || remembered(id, defaultOpen))
+  const root = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (linked) root.current?.scrollIntoView({ block: 'start' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const reduced = useReducedMotion()
   const bodyId = useId()
 
@@ -52,7 +59,7 @@ export default function SettingsSection({
   }
 
   return (
-    <section className="card settings-section" style={style}>
+    <section ref={root} id={id} className="card settings-section" style={style}>
       <h2 className="sect settings-section-title">
         <button type="button" className="settings-section-head" aria-expanded={open} aria-controls={bodyId} onClick={toggle}>
           <span className="settings-section-name">{title}</span>

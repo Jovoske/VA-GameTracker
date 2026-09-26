@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import './cameras.css'
 
@@ -44,6 +45,7 @@ type Img = {
   group_type: string | null
   group_size: number | null
   sex: string | null
+  notes_count: number
 }
 
 // Species + group make-up (+ sex once known) as one short label.
@@ -228,6 +230,7 @@ function toPhoto(cam: string, im: Img): LightboxPhoto {
     captured_at: im.captured_at,
     camera: cam,
     label: im.is_empty_frame ? 'No animal' : classLabel(im) || 'Unknown animal',
+    notes_count: im.notes_count,
   }
 }
 
@@ -445,6 +448,7 @@ export default function Cameras() {
                           border: im.reviewed ? '2px solid var(--teal)' : 'none',
                         }}
                       />
+                      <NoteMark count={im.notes_count} />
                       {hidden && (
                         <button
                           className="cam-flag"
@@ -497,7 +501,9 @@ export default function Cameras() {
         })}
       </div>
 
-      {zoom && <PhotoLightbox photos={zoom.photos} start={zoom.idx} backLabel="Back to cameras" onClose={() => setZoom(null)} />}
+      {zoom && <PhotoLightbox photos={zoom.photos} start={zoom.idx} backLabel="Back to cameras" onClose={() => setZoom(null)}
+        onNotesChange={(id, n) => setImages((prev) => Object.fromEntries(Object.entries(prev).map(([cam, imgs]) =>
+          [cam, imgs.map((im) => (im.id === id ? { ...im, notes_count: n } : im))])))} />}
     </div>
   )
 }
