@@ -8,21 +8,26 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from 're
 import { Link, useBlocker, useSearchParams } from 'react-router-dom'
 import { api, thumbUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { isView, type View } from '../map/activity'
+import { ActivityBar, ActivityCard } from '../map/ActivityPanel'
 import { BASE_SOURCES, CALLOUT_ZOOM, CATASTRO, baseLabel, baseSource, mapStyle, readPrefs, retryBase, showBase, showCatastro, writePrefs, type BaseId, type MapPrefs } from '../map/basemaps'
 import BottomSheet, { type Snap } from '../map/BottomSheet'
 import { CameraBody, CameraHeader } from '../map/CameraSheet'
 import CrosshairEditor, { Crosshair, useMapCenter, type Editing } from '../map/CrosshairEditor'
 import { confirmLeave, hasUnsavedDraft, setUnsavedDraft } from '../map/draftGuard'
 import { direction, downwind, isNewCorner, validLngLat, type Camera, type LngLat, type MapData } from '../map/geometry'
-import { addLayers, fitEstate, renderLayers } from '../map/layers'
+import { addLayers, fitEstate, renderLayers, roomFor } from '../map/layers'
 import MapFab from '../map/MapFab'
 import MapSheet, { type Unplaced } from '../map/MapSheet'
 import { PickBody, PickHeader } from '../map/PickSheet'
 import { PIN_ICONS, addCallout, declutterLabels, paintBadge, pinsAt, type Pin, type PinRef } from '../map/pins'
 import { StandBody, StandHeader, ZoneBody, ZoneHeader } from '../map/PlaceSheet'
+import ReplayBar from '../map/ReplayBar'
 import ScalePill from '../map/ScalePill'
+import { useActivity } from '../map/useActivity'
 import { useMeasure } from '../map/useMeasure'
 import { useMyPosition } from '../map/useMyPosition'
+import { useReplay } from '../map/useReplay'
 import '../map/map.css'
 
 type Selection = { kind: 'stand' | 'camera' | 'zone'; id: string }
@@ -50,6 +55,10 @@ type Failure = Error & { offline?: boolean; timeout?: boolean }
 export default function MapPage() {
   const [params, setParams] = useSearchParams()
   const [selected, setSelected] = useState<Selection | null>(() => initialSelection(params))
+  // What the cameras show: their photos (the normal map), where the game is, or a
+  // night played back. In the address, so a reload or Back comes back to it.
+  const [view, setViewState] = useState<View>(() => { const v = params.get('view'); return isView(v) ? v : 'cameras' })
+  const [replayPhoto, setReplayPhoto] = useState<number | null>(null)
   // Bumped on every choice, even the same pin again, so a close in progress is called off.
   const [selKey, setSelKey] = useState(0)
   const [pick, setPick] = useState<PinRef[] | null>(null)
@@ -87,6 +96,9 @@ export default function MapPage() {
   const busyRef = useRef(editBusy); busyRef.current = editBusy
   const activeBaseRef = useRef(activeBase); activeBaseRef.current = activeBase
   const paramsRef = useRef(params); paramsRef.current = params
+  const viewRef = useRef(view); viewRef.current = view
+  // Whether a sheet covers the map now (read by the map's own tap handlers).
+  const sheetOpenRef = useRef(false)
   const requestId = useRef(0)
   // Cameras opened this visit whose "new" count is cleared here before the server's
   // next answer says so: null while the call is out, then when it answered.
@@ -103,6 +115,9 @@ export default function MapPage() {
   const measureRef = useRef(measure); measureRef.current = measure
   const me = useMyPosition(mapObj, ready)
   const center = useMapCenter(mapObj, !!editing)
+  const act = useActivity(mapObj, ready, view === 'activity')
+  const pickActivityRef = useRef(act.pick); pickActivityRef.current = act.pick
+  const pickedId = act.picked?.camera_id
 
   const load = useCallback(async () => {
     const request = ++requestId.current
@@ -203,6 +218,18 @@ export default function MapPage() {
         return
       }
       if (measureRef.current.on) { measureRef.current.add([e.lngLat.lng, e.lngLat.lat]); return }
+      // Activity: a tap on (or next to) a circle reads that camera; anywhere else clears
+      // it. With a camera's sheet open, the circle opens that camera's sheet instead.
+      if (viewRef.current === 'activity') {
+        const { x, y } = e.point, pad = 14
+        const hit = instance.queryRenderedFeatures([[x - pad, y - pad], [x + pad, y + pad]], { layers: ['activity-circles', 'activity-quiet'] })[0]
+        const id = hit?.properties?.id ? String(hit.properties.id) : null
+        const pin = id ? markers.current.find(m => m.pin.kind === 'camera' && m.pin.id === id)?.pin : undefined
+        if (sheetOpenRef.current) { if (pin) selectRef.current(pin); else chooseRef.current(null) }
+        pickActivityRef.current(id)
+        return
+      }
+      if (viewRef.current === 'replay') return
       const feature = instance.getLayer('bedding-fill') ? instance.queryRenderedFeatures(e.point, { layers: ['bedding-fill'] })[0] : undefined
       if (feature?.properties?.id) chooseRef.current({ kind: 'zone', id: String(feature.properties.id) })
       else chooseRef.current(null)
@@ -234,7 +261,9 @@ export default function MapPage() {
   useEffect(() => {
     const instance = map.current
     if (!instance || !ready || !data) return
-    renderLayers(instance, data, prefs.layers, selected?.kind === 'stand' ? selected.id : undefined)
+    // Tonight's wind and scent say nothing about where the game was: off in Activity and Replay.
+    const layers = view === 'cameras' ? prefs.layers : { ...prefs.layers, wind: false, exposure: false, routes: false }
+    renderLayers(instance, data, layers, selected?.kind === 'stand' ? selected.id : undefined)
     if (!fitted.current) {
       fitEstate(instance, data, cameras)
       fitted.current = true
@@ -242,7 +271,7 @@ export default function MapPage() {
       if (focus && validLngLat(focus.lon, focus.lat)) reveal(focus.lon as number, focus.lat as number, true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, data, cameras, prefs.layers, selected])
+  }, [ready, data, cameras, prefs.layers, selected, view])
 
   /** Bring a place into the part of the map the sheet doesn't cover. */
   function reveal(lon: number, lat: number, always = false) {
@@ -285,8 +314,9 @@ export default function MapPage() {
     const current = paramsRef.current, next = new URLSearchParams(current)
     for (const k of SELECTION_KINDS) next.delete(k)
     if (selected) next.set(selected.kind, selected.id)
+    if (view === 'cameras') next.delete('view'); else next.set('view', view)
     if (next.toString() !== current.toString()) setParams(next, { replace: true })
-  }, [selected, setParams])
+  }, [selected, view, setParams])
 
   useEffect(() => {
     const instance = map.current
@@ -304,6 +334,14 @@ export default function MapPage() {
       el.addEventListener('click', e => {
         e.stopPropagation()
         if (editRef.current || measureRef.current.on) return
+        // Activity reads a camera's circle in a card; the camera's sheet is one tap on from there.
+        if (viewRef.current === 'activity') {
+          if (pin.kind !== 'camera') return
+          if (sheetOpenRef.current) selectRef.current(pin)
+          pickActivityRef.current(pin.id)
+          return
+        }
+        if (viewRef.current === 'replay') return
         // A camera usually sits by a stand, so at estate zoom their pins overlap. A tap
         // on more than one asks which; a key press (no pointer) means this pin. A
         // camera's photo stands above its pin and can cover a stand close by when
@@ -329,6 +367,42 @@ export default function MapPage() {
     }
   }, [ready, data, cameras, seenTick])
 
+  // Activity and Replay: every placed camera in view above the docked bar, with room
+  // round each for its circle or its photo (a photo pops up above its camera).
+  const placedKey = cameras.filter(c => validLngLat(c.lon, c.lat)).map(c => `${c.id}:${c.lon},${c.lat}`).join('|')
+  useEffect(() => {
+    const instance = map.current
+    if (!instance || !ready || view === 'cameras' || !placedKey) return
+    const frame = requestAnimationFrame(() => {
+      instance.resize()
+      const pts = placedKey.split('|').map(p => p.split(':')[1].split(',').map(Number) as LngLat)
+      const { clientWidth: w, clientHeight: h } = instance.getCanvas()
+      if (w < 120 || h < 80) return // a sliver of map: leave it where it is
+      // Photos pop up above their cameras in Replay, so more room there; a small
+      // map gives up some of it rather than zoom out to nothing.
+      const side = Math.min(view === 'replay' ? 96 : 64, w * .2)
+      const padding = { top: Math.min(view === 'replay' ? 96 : 60, h * .25), bottom: Math.min(40, h * .1), left: side, right: Math.max(side, Math.min(72, w * .2)) }
+      instance.fitBounds([[Math.min(...pts.map(p => p[0])), Math.min(...pts.map(p => p[1]))], [Math.max(...pts.map(p => p[0])), Math.max(...pts.map(p => p[1]))]],
+        { padding: roomFor(instance, padding), maxZoom: 16, duration: 300 })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [view, ready, placedKey])
+  // The camera being read stays in sight above its card.
+  useEffect(() => {
+    if (view !== 'activity' || !pickedId) return
+    const frame = requestAnimationFrame(() => {
+      const instance = map.current, c = cameras.find(x => x.id === pickedId)
+      const card = stageRef.current?.querySelector<HTMLElement>('.act-card')
+      if (!instance || !c || !card || !validLngLat(c.lon, c.lat)) return
+      const covered = card.offsetHeight + 24, p = instance.project([c.lon!, c.lat!]), h = instance.getCanvas().clientHeight
+      if (p.y > 70 && p.y < h - covered - 30) return
+      instance.easeTo({ center: [c.lon!, c.lat!], offset: [0, -covered / 2], duration: 300 })
+    })
+    return () => cancelAnimationFrame(frame)
+    // Only when another camera is chosen: the map refreshing mustn't pull it back.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, pickedId])
+
   // Opening a camera's sheet marks its photos seen, for this person only.
   const openCamera = selected?.kind === 'camera' ? selected.id : null
   useEffect(() => {
@@ -341,16 +415,18 @@ export default function MapPage() {
   }, [openCamera, selKey])
 
   useEffect(() => {
-    const inert = !!editing || measure.on
     for (const { marker, pin } of markers.current) {
       const el = marker.getElement() as HTMLButtonElement
-      const active = pin.id === selected?.id && pin.kind === selected?.kind
+      // In Activity the chosen camera is the one whose circle is being read. Stands
+      // are only landmarks there, and in Replay nothing on the map but its photos is.
+      const active = view === 'activity' ? pin.kind === 'camera' && pin.id === pickedId : pin.id === selected?.id && pin.kind === selected?.kind
+      const inert = !!editing || measure.on || view === 'replay' || (view === 'activity' && pin.kind === 'stand')
       el.classList.toggle('is-selected', active)
       el.setAttribute('aria-pressed', String(active))
       el.disabled = inert
       el.style.pointerEvents = inert ? 'none' : ''
     }
-  }, [ready, data, cameras, selected, editing, measure.on])
+  }, [ready, data, cameras, selected, editing, measure.on, view, pickedId])
   // Names that would land on another pin stay hidden (after the pins above are in place).
   useEffect(() => { declutterSoon() }, [ready, data, cameras, selected, zoom, prefs.bigPins, prefs.layers.photos, declutterSoon])
 
@@ -383,7 +459,7 @@ export default function MapPage() {
     const instance = map.current
     const [lon, lat] = next.at ?? []
     if (instance && validLngLat(lon, lat)) instance.jumpTo({ center: [lon as number, lat as number], zoom: Math.max(16, instance.getZoom()) })
-    measure.stop(); setSettingsOpen(false); setPick(null); setEditErr('')
+    measure.stop(); setSettingsOpen(false); setPick(null); setEditErr(''); setViewState('cameras')
     setEditing({ kind: next.kind, id: next.id, name: next.name, points: [], step: 'place' })
   }
   async function saveEdit(at: LngLat | null) {
@@ -467,7 +543,24 @@ export default function MapPage() {
   const placedCount = (data?.stands.length ?? 0) + cameras.length - unplaced.length
   const emptyEstate = !!data && !editing && placedCount === 0 && !data.zones.length
   const sheet = editing ? null : (stand || camera || zone) ? 'place' : pick ? 'pick' : settingsOpen ? 'settings' : null
+  sheetOpenRef.current = !!sheet
   const closeSheet = () => { setSelected(null); setSettingsOpen(false); setPick(null) }
+  // Activity and Replay dock their controls under the map; a sheet opened over the
+  // map (a camera, the Map sheet) puts them away until it closes.
+  const modeBar = view !== 'cameras' && !editing && !sheet
+  const replay = useReplay(mapObj, ready, view === 'replay', modeBar, cameras, setReplayPhoto)
+  function setView(next: View) {
+    setViewState(next); setSelected(null); setPick(null); setSettingsOpen(false); setReplayPhoto(null)
+    if (next !== 'activity') act.pick(null)
+  }
+  function openCameraSheet(id: string) {
+    const c = cameras.find(x => x.id === id)
+    if (c && validLngLat(c.lon, c.lat)) select({ kind: 'camera', id, name: c.name, lon: c.lon!, lat: c.lat! })
+    else choose({ kind: 'camera', id })
+  }
+  const activityEmpty = view === 'activity' && !!act.data && !act.loading && !act.err
+    ? act.data.cameras.every(c => !c.watched_nights) ? 'No camera was working in this period, so there is nothing to show.'
+      : act.data.cameras.every(c => !c.visits) ? 'No visits in this period.' : '' : ''
   const onSheetHeight = useCallback((px: number) => {
     const stage = stageRef.current
     if (!stage) return
@@ -498,7 +591,8 @@ export default function MapPage() {
       <span className="map-wind-chevron" aria-hidden="true">{windOpen ? '▴' : '▾'}</span>
     </button>
     <div className="map-stage" ref={stageRef} data-editing={editing ? 'true' : undefined} data-labels={zoom >= LABEL_ZOOM ? 'on' : undefined}
-      data-callouts={!prefs.layers.photos ? undefined : zoom >= CALLOUT_ZOOM ? 'on' : 'dots'}>
+      data-view={view === 'cameras' ? undefined : view}
+      data-callouts={!prefs.layers.photos || view !== 'cameras' ? undefined : zoom >= CALLOUT_ZOOM ? 'on' : 'dots'}>
       <div className="map-canvas-wrap">
         <div ref={mapEl} className="map-canvas" aria-label="Estate map. Drag to move, pinch to zoom." />
         {windOpen && <div id="map-wind-more" className="map-wind-more">
@@ -528,8 +622,14 @@ export default function MapPage() {
             <button type="button" onClick={measure.stop}>Done</button>
           </div>}
           {notice && <div className="map-pill" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>OK</button></div>}
+          {view === 'activity' && act.err && <div className="map-pill map-pill--error" role="alert"><span>{act.err}</span><button type="button" onClick={act.reload} disabled={act.loading}>Try again</button></div>}
+          {view === 'activity' && act.loading && <div className="map-pill" role="status"><span>{act.data ? 'Updating the circles…' : 'Loading activity…'}</span></div>}
+          {activityEmpty && <div className="map-pill map-pill--empty" role="status"><span>{activityEmpty}</span></div>}
+          {view === 'replay' && replay.data && !replay.visits.length && <div className="map-pill map-pill--empty" role="status"><span>Nothing came past a camera that night.</span></div>}
         </div>
         {!ready && <div className="map-loading" role="status">Loading map…</div>}
+        {modeBar && view === 'activity' && act.picked && act.data && <ActivityCard camera={act.picked} data={act.data}
+          onOpen={() => openCameraSheet(act.picked!.camera_id)} onClose={() => act.pick(null)} onHeight={onSheetHeight} />}
 
         {!editing && <div className="map-fabs map-fabs--right">
           <MapFab label="Map type, layers and tools" pressed={settingsOpen} onClick={() => { setSelected(null); setPick(null); setSettingsOpen(v => !v); setSnap('half') }}><StackIcon size={22} /></MapFab>
@@ -555,7 +655,7 @@ export default function MapPage() {
           header={sheet === 'settings' ? <><span className="map-eyebrow">Map</span><h2 className="bsheet-name">How the map looks</h2></>
             : sheet === 'pick' ? <PickHeader count={pick!.length} />
               : stand ? <StandHeader stand={stand} /> : camera ? <CameraHeader camera={camera} /> : zone ? <ZoneHeader zone={zone} /> : null}>
-          {sheet === 'settings' && <MapSheet prefs={prefs} onPrefs={setPrefs} onRetryBase={() => { if (fallbackFrom || tileErr) retryTiles() }} zoom={zoom} baseNote={baseNote}
+          {sheet === 'settings' && <MapSheet view={view} onView={setView} prefs={prefs} onPrefs={setPrefs} onRetryBase={() => { if (fallbackFrom || tileErr) retryTiles() }} zoom={zoom} baseNote={baseNote}
             catastroNote={catastroErr ? 'Property lines aren’t loading right now. Check the signal.' : null}
             admin={admin} measuring={measure.on} meOn={me.on}
             onMeasure={() => { measure.toggle(); closeSheet() }} onMe={() => { me.toggle(); closeSheet() }}
@@ -575,6 +675,8 @@ export default function MapPage() {
       </div>
       {editing && <CrosshairEditor map={mapObj} editing={editing} center={center} busy={editBusy} err={editErr} title={editTitle}
         onChange={setEditing} onSave={saveEdit} onCancel={cancelEdit} />}
+      {modeBar && view === 'activity' && <ActivityBar filters={act.filters} onFilters={f => { act.setFilters(f) }} data={act.data} onClose={() => setView('cameras')} />}
+      {modeBar && view === 'replay' && <ReplayBar replay={replay} cameras={cameras} photo={replayPhoto} onPhoto={setReplayPhoto} onClose={() => setView('cameras')} />}
     </div>
   </div>
 }

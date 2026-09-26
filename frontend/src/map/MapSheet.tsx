@@ -5,6 +5,7 @@ import { NavigationArrowIcon } from '@phosphor-icons/react/dist/csr/NavigationAr
 import { PolygonIcon } from '@phosphor-icons/react/dist/csr/Polygon'
 import { RulerIcon } from '@phosphor-icons/react/dist/csr/Ruler'
 import type { ReactNode } from 'react'
+import { VIEWS, type View } from './activity'
 import { BASES, CALLOUT_ZOOM, CATASTRO_MINZOOM, type BaseId, type MapPrefs } from './basemaps'
 import type { Layers } from './layers'
 
@@ -27,11 +28,15 @@ function ToolRow({ icon, label, note, onClick, disabled }: { icon: ReactNode; la
 }
 
 /**
- * Everything about how the map looks, in one sheet: which picture is underneath,
- * what is drawn on it, the tools, and one size switch. WeHunt's settings sheet,
- * cut down to what a handful of hunters on one estate actually change.
+ * Everything about how the map looks, in one sheet: what the cameras show (their
+ * photos, where the game is, or a night played back), which picture is underneath,
+ * what is drawn on it, the tools, and one size switch. WeHunt's settings sheet, cut
+ * down to what a handful of hunters on one estate actually change.
  */
-export default function MapSheet({ prefs, onPrefs, onRetryBase, zoom, baseNote, catastroNote, admin, measuring, meOn, onMeasure, onMe, onAddStand, onDrawBedding, onPlace, unplaced, terrain }: {
+export default function MapSheet({ view, onView, prefs, onPrefs, onRetryBase, zoom, baseNote, catastroNote, admin, measuring, meOn, onMeasure, onMe, onAddStand, onDrawBedding, onPlace, unplaced, terrain }: {
+  view: View
+  /** Choosing a view closes the sheet and shows it. */
+  onView: (view: View) => void
   prefs: MapPrefs
   onPrefs: (next: MapPrefs) => void
   /** Tapping the map type that is already chosen asks for its picture again. */
@@ -52,6 +57,14 @@ export default function MapSheet({ prefs, onPrefs, onRetryBase, zoom, baseNote, 
 }) {
   const layer = (key: keyof Layers) => (on: boolean) => onPrefs({ ...prefs, layers: { ...prefs.layers, [key]: on } })
   return <div className="msheet">
+    <section aria-labelledby="msheet-view">
+      <h3 id="msheet-view">View</h3>
+      <div className="msheet-segments" role="radiogroup" aria-label="View">
+        {VIEWS.map(v => <button key={v.id} type="button" role="radio" aria-checked={view === v.id} onClick={() => onView(v.id)}>{v.label}</button>)}
+      </div>
+      <p className="msheet-note">{VIEWS.find(v => v.id === view)?.note}</p>
+    </section>
+
     <section aria-labelledby="msheet-type">
       <h3 id="msheet-type">Map type</h3>
       <div className="msheet-segments" role="radiogroup" aria-label="Map type">

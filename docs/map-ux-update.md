@@ -1,5 +1,25 @@
 # Map, stands, and activity reporting update
 
+## September 2026: where the game is, and a night played back
+
+Two more ways to read the cameras' output on the map (`docs/wehunt-features.md`, sections 3 and 4). Map sheet → **View**: **Cameras** (each camera's photo, as before), **Activity** or **Replay**. The view is kept in the address (`?view=activity`), so a reload or Back returns to it. Each view docks its controls under the map; a camera's sheet or the Map sheet puts them away until it closes, and leaving the view brings the normal map back: photos, counts, wind arrows.
+
+- **One rule for a visit** (`backend/app/forecasting/visits.py`). Frames of the same species at the same camera, each within 30 minutes of the one before, are one visit, with its first and last frame, frame count, largest group and first photo. Only photos the detector has checked and kept count, never a hidden species, and a kept photo nobody has named is an "Animal" visit. The camera sheet's "Last night", the activity map, the replay and the nightly statistics (`exposure.visits_by_night`) all count with it, so their numbers agree. `visits_by_night` now also leaves out hidden species and frames not yet checked, as the rest of the app does.
+- **The map's night runs 18:00 to 08:00**, the replay's timeline, so dawn is whole. Parts by local hour: dusk 18–22, night 22–03, dawn 03–08. A visit at 07:30 belongs to the night before. The camera sheet's "Last night" still covers 18:00–06:00.
+- **Activity** (`GET /api/map/activity?species=<id|all>&part=dusk|night|dawn|all&nights=1|7|30`, any role):
+  - A circle at each camera whose **area** is visits per night the camera was working, in one colour (teal, .35 fill, 2 px line), with a two-size key under the filters. A camera that was working and saw nothing is a small empty ring; one that wasn't working gets no circle.
+  - Which nights count comes from `camera_nights` (CONFIRMED or PRESUMED_UP). Where that table hasn't caught up (it is rebuilt hourly), the frames decide, as on the camera sheet: checked frames prove the camera was awake, and unchecked ones mean "still checking". A night out of photo credits never counts. Only visits on counted nights are in the rate, so `per_night` is honest.
+  - Filters: period (last night, 7 or 30 nights), part of the night, and the animals seen in the period. They are remembered on the phone.
+  - Tapping a circle (or the camera's dot) opens a small card with one line, e.g. "Wild boar on 5 of 7 nights, mostly 21–23 h", or "Wild boar on 3 of 5 nights it was working, …" when some nights didn't count. One to three visits are given by their times ("at 19:40, 23:10 and 02:15"); otherwise the busiest two hours ("mostly" for more than half the visits, "busiest" for a third, "at no set time" below that). The numbers are behind a fold, and **Open camera** opens its sheet. The map moves so the circle stays above the card.
+  - Empty periods say "No visits in this period." No signal says so, keeps the circles, and has Try again.
+- **Replay** (`GET /api/map/replay/nights?limit=14`, `GET /api/map/replay?night=YYYY-MM-DD`, any role):
+  - A night picker (the last 14 finished nights with their visit counts), a timeline from 18:00 to 08:00 with a tick for each visit, play/pause (56 px), −5/+5 min and speed **1× / 10× / 60×**. The speeds are minutes of the night per second, so 1× is an hour in a minute, 10× an hour in 6 seconds and 60× an hour a second. The timeline is a real slider across the whole bar: drag anywhere with a thumb or glove, or use the arrow keys.
+  - As the clock passes a visit, it pops up at its camera with its photo, the animal and the time, then fades. The newest is on top, and each goes on the side of its camera that keeps it on the map, off a newer photo and off a fresh arrow. Tapping one opens the photo viewer, which pages through the night.
+  - When the same species reaches a different camera within 3 hours of leaving the last one, a faint dashed arrow joins them once the second visit happens, labelled "Likely went this way". The bar says it is a guess. Overlapping visits and ones the animals couldn't have walked (over 15 km/h between the cameras) are never joined, and nor are unnamed animals.
+  - Everything drawn follows the clock, so scrubbing back takes photos and arrows off again.
+- **Fits.** Entering Activity or Replay fits the placed cameras above the docked bar. `fitEstate` now shrinks its padding when the map is small. Before, a phone on its side with a bar open asked MapLibre for a camera at NaN and took the page down.
+- **No migration.** Nothing new is stored.
+
 ## September 2026: photos on the map
 
 The cameras' output is now on the map, WeHunt-style (`docs/wehunt-features.md`, section 2).
