@@ -127,6 +127,24 @@ class Camera(Base):
     )
 
 
+class CameraView(Base):
+    """When each person last opened each camera on the map.
+
+    That moment is what makes a photo "new" to them: the count on a camera's map
+    callout is its photos that arrived since. Per person, because the team does not
+    look at the same cameras at the same time. No row means never opened.
+    """
+
+    __tablename__ = "camera_views"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cameras.id", ondelete="CASCADE"), primary_key=True
+    )
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Stand(Base):
     __tablename__ = "stands"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
@@ -212,6 +230,8 @@ class Image(Base):
     ubox_event_id: Mapped[str | None] = mapped_column(String, unique=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     original_path: Mapped[str | None] = mapped_column(String)
+    # The small WebP the grids and the map show, made on first request (routes_images).
+    thumbnail_path: Mapped[str | None] = mapped_column(String)
     annotated_path: Mapped[str | None] = mapped_column(String)
     cdn_url: Mapped[str | None] = mapped_column(String)
     file_hash: Mapped[str | None] = mapped_column(String)

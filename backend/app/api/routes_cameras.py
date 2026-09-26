@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
@@ -15,7 +16,7 @@ from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.core.db import get_db
 from app.health import camera_health
-from app.models import Camera, Detection, Image, Species, SyncLog, User
+from app.models import Camera, CameraView, Detection, Image, Species, SyncLog, User
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -168,6 +169,34 @@ def rename_camera(
         "provider_name": camera.provider_name,
         "name_is_custom": camera.name_is_custom, "can_rename": True,
     }
+
+
+@router.post("/{camera_id}/seen")
+def mark_seen(
+    camera_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """You opened this camera: its photos so far are no longer new to you.
+
+    Any signed-in role, viewers included: it records what this person has looked
+    at, not anything about the camera. The database's clock stamps it, the same
+    clock that stamps each photo's arrival, so the two always compare fairly.
+    """
+    camera = db.scalar(select(Camera.id).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ))
+    if camera is None:
+        raise HTTPException(404, "Camera not found.")
+    stmt = pg_insert(CameraView).values(user_id=user.id, camera_id=camera_id, seen_at=func.now())
+    seen_at = db.scalar(
+        stmt.on_conflict_do_update(
+            index_elements=[CameraView.user_id, CameraView.camera_id],
+            set_={"seen_at": stmt.excluded.seen_at},
+        ).returning(CameraView.seen_at)
+    )
+    db.commit()
+    return {"camera_id": str(camera_id), "seen_at": seen_at}
 
 
 @router.post("/sync")
