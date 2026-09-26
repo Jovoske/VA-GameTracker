@@ -15,23 +15,26 @@ the detector catches up, promised animals that were never there.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import and_, case, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.api.routes_stands import tonight
-from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.core.db import get_db
-from app.forecasting.exposure import VISIT_GAP
+from app.forecasting.activity import activity, replay, replay_nights
 from app.forecasting.model import class_label
+from app.forecasting.visits import CHECKED_ANIMAL, visit_rows
 from app.health import camera_health
 from app.models import Camera, CameraNight, CameraView, Detection, Image, Species, User
 
 router = APIRouter(prefix="/map", tags=["map"])
+CurrentUser = Annotated[User, Depends(get_current_user)]
+DB = Annotated[Session, Depends(get_db)]
 
 # A camera you have never opened counts what arrived in the last day, not its whole
 # history: a new hunter's first look at the map shouldn't read "99+" everywhere.
@@ -46,9 +49,6 @@ NEW_CAP = 99
 NIGHT_START, NIGHT_END = time(18), time(6)
 WATCHED = ("CONFIRMED", "PRESUMED_UP")
 
-# An animal photo the detector has checked and kept (or a hunter marked as not
-# empty), with something in it that is not a hidden species.
-CHECKED_ANIMAL = and_(Image.is_empty_frame.is_(False), VISIBLE_ANIMAL)
 
 
 def seen_mark(camera_id):
@@ -82,54 +82,23 @@ def night_window(night: date) -> tuple[datetime, datetime]:
 def last_night_visits(db: Session, camera_ids: list, night: date) -> dict:
     """{camera_id: [{species_id, label, visits}]}, busiest first.
 
-    A visit is an arrival: frames of the same species at the same camera within
-    VISIT_GAP of the previous one are the same visit (exposure.visits_by_night's
-    rule). Only frames inside the night window count, only checked animal photos,
-    and never a hidden species. A kept photo nobody has named yet (the species pass
-    hasn't reached it, or couldn't name it) is an "Animal", the same word its tile
-    and the camera's map photo use, so the sheet never shows last night's photo
-    under a line saying nothing came.
+    Visits come from visits.visit_rows, the rule the activity map and the replay
+    count with, so the three agree: frames of the same species at the same camera
+    within VISIT_GAP of the previous one are the same visit. Only frames inside the
+    night window count, only checked animal photos, and never a hidden species. A
+    kept photo nobody has named yet (the species pass hasn't reached it, or couldn't
+    name it) is an "Animal", the same word its tile and the camera's map photo use,
+    so the sheet never shows last night's photo under a line saying nothing came.
     """
     if not camera_ids:
         return {}
     start, end = night_window(night)
-    # The photo's sightings of species that are not hidden; a photo without one
-    # joins to nothing and is an unnamed animal.
-    named = (
-        select(Detection.image_id, Detection.species_id, Species.common_name)
-        .join(Species, Species.id == Detection.species_id)
-        .where(Species.hidden.is_(False))
-        .subquery()
-    )
-    frames = (
-        select(
-            Image.camera_id,
-            named.c.species_id,
-            named.c.common_name,
-            Image.captured_at,
-            func.lag(Image.captured_at)
-            .over(partition_by=(Image.camera_id, named.c.species_id), order_by=Image.captured_at)
-            .label("prev_at"),
-        )
-        .select_from(Image)
-        .outerjoin(named, named.c.image_id == Image.id)
-        .where(
-            Image.camera_id.in_(camera_ids),
-            Image.captured_at >= start,
-            Image.captured_at < end,
-            CHECKED_ANIMAL,
-        )
-        .subquery()
-    )
-    arrival = case(
-        (or_(frames.c.prev_at.is_(None), frames.c.captured_at - frames.c.prev_at > VISIT_GAP), 1),
-        else_=0,
-    )
-    visits = func.sum(arrival).label("visits")
+    v = visit_rows(start=start, end=end, camera_ids=camera_ids)
+    visits = func.count().label("visits")
     rows = db.execute(
-        select(frames.c.camera_id, frames.c.species_id, frames.c.common_name, visits)
-        .group_by(frames.c.camera_id, frames.c.species_id, frames.c.common_name)
-        .order_by(visits.desc(), frames.c.common_name)
+        select(v.c.camera_id, v.c.species_id, v.c.common_name, visits)
+        .group_by(v.c.camera_id, v.c.species_id, v.c.common_name)
+        .order_by(visits.desc(), v.c.common_name)
     ).all()
     out: dict = {}
     for r in rows:
@@ -138,7 +107,7 @@ def last_night_visits(db: Session, camera_ids: list, night: date) -> dict:
             # The Photos tiles' word for it: "Wild boar", not the stored "Wild Boar";
             # an unnamed animal is "Animal".
             "label": class_label(r.species_id, r.common_name, None, None),
-            "visits": int(r.visits or 0),
+            "visits": int(r.visits),
         })
     return out
 
@@ -219,9 +188,7 @@ def latest_photos(db: Session, image_ids: list) -> dict:
 
 
 @router.get("/cameras")
-def map_cameras(
-    user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> list[dict]:
+def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
     """Every camera with what the map draws for it and what its sheet opens with.
 
     `latest` is the newest checked animal photo, or null. `new_count` is how many
@@ -293,3 +260,72 @@ def map_cameras(
             "last_night_status": night_status(r.exposure_state, *sent.get(c.id, (0, 0))),
         })
     return out
+
+
+# ── activity and replay ─────────────────────────────────────────────────────
+
+PERIODS = (1, 7, 30)
+
+
+def _estate_cameras(db: Session, user: User) -> list[Camera]:
+    return list(db.scalars(
+        select(Camera).where(Camera.estate_id == user.estate_id).order_by(Camera.name)
+    ).all())
+
+
+@router.get("/activity")
+def map_activity(
+    user: CurrentUser,
+    db: DB,
+    species: Annotated[str, Query(max_length=64)] = "all",
+    part: Literal["dusk", "night", "dawn", "all"] = "all",
+    nights: int = 7,
+) -> dict:
+    """Where the game is: visits per watched night at each camera.
+
+    `nights` is 1 (the last finished night), 7 or 30, counted back from last
+    night. `part` is dusk 18-22, night 22-03, dawn 03-08 or all of 18-08, by local
+    hour. `species` is a species id or "all". Per camera: visits, the nights it was
+    watching (watched_nights) and how many of those had a visit (nights_with),
+    per_night (null when it watched none), the busiest two hours (peak, '21–23'),
+    the species behind the count, and `read`, the line the map leads with. Nights a
+    camera wasn't working are left out, never counted as quiet. Any role.
+    """
+    if nights not in PERIODS:
+        raise HTTPException(422, "nights is 1, 7 or 30.")
+    label = None
+    if species != "all":
+        sp = db.get(Species, species)
+        # A hidden species is out of the app altogether, filters included.
+        if sp is None or sp.hidden:
+            raise HTTPException(404, "No such species.")
+        label = class_label(sp.id, sp.common_name, None, None)
+    return activity(
+        db, cameras=_estate_cameras(db, user), last_night=last_completed_night(),
+        nights=nights, part=part, species=None if species == "all" else species,
+        species_label=label,
+    )
+
+
+@router.get("/replay/nights")
+def map_replay_nights(
+    user: CurrentUser, db: DB, limit: Annotated[int, Query(ge=1, le=60)] = 14,
+) -> list[dict]:
+    """The last `limit` finished nights, newest first, each with its number of visits
+    (18:00-08:00, every camera and species). Any role."""
+    return replay_nights(
+        db, cameras=_estate_cameras(db, user), last_night=last_completed_night(), limit=limit,
+    )
+
+
+@router.get("/replay")
+def map_replay(user: CurrentUser, db: DB, night: date) -> dict:
+    """One night, 18:00 to 08:00 local, as the map replays it.
+
+    `visits` are in time order: when (`at`, `last_at`), where, what (`label`,
+    `group_size`, the largest group in the visit) and the first frame's image_id for
+    its thumbnail. `links` join consecutive visits of the same species at two
+    different cameras within three hours, when the animals could have walked it: a
+    guess at where they went, and the map says so. Any role.
+    """
+    return replay(db, cameras=_estate_cameras(db, user), night=night)

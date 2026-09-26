@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models import Camera, CameraNight, Detection, Image
+from app.models import Camera, CameraNight, Image
 
 log = get_logger(__name__)
 
@@ -193,53 +193,27 @@ def visits_by_night(db: Session, *, camera_id=None, species_id=None) -> dict:
     """{(night, camera_id, species_id): {frames, visits, animals}}
 
     A visit is an arrival: consecutive detections of the same species at the same
-    camera separated by more than VISIT_GAP. `animals` uses group_size, which the
-    pipeline already computes per frame and which nothing has ever used.
+    camera separated by more than VISIT_GAP. The visits themselves come from
+    visits.visit_rows, the rule every map view counts with, so this agrees with
+    them: only checked animal photos, never a hidden species, and a kept photo
+    nobody has named is an unnamed (None) visit. A visit belongs to the night of its
+    first frame. `animals` uses group_size, which the pipeline already computes per
+    frame and which nothing has ever used.
     """
-    gap_seconds = int(VISIT_GAP.total_seconds())
-    where = ["1=1"]
-    params: dict = {"gap": gap_seconds, "tz": _TZ}
-    if camera_id:
-        where.append("i.camera_id = :camera_id")
-        params["camera_id"] = camera_id
-    if species_id:
-        where.append("d.species_id = :species_id")
-        params["species_id"] = species_id
+    # Imported here: visits reads VISIT_GAP and night_expr from this module.
+    from app.forecasting.visits import visit_rows
 
-    sql = text(
-        f"""
-        WITH ordered AS (
-            SELECT
-                i.camera_id,
-                d.species_id,
-                i.captured_at,
-                COALESCE(d.group_size, 1) AS group_size,
-                date(timezone(:tz, i.captured_at) - interval '6 hours') AS night,
-                LAG(i.captured_at) OVER (
-                    PARTITION BY i.camera_id, d.species_id ORDER BY i.captured_at
-                ) AS prev_at
-            FROM detections d
-            JOIN images i ON i.id = d.image_id
-            WHERE {' AND '.join(where)}
-        ), marked AS (
-            SELECT *,
-                CASE
-                    WHEN prev_at IS NULL
-                      OR EXTRACT(EPOCH FROM (captured_at - prev_at)) > :gap
-                    THEN 1 ELSE 0
-                END AS is_new_visit
-            FROM ordered
-        )
-        SELECT night, camera_id, species_id,
-               COUNT(*)                AS frames,
-               SUM(is_new_visit)       AS visits,
-               MAX(group_size)         AS animals
-        FROM marked
-        GROUP BY night, camera_id, species_id
-        """
-    )
+    v = visit_rows(camera_ids=[camera_id] if camera_id else None, species_id=species_id)
+    rows = db.execute(
+        select(
+            v.c.night, v.c.camera_id, v.c.species_id,
+            func.sum(v.c.frames).label("frames"),
+            func.count().label("visits"),
+            func.max(v.c.max_group).label("animals"),
+        ).group_by(v.c.night, v.c.camera_id, v.c.species_id)
+    ).all()
     out: dict = {}
-    for r in db.execute(sql, params).all():
+    for r in rows:
         out[(r.night, r.camera_id, r.species_id)] = {
             "frames": int(r.frames),
             "visits": int(r.visits or 0),
