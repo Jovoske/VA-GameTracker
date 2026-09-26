@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.health import camera_health
 from app.models import Camera, CameraView, Detection, Image, Species, SyncLog, User
+from app.notes import note_counts
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -311,6 +312,7 @@ def camera_images(
             }
             for r in drows
         }
+    counts = note_counts(db, ids)
     return [{
         "id": str(i.id),
         "captured_at": i.captured_at,
@@ -322,4 +324,5 @@ def camera_images(
         "is_empty_frame": i.is_empty_frame,
         "reviewed": i.reviewed,
         "animal_conf": i.animal_conf,
+        "notes_count": counts.get(i.id, 0),
     } for i in rows]

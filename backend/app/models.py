@@ -519,8 +519,38 @@ class NotificationPref(Base):
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     species_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Cameras this person hears nothing from (the busy feeder), as camera id strings.
+    # Every camera is on until muted, so a camera added later is heard by default.
+    muted_camera_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PhotoNote(Base):
+    """A photo someone on the team marked "Worth a look", with an optional note.
+
+    The team's own read of the camera output, shown to everyone newest first. `text`
+    is NULL for a mark with nothing said. Removing a person keeps what they said
+    (user_id goes NULL and the name falls back to "Hunter"); removing the photo
+    removes its notes.
+    """
+
+    __tablename__ = "photo_notes"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    image_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    text: Mapped[str | None] = mapped_column(String(140))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        Index("ix_photo_notes_image_id", "image_id"),
+        Index("ix_photo_notes_created_at", "created_at"),
     )
 
 

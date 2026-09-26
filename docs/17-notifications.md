@@ -15,6 +15,18 @@ animals they hear about from **Settings → Notifications**.
   push did not reach anything. This is how a quiet night is told apart from a
   broken subscription.
 
+- **Cameras** — one switch per camera, all on to start. Muting one (the busy
+  feeder) stops every alert from it for that person only; the rest of the team
+  still hears from it. The same switch is on the camera's sheet on the map
+  ("Alerts from this camera"). Each tap saves at once and says so under the
+  switch ("Saved. No alerts from Charca."); a save that fails puts the switch back
+  and says why.
+- **Worth a look** — when a teammate marks a photo and turns on "Tell the team",
+  everyone else with alerts on gets one push: "Worth a look: Wild boar at Charca" /
+  "Pedro: Big boar, third night running". It opens that photo. It is not a species
+  alert, so it comes whichever animals you picked, but never from a camera you
+  muted.
+
 Each device subscribes from that device: a phone and a tablet are two rows in
 `push_subscriptions`, both owned by the same user. Turning alerts off silences
 all of them.
@@ -55,6 +67,11 @@ fresh install has a season of photos and none of them are news.
   and a run with more than five species for one person collapses into a single
   summary ("12 new sightings, 6 species").
 
+**Muted cameras.** Each person's digest is built only from their unmuted cameras,
+so a muted camera is as if it saw nothing: no push and no line in Recent (the
+point of muting the feeder is to stop hearing about it). A run where only a muted
+camera saw something tells that person nothing.
+
 **Keys.** The VAPID key pair is generated on first use and stored in
 `app_settings` (`vapid`). Nothing to configure. Rotating it would force every phone
 to re-subscribe, which the frontend handles: a subscription made under a different
@@ -71,7 +88,11 @@ classification pass.
 | `app_settings` | key → JSON: the VAPID pair, the dispatch watermark |
 | `notification_prefs` | per user: `enabled`, `species_ids` (JSON list) |
 | `push_subscriptions` | per device: endpoint (unique), `p256dh`, `auth`, owner, failure count |
-| `notifications` | what was sent: title, body, url, species, photo, `push_status`, `read_at` |
+| `notifications` | what was sent: title, body, url, species, photo, `push_status`, `read_at`; `kind` is `sighting`, `team_note` or `test` |
+
+Migration `0019_camera_alerts_photo_notes` adds `notification_prefs.muted_camera_ids`
+(JSON list of camera ids, default `[]`, so every camera starts on) and the
+`photo_notes` table behind "Worth a look" (see `docs/map-ux-update.md`).
 
 ## API
 
@@ -79,8 +100,9 @@ All per-user, any role.
 
 | Route | Does |
 |---|---|
-| `GET /api/notifications/settings` | prefs + species list + VAPID public key + device count |
-| `PUT /api/notifications/settings` | `{enabled?, species_ids?}` partial update |
+| `GET /api/notifications/settings` | prefs + species list + cameras with their switch + VAPID public key + device count |
+| `PUT /api/notifications/settings` | `{enabled?, species_ids?, muted_camera_ids?}` partial update; unknown or other estates' cameras are a 400 |
+| `PUT /api/notifications/cameras/{id}` | `{alerts}`: one camera on or muted, for you; answers with `enabled` too |
 | `POST /api/notifications/subscriptions` | register this browser's `PushSubscription.toJSON()` |
 | `DELETE /api/notifications/subscriptions` | `{endpoint}` |
 | `GET /api/notifications?limit=` | the user's feed, newest first, with unread count |

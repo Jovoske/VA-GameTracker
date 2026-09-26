@@ -1,11 +1,14 @@
 """Notifications — what each person wants to hear about, their devices, and the log.
 
 Every route is per-user and open to every role: a guest choosing to hear about boar
-is not an admin action. Admins manage people; people manage their own alerts.
+is not an admin action. Admins manage people; people manage their own alerts. That
+includes muting a camera: it silences it for you, not for the team.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -14,8 +17,16 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.db import get_db
-from app.models import Detection, Notification, NotificationPref, PushSubscription, Species, User
-from app.notifications.prefs import effective_prefs
+from app.models import (
+    Camera,
+    Detection,
+    Notification,
+    NotificationPref,
+    PushSubscription,
+    Species,
+    User,
+)
+from app.notifications.prefs import effective_prefs, locked_prefs, muted_cameras
 from app.notifications.push import send_to_user
 from app.notifications.vapid import get_vapid
 
@@ -51,41 +62,116 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
     ]
     # most-seen first — the animals that actually turn up sit at the top
     species.sort(key=lambda r: (-r["detections"], r["common_name"]))
+    muted = muted_cameras(db, user.id)
     return {
         "enabled": enabled,
         "configured": db.get(NotificationPref, user.id) is not None,
         "species": species,
+        "cameras": [
+            {"id": str(c.id), "name": c.name, "alerts": str(c.id) not in muted}
+            for c in _estate_cameras(db, user)
+        ],
+        "muted_camera_ids": sorted(muted),
         "public_key": get_vapid(db).public_key,
         "subscriptions": _subscription_count(db, user),
     }
 
 
+def _estate_cameras(db: Session, user: User) -> list[Camera]:
+    return list(db.scalars(
+        select(Camera).where(Camera.estate_id == user.estate_id).order_by(Camera.name)
+    ).all())
+
+
+def _camera_ids(db: Session, user: User, ids: list[str]) -> list[str]:
+    """`ids` as the estate's camera ids, sorted and once each; 400 for any other."""
+    known = {str(c.id) for c in _estate_cameras(db, user)}
+    out, unknown = set(), []
+    for raw in ids:
+        try:
+            key = str(uuid.UUID(str(raw)))
+        except ValueError:
+            key = None
+        if key in known:
+            out.add(key)
+        else:
+            unknown.append(str(raw))
+    if unknown:
+        raise HTTPException(400, f"Unknown camera: {', '.join(sorted(unknown))}")
+    return sorted(out)
+
+
 class SettingsBody(BaseModel):
     enabled: bool | None = None
     species_ids: list[str] | None = None
+    # The whole list of cameras you hear nothing from; [] turns every camera back on.
+    muted_camera_ids: list[str] | None = None
 
 
 @router.put("/settings")
 def put_settings(
     body: SettingsBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> dict:
-    """Partial update: either field may be omitted and keeps its value (or default)."""
-    row = db.get(NotificationPref, user.id)
-    if row is None:
-        enabled, selected = effective_prefs(db, user.id)
-        row = NotificationPref(user_id=user.id, enabled=enabled, species_ids=selected)
-        db.add(row)
-    if body.enabled is not None:
-        row.enabled = body.enabled
+    """Partial update: any field may be omitted and keeps its value (or default)."""
     if body.species_ids is not None:
         known = set(db.scalars(select(Species.id)).all())
         unknown = sorted(set(body.species_ids) - known)
         if unknown:
             raise HTTPException(400, f"Unknown species: {', '.join(unknown)}")
+    muted = None
+    if body.muted_camera_ids is not None:
+        muted = _camera_ids(db, user, body.muted_camera_ids)
+    row = locked_prefs(db, user.id)
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    if body.species_ids is not None:
         row.species_ids = sorted(set(body.species_ids))
-    row.updated_at = datetime.now(timezone.utc)
+    if muted is not None:
+        row.muted_camera_ids = muted
+    row.updated_at = datetime.now(UTC)
     db.commit()
-    return {"enabled": row.enabled, "species_ids": row.species_ids}
+    return {
+        "enabled": row.enabled, "species_ids": row.species_ids,
+        "muted_camera_ids": row.muted_camera_ids,
+    }
+
+
+class CameraAlertsBody(BaseModel):
+    alerts: bool
+
+
+@router.put("/cameras/{camera_id}")
+def put_camera_alerts(
+    camera_id: uuid.UUID,
+    body: CameraAlertsBody,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """One camera's switch: alerts from it on, or muted for you.
+
+    One camera at a time rather than the whole list, so the switch in Settings and
+    the one on the map's camera sheet can't undo each other. `enabled` says whether
+    your alerts are on at all, so the screen can say when nothing will come anyway.
+    """
+    camera = db.scalar(select(Camera.id).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ))
+    if camera is None:
+        raise HTTPException(404, "Camera not found.")
+    row = locked_prefs(db, user.id)
+    muted = set(row.muted_camera_ids or [])
+    key = str(camera_id)
+    if body.alerts:
+        muted.discard(key)
+    else:
+        muted.add(key)
+    row.muted_camera_ids = sorted(muted)
+    row.updated_at = datetime.now(UTC)
+    db.commit()
+    return {
+        "camera_id": key, "alerts": body.alerts, "enabled": row.enabled,
+        "muted_camera_ids": row.muted_camera_ids,
+    }
 
 
 class SubscriptionKeys(BaseModel):

@@ -1,4 +1,6 @@
 """Species — list them, toggle hunting-advice visibility, and browse what was spotted."""
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -8,6 +10,7 @@ from app.api.deps import get_current_admin, get_current_user
 from app.core.db import get_db
 from app.forecasting.model import class_label
 from app.models import Camera, Detection, Image, Species, User
+from app.notes import note_counts
 
 router = APIRouter(prefix="/species", tags=["species"])
 
@@ -123,6 +126,9 @@ def species_images(
         })
         if len(out) >= limit:
             break
+    counts = note_counts(db, [uuid.UUID(o["image_id"]) for o in out])
+    for o in out:
+        o["notes_count"] = counts.get(uuid.UUID(o["image_id"]), 0)
     return out
 
 

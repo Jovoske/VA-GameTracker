@@ -31,6 +31,7 @@ from app.forecasting.model import class_label
 from app.forecasting.visits import CHECKED_ANIMAL, visit_rows
 from app.health import camera_health
 from app.models import Camera, CameraNight, CameraView, Detection, Image, Species, User
+from app.notifications.prefs import effective_prefs, muted_cameras
 
 router = APIRouter(prefix="/map", tags=["map"])
 CurrentUser = Annotated[User, Depends(get_current_user)]
@@ -197,7 +198,9 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
     photos taken since a few days before that count, and it stops at 99. `last_night`
     is the most recent finished night, in visits; `last_night_status` says how far
     to trust it (see night_status), so an empty list is not read as a quiet night
-    when the camera was down or its photos are still being checked.
+    when the camera was down or its photos are still being checked. `alerts` is
+    this camera's switch for you (false when you muted it), and `alerts_enabled`
+    whether your alerts are on at all, so the sheet can say when nothing would come.
     """
     night = last_completed_night()
     since = func.coalesce(CameraView.seen_at, func.now() - NEW_WINDOW)
@@ -241,6 +244,8 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
     sent = night_frames(db, ids, night)
     now = datetime.now(UTC)
     can_rename = user.role in {"admin", "member"}
+    muted = muted_cameras(db, user.id)
+    alerts_enabled = effective_prefs(db, user.id)[0]
     out = []
     for r in rows:
         c = r.Camera
@@ -258,6 +263,8 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
             "new_count": min(int(r.fresh or 0), NEW_CAP),
             "last_night": visits.get(c.id, []),
             "last_night_status": night_status(r.exposure_state, *sent.get(c.id, (0, 0))),
+            "alerts": str(c.id) not in muted,
+            "alerts_enabled": alerts_enabled,
         })
     return out
 

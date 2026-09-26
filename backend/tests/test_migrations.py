@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.core.security import create_access_token, decode_token
@@ -64,6 +64,12 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert set(_columns(eng, "camera_views")) == {"user_id", "camera_id", "seen_at"}
         assert "thumbnail_path" in images
         assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
+        assert _columns(eng, "notification_prefs")["muted_camera_ids"] == "jsonb"
+        assert set(_columns(eng, "photo_notes")) == {
+            "id", "image_id", "user_id", "text", "created_at",
+        }
+        assert _index(eng, "photo_notes", "ix_photo_notes_image_id") == ["image_id"]
+        assert _index(eng, "photo_notes", "ix_photo_notes_created_at") == ["created_at"]
     finally:
         eng.dispose()
 
@@ -117,6 +123,8 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert _columns(eng, "camera_views")
         assert "thumbnail_path" in _columns(eng, "images")
         assert _index(eng, "images", "ix_images_camera_created")
+        assert "muted_camera_ids" in _columns(eng, "notification_prefs")
+        assert _columns(eng, "photo_notes")
     finally:
         eng.dispose()
 
@@ -447,5 +455,82 @@ def test_image_arrivals_index_upgrade_down_and_up_again(fresh_db):
         command.stamp(cfg, "0017_camera_views")
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_alerts_and_photo_notes_upgrade_down_and_up_again(fresh_db):
+    """0019 on a real 0018 database: people's alert choices survive and every camera
+    starts on; notes go with their photo but outlive the person who wrote them."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0018_image_arrivals")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0018 shape first.
+            c.execute(text("DROP TABLE photo_notes"))
+            c.execute(text("ALTER TABLE notification_prefs DROP COLUMN muted_camera_ids"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            user_id = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'pedro@x.local','h','member') RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text(
+                "INSERT INTO notification_prefs (user_id,enabled,species_ids) "
+                "VALUES (:u,true,'[\"wild_boar\"]'::jsonb)"
+            ), {"u": user_id})
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            image_id = c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),'photo.jpg',false) RETURNING id"
+            ), {"c": camera_id}).scalar_one()
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            pref = c.execute(text("SELECT enabled, species_ids, muted_camera_ids "
+                                  "FROM notification_prefs")).one()
+            assert pref == (True, ["wild_boar"], [])  # kept, and every camera on
+            for words in (None, "Big boar, third night running"):
+                c.execute(text("INSERT INTO photo_notes (id,image_id,user_id,text) "
+                               "VALUES (gen_random_uuid(),:i,:u,:t)"),
+                          {"i": image_id, "u": user_id, "t": words})
+            with pytest.raises(DBAPIError), c.begin_nested():
+                c.execute(text("INSERT INTO photo_notes (id,image_id,text) "
+                               "VALUES (gen_random_uuid(),:i,:t)"), {"i": image_id, "t": "x" * 141})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        # The person goes, what they said stays; the photo goes, its notes go.
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user_id})
+            assert c.execute(text("SELECT count(*) FROM photo_notes "
+                                  "WHERE user_id IS NULL")).scalar_one() == 2
+            c.execute(text("DELETE FROM images WHERE id=:i"), {"i": image_id})
+            assert c.execute(text("SELECT count(*) FROM photo_notes")).scalar_one() == 0
+
+        command.downgrade(cfg, "0018_image_arrivals")
+        assert "photo_notes" not in inspect(eng).get_table_names()
+        assert "muted_camera_ids" not in _columns(eng, "notification_prefs")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0018_image_arrivals")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "muted_camera_ids" in _columns(eng, "notification_prefs")
+        assert _index(eng, "photo_notes", "ix_photo_notes_image_id") == ["image_id"]
     finally:
         eng.dispose()

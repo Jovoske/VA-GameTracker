@@ -13,6 +13,10 @@ Two guards keep this an alert rather than a firehose:
   * one notification per species per run however many frames a sounder produced,
     and when one run has more than MAX_PER_USER species for a person it collapses
     into a single summary.
+
+A camera someone muted is left out of what they are told, as if it had seen
+nothing: no push and no in-app record, because the reason to mute the busy feeder
+is to stop hearing about it. Everyone else still hears from it.
 """
 from __future__ import annotations
 
@@ -154,7 +158,10 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
 
     lookback = now - timedelta(hours=settings.notify_lookback_hours)
     rows = db.execute(
-        select(Detection.species_id, Species.common_name, Image.id, Image.captured_at, Camera.name)
+        select(
+            Detection.species_id, Species.common_name, Image.id, Image.captured_at, Camera.name,
+            Camera.id,
+        )
         .select_from(Detection)
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
@@ -168,17 +175,22 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
         )
         .order_by(Image.captured_at)
     ).all()
-    digests = group_by_species(rows)
+    species_seen = {r[0] for r in rows}
 
     created = pushed = 0
-    if digests:
+    if rows:
         tz = ZoneInfo(settings.estate_timezone)
         prefs = db.scalars(
             select(NotificationPref).where(NotificationPref.enabled.is_(True))
         ).all()
         for pref in prefs:
             wanted_ids = set(pref.species_ids or [])
-            wanted = [d for sid, d in digests.items() if sid in wanted_ids]
+            muted = set(pref.muted_camera_ids or [])
+            # Per person: what their unmuted cameras saw of the animals they asked for.
+            digests = group_by_species(
+                r[:5] for r in rows if r[0] in wanted_ids and str(r[5]) not in muted
+            )
+            wanted = list(digests.values())
             if not wanted:
                 continue
             wanted.sort(key=lambda d: d.latest_at or now, reverse=True)
@@ -222,7 +234,7 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
     _set_cursor(db, newest)
     db.commit()
     result = {
-        "status": "ok", "species": len(digests), "notifications": created, "pushed": pushed,
+        "status": "ok", "species": len(species_seen), "notifications": created, "pushed": pushed,
     }
     log.info("notify.dispatched", **result)
     return result
