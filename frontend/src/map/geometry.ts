@@ -1,4 +1,6 @@
-export type Camera = { id: string; name: string; lat: number | null; lng: number | null; sightings: number; battery_pct: number | null; signal_pct?: number | null; last_capture?: string | null }
+// No photo count here on purpose: the API's `sightings` counts frames, bursts and
+// hidden species included, and anything a hunter reads counts visits instead.
+export type Camera = { id: string; name: string; lat: number | null; lng: number | null; battery_pct: number | null; signal_pct?: number | null; last_capture?: string | null }
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string }
 export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }
@@ -79,6 +81,39 @@ export function areaM2(ring: LngLat[]): number {
 }
 export const formatDistance = (m: number) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
 export const formatArea = (m2: number) => m2 < 1000 ? `${Math.round(m2)} m²` : `${(m2 / 10_000).toFixed(1)} ha`
+
+// ── drawing an outline ──
+// Closer than this to the last corner is the same corner pressed twice (a gloved
+// double press), and closer than this to the first is the shape closing on itself.
+const SAME_CORNER_M = 1
+/** Whether `p` would be a real next corner, not a repeat of the last or the first. */
+export function isNewCorner(points: LngLat[], p: LngLat): boolean {
+  const last = points[points.length - 1]
+  if (last && distanceM(last, p) < SAME_CORNER_M) return false
+  return !(points.length > 1 && distanceM(points[0], p) < SAME_CORNER_M)
+}
+export const nearFirstCorner = (points: LngLat[], p: LngLat | null) => !!p && points.length > 2 && distanceM(points[0], p) < SAME_CORNER_M * 8
+/**
+ * Whether any two edges cross: a bow-tie, not an area (B-10). `closed` includes the
+ * edge from the last corner back to the first, which Finish shape would draw.
+ */
+export function crossesItself(points: LngLat[], closed = true): boolean {
+  const n = points.length
+  const edges = closed ? n : n - 1
+  if (n < 4) return false
+  const k = Math.cos(rad(points[0][1]))
+  const xy = points.map(([lon, lat]) => [lon * k, lat])
+  const side = (a: number[], b: number[], c: number[]) => Math.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+  for (let i = 0; i < edges; i++) {
+    const a = xy[i], b = xy[(i + 1) % n]
+    for (let j = i + 2; j < edges; j++) {
+      if (closed && i === 0 && j === n - 1) continue // the two edges that meet at the first corner
+      const c = xy[j], d = xy[(j + 1) % n]
+      if (side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0) return true
+    }
+  }
+  return false
+}
 /** "134 m · north-east": how far, and which way to walk from the first point. */
 export const measureLabel = (a: LngLat, b: LngLat) => `${formatDistance(distanceM(a, b))} · ${direction(bearingDeg(a, b))}`
 export function circle(center: LngLat, radiusM: number, steps = 48): GeoJSON.Polygon {

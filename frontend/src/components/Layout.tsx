@@ -71,8 +71,6 @@ export default function Layout() {
     setToken(null)
     nav('/login')
   }
-  // An unsaved bedding outline asks before a tab takes you away from it.
-  const guard = (e: React.MouseEvent) => { if (!confirmLeave()) e.preventDefault() }
   const onMap = loc.pathname === '/map'
 
   return (
@@ -86,7 +84,7 @@ export default function Layout() {
         {/* Desktop / tablet: links in the header. On phones the bottom tab bar takes over. */}
         <nav className="topnav" aria-label="Main navigation">
           {TABS.map((t) => (
-            <NavLink key={t.to} to={t.to} end={t.end} onClick={guard} style={({ isActive }) => linkStyle(isActive)}>
+            <NavLink key={t.to} to={t.to} end={t.end} style={({ isActive }) => linkStyle(isActive)}>
               {t.label}
             </NavLink>
           ))}
@@ -120,7 +118,7 @@ export default function Layout() {
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
       <nav className="tabbar" aria-label="Main navigation" ref={tabbar}>
         {TABS.map(({ to, label, Ico, end }) => (
-          <NavLink key={to} to={to} end={end} onClick={guard} className={({ isActive }) => (isActive ? 'active' : '')}>
+          <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'active' : '')}>
             {({ isActive }) => (
               <>
                 <span className="ico">

@@ -3,6 +3,8 @@
   --surface: #161D1A;
   --surface-2: #1E2723;
   --go: #3FB950;
+  /* Text on a --go button: dark enough to read on green in daylight and at dusk. */
+  --on-go: #06210C;
   /* Verdict states. Word + shape carry the meaning; these are a redundant channel.
      Measured contrast between --go and --marginal was 1.12:1 — the states were
      effectively isoluminant — and under a red headlamp green reads near-black
@@ -169,7 +171,7 @@ button:not(:disabled):active,
   width: 100%;
   padding: 12px;
   background: var(--go);
-  color: #06210C;
+  color: var(--on-go);
   border: none;
   border-radius: var(--r-ctl);
   font-weight: 600;

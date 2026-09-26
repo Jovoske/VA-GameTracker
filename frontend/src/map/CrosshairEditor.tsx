@@ -1,6 +1,6 @@
 import type { Map } from 'maplibre-gl'
 import { useEffect, useState } from 'react'
-import { areaM2, distanceM, formatArea, formatDistance, type LngLat } from './geometry'
+import { areaM2, crossesItself, distanceM, formatArea, formatDistance, isNewCorner, nearFirstCorner, type LngLat } from './geometry'
 import { setSource } from './layers'
 
 export type Editing = {
@@ -48,6 +48,11 @@ export function Crosshair({ editing, center }: { editing: Editing; center: LngLa
  * shape" once there are three corners. On a desktop a click on the map still adds a
  * corner where you click. It sits under the map, above the tab bar, so it never hides
  * the counter or a button under the navigation (B-12).
+ *
+ * Add corner rests until the cross has moved off the last corner, so a gloved double
+ * press can't lay two corners on one spot, and Finish shape waits for an outline
+ * that doesn't cross itself (B-10). Cancel stays live while saving: on a connection
+ * that never answers it is the way out, and it drops the request.
  */
 export default function CrosshairEditor({ map, editing, center, busy, err, onChange, onSave, onCancel, title }: {
   map: Map | null
@@ -83,18 +88,28 @@ export default function CrosshairEditor({ map, editing, center, busy, err, onCha
     if (zone && (pts.length >= 3 || editing.step === 'name') && !confirmCancel) { setConfirmCancel(true); return }
     onCancel()
   }
-  const addCorner = () => { if (center) onChange({ ...editing, points: [...pts, center] }) }
+  const canAdd = !!center && isNewCorner(pts, center)
+  const addCorner = () => { if (center && isNewCorner(pts, center)) onChange({ ...editing, points: [...pts, center] }) }
   const area = pts.length >= 3 ? formatArea(areaM2(pts)) : null
   const gap = last && center ? formatDistance(distanceM(last, center)) : null
   const nameMissing = !editing.name.trim()
+  // Crossed so far, or would cross once Finish shape closes it back to the first corner.
+  const crossed = zone && crossesItself(pts, false)
+  const closeCrosses = zone && !crossed && crossesItself(pts)
+  const closing = zone && editing.step === 'place' && nearFirstCorner(pts, center)
+  const hint = zone && editing.step === 'name' ? 'Give it a name the group will know.'
+    : crossed ? 'The outline crosses itself. Undo back to where it went wrong.'
+      : closeCrosses ? 'Closing it here would cross the outline. Add a corner or Undo.'
+        : closing ? 'Back at the first corner. Tap Finish shape.'
+          : `Move the map so the cross is ${zone ? 'on a corner' : editing.kind === 'stand' ? 'where you sit' : 'on the camera'}.`
 
   return <div className="map-editor" role="region" aria-label={title}>
     <div className="map-editor-head">
       <div>
         <strong>{title}</strong>
-        <p className="map-editor-hint">{zone && editing.step === 'name' ? 'Give it a name the group will know.' : `Move the map so the cross sits on ${zone ? 'a corner' : editing.kind === 'stand' ? 'where you sit' : 'the camera'}.`}</p>
+        <p className={crossed || closeCrosses ? 'map-editor-hint map-editor-hint--warn' : 'map-editor-hint'} aria-live="polite">{hint}</p>
       </div>
-      <button type="button" className="map-editor-x" aria-label="Cancel" onClick={cancel} disabled={busy}>
+      <button type="button" className="map-editor-x" aria-label="Cancel" onClick={cancel}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
       </button>
     </div>
@@ -111,8 +126,8 @@ export default function CrosshairEditor({ map, editing, center, busy, err, onCha
         </p>
         <div className="map-editor-row">
           <button type="button" className="map-button map-editor-side" disabled={!pts.length || busy} onClick={() => onChange({ ...editing, points: pts.slice(0, -1) })}>Undo</button>
-          <button type="button" className="map-button map-button--primary map-editor-main" disabled={!center || busy} onClick={addCorner}>Add corner</button>
-          {pts.length >= 3 && <button type="button" className="map-button map-editor-side" disabled={busy} onClick={() => onChange({ ...editing, step: 'name' })}>Finish shape</button>}
+          <button type="button" className="map-button map-button--primary map-editor-main" disabled={!canAdd || busy} onClick={addCorner}>Add corner</button>
+          {pts.length >= 3 && <button type="button" className="map-button map-editor-side" disabled={busy || crossed || closeCrosses} onClick={() => onChange({ ...editing, step: 'name' })}>Finish shape</button>}
         </div>
       </>}
 

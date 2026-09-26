@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import { ageLabel } from '../api'
 import { validLngLat, type Camera } from './geometry'
 
 /**
@@ -7,14 +8,17 @@ import { validLngLat, type Camera } from './geometry'
  * Kept in its own file on purpose: this is where the camera's own photos land next
  * (last photo, last night's visits, a strip of recent photos, its alert switch).
  * The header is what shows at the 112px peek, so it carries the one line that says
- * whether the camera is worth opening.
+ * whether the camera is working: when it last took a photo, and its battery. No
+ * photo count: a burst of three frames is one visit, and until the sheet can say
+ * "Last night: 2 visits" it says nothing rather than a number three times too high.
  */
 export function CameraHeader({ camera }: { camera: Camera }) {
+  const last = camera.last_capture ? `Last photo ${ageLabel(camera.last_capture)}` : 'No photos yet'
   const battery = camera.battery_pct == null ? 'Battery unknown' : `Battery ${camera.battery_pct}%`
   return <>
     <span className="map-eyebrow">Camera</span>
     <h2 className="bsheet-name">{camera.name}</h2>
-    <p className="bsheet-meta">{camera.sightings} sighting{camera.sightings === 1 ? '' : 's'} · {battery}</p>
+    <p className="bsheet-meta">{last} · {battery}</p>
   </>
 }
 

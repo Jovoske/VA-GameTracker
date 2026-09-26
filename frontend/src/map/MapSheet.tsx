@@ -31,9 +31,11 @@ function ToolRow({ icon, label, note, onClick, disabled }: { icon: ReactNode; la
  * what is drawn on it, the tools, and one size switch. WeHunt's settings sheet,
  * cut down to what a handful of hunters on one estate actually change.
  */
-export default function MapSheet({ prefs, onPrefs, zoom, baseNote, catastroNote, admin, measuring, meOn, onMeasure, onMe, onAddStand, onDrawBedding, onPlace, unplaced, terrain }: {
+export default function MapSheet({ prefs, onPrefs, onRetryBase, zoom, baseNote, catastroNote, admin, measuring, meOn, onMeasure, onMe, onAddStand, onDrawBedding, onPlace, unplaced, terrain }: {
   prefs: MapPrefs
   onPrefs: (next: MapPrefs) => void
+  /** Tapping the map type that is already chosen asks for its picture again. */
+  onRetryBase: () => void
   zoom: number
   baseNote: string | null
   catastroNote: string | null
@@ -53,7 +55,7 @@ export default function MapSheet({ prefs, onPrefs, zoom, baseNote, catastroNote,
     <section aria-labelledby="msheet-type">
       <h3 id="msheet-type">Map type</h3>
       <div className="msheet-segments" role="radiogroup" aria-label="Map type">
-        {BASES.map(b => <button key={b.id} type="button" role="radio" aria-checked={prefs.base === b.id} onClick={() => onPrefs({ ...prefs, base: b.id as BaseId })}>{b.label}</button>)}
+        {BASES.map(b => <button key={b.id} type="button" role="radio" aria-checked={prefs.base === b.id} onClick={() => prefs.base === b.id ? onRetryBase() : onPrefs({ ...prefs, base: b.id as BaseId })}>{b.label}</button>)}
       </div>
       {baseNote && <p className="msheet-note msheet-note--warn" role="status">{baseNote}</p>}
       <SwitchRow label="Property lines (Catastro)" on={prefs.catastro} onChange={on => onPrefs({ ...prefs, catastro: on })}

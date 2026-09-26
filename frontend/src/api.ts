@@ -22,35 +22,71 @@ export function imageUrl(path: string): string {
   return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers)
+/** What a hunter reads instead of the browser's own "Failed to fetch" or "Load failed". */
+export const NO_SIGNAL = 'No signal. Try again when you have a connection.'
+export const NO_ANSWER = 'No answer from the server.'
+
+/**
+ * `timeoutMs` gives up on a request that never answers, which on a valley
+ * connection is likelier than one that fails: without it a Save button can say
+ * "Saving…" forever. The error then carries `timeout: true`. A request dropped by
+ * the network carries `offline: true`, and one the server refused carries `status`.
+ * An abort from the caller's own `signal` is passed through untouched.
+ */
+export async function api<T>(path: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
+  const { timeoutMs, ...init } = options
+  const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  const resp = await fetch(`/api${path}`, { ...options, headers })
-
-  // An expired or revoked session is not a data-loading failure — showing it as one
-  // leaves the user staring at a red error with no way forward. Clear the dead token
-  // and send them to sign in. Only when we actually sent a token: a 401 without one is
-  // a failed login attempt, which the login form reports itself.
-  if (resp.status === 401 && token) {
-    setToken(null)
-    if (!window.location.pathname.startsWith('/login')) {
-      window.location.assign('/login?expired=1')
+  const outer = init.signal
+  const ctl = timeoutMs ? new AbortController() : null
+  let timedOut = false
+  let timer = 0
+  if (ctl) {
+    if (outer?.aborted) ctl.abort(outer.reason)
+    else outer?.addEventListener('abort', () => ctl.abort(outer.reason), { once: true })
+    timer = window.setTimeout(() => { timedOut = true; ctl.abort() }, timeoutMs)
+  }
+  // The body is read inside the same guard: a connection can stall halfway through it.
+  const guard = async <R,>(work: () => Promise<R>): Promise<R> => {
+    try { return await work() } catch (e) {
+      if (timedOut) throw Object.assign(new Error(NO_ANSWER), { timeout: true })
+      if ((e as Error).name === 'AbortError' || outer?.aborted) throw e
+      // fetch reports a dropped connection as a bare TypeError; anything else is real.
+      if (e instanceof TypeError) throw Object.assign(new Error(NO_SIGNAL), { offline: true })
+      throw e
     }
-    throw new Error('You were signed out. Sign in again.')
   }
 
-  if (!resp.ok) {
-    const detail = await resp.json().catch(() => ({}))
-    // The status rides along so a caller can say something specific about a 409.
-    throw Object.assign(new Error(detail.detail || `Something went wrong (${resp.status})`), { status: resp.status })
+  try {
+    const resp = await guard(() => fetch(`/api${path}`, { ...init, headers, signal: ctl?.signal ?? outer }))
+
+    // An expired or revoked session is not a data-loading failure — showing it as one
+    // leaves the user staring at a red error with no way forward. Clear the dead token
+    // and send them to sign in. Only when we actually sent a token: a 401 without one is
+    // a failed login attempt, which the login form reports itself.
+    if (resp.status === 401 && token) {
+      setToken(null)
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.assign('/login?expired=1')
+      }
+      throw new Error('You were signed out. Sign in again.')
+    }
+
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => ({}))
+      // The status rides along so a caller can say something specific about a 409.
+      throw Object.assign(new Error(detail.detail || `Something went wrong (${resp.status})`), { status: resp.status })
+    }
+    // DELETEs answer 204 with no body — resp.json() on that rejects and the caller
+    // never gets to refresh, which reads as "the button did nothing".
+    if (resp.status === 204) return undefined as T
+    return await guard(() => resp.json() as Promise<T>)
+  } finally {
+    window.clearTimeout(timer)
   }
-  // DELETEs answer 204 with no body — resp.json() on that rejects and the caller
-  // never gets to refresh, which reads as "the button did nothing".
-  if (resp.status === 204) return undefined as T
-  return resp.json() as Promise<T>
 }
 
 /** Last-good copy of a GET response, so the plan survives a dead valley.

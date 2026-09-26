@@ -28,8 +28,9 @@ function Heading({ kind, name, children }: { kind: string; name: string; childre
 }
 
 export function StandHeader({ stand }: { stand: MapStand }) {
+  const status = validLngLat(stand.lon, stand.lat) ? stand.wind.status : 'no_position'
   return <Heading kind="Stand" name={stand.name}>
-    <p className="bsheet-verdict" style={{ color: windColor(stand.wind.status) }}>{WIND_HEAD[stand.wind.status] ?? 'Wind unknown.'}</p>
+    <p className="bsheet-verdict" style={{ color: windColor(status) }}>{WIND_HEAD[status] ?? 'Wind unknown.'}</p>
   </Heading>
 }
 export function ZoneHeader({ zone }: { zone: Zone }) {
@@ -89,10 +90,11 @@ export function StandBody({ stand, scentRange, admin, onMove, onRemove, onRename
   const placed = validLngLat(stand.lon, stand.lat)
   const drawn = !!windGeometry(stand, scentRange)
   return <>
-    <p className="map-detail-copy">{stand.wind.text}</p>
-    {stand.wind.source && stand.wind.source !== 'synoptic' && stand.wind.source !== 'unknown' && <p className="map-detail-copy">That’s the slope air at this seat, not the forecast wind above.</p>}
+    {/* An unplaced stand has no wind to give: the header already says it isn't on the map. */}
+    {placed && <p className="map-detail-copy">{stand.wind.text}</p>}
+    {placed && stand.wind.source && stand.wind.source !== 'synoptic' && stand.wind.source !== 'unknown' && <p className="map-detail-copy">That’s the slope air at this seat, not the forecast wind above.</p>}
     {drawn && <p className="map-caveat">The cone shows how far scent carries tonight. An indication only: wind near the ground swirls.</p>}
-    {!placed && <p className="map-detail-copy">Not on the map yet.{admin ? '' : ' An admin can place it.'}</p>}
+    {!placed && !admin && <p className="map-detail-copy">An admin can place it.</p>}
     <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>Reserve this stand</Link>
     {admin && <div className="map-actions map-actions--admin">
       <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>

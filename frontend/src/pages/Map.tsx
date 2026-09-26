@@ -5,18 +5,20 @@ import { StackIcon } from '@phosphor-icons/react/dist/csr/Stack'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useBlocker, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 import { BASE_SOURCES, CATASTRO, baseLabel, baseSource, mapStyle, readPrefs, retryBase, showBase, showCatastro, writePrefs, type BaseId, type MapPrefs } from '../map/basemaps'
 import BottomSheet, { type Snap } from '../map/BottomSheet'
 import { CameraBody, CameraHeader } from '../map/CameraSheet'
 import CrosshairEditor, { Crosshair, useMapCenter, type Editing } from '../map/CrosshairEditor'
-import { setUnsavedDraft } from '../map/draftGuard'
-import { direction, downwind, validLngLat, type Camera, type LngLat, type MapData } from '../map/geometry'
+import { confirmLeave, hasUnsavedDraft, setUnsavedDraft } from '../map/draftGuard'
+import { direction, downwind, isNewCorner, validLngLat, type Camera, type LngLat, type MapData } from '../map/geometry'
 import { addLayers, fitEstate, renderLayers } from '../map/layers'
 import MapFab from '../map/MapFab'
 import MapSheet, { type Unplaced } from '../map/MapSheet'
+import { PickBody, PickHeader } from '../map/PickSheet'
+import { PIN_ICONS, declutterLabels, pinsAt, type Pin, type PinRef } from '../map/pins'
 import { StandBody, StandHeader, ZoneBody, ZoneHeader } from '../map/PlaceSheet'
 import ScalePill from '../map/ScalePill'
 import { useMeasure } from '../map/useMeasure'
@@ -24,23 +26,33 @@ import { useMyPosition } from '../map/useMyPosition'
 import '../map/map.css'
 
 type Selection = { kind: 'stand' | 'camera' | 'zone'; id: string }
-const PIN_ICONS = {
-  stand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 21V8l7-5 7 5v13M4 11h16M8 21v-6h8v6"/></svg>',
-  camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="4"/><path d="M8 6V3h8v3"/></svg>',
-}
+const SELECTION_KINDS = ['stand', 'camera', 'zone'] as const
 // Names under the pins from this zoom in; further out they would pile on top of each other.
-const LABEL_ZOOM = 15
-// A base map that fails this many tiles in a row, with none getting through, is down
-// (or blocked on this network), not just slow. One timeout on weak signal is not this.
+const LABEL_ZOOM = 16
+// A base map that fails this many tiles with not one getting through is down (or
+// blocked on this network), not just slow. One timeout on weak signal is not this.
 const FALLBACK_AFTER = 4
+// A save that hasn't answered by now isn't going to. The outline stays for Try again.
+const SAVE_TIMEOUT_MS = 20_000
+// How long a save waits for the map to reload before it lets the drawing bar go.
+const RELOAD_WAIT_MS = 8_000
+const LOAD_TIMEOUT_MS = 30_000
 const ESTATE_CENTER: LngLat = [-1.3608, 39.0947]
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+const freshTiles = () => ({ fails: {} as Record<string, number>, loaded: {} as Record<string, number>, errSinceIdle: 0, okSinceErr: 0 })
 
-const initialSelection = (params: URLSearchParams): Selection | null =>
-  params.get('stand') ? { kind: 'stand', id: params.get('stand')! } : params.get('camera') ? { kind: 'camera', id: params.get('camera')! } : null
+const initialSelection = (params: URLSearchParams): Selection | null => {
+  const kind = SELECTION_KINDS.find(k => params.get(k))
+  return kind ? { kind, id: params.get(kind)! } : null
+}
+type Failure = Error & { offline?: boolean; timeout?: boolean }
 
 export default function MapPage() {
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const [selected, setSelected] = useState<Selection | null>(() => initialSelection(params))
+  // Bumped on every choice, even the same pin again, so a close in progress is called off.
+  const [selKey, setSelKey] = useState(0)
+  const [pick, setPick] = useState<PinRef[] | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [snap, setSnap] = useState<Snap>('half')
   const [data, setData] = useState<MapData | null>(null)
@@ -57,6 +69,7 @@ export default function MapPage() {
   const [prefs, setPrefsState] = useState<MapPrefs>(readPrefs)
   const [activeBase, setActiveBase] = useState<BaseId>(prefs.base)
   const [fallbackFrom, setFallbackFrom] = useState<BaseId | null>(null)
+  const [fallbackNoted, setFallbackNoted] = useState(false)
   const [tileErr, setTileErr] = useState(false)
   const [catastroErr, setCatastroErr] = useState(false)
   const [windOpen, setWindOpen] = useState(false)
@@ -69,15 +82,18 @@ export default function MapPage() {
   const stageRef = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
   const fitted = useRef(false)
-  const markers = useRef<maplibregl.Marker[]>([])
+  const markers = useRef<Pin[]>([])
   const editRef = useRef(editing); editRef.current = editing
   const busyRef = useRef(editBusy); busyRef.current = editBusy
   const activeBaseRef = useRef(activeBase); activeBaseRef.current = activeBase
+  const paramsRef = useRef(params); paramsRef.current = params
   const requestId = useRef(0)
   const saving = useRef(false)
+  const saveCtl = useRef<AbortController | null>(null)
   const lastCorner = useRef({ t: 0, x: 0, y: 0 })
+  const labelFrame = useRef(0)
   // Tile health, per source. Kept in a ref: tiles report far too often for state.
-  const tiles = useRef({ fails: {} as Record<string, number>, errSinceIdle: 0, okSinceErr: 0 })
+  const tiles = useRef(freshTiles())
 
   const measure = useMeasure(mapObj, ready)
   const measureRef = useRef(measure); measureRef.current = measure
@@ -88,16 +104,23 @@ export default function MapPage() {
     const request = ++requestId.current
     setLoading(true); setErr('')
     try {
-      const [next, cams] = await Promise.all([api<MapData>('/map/tonight'), api<Camera[]>('/cameras')])
+      const [next, cams] = await Promise.all([api<MapData>('/map/tonight', { timeoutMs: LOAD_TIMEOUT_MS }), api<Camera[]>('/cameras', { timeoutMs: LOAD_TIMEOUT_MS })])
       if (request !== requestId.current) return
       setData(next); setCameras(cams)
-    } catch (e) { if (request === requestId.current) setErr(`Couldn’t load the map. ${(e as Error).message}`) }
-    finally { if (request === requestId.current) setLoading(false) }
+    } catch (e) {
+      if (request !== requestId.current) return
+      const x = e as Failure
+      setErr(x.offline ? 'No signal, so the map didn’t load.' : x.timeout ? 'No answer from the server, so the map didn’t load.' : `Couldn’t load the map. ${x.message}`)
+    } finally { if (request === requestId.current) setLoading(false) }
   }, [])
   useEffect(() => { load(); api<{ role: string }>('/auth/me').then(u => setAdmin(u.role === 'admin')).catch(() => {}) }, [load])
   useRefetchOnReturn(() => { if (!editRef.current && !busyRef.current) load() }, 120_000)
 
   function setPrefs(next: MapPrefs) { setPrefsState(next); writePrefs(next) }
+  const declutterSoon = useCallback(() => {
+    cancelAnimationFrame(labelFrame.current)
+    labelFrame.current = requestAnimationFrame(() => declutterLabels(markers.current))
+  }, [])
 
   // ── the map itself ──
   useEffect(() => {
@@ -112,8 +135,8 @@ export default function MapPage() {
     instance.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right')
     instance.on('rotate', () => setBearing(instance.getBearing()))
     // A pinch that twists a few degrees shouldn't leave the estate skewed (B-23).
-    instance.on('rotateend', () => { const b = instance.getBearing(); if (b !== 0 && Math.abs(b) < 12) instance.easeTo({ bearing: 0, duration: 200 }) })
-    instance.on('zoomend', () => setZoom(Math.round(instance.getZoom() * 10) / 10))
+    instance.on('rotateend', () => { const b = instance.getBearing(); if (b !== 0 && Math.abs(b) < 12) instance.easeTo({ bearing: 0, duration: 200 }); declutterSoon() })
+    instance.on('zoomend', () => { setZoom(Math.round(instance.getZoom() * 10) / 10); declutterSoon() })
     instance.on('style.load', () => { addLayers(instance); setReady(true); setMapObj(instance) })
 
     // Only the base picture raises the banner, and only its own tiles. A failed
@@ -125,23 +148,32 @@ export default function MapPage() {
       if (source === CATASTRO) { if (t.fails[source] >= 2) setCatastroErr(true); return }
       if (!BASE_SOURCES.includes(source) || source !== baseSource(activeBaseRef.current)) return
       t.errSinceIdle++; t.okSinceErr = 0
-      if (activeBaseRef.current !== 'world' && t.fails[source] >= FALLBACK_AFTER) {
-        // The Spanish servers aren't answering here. Show the world imagery and say so.
-        setFallbackFrom(activeBaseRef.current); setActiveBase('world'); setTileErr(false)
-        t.fails = {}; t.errSinceIdle = 0
-      } else setTileErr(true)
+      // Some of this picture got through, so this is a gap, not an outage: say so now.
+      // With nothing through yet, wait for the map to settle before deciding which.
+      // A failed tile doesn't repaint the map, so ask for one: 'idle' follows it.
+      if (t.loaded[source]) setTileErr(true)
+      instance.triggerRepaint()
     })
     instance.on('sourcedata', (e: maplibregl.MapSourceDataEvent) => {
       if (!e.tile || !e.sourceId) return
       const t = tiles.current
-      t.fails[e.sourceId] = 0
+      t.loaded[e.sourceId] = (t.loaded[e.sourceId] ?? 0) + 1
       if (e.sourceId === CATASTRO) setCatastroErr(false)
       if (e.sourceId === baseSource(activeBaseRef.current)) t.okSinceErr++
     })
-    // The banner goes by itself once the picture has loaded again with nothing failing.
+    // Every tile asked for has answered or failed. Failed tiles report at once and good
+    // ones only once decoded, so this is the first moment "none got through" is true.
     instance.on('idle', () => {
-      const t = tiles.current
-      if (t.okSinceErr > 0 && t.errSinceIdle === 0) setTileErr(false)
+      const t = tiles.current, base = activeBaseRef.current, source = baseSource(base)
+      if (t.errSinceIdle > 0) {
+        if (base !== 'world' && !t.loaded[source] && (t.fails[source] ?? 0) >= FALLBACK_AFTER) {
+          // The Spanish servers aren't answering here. Show the world imagery and say so.
+          setFallbackFrom(base); setFallbackNoted(false); setActiveBase('world'); setTileErr(false)
+          tiles.current = freshTiles()
+          return
+        }
+        setTileErr(true)
+      } else if (t.okSinceErr > 0) setTileErr(false) // the picture came back by itself
       t.errSinceIdle = 0
     })
 
@@ -155,27 +187,28 @@ export default function MapPage() {
         if (touch) return
         if (edit.kind !== 'zone') { instance.easeTo({ center: e.lngLat, duration: 200 }); return }
         if (edit.step !== 'place') return
-        const last = lastCorner.current, now = Date.now()
-        // The second click of a double click is not a second corner (B-13).
+        const last = lastCorner.current, now = Date.now(), at: LngLat = [e.lngLat.lng, e.lngLat.lat]
+        // The second click of a double click is not a second corner (B-13), nor is a click on a corner.
         if (now - last.t < 350 && Math.hypot(e.point.x - last.x, e.point.y - last.y) < 20) return
+        if (!isNewCorner(edit.points, at)) return
         lastCorner.current = { t: now, x: e.point.x, y: e.point.y }
-        setEditing({ ...edit, points: [...edit.points, [e.lngLat.lng, e.lngLat.lat]] })
+        setEditing({ ...edit, points: [...edit.points, at] })
         return
       }
       if (measureRef.current.on) { measureRef.current.add([e.lngLat.lng, e.lngLat.lat]); return }
       const feature = instance.getLayer('bedding-fill') ? instance.queryRenderedFeatures(e.point, { layers: ['bedding-fill'] })[0] : undefined
-      if (feature?.properties?.id) { setSelected({ kind: 'zone', id: String(feature.properties.id) }); setSettingsOpen(false); setSnap('half') }
-      else { setSelected(null); setSettingsOpen(false) }
+      if (feature?.properties?.id) chooseRef.current({ kind: 'zone', id: String(feature.properties.id) })
+      else chooseRef.current(null)
     })
     const resize = new ResizeObserver(() => instance.resize())
     resize.observe(mapEl.current)
-    return () => { resize.disconnect(); markers.current.forEach(m => m.remove()); markers.current = []; instance.remove(); map.current = null; setMapObj(null); fitted.current = false }
+    return () => { resize.disconnect(); cancelAnimationFrame(labelFrame.current); markers.current.forEach(m => m.marker.remove()); markers.current = []; instance.remove(); map.current = null; setMapObj(null); fitted.current = false }
     // The map is built once; later preference changes flip layers on the live style.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Base picture and property lines follow the choice without rebuilding the style.
-  useEffect(() => { setActiveBase(prefs.base); setFallbackFrom(null); setTileErr(false); tiles.current = { fails: {}, errSinceIdle: 0, okSinceErr: 0 } }, [prefs.base])
+  useEffect(() => { setActiveBase(prefs.base); setFallbackFrom(null); setTileErr(false); tiles.current = freshTiles() }, [prefs.base])
   useEffect(() => { if (ready && map.current) showBase(map.current, activeBase) }, [ready, activeBase])
   useEffect(() => { if (ready && map.current) showCatastro(map.current, prefs.catastro); if (!prefs.catastro) setCatastroErr(false) }, [ready, prefs.catastro])
 
@@ -183,7 +216,7 @@ export default function MapPage() {
   function retryTiles() {
     const instance = map.current
     if (!instance) return
-    tiles.current = { fails: {}, errSinceIdle: 0, okSinceErr: 0 }
+    tiles.current = freshTiles()
     setTileErr(false)
     // Back from the fallback: the Spanish layer was hidden, so its failed tiles are
     // already gone and showing it again asks for them afresh.
@@ -216,43 +249,79 @@ export default function MapPage() {
     if (!always && !covered && p.x > 40 && p.x < w - 40 && p.y > 40) return
     instance.easeTo({ center: [lon, lat], zoom: always ? Math.max(16, instance.getZoom()) : instance.getZoom(), offset: wide ? [Math.min(230, w / 4), -h * .1] : [0, -h * .25], duration: always ? 0 : 300 })
   }
-  const select = useCallback((kind: 'stand' | 'camera', id: string, lon: number, lat: number) => {
-    setSelected({ kind, id }); setSettingsOpen(false); setSnap('half')
-    reveal(lon, lat)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  /** Room around the estate for Fit: clear of an open sheet, below it on a phone, beside it on a wider screen. */
+  function fitPadding(): number | maplibregl.PaddingOptions {
+    const edge = 72
+    const wrap = mapEl.current?.getBoundingClientRect(), sheet = mapEl.current?.parentElement?.querySelector('.bsheet')?.getBoundingClientRect()
+    if (!wrap || !sheet?.height) return edge
+    const room = (px: number, span: number) => Math.max(edge, Math.min(Math.round(px) + 24, span - edge - 80))
+    return sheet.width < wrap.width - 2
+      ? { top: edge, right: edge, bottom: edge, left: room(sheet.right - wrap.left, wrap.width) }
+      : { top: edge, right: edge, left: edge, bottom: room(wrap.bottom - sheet.top, wrap.height) }
+  }
+
+  const choose = useCallback((next: Selection | null, sheetSnap: Snap = 'half') => {
+    setSelected(next); setPick(null)
+    if (next) { setSettingsOpen(false); setSnap(sheetSnap); setSelKey(k => k + 1) }
   }, [])
+  const chooseRef = useRef(choose); chooseRef.current = choose
+  const select = useCallback((pin: PinRef) => {
+    choose({ kind: pin.kind, id: pin.id })
+    reveal(pin.lon, pin.lat)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [choose])
   const selectRef = useRef(select); selectRef.current = select
+
+  // The open sheet lives in the address, so Back from a camera's photos (or a reload)
+  // comes back to it. Replaced, not pushed: tapping pins doesn't fill the history.
+  useEffect(() => {
+    const current = paramsRef.current, next = new URLSearchParams(current)
+    for (const k of SELECTION_KINDS) next.delete(k)
+    if (selected) next.set(selected.kind, selected.id)
+    if (next.toString() !== current.toString()) setParams(next, { replace: true })
+  }, [selected, setParams])
 
   useEffect(() => {
     const instance = map.current
     if (!instance || !ready || !data) return
-    markers.current.forEach(m => m.remove()); markers.current = []
-    const pin = (kind: 'stand' | 'camera', id: string, name: string, lon: number, lat: number) => {
+    markers.current.forEach(m => m.marker.remove()); markers.current = []
+    const add = (pin: PinRef) => {
       const el = document.createElement('button')
-      el.dataset.kind = kind; el.dataset.id = id
-      el.type = 'button'; el.className = `map-pin map-pin--${kind}`
-      el.setAttribute('aria-label', `${kind === 'stand' ? 'Stand' : 'Camera'}: ${name}`)
-      const icon = document.createElement('span'); icon.className = 'map-pin-icon'; icon.innerHTML = PIN_ICONS[kind]
-      const label = document.createElement('span'); label.className = 'map-pin-label'; label.textContent = name
+      el.dataset.kind = pin.kind; el.dataset.id = pin.id
+      el.type = 'button'; el.className = `map-pin map-pin--${pin.kind}`
+      el.setAttribute('aria-label', `${pin.kind === 'stand' ? 'Stand' : 'Camera'}: ${pin.name}`)
+      const icon = document.createElement('span'); icon.className = 'map-pin-icon'; icon.innerHTML = PIN_ICONS[pin.kind]
+      const label = document.createElement('span'); label.className = 'map-pin-label'; label.textContent = pin.name
       el.append(icon, label)
-      el.addEventListener('click', e => { e.stopPropagation(); if (!editRef.current && !measureRef.current.on) selectRef.current(kind, id, lon, lat) })
-      markers.current.push(new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(instance))
+      el.addEventListener('click', e => {
+        e.stopPropagation()
+        if (editRef.current || measureRef.current.on) return
+        // A camera usually sits by a stand, so at estate zoom their pins overlap. A tap
+        // on more than one asks which. A key press (no pointer) means this pin.
+        const here = e.detail ? pinsAt(markers.current, e.clientX, e.clientY) : []
+        if (here.length > 1) { setSelected(null); setSettingsOpen(false); setPick(here); setSnap('half'); setSelKey(k => k + 1) }
+        else selectRef.current(pin)
+      })
+      markers.current.push({ marker: new maplibregl.Marker({ element: el }).setLngLat([pin.lon, pin.lat]).addTo(instance), pin })
     }
-    cameras.forEach(c => { if (validLngLat(c.lng, c.lat)) pin('camera', c.id, c.name, c.lng!, c.lat!) })
-    data.stands.forEach(s => { if (validLngLat(s.lon, s.lat)) pin('stand', s.id, s.name, s.lon!, s.lat!) })
+    // Cameras go on last, so where a pin overlaps they are on top: they're what the team opens the map for.
+    data.stands.forEach(s => { if (validLngLat(s.lon, s.lat)) add({ kind: 'stand', id: s.id, name: s.name, lon: s.lon!, lat: s.lat! }) })
+    cameras.forEach(c => { if (validLngLat(c.lng, c.lat)) add({ kind: 'camera', id: c.id, name: c.name, lon: c.lng!, lat: c.lat! }) })
   }, [ready, data, cameras])
 
   useEffect(() => {
     const inert = !!editing || measure.on
-    for (const marker of markers.current) {
+    for (const { marker, pin } of markers.current) {
       const el = marker.getElement() as HTMLButtonElement
-      const active = el.dataset.id === selected?.id && el.dataset.kind === selected?.kind
+      const active = pin.id === selected?.id && pin.kind === selected?.kind
       el.classList.toggle('is-selected', active)
       el.setAttribute('aria-pressed', String(active))
       el.disabled = inert
       el.style.pointerEvents = inert ? 'none' : ''
     }
   }, [ready, data, cameras, selected, editing, measure.on])
+  // Names that would land on another pin stay hidden (after the pins above are in place).
+  useEffect(() => { declutterSoon() }, [ready, data, cameras, selected, zoom, prefs.bigPins, declutterSoon])
 
   // While drawing, a double tap must not zoom and add a corner at once (B-13).
   useEffect(() => {
@@ -260,15 +329,22 @@ export default function MapPage() {
     if (!instance) return
     if (editing) instance.doubleClickZoom.disable(); else instance.doubleClickZoom.enable()
   }, [editing != null])
+  const draftWhat = editing?.kind === 'zone' && editing.points.length ? 'this bedding outline' : editing && !editing.id && editing.name.trim() ? 'this stand' : ''
   useEffect(() => {
-    const what = editing?.kind === 'zone' && editing.points.length ? 'this bedding outline' : editing && !editing.id && editing.name.trim() ? 'this stand' : ''
-    setUnsavedDraft(what)
-    if (!what) return
+    setUnsavedDraft(draftWhat)
+    if (!draftWhat) return
     const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
-  }, [editing])
+  }, [draftWhat])
   useEffect(() => () => setUnsavedDraft(''), [])
+  // Leaving with an unsaved outline asks first, whichever way you leave: a tab, the
+  // browser's Back, or the phone's back gesture (B-12).
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => hasUnsavedDraft() && currentLocation.pathname !== nextLocation.pathname)
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return
+    if (confirmLeave()) blocker.proceed(); else blocker.reset()
+  }, [blocker])
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 5000); return () => clearTimeout(t) }, [notice])
 
   // ── placing and drawing ──
@@ -276,7 +352,7 @@ export default function MapPage() {
     const instance = map.current
     const [lon, lat] = next.at ?? []
     if (instance && validLngLat(lon, lat)) instance.jumpTo({ center: [lon as number, lat as number], zoom: Math.max(16, instance.getZoom()) })
-    measure.stop(); setSettingsOpen(false); setEditErr('')
+    measure.stop(); setSettingsOpen(false); setPick(null); setEditErr('')
     setEditing({ kind: next.kind, id: next.id, name: next.name, points: [], step: 'place' })
   }
   async function saveEdit(at: LngLat | null) {
@@ -286,25 +362,40 @@ export default function MapPage() {
     const live = map.current?.getCenter()
     const point: LngLat | null = live ? [live.lng, live.lat] : at
     if (e.kind === 'zone' ? e.points.length < 3 : !point) return
+    // Cancel aborts this; the timeout gives up on a connection that never answers.
+    const ctl = new AbortController(); saveCtl.current = ctl
+    const send = (body: unknown, method: string) => ({ method, body: JSON.stringify(body), signal: ctl.signal, timeoutMs: SAVE_TIMEOUT_MS })
     saving.current = true; setEditBusy(true); setEditErr('')
     try {
       let created: { id: string } | undefined
-      if (e.kind === 'zone') await api('/zones', { method: 'POST', body: JSON.stringify({ name: e.name.trim(), kind: 'bedding', polygon: { type: 'Polygon', coordinates: [[...e.points, e.points[0]]] } }) })
-      else if (e.kind === 'camera') await api(`/cameras/${e.id}/location`, { method: 'PUT', body: JSON.stringify({ lat: point![1], lng: point![0] }) })
-      else if (e.id) await api(`/stands/${e.id}`, { method: 'PATCH', body: JSON.stringify({ lat: point![1], lon: point![0] }) })
-      else created = await api<{ id: string }>('/stands', { method: 'POST', body: JSON.stringify({ name: e.name.trim(), lat: point![1], lon: point![0] }) })
+      if (e.kind === 'zone') await api('/zones', send({ name: e.name.trim(), kind: 'bedding', polygon: { type: 'Polygon', coordinates: [[...e.points, e.points[0]]] } }, 'POST'))
+      else if (e.kind === 'camera') await api(`/cameras/${e.id}/location`, send({ lat: point![1], lng: point![0] }, 'PUT'))
+      else if (e.id) await api(`/stands/${e.id}`, send({ lat: point![1], lon: point![0] }, 'PATCH'))
+      else created = await api<{ id: string }>('/stands', send({ name: e.name.trim(), lat: point![1], lon: point![0] }, 'POST'))
       // The draft stays until the new positions are in, so the pin never jumps back (B-17).
-      await load()
+      // A reload that hangs doesn't hold the bar, though: the save itself is done.
+      await Promise.race([load(), wait(RELOAD_WAIT_MS)])
       setEditing(null)
-      if (created?.id) { setSelected({ kind: 'stand', id: created.id }); setSnap('peek') }
+      if (created?.id) choose({ kind: 'stand', id: created.id }, 'peek')
       else if (e.id) setSnap('peek')
       setNotice(e.kind === 'zone' ? 'Bedding saved.' : 'Saved.')
-    } catch (x) { setEditErr(`That didn’t save. ${(x as Error).message}`) }
-    finally { saving.current = false; setEditBusy(false) }
+    } catch (x) {
+      // Cancelled: the hunter has already left the drawing bar.
+      if (ctl.signal.aborted) return
+      const kept = e.kind === 'zone' ? 'Your outline is kept.' : 'It isn’t saved yet.'
+      setEditErr((x as Failure).timeout ? `No answer from the server. ${kept}` : `That didn’t save. ${(x as Error).message}`)
+    } finally {
+      saving.current = false; setEditBusy(false)
+      if (saveCtl.current === ctl) saveCtl.current = null
+    }
+  }
+  function cancelEdit() {
+    saveCtl.current?.abort()
+    setEditing(null); setEditErr('')
   }
   async function remove(kind: 'stand' | 'zone', id: string) {
     try {
-      await api(`/${kind === 'stand' ? 'stands' : 'zones'}/${id}`, { method: 'DELETE' })
+      await api(`/${kind === 'stand' ? 'stands' : 'zones'}/${id}`, { method: 'DELETE', timeoutMs: SAVE_TIMEOUT_MS })
     } catch (x) {
       const status = (x as Error & { status?: number }).status
       if (kind === 'stand' && status === 409) throw Object.assign(new Error('This stand has sit history, so it can’t be removed. Rename it instead.'), { final: true })
@@ -314,7 +405,7 @@ export default function MapPage() {
     await load(); setSelected(null); setNotice('Removed from the map.')
   }
   async function rename(id: string, name: string) {
-    try { await api(`/stands/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }) }
+    try { await api(`/stands/${id}`, { method: 'PATCH', body: JSON.stringify({ name }), timeoutMs: SAVE_TIMEOUT_MS }) }
     catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
     await load(); setNotice('Renamed.')
   }
@@ -331,20 +422,25 @@ export default function MapPage() {
   const air = data?.airflow
   const from = air?.source !== 'unknown' ? air?.wind_dir_deg : null
   const speed = air?.wind_speed_kmh
+  // Nothing loaded is not the same as calm air: never state a verdict without the forecast.
+  const windWord = !data ? (loading ? 'Checking…' : 'Wind not loaded') : from != null ? `From the ${direction(from)}` : speed == null ? 'No wind forecast' : 'Too light to call'
   const unplaced: Unplaced[] = [
     ...(data?.stands ?? []).filter(s => !validLngLat(s.lon, s.lat)).map(s => ({ kind: 'stand' as const, id: s.id, name: s.name })),
     ...cameras.filter(c => !validLngLat(c.lng, c.lat)).map(c => ({ kind: 'camera' as const, id: c.id, name: c.name })),
   ]
-  const sheet = editing ? null : (stand || camera || zone) ? 'place' : settingsOpen ? 'settings' : null
-  const closeSheet = () => { setSelected(null); setSettingsOpen(false) }
+  const placedCount = (data?.stands.length ?? 0) + cameras.length - unplaced.length
+  const emptyEstate = !!data && !editing && placedCount === 0 && !data.zones.length
+  const sheet = editing ? null : (stand || camera || zone) ? 'place' : pick ? 'pick' : settingsOpen ? 'settings' : null
+  const closeSheet = () => { setSelected(null); setSettingsOpen(false); setPick(null) }
   const onSheetHeight = useCallback((px: number) => {
     const stage = stageRef.current
     if (!stage) return
     stage.style.setProperty('--sheet-h', `${px}px`)
     stage.dataset.sheet = px > stage.clientHeight * .7 ? 'tall' : px > 0 ? 'open' : ''
   }, [])
-  const baseNote = fallbackFrom ? `${baseLabel(fallbackFrom)} from IGN isn’t loading here, so this is ${baseLabel('world')} for now.` : null
-  const tileNotice = fallbackFrom && !tileErr ? `${baseLabel(fallbackFrom)} isn’t loading, so this is ${baseLabel('world')}.` : tileErr ? 'Part of the map picture didn’t load. Your stands and cameras are still on it.' : ''
+  const baseNote = fallbackFrom ? `${baseLabel(fallbackFrom)} from IGN isn’t loading here, so this is ${baseLabel('world')} for now. Tap ${baseLabel(fallbackFrom)} to try it again.` : null
+  const tileNotice = tileErr ? 'Part of the map picture didn’t load. Your stands and cameras are still on it.'
+    : fallbackFrom && !fallbackNoted ? `${baseLabel(fallbackFrom)} isn’t loading, so this is ${baseLabel('world')}.` : ''
   const editTitle = editing ? editing.kind === 'zone' ? 'Draw bedding' : editing.id ? `Move ${editing.name}` : 'New stand' : ''
 
   if (fatal) return <div className="map-page map-page--fatal">
@@ -359,16 +455,17 @@ export default function MapPage() {
       <span className="wind-direction" aria-hidden="true"><svg viewBox="0 0 40 40" style={{ transform: from == null ? undefined : `rotate(${downwind(from) - bearing}deg)` }}><circle cx="20" cy="20" r="18" />{from != null && <path d="M20 29V11m-6 6 6-6 6 6" />}</svg></span>
       <span className="map-wind-reading">
         <span>{air?.source === 'katabatic' ? 'Calm evening. Cold air sliding downhill' : air?.source === 'anabatic' ? 'Calm and sunny. Air drifting uphill' : 'Wind tonight'}</span>
-        <strong>{from != null ? `From the ${direction(from)}` : loading && !data ? 'Checking…' : 'Too light to call'}</strong>
+        <strong>{windWord}</strong>
         {from != null && <em>Scent goes {direction(downwind(from))}</em>}
       </span>
-      <span className="map-wind-speed"><strong>{speed == null ? '—' : Math.round(speed)}</strong><span>km/h</span></span>
+      <span className="map-wind-speed"><strong>{speed == null || !data ? '—' : Math.round(speed)}</strong><span>km/h</span></span>
       <span className="map-wind-chevron" aria-hidden="true">{windOpen ? '▴' : '▾'}</span>
     </button>
     <div className="map-stage" ref={stageRef} data-editing={editing ? 'true' : undefined} data-labels={zoom >= LABEL_ZOOM ? 'on' : undefined}>
       <div className="map-canvas-wrap">
         <div ref={mapEl} className="map-canvas" aria-label="Estate map. Drag to move, pinch to zoom." />
         {windOpen && <div id="map-wind-more" className="map-wind-more">
+          {!data && <p>{loading ? 'Getting tonight’s wind…' : 'The wind comes with the map. It shows once the map loads.'}</p>}
           {air?.text && <p>{air.text}</p>}
           <p>Arrows show where scent goes from each stand. Tap a stand to see how far it carries.</p>
           <p className="map-caveat">An indication only. Wind near the ground swirls.</p>
@@ -376,7 +473,18 @@ export default function MapPage() {
         <ScalePill map={mapObj} />
         <div className="map-notices">
           {err && <div className="map-pill map-pill--error" role="alert"><span>{err}</span><button type="button" onClick={load} disabled={loading}>Try again</button></div>}
-          {tileNotice && <div className="map-pill" role="status"><span>{tileNotice}</span><button type="button" onClick={retryTiles}>Try again</button></div>}
+          {tileNotice && <div className="map-pill" role="status"><span>{tileNotice}</span><button type="button" onClick={retryTiles}>Try again</button>
+            {!tileErr && <button type="button" aria-label="OK, keep this map" onClick={() => setFallbackNoted(true)}>OK</button>}</div>}
+          {emptyEstate && <div className="map-pill map-pill--empty" role="status">
+            <span>{data.stands.length + cameras.length === 0
+              ? admin ? 'Nothing on the map yet. Add a stand here, and connect cameras in Settings.' : 'Nothing on the map yet. An admin adds stands here and connects cameras in Settings.'
+              : admin ? 'Your stands and cameras aren’t placed on the map yet.' : 'The stands and cameras aren’t placed on the map yet. An admin can place them.'}</span>
+            {admin && <span className="map-pill-actions">
+              {data.stands.length + cameras.length === 0
+                ? <><button type="button" onClick={() => startEdit({ kind: 'stand', name: '' })}>Add a stand</button><Link to="/settings">Settings</Link></>
+                : <button type="button" onClick={() => { choose(null); setSettingsOpen(true); setSnap('full') }}>Place them</button>}
+            </span>}
+          </div>}
           {measure.on && <div className="map-pill map-pill--measure" role="status">
             <span>{measure.result ?? (measure.points.length ? 'Now tap the second point.' : 'Tap two points to measure.')}</span>
             {measure.result && <button type="button" onClick={measure.clear}>Clear</button>}
@@ -387,13 +495,13 @@ export default function MapPage() {
         {!ready && <div className="map-loading" role="status">Loading map…</div>}
 
         {!editing && <div className="map-fabs map-fabs--right">
-          <MapFab label="Map type, layers and tools" pressed={settingsOpen} onClick={() => { setSelected(null); setSettingsOpen(v => !v); setSnap('half') }}><StackIcon size={22} /></MapFab>
+          <MapFab label="Map type, layers and tools" pressed={settingsOpen} onClick={() => { setSelected(null); setPick(null); setSettingsOpen(v => !v); setSnap('half') }}><StackIcon size={22} /></MapFab>
           <MapFab label="Point the map north" onClick={() => map.current?.easeTo({ bearing: 0, pitch: 0, duration: 300 })}>
             <svg className="map-north" viewBox="0 0 24 24" aria-hidden="true" style={{ transform: `rotate(${-bearing}deg)` }}>
               <path className="map-north-n" d="M12 3.5 15 12H9z" /><path className="map-north-s" d="M12 20.5 9 12h6z" /><path className="map-north-tick" d="M12 1v3" />
             </svg>
           </MapFab>
-          <MapFab label="Fit the estate" disabled={!data || !ready} onClick={() => { if (map.current && data) fitEstate(map.current, data, cameras, 300) }}><FrameCornersIcon size={22} /></MapFab>
+          <MapFab label="Fit the estate" disabled={!data || !ready} onClick={() => { if (map.current && data) fitEstate(map.current, data, cameras, 300, fitPadding()) }}><FrameCornersIcon size={22} /></MapFab>
         </div>}
         {!editing && <div className="map-fabs map-fabs--left">
           {me.message && <div className="map-pill map-pill--side" role="status"><span>{me.message}</span><button type="button" aria-label="Dismiss" onClick={me.clearMessage}>OK</button></div>}
@@ -403,12 +511,14 @@ export default function MapPage() {
         {editing && <Crosshair editing={editing} center={center} />}
 
         {sheet && <BottomSheet
-          label={sheet === 'settings' ? 'Map settings' : stand ? `Stand: ${stand.name}` : camera ? `Camera: ${camera.name}` : `Bedding: ${zone?.name}`}
+          label={sheet === 'settings' ? 'Map settings' : sheet === 'pick' ? 'Which one?' : stand ? `Stand: ${stand.name}` : camera ? `Camera: ${camera.name}` : `Bedding: ${zone?.name}`}
           snap={snap} onSnap={setSnap} onClose={closeSheet} onHeight={onSheetHeight}
           returnFocus={() => selected ? mapEl.current?.querySelector(`.map-pin[data-kind="${selected.kind}"][data-id="${selected.id}"]`) : null}
-          focusKey={sheet === 'settings' ? 'settings' : `${selected?.kind}-${selected?.id}`}
-          header={sheet === 'settings' ? <><span className="map-eyebrow">Map</span><h2 className="bsheet-name">How the map looks</h2></> : stand ? <StandHeader stand={stand} /> : camera ? <CameraHeader camera={camera} /> : zone ? <ZoneHeader zone={zone} /> : null}>
-          {sheet === 'settings' && <MapSheet prefs={prefs} onPrefs={setPrefs} zoom={zoom} baseNote={baseNote}
+          focusKey={sheet === 'settings' ? 'settings' : `${sheet}-${selKey}`}
+          header={sheet === 'settings' ? <><span className="map-eyebrow">Map</span><h2 className="bsheet-name">How the map looks</h2></>
+            : sheet === 'pick' ? <PickHeader count={pick!.length} />
+              : stand ? <StandHeader stand={stand} /> : camera ? <CameraHeader camera={camera} /> : zone ? <ZoneHeader zone={zone} /> : null}>
+          {sheet === 'settings' && <MapSheet prefs={prefs} onPrefs={setPrefs} onRetryBase={() => { if (fallbackFrom || tileErr) retryTiles() }} zoom={zoom} baseNote={baseNote}
             catastroNote={catastroErr ? 'Property lines aren’t loading right now. Check the signal.' : null}
             admin={admin} measuring={measure.on} meOn={me.on}
             onMeasure={() => { measure.toggle(); closeSheet() }} onMe={() => { me.toggle(); closeSheet() }}
@@ -417,6 +527,7 @@ export default function MapPage() {
             onPlace={u => { setSelected({ kind: u.kind, id: u.id }); startEdit({ kind: u.kind, id: u.id, name: u.name }) }}
             unplaced={unplaced}
             terrain={{ needed: !!data && !data.terrain_loaded, busy: terrainBusy, err: terrainErr, onLoad: loadTerrain }} />}
+          {sheet === 'pick' && <PickBody pins={pick!} onPick={select} />}
           {stand && <StandBody stand={stand} scentRange={data!.scent_range_m} admin={admin}
             onMove={() => startEdit({ kind: 'stand', id: stand.id, name: stand.name, at: [stand.lon, stand.lat] })}
             onRemove={() => remove('stand', stand.id)} onRename={name => rename(stand.id, name)} />}
@@ -425,7 +536,7 @@ export default function MapPage() {
         </BottomSheet>}
       </div>
       {editing && <CrosshairEditor map={mapObj} editing={editing} center={center} busy={editBusy} err={editErr} title={editTitle}
-        onChange={setEditing} onSave={saveEdit} onCancel={() => { setEditing(null); setEditErr('') }} />}
+        onChange={setEditing} onSave={saveEdit} onCancel={cancelEdit} />}
     </div>
   </div>
 }

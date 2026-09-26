@@ -12,11 +12,29 @@ The map now fills the screen down to the tab bar. Everything that sat below it m
   - Tools: Measure, Me, and for admins Add a stand, Draw bedding, Place for unplaced items, and Load the hill shape.
   - Size: "Bigger pins and names".
   Choices are remembered on the phone.
-- **Base maps** (`map/basemaps.ts`). All three bases are in one style, and a choice only flips visibility. Nothing calls `setStyle` any more, which is what wiped the drawn layers (B-01, I-11). Each raster has its real max zoom, so MapLibre over-zooms instead of asking for tiles that don't exist (B-24). After four failed tiles in a row on an IGN base, the map shows Aerial (world) and says so in one line. Only base-picture errors raise the banner, and it clears on the next idle once tiles load. **Try again** re-asks only for the failed tiles. It does not call `map.refreshTiles()`: in MapLibre 5.24 that marks a failed raster tile "expired", and the next frame throws while drawing a texture that was never made.
-- **Crosshair placing** (`map/CrosshairEditor.tsx`). Stands, cameras and bedding corners are placed with a fixed centre cross and a bar under the map. The bar has a 56 px Add corner button, Undo, and Finish shape (from three corners), and shows the live distance from the last corner and the running area. On a phone, taps don't place anything. With a mouse, a click still adds a corner, and double-click zoom is off while drawing (B-13). The bar sits above the tab bar, and nothing opens the keyboard until the shape is named. Leaving with an unsaved outline asks first (B-12).
+- **Base maps** (`map/basemaps.ts`). All three bases are in one style, and a choice only flips visibility. Nothing calls `setStyle` any more, which is what wiped the drawn layers (B-01, I-11). Each raster has its real max zoom, so MapLibre over-zooms instead of asking for tiles that don't exist (B-24). If an IGN base gets not one tile through (four or more fail), the map shows Aerial (world) and says so in one line. Only base-picture errors raise the banner, and it clears on the next idle once tiles load. **Try again** re-asks only for the failed tiles. It does not call `map.refreshTiles()`: in MapLibre 5.24 that marks a failed raster tile "expired", and the next frame throws while drawing a texture that was never made.
+- **Crosshair placing** (`map/CrosshairEditor.tsx`). Stands, cameras and bedding corners are placed with a fixed centre cross and a bar under the map. The bar has a 56 px Add corner button, Undo, and Finish shape (from three corners), and shows the live distance from the last corner and the running area. On a phone, taps don't place anything. With a mouse, a click still adds a corner, and double-click zoom is off while drawing (B-13). The bar sits above the tab bar, and nothing opens the keyboard until the shape is named. Leaving with an unsaved outline asks first, by tab, Back or the back gesture (B-12).
 - **Measure** gives "134 m · north-east". **Me** shows your own position, which stays on the phone.
 - **North** resets bearing and pitch, and small accidental twists snap back (B-23).
 - **One palette.** `map/map.css` uses only theme tokens. There is a new `--camera` token for camera pins.
+
+### After review
+
+- **Cameras first where pins overlap.** A camera usually sits a few metres from its stand, so at estate zoom the stand pin used to swallow every tap on the camera. Cameras are now drawn on top, and a tap that lands on more than one pin opens **Which one?** with a row for each (`map/pins.ts`, `map/PickSheet.tsx`). Names show from zoom 16. A name that would land on another pin flips to the other side, and waits for more room if that side is taken too.
+- **The camera sheet shows no photo count.** The API's `sightings` counts frames, bursts and hidden species included. The header now reads "Last photo 3 h ago · Battery 85%" until the sheet can say "Last night: 2 visits".
+- **No signal is not calm air.** With no map data the wind bar reads "Wind not loaded". "Too light to call" needs a loaded forecast, and a night with no forecast says "No wind forecast".
+- **Nothing spins forever.** `api()` takes `timeoutMs`. Saves, renames and removes on the map give up after 20 s with "No answer from the server. Your outline is kept." Cancel stays live while saving and drops the request. The browser's own "Failed to fetch" is replaced everywhere by "No signal. Try again when you have a connection."
+- **Back asks too.** The app now uses a data router (`createBrowserRouter`), so the map's `useBlocker` guards an unsaved outline against the tabs, the browser's Back and the phone's back gesture.
+- **The open sheet lives in the address** (`?camera=`, `?stand=`, `?zone=`). Back from a camera's photos comes back to its sheet.
+- **Fallback only on an outage.** The switch to Aerial (world) waits until the map settles (`idle`, with a repaint asked for after a failed tile, because MapLibre doesn't repaint on its own). It then happens only if nothing of the IGN picture got through. A partly failing base keeps its banner and Try again. Tapping the chosen map type retries it, and the fallback line can be dismissed.
+- **Drawing guards.** Add corner rests until the cross moves off the last corner, so a gloved double press lays one corner. Finish shape waits for an outline that doesn't cross itself, and the hint says why.
+- **Smaller fixes.**
+  - Fit the estate keeps pins clear of an open sheet.
+  - A second tap on a pin while its sheet is closing keeps the sheet open.
+  - Escape in a sheet's text field leaves the field and keeps the text.
+  - A phone in landscape doesn't scroll.
+  - An empty estate says what to do, and admins get Add a stand.
+  - Me points the heading triangle with the phone's compass while you stand still.
 
 ## Earlier: arrows, stands and activity comparisons
 

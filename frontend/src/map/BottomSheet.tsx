@@ -16,7 +16,8 @@ const EXIT_MS = 200
  *
  * Not modal: the map above it stays live, so focus is moved into the sheet when it
  * opens and handed back when it closes, but not trapped. Escape closes it unless a
- * full-screen overlay (the photo viewer) is on top, which gets the key instead.
+ * full-screen overlay (the photo viewer) is on top, which gets the key instead, or
+ * the hunter is typing in it: then Escape only leaves the field and keeps the text.
  *
  * `onHeight` reports the visible height on every change, dragging included, so the
  * floating buttons can ride on top of it.
@@ -29,7 +30,9 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
   onHeight?: (px: number, snap: Snap) => void
   header: ReactNode
   children: ReactNode
-  /** Change it to move focus into the sheet again, e.g. when a different pin is chosen. */
+  /** Change it to move focus into the sheet again, e.g. when a pin is chosen. A new
+   * value also cancels a close in progress, so give each choice its own, even a
+   * second tap on the same pin. */
   focusKey?: string
   /** Where focus goes back to on close. Map markers don't take focus on a tap, so the page names the pin. */
   returnFocus?: () => Element | null | undefined
@@ -98,8 +101,10 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
     if (back?.isConnected && back !== document.body && (!here || here === document.body || root.current?.contains(here))) back.focus({ preventScroll: true })
   }, [])
   useEffect(() => {
-    // A new subject arriving mid-close (another pin tapped) cancels the close.
+    // A new subject arriving mid-close (another pin tapped) cancels the close, and
+    // starts at its top rather than wherever the last one was scrolled to.
     window.clearTimeout(closeTimer.current); setClosing(false)
+    root.current?.querySelector('.bsheet-body')?.scrollTo({ top: 0 })
     root.current?.focus({ preventScroll: true })
   }, [focusKey])
 
@@ -107,6 +112,11 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
       if (document.querySelector('.ov[role="dialog"]')) return
+      const field = document.activeElement
+      if (field instanceof HTMLElement && field.matches('input, textarea, select') && root.current?.contains(field)) {
+        e.preventDefault(); field.blur(); root.current?.focus({ preventScroll: true })
+        return
+      }
       e.preventDefault(); requestClose()
     }
     window.addEventListener('keydown', onKey)

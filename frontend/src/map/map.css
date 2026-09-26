@@ -9,7 +9,7 @@
 .map-page-heading p { color: var(--text-dim); font-size: 14px; margin: 0; }
 .map-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 16px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--surface-2); color: var(--text); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; text-decoration: none; }
 .map-button:hover { border-color: color-mix(in srgb, var(--text-dim) 45%, var(--border)); }
-.map-button--primary { background: var(--go); color: #06210C; border-color: var(--go); font-weight: 600; }
+.map-button--primary { background: var(--go); color: var(--on-go); border-color: var(--go); font-weight: 600; }
 .map-button--primary:hover { background: color-mix(in srgb, var(--go) 88%, white); border-color: var(--go); }
 .map-button--big { width: 100%; min-height: 56px; font-size: 16px; }
 .map-button:disabled, .map-link:disabled { opacity: .45; cursor: default; }
@@ -107,9 +107,18 @@
 .map-pill--error { border-color: color-mix(in srgb, var(--skip) 55%, var(--border)); }
 .map-pill--measure > span { font-size: 15px; font-weight: 600; }
 .map-pill--side { position: absolute; left: 60px; bottom: 0; width: min(290px, calc(100vw - 100px)); max-width: none; }
+/* An empty estate: the words, then what to do about it. */
+.map-pill--empty { flex-wrap: wrap; padding: 4px 4px 4px 14px; }
+.map-pill--empty > span:first-child { flex-basis: 100%; }
+.map-pill-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-left: -12px; }
+.map-pill-actions a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px; color: var(--go); font-weight: 600; }
 
 /* Pins. Shape says what it is (square stand, round camera) and colour repeats it. */
 .map-pin { width: calc(44px * var(--pin-scale)); height: calc(44px * var(--pin-scale)); padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent; cursor: pointer; overflow: visible; -webkit-tap-highlight-color: transparent; transition: none; }
+/* Cameras sit above stands where they overlap (they're what the team opens the map
+   for), and the chosen pin above both. A tap on an overlap asks which one. */
+.map-pin--camera { z-index: 1; }
+.map-pin.is-selected { z-index: 2; }
 /* MapLibre moves markers with an inline transform every frame: no press motion here or the pin lags the map. */
 .map-pin:not(:disabled):active { transform: none; }
 .map-pin-icon { display: flex; align-items: center; justify-content: center; width: calc(30px * var(--pin-scale)); height: calc(30px * var(--pin-scale)); border: 1.5px solid var(--sand); border-radius: var(--r-ctl); background: color-mix(in srgb, var(--bg) 88%, transparent); color: var(--sand); box-shadow: 0 1px 5px rgb(0 0 0 / .55); }
@@ -122,12 +131,17 @@
 /* Cameras usually sit beside a stand: their names go above, stand names below, so a pair doesn't collide. */
 .map-pin--camera .map-pin-label { top: auto; bottom: calc(40px * var(--pin-scale)); }
 .map-stage[data-labels='on'] .map-pin-label, .map-pin.is-selected .map-pin-label, .map-pin:hover .map-pin-label, .map-pin:focus-visible .map-pin-label { display: block; }
+/* A name that would land on another pin or name waits until there's room (pins.ts). */
+.map-pin-label.is-clashing { visibility: hidden; }
+.map-pin--stand .map-pin-label.is-flipped { top: auto; bottom: calc(40px * var(--pin-scale)); }
+.map-pin--camera .map-pin-label.is-flipped { top: calc(40px * var(--pin-scale)); bottom: auto; }
+.map-pin:hover .map-pin-label, .map-pin:focus-visible .map-pin-label { visibility: visible; }
 .map-pin:focus-visible { outline: none; }
 .map-pin:focus-visible .map-pin-icon { outline: 2px solid var(--teal); outline-offset: 3px; }
 
 /* You. White dot, teal ring, a heading triangle when the phone knows it. */
 .me-dot { width: 22px; height: 22px; pointer-events: none; }
-.me-core { position: absolute; inset: 1px; border-radius: 50%; background: #fff; border: 3px solid var(--teal); box-shadow: 0 0 0 2px rgb(0 0 0 / .35); }
+.me-core { position: absolute; inset: 1px; border-radius: 50%; background: var(--text); border: 3px solid var(--teal); box-shadow: 0 0 0 2px rgb(0 0 0 / .35); }
 .me-heading { display: none; position: absolute; left: 50%; top: -10px; transform: translateX(-50%); border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid var(--teal); }
 .me-dot.has-heading .me-heading { display: block; }
 .measure-tag { padding: 6px 11px; border-radius: var(--r-pill); background: var(--surface); border: 1px solid var(--border); color: var(--text); font-size: 13px; font-weight: 700; white-space: nowrap; box-shadow: 0 2px 10px rgb(0 0 0 / .45); pointer-events: none; }
@@ -143,6 +157,7 @@
 .map-editor-head > div { flex: 1; min-width: 0; }
 .map-editor-head strong { font-size: 16px; font-weight: 600; }
 .map-editor-hint { margin: 2px 0 0; font-size: 13px; line-height: 1.4; color: var(--text-dim); }
+.map-editor-hint--warn { color: var(--marginal); }
 .map-editor-x, .bsheet-close { width: 44px; height: 44px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-radius: 50%; border: 0; background: var(--surface-2); color: var(--text); cursor: pointer; }
 .map-editor-x svg, .bsheet-close svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .map-editor-status { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 13px; color: var(--text-dim); }
@@ -183,7 +198,7 @@
 .msheet section:last-child { border-bottom: 0; }
 .msheet h3 { margin: 12px 0 8px; font-size: 13px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
 .msheet-segments { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin-bottom: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-ctl); }
-.msheet-segments button { min-height: 44px; padding: 4px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
+.msheet-segments button { min-height: 44px; padding: 4px 6px; border: 0; border-radius: var(--r-ctl); background: transparent; color: var(--text-dim); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
 .msheet-segments button[aria-checked='true'] { background: var(--surface-2); color: var(--text); font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--go) 55%, var(--border)); }
 .msheet-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 0; background: none; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
 .msheet-row:last-child { border-bottom: 0; }
@@ -193,10 +208,10 @@
 .msheet-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 15px; }
 .msheet-text small { font-size: 12px; line-height: 1.35; color: var(--text-dim); }
 .msheet-chevron { color: var(--text-dim); font-size: 22px; line-height: 1; }
-.msheet-switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; border-radius: var(--r-card); background: var(--surface-2); border: 1px solid var(--border); transition: background var(--d-base) var(--ease-out); }
+.msheet-switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; border-radius: var(--r-pill); background: var(--surface-2); border: 1px solid var(--border); transition: background var(--d-base) var(--ease-out); }
 .msheet-switch span { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: var(--text-dim); transition: transform var(--d-base) var(--ease-out); }
 .msheet-row[aria-checked='true'] .msheet-switch { background: var(--go); border-color: var(--go); }
-.msheet-row[aria-checked='true'] .msheet-switch span { transform: translateX(20px); background: #fff; }
+.msheet-row[aria-checked='true'] .msheet-switch span { transform: translateX(20px); background: var(--text); }
 .msheet-note { margin: 6px 0 8px; font-size: 12px; line-height: 1.45; color: var(--text-dim); }
 .msheet-note--warn { color: var(--marginal); }
 .msheet-key { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 0 8px; font-size: 12px; color: var(--text-dim); }
@@ -208,6 +223,11 @@
 .msheet-key .key-wind--clean { background: var(--v-best); }
 .msheet-key .key-wind--carries { background: var(--marginal); }
 
+/* "Which one?": the pins under one tap, as rows with the pin's own mark. */
+.map-pick-icon { width: 36px; height: 36px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.map-pick-icon .map-pin-icon { width: 30px; height: 30px; }
+.map-pick-icon .map-pin-icon svg { width: 19px; height: 19px; }
+
 /* MapLibre's own controls: only the attribution is left, sized for a glove (B-16). */
 .map-page .maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin: 0 10px 10px 0; }
 .map-page .maplibregl-ctrl-attrib.maplibregl-compact { min-height: 44px; min-width: 44px; padding: 0 44px 0 0; box-sizing: border-box; border-radius: 22px; background: color-mix(in srgb, var(--surface) 85%, transparent); color: var(--text-dim); font: 11px/1.4 var(--font); }
@@ -215,7 +235,7 @@
 .map-page .maplibregl-ctrl-attrib a { color: var(--text); }
 .map-page .maplibregl-ctrl-attrib-button { width: 44px; height: 44px; border-radius: 22px; background-color: transparent; background-position: center; background-repeat: no-repeat; background-size: 22px; filter: invert(.88); }
 .map-page .maplibregl-ctrl-attrib.maplibregl-compact-show .maplibregl-ctrl-attrib-button { background-color: transparent; }
-.map-page .maplibregl-ctrl-attrib-button:focus { box-shadow: 0 0 0 2px #000; }
+.map-page .maplibregl-ctrl-attrib-button:focus { box-shadow: 0 0 0 2px var(--bg); }
 
 @media (min-width: 641px) {
   /* A side card rather than a full-width sheet: the map stays in view beside it. */
@@ -224,6 +244,16 @@
 @media (max-width: 640px) {
   .map-windbar { border-radius: 0; border-width: 0 0 1px; }
   .map-stage { border: 0; border-radius: 0; }
+}
+/* A phone on its side: every pixel of height goes to the map, and nothing scrolls. */
+@media (max-height: 500px) {
+  .map-stage { min-height: 0; }
+  .layout--map > main.page { padding-top: 4px; padding-bottom: 4px; }
+  .map-windbar { min-height: 44px; padding-top: 4px; padding-bottom: 4px; }
+  .map-wind-reading em { display: none; }
+  /* The tab links share the header row instead of wrapping onto a second one. */
+  .layout--map .appbar { flex-wrap: nowrap; padding-top: max(6px, env(safe-area-inset-top)); padding-bottom: 6px; }
+  .layout--map .topnav { order: 0; flex-basis: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .bsheet, .map-fabs { transition: none; }
