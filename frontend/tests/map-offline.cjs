@@ -96,6 +96,8 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  const sheet=async page=>{await page.getByRole('button',{name:'Map type, layers and tools'}).click();await page.locator('.msheet-offline').waitFor()};
  const status=async page=>{await page.waitForFunction(()=>!/^Checking this phone/.test(document.querySelector('.msheet-offline .msheet-status')?.textContent||'Checking this phone'));return page.locator('.msheet-offline .msheet-status').innerText()};
  const notices=page=>page.locator('.map-notices').innerText().catch(()=>'');
+ // What a camera sheet shows and how its photo requests went (none listed: still waiting), for a failure's log.
+ const sheetState=page=>page.evaluate(()=>({age:document.querySelector('.cam-strip-age')?.textContent??null,sheet:(document.querySelector('.bsheet')?.innerText||'').slice(0,400),worker:!!navigator.serviceWorker.controller,photos:performance.getEntriesByType('resource').filter(r=>r.name.includes('/api/photos')).map(r=>({url:r.name.replace(location.origin,''),ms:Math.round(r.duration),status:r.responseStatus}))})).catch(e=>e.message);
  // Watch the map's notices for a while: each different text, in order.
  const watch=async(page,ms)=>{const seen=[];for(const end=Date.now()+ms;Date.now()<end;){const t=await notices(page);if(seen[seen.length-1]!==t)seen.push(t);await page.waitForTimeout(250)}return seen};
  const ready=async page=>{await page.evaluate(()=>navigator.serviceWorker.ready);await page.waitForFunction(async()=>{const k=(await caches.keys()).find(n=>n.startsWith('gamesense-shell-'));if(!k||!navigator.serviceWorker.controller)return false;return (await (await caches.open(k)).keys()).some(r=>/\/assets\/Map-.*\.js$/.test(r.url))},null,{timeout:30000,polling:500})};
@@ -186,7 +188,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  await page.waitForTimeout(400);const pickRow=page.locator('.map-pick-row',{hasText:'Camera'}).first();if(await pickRow.count())await pickRow.click();
  await page.locator('.cam-strip-row img').first().waitFor({timeout:15000});
  await page.waitForFunction(()=>[...document.querySelectorAll('.cam-strip-row img')].slice(0,3).every(i=>i.complete&&i.naturalWidth>0),null,{timeout:15000});
- await page.waitForFunction(()=>/^No signal\. These photos were saved on this phone (just now|\d+ min ago)\.$/.test(document.querySelector('.cam-strip-age')?.textContent||''),null,{timeout:15000});
+ await page.waitForFunction(()=>/^No signal\. These photos were saved on this phone (just now|\d+ min ago)\.$/.test(document.querySelector('.cam-strip-age')?.textContent||''),null,{timeout:15000}).catch(async e=>{console.log('The camera sheet:',JSON.stringify(await sheetState(page)),'page errors:',JSON.stringify(errors));throw e});
  assert.equal(await page.locator('.bsheet .map-inline-error').count(),0,'no "No signal, so the photos didn’t load"');
  if(shots)await page.screenshot({path:shots+'/offline-camera.png'});
  await page.keyboard.press('Escape');
