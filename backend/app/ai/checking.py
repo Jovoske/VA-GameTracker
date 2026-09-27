@@ -23,6 +23,11 @@ What used to go wrong, and what happens now:
 * A run takes at most RUN_LIMIT photos or RUN_BUDGET of time, newest first, so a
   backlog (a new login's two months, a 13-month backfill) never holds the pipeline
   lock for hours: the next fetch comes, and the backlog drains a run at a time.
+* A hunter's word is a check: flagging a photo the pass gave up on ("nothing in it"
+  or Keep) clears the failure (hunter_decided), and a kept photo the species model
+  still can't read becomes an "Animal" nobody has named, never "couldn't check".
+* A run that lost its lock (it stalled and another run took over) stops at the next
+  photo rather than checking the same photos alongside the new owner.
 """
 from __future__ import annotations
 
@@ -145,18 +150,50 @@ def check_image(db: Session, image: Image) -> str:
     return species.classify_image(db, image, boxes=boxes) or "animal"
 
 
+def hunter_decided(image: Image, *, keep: bool) -> None:
+    """A hunter flagged the photo ("nothing in it", or Keep): that is a check.
+
+    A photo the pass gave up on used to keep saying "Couldn't check" after a hunter
+    had judged it, and its night stayed not checked for good. Now the failure is
+    cleared: an empty one is empty, and a kept one gets one more try at naming the
+    animal (then it is an "Animal" nobody has named, see _record_failures).
+    """
+    if image.ai_failed_at is None:
+        return
+    image.ai_failed_at = None
+    image.ai_attempts = MAX_AI_ATTEMPTS - 1 if keep else 0
+    if not keep:
+        image.ai_error = None
+
+
 def _record_failures(db: Session, failures: list[tuple], now: datetime) -> int:
     """Count a failed try against each photo; given up on after MAX_AI_ATTEMPTS."""
     given_up = 0
     for image_id, error in failures:
-        attempts = (db.scalar(select(Image.ai_attempts).where(Image.id == image_id)) or 0) + 1
+        row = db.execute(
+            select(Image.ai_attempts, Image.reviewed, Image.is_empty_frame)
+            .where(Image.id == image_id)
+        ).first()
+        if row is None:
+            continue
+        attempts = (row.ai_attempts or 0) + 1
+        done = attempts >= MAX_AI_ATTEMPTS
+        # Kept by a hunter: there is an animal in it, the model just can't say which.
+        # It becomes an "Animal" nobody has named (as one under the floor is), and
+        # the hunter's word stands, never "couldn't check".
+        kept = bool(row.reviewed) and row.is_empty_frame is False
+        if done and kept and not db.scalar(
+            select(exists().where(Detection.image_id == image_id))
+        ):
+            db.add(Detection(image_id=image_id, species_id=None,
+                             bbox={"boxes": [], "error": error}))
         db.execute(
             update(Image).where(Image.id == image_id).values(
                 ai_attempts=attempts, ai_error=error,
-                ai_failed_at=now if attempts >= MAX_AI_ATTEMPTS else None,
+                ai_failed_at=now if done and not kept else None,
             ).execution_options(synchronize_session="fetch")
         )
-        given_up += attempts >= MAX_AI_ATTEMPTS
+        given_up += done and not kept
         log.warning("ai.photo_failed", image=str(image_id), attempts=attempts, error=error)
     db.commit()
     return given_up
@@ -264,9 +301,13 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
         streak = []
 
     stopped = None
+    lost = False
     try:
         for n, image_id in enumerate(ids, 1):
             if time.monotonic() > deadline:
+                break
+            if jobs.lock_lost():
+                lost = True
                 break
             image = db.get(Image, image_id, populate_existing=True)
             if image is None:
@@ -305,7 +346,7 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
         settle_streak(stop_if_models_broken=True)
 
         for image_id in rescan:
-            if time.monotonic() > deadline:
+            if lost or time.monotonic() > deadline or jobs.lock_lost():
                 break
             image = db.get(Image, image_id, populate_existing=True)
             if image is None or image.reviewed or image.is_empty_frame is not True:
@@ -338,6 +379,10 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
     db.commit()
     _announce(db)
     waiting = waiting_count(db)
+    if lost:
+        # The run that took the lock over carries on and says how it went.
+        log.warning("ai.lock_lost", **{k: result[k] for k in ("checked", "failed")})
+        return {**result, "status": "lost", "reason": None, "waiting": waiting}
     fields = {"last_run_at": now, "stopped": stopped, "waiting": waiting,
               "checked": result["checked"]}
     if stopped or last_error:

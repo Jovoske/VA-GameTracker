@@ -5,6 +5,7 @@ Scheduler instead, and the app's buttons start the same script (app.jobs.spawn),
 the AI models never load into the web server. Modes:
 
     python pipeline.py sync       # SPYPOINT + UBox fetch + local AI (free) — every 15 min
+    python pipeline.py sync queued  # the Check button while another job runs: waits for it
     python pipeline.py backfill [months]  # SPYPOINT history pull + local AI — one-off
     python pipeline.py scan       # the local AI pass over waiting photos only
     python pipeline.py login <id> # first import of a camera login just added + local AI
@@ -12,14 +13,15 @@ the AI models never load into the web server. Modes:
     python pipeline.py plan       # record tonight's claims before the night — daily, ~17:00
     python pipeline.py score      # grade the claims of finished nights — daily, ~11:00
     python pipeline.py reid       # "Look for repeats": embed new sightings, regroup them
-    python pipeline.py busy       # exit 3 while a run holds the pipeline (deploy/update.ps1)
+    python pipeline.py busy       # exit 3 while a run is working (deploy/update.ps1)
 
 Every mode but `sex` shares the "pipeline" lock (app.jobs): they load the CPU models
 or rebuild the exposure table, so they must never run on top of each other. `sync`
 and the one-offs give way when it is held (the next fetch is 15 minutes off); `plan`,
-`score` and `reid` wait for it, and `plan`/`score` exit 1 if it never frees, so Task
-Scheduler shows a failure instead of a silent success. The lock is taken before the
-heavy AI imports, so a run that finds it held costs a couple of seconds.
+`score`, `reid` and a queued `sync` wait for it, and `plan`/`score` exit 1 if it never
+frees, so Task Scheduler shows a failure instead of a silent success. The lock is
+taken before the heavy AI imports, so a run that finds it held costs a couple of
+seconds.
 
 Everything a run logs also goes to pipeline.log (app.jobs.log_dir): Task Scheduler
 throws a scheduled run's output away.
@@ -27,7 +29,7 @@ throws a scheduled run's output away.
 import os
 import sys
 import uuid
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -51,32 +53,46 @@ MODES = ("sync", "backfill", "scan", "login", "sex", "plan", "score", "reid", "b
 # plan and score wait this long for a running job (inside the tasks' 1 h limit).
 WAIT_SECONDS = int(os.environ.get("PIPELINE_WAIT_SECONDS", str(40 * 60)))
 POLL_SECONDS = 30
-# Tonight's claim is written by the 17:00 plan run. If that run never managed it, the
-# fetch writes it, from when the plan run has given up waiting until sunset, never
-# after dark: a claim made after dark is not a forecast (scoring._claims_for).
-PLAN_CATCH_UP_FROM = time(17, 45)
+# A Check press queued behind another job looks for the lock this often, so the
+# photos come in as soon as that job ends.
+QUEUE_POLL_SECONDS = 5
+# Tonight's claim is written by the 17:00 plan run (GameSense-Plan). If that run never
+# did (it crashed, or timed out waiting), any fetch or photo check from then on writes
+# it, until sunset and never after dark: a claim made after dark is not a forecast
+# (scoring._claims_for). At Alatoz the sun sets before 17:45 from late November to
+# Christmas, so the window opens at 17:00, or an hour before sunset if that is earlier.
+PLAN_AT = time(17, 0)
+PLAN_LEAD = timedelta(hours=1)
 BUSY_EXIT = 3
+# Jobs a button queues behind a running one: the marker lock that says one is on its
+# way, so a second tap is told so instead of queueing another.
+QUEUES = {("reid", ()): "reid", ("sync", ("queued",)): "fetchqueue"}
+
+
+def _claimed(db, day) -> bool:
+    """Whether a claim for `day` has been written already."""
+    from sqlalchemy import select
+
+    from app.models import ModelRun
+
+    return db.scalar(select(ModelRun.id).where(
+        ModelRun.kind == "forecast",
+        ModelRun.metrics["target_date"].astext == day.isoformat(),
+    ).limit(1)) is not None
 
 
 def plan_catch_up(db, now: datetime | None = None) -> dict | None:
     """Tonight's claim, if nothing has claimed tonight yet and it is still daylight."""
-    from sqlalchemy import select
-
     from app.enrichment.astro import solar
-    from app.models import ModelRun
 
     now = now or datetime.now(UTC)
-    local = now.astimezone(ZoneInfo(settings.estate_timezone))
-    if local.time() < PLAN_CATCH_UP_FROM:
-        return None
+    zone = ZoneInfo(settings.estate_timezone)
+    local = now.astimezone(zone)
     sunset = solar(settings.estate_lat, settings.estate_lon, local.date()).get("sunset")
     if sunset is None or now >= sunset:
         return None
-    claimed = db.scalar(select(ModelRun.id).where(
-        ModelRun.kind == "forecast",
-        ModelRun.metrics["target_date"].astext == local.date().isoformat(),
-    ).limit(1))
-    if claimed is not None:
+    opens = min(datetime.combine(local.date(), PLAN_AT, tzinfo=zone), sunset - PLAN_LEAD)
+    if now < opens or _claimed(db, local.date()):
         return None
     from app.forecasting.model import forecast_tonight
     from app.forecasting.scoring import persist_tonight
@@ -93,22 +109,39 @@ def _checked(db) -> None:
     log.info("pipeline.ai", result=results.get("ai"), error=error)
 
 
+def _catch_up(db) -> None:
+    """After a fetch or a photo check: tonight's claim, if the plan run never wrote it."""
+    if jobs.lock_lost():
+        return  # another run has the lock now; it writes the claim if it is due
+    plan_catch_up(db)
+
+
 def _run(mode: str, args: list[str], db) -> int:
     if mode == "sync":
         # Both providers (one failing never stops the other), the AI pass and the
         # night recount, leaving the summary row the Check button and Settings read.
-        from app.ingestion.fetch import run_fetch
+        from app.ingestion.fetch import latest_run, run_fetch
 
+        if args[:1] == ["queued"]:
+            # A Check press that waited for another job: if a fetch has run since
+            # it was pressed (the scheduled one got the lock first), that was it.
+            asked = jobs.read_note(db, "fetch_request").get("at")
+            row = latest_run(db)
+            if asked and row is not None and row.started_at >= datetime.fromisoformat(asked):
+                log.info("pipeline.sync_already_done", asked=asked)
+                return 0
         log.info("pipeline.sync", result=run_fetch(db))
-        plan_catch_up(db)
+        _catch_up(db)
     elif mode == "backfill":
         from app.ingestion.sync import backfill_all
 
         months = int(args[0]) if args else int(os.environ.get("BACKFILL_MONTHS", "1"))
         log.info("pipeline.backfill", result=backfill_all(db, months=months))
         _checked(db)
+        _catch_up(db)
     elif mode == "scan":
         _checked(db)
+        _catch_up(db)
     elif mode == "login":
         if not args:
             log.error("pipeline.login_needs_id")
@@ -128,6 +161,7 @@ def _run(mode: str, args: list[str], db) -> int:
 
             log.info("pipeline.login", result=backfill_account(db, args[0]))
         _checked(db)
+        _catch_up(db)
     elif mode == "plan":
         # Record what the app is claiming BEFORE the night happens. A forecast
         # only ever read after the fact can never be scored, which is how the
@@ -135,6 +169,10 @@ def _run(mode: str, args: list[str], db) -> int:
         from app.forecasting.model import forecast_tonight
         from app.forecasting.scoring import local_today, persist_tonight
 
+        if _claimed(db, local_today()):
+            # A fetch wrote it while this run waited for the lock: one claim a night.
+            log.info("pipeline.plan_already_claimed", night=local_today().isoformat())
+            return 0
         run = persist_tonight(db, forecast_tonight(db), target=local_today())
         log.info("pipeline.plan", model_run=str(run.id), **(run.metrics or {}))
     elif mode == "score":
@@ -165,6 +203,12 @@ def _run(mode: str, args: list[str], db) -> int:
                 log.error("pipeline.reid_stopped", reason=words)
                 return 1
             raise
+        if result.get("stopped"):
+            jobs.note(db, "reid_status", state="failed", finished_at=datetime.now(UTC),
+                      error="It stopped partway: the server was held up too long. "
+                            "Tap it again to finish.")
+            log.warning("pipeline.reid_lost_lock", result=result)
+            return 0
         jobs.note(db, "reid_status", state="done", finished_at=datetime.now(UTC), result=result)
         log.info("pipeline.reid", result=result)
     return 0
@@ -188,24 +232,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unknown mode: {mode!r} (use {'|'.join(MODES)})")
         return 2
     if mode == "busy":
-        h = jobs.holder("pipeline")
-        if h is None:
-            print("free")
-            return 0
-        print(f"busy: {h.owner} (pid {h.pid} on {h.host}) since {h.started.isoformat()}")
-        return BUSY_EXIT
+        # The deploy stands down while either lock is held, as it did when the cloud
+        # stag/hind pass shared the pipeline lock: a migration or a code swap must not
+        # land under a running pass.
+        for name in ("pipeline", "sexpass"):
+            h = jobs.holder(name)
+            if h is not None:
+                print(f"busy: {h.owner} (pid {h.pid} on {h.host}) since {h.started.isoformat()}")
+                return BUSY_EXIT
+        print("free")
+        return 0
 
     configure_logging(log_file=jobs.log_dir() / "pipeline.log")
     name = "sexpass" if mode == "sex" else "pipeline"
+    marker = QUEUES.get((mode, tuple(argv[1:])))
     queued = None
-    if mode == "reid":
-        # Marks a "Look for repeats" as on its way, so a second tap is told so.
-        queued = jobs.try_acquire("reid", "reid")
+    if marker:
+        # Marks a "Look for repeats" or a Check press as on its way, so a second tap
+        # is told so instead of queueing another.
+        queued = jobs.try_acquire(marker, mode)
         if queued is None:
             log.info("pipeline.skip_queued", mode=mode)
             return 0
-    wait = WAIT_SECONDS if mode in ("plan", "score", "reid") else 0
-    lock = jobs.acquire(name, mode, wait=wait, poll=POLL_SECONDS)
+    wait = WAIT_SECONDS if mode in ("plan", "score") or queued is not None else 0
+    lock = jobs.acquire(name, mode, wait=wait,
+                        poll=QUEUE_POLL_SECONDS if mode == "sync" else POLL_SECONDS)
     if lock is None:
         if queued is not None:
             queued.release()
@@ -216,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         log.info("pipeline.skip_locked", mode=mode, held_by=holder.owner if holder else None)
         return 0
+    jobs.run_under(lock)
     try:
         with SessionLocal() as db:
             return _sex(db) if mode == "sex" else _run(mode, argv[1:], db)
@@ -223,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("pipeline.crashed", mode=mode)
         return 1
     finally:
+        jobs.run_under(None)
         lock.release()
         if queued is not None:
             queued.release()

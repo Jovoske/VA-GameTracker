@@ -17,8 +17,12 @@ only ever removes a lock that carries its own token.
 Two locks exist: "pipeline" (fetching, the AI pass, the night recount, the plan and
 the score: anything that loads the local models or rebuilds camera_nights) and
 "sexpass" (the cloud stag/hind pass, which needs no local model and must not hold
-the photo fetch up for an hour). "reid" only marks a queued "Look for repeats", so
-a second tap is told it is already on its way.
+the photo fetch up for an hour). "reid" and "fetchqueue" only mark a queued "Look for
+repeats" or photo check, so a second tap is told it is already on its way.
+
+A run that stalls past LOCK_STALE (a paused VM) loses its lock to the next one. Its
+long loops (the photo check, the fetch, Look for repeats) ask lock_lost() as they go
+and stop, so two runs never work through the same photos side by side.
 """
 from __future__ import annotations
 
@@ -45,6 +49,13 @@ HEARTBEAT_SECONDS = 60
 # A takeover in progress that is older than this was left by a process that died
 # in the middle of it (it takes milliseconds).
 _TAKEOVER_STALE = 60
+# How often a run's loops read its lock file to see that it is still theirs.
+CHECK_SECONDS = 5
+
+# What the pipeline modes do, by the owner name their lock carries: the ones that
+# fetch photos, and the ones that run the AI pass over them.
+FETCH_MODES = ("sync", "backfill", "login")
+CHECK_MODES = (*FETCH_MODES, "scan")
 
 BACKEND = Path(__file__).resolve().parent.parent
 
@@ -155,6 +166,7 @@ class JobLock:
     def __init__(self, name: str, owner: str, token: str, path: Path):
         self.name, self.owner, self.token, self.path = name, owner, token, path
         self.lost = False
+        self._checked = time.monotonic()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._beat, name=f"{name}-heartbeat", daemon=True)
         self._thread.start()
@@ -175,6 +187,16 @@ class JobLock:
                 os.utime(self.path)
             except OSError as e:
                 log.warning("joblock.heartbeat_failed", lock=self.name, error=str(e))
+
+    def check(self) -> bool:
+        """True while the lock is still this run's. The file is read at most every
+        CHECK_SECONDS, so a loop can ask once per photo."""
+        if not self.lost and time.monotonic() - self._checked >= CHECK_SECONDS:
+            self._checked = time.monotonic()
+            if not self._mine():
+                self.lost = True
+                log.warning("joblock.lost", lock=self.name, owner=self.owner)
+        return not self.lost
 
     def release(self) -> None:
         self._stop.set()
@@ -270,6 +292,23 @@ def acquire(name: str, owner: str, *, wait: float = 0, poll: float = 30) -> JobL
         time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
 
 
+_current: JobLock | None = None
+
+
+def run_under(lock: JobLock | None) -> None:
+    """Name the lock this process's run holds (None when it ends), for lock_lost()."""
+    global _current
+    _current = lock
+
+
+def lock_lost() -> bool:
+    """Whether this process's run has lost its lock: it stalled past LOCK_STALE and
+    another run took over. The long loops stop then instead of fetching or checking
+    the same photos alongside the new owner."""
+    lock = _current
+    return lock is not None and not lock.check()
+
+
 def note(db, key: str, **fields) -> dict:
     """Merge `fields` into a job's status document (app_settings) and commit it.
 
@@ -300,40 +339,62 @@ def read_note(db, key: str) -> dict:
     return dict(row.value or {}) if row is not None else {}
 
 
+# The launcher spawn() goes through: it starts the job and exits at once, so the job
+# is nobody's child. NSSM, which runs the web service on the server, stops a service
+# by killing every process descended from it (AppKillProcessTree, on by default),
+# whatever the process-group or job flags; a job whose parent has already gone is not
+# in that tree, so a deploy's Restart-Service does not stop it.
+_LAUNCH = """\
+import subprocess, sys
+try:
+    err = open(sys.argv[1], "ab") if sys.argv[1] else subprocess.DEVNULL
+except OSError:
+    err = subprocess.DEVNULL
+kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, close_fds=True)
+if sys.platform == "win32":
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    away = subprocess.CREATE_BREAKAWAY_FROM_JOB
+    try:
+        subprocess.Popen(sys.argv[2:], creationflags=flags | away, **kw)
+    except OSError:  # a job object that does not allow breaking away
+        subprocess.Popen(sys.argv[2:], creationflags=flags, **kw)
+else:
+    subprocess.Popen(sys.argv[2:], start_new_session=True, **kw)
+"""
+
+
 def spawn(mode: str, *args: str) -> bool:
-    """Start `pipeline.py <mode> [args]` as a process of its own and return at once.
+    """Start `pipeline.py <mode> [args]` as a process of its own; True once it has started.
 
     The job takes its own lock, so the caller only checks the lock to answer "busy"
-    first. It logs to pipeline.log like a scheduled run. On Windows it is started
-    without a console and outside the web service's process group, so restarting the
-    service does not have to stop it.
+    first. It logs to pipeline.log like a scheduled run. It is started through a
+    launcher that exits at once (_LAUNCH), without a console, so it is not a child of
+    the web service and restarting the service (a deploy) does not stop it.
     """
     cmd = [sys.executable, str(BACKEND / "pipeline.py"), mode, *args]
     folder = log_dir()
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        out = open(folder / "pipeline.log", "ab")  # noqa: SIM115 - handed to the child
+        err = str(folder / "pipeline.log")
     except OSError:
-        out = subprocess.DEVNULL
+        err = ""
     # Its log lines go to pipeline.log themselves (app.core.logging); only what it
     # writes before logging starts (an import that fails) comes through stderr.
     kwargs: dict = {"cwd": str(BACKEND), "stdin": subprocess.DEVNULL,
-                    "stdout": subprocess.DEVNULL, "stderr": out, "close_fds": True}
+                    "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                    "close_fds": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        if os.name == "nt":
-            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            try:
-                subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB,
-                                 **kwargs)
-            except OSError:  # the service's job does not allow breaking away
-                subprocess.Popen(cmd, creationflags=flags, **kwargs)
-        else:
-            subprocess.Popen(cmd, start_new_session=True, **kwargs)
+        launcher = subprocess.Popen([sys.executable, "-c", _LAUNCH, err, *cmd], **kwargs)
+        code = launcher.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        code = 0  # a slow machine: it is still starting the job
     except OSError as e:
         log.error("jobs.spawn_failed", mode=mode, error=str(e))
         return False
-    finally:
-        if out is not subprocess.DEVNULL:
-            out.close()
+    if code != 0:
+        log.error("jobs.spawn_failed", mode=mode, error=f"launcher exited {code}")
+        return False
     log.info("jobs.spawned", mode=mode, args=list(args))
     return True

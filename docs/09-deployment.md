@@ -99,14 +99,27 @@ ever removes its own lock.
 - `score` grades every finished night of the last 14 days that still has an
   ungraded claim, not only yesterday; a night whose photos were still being
   checked is tried again the next morning.
-- If the 17:00 `plan` run never managed tonight's claim, a `sync` between 17:45
-  and sunset writes it. Never after dark: a claim made after dark is not a forecast.
+- If the 17:00 `plan` run never managed tonight's claim, the next fetch or photo
+  check writes it, from 17:00 (or an hour before sunset, in December) until sunset.
+  Never after dark: a claim made after dark is not a forecast. A `plan` run that
+  finds tonight already claimed leaves it be: one claim a night.
 - The cloud stag/hind pass (`sex`) has its own lock (`sexpass.lock`): it needs no
-  local model, and it must not hold the photo fetch up for an hour.
+  local model, and it must not hold the photo fetch up for an hour. A deploy still
+  waits for it, as it did when the pass shared the pipeline lock (`pipeline.py busy`
+  answers busy for either).
 
 The app's buttons (Check for new photos, a new camera login's first import, Look for
 repeats, the stag/hind pass) start `pipeline.py` as a process of its own under the
-same locks, so the AI models never load into the web server.
+same locks, so the AI models never load into the web server. They are started
+through a launcher that exits at once, so the job is not a child of GameSenseAPI:
+NSSM stops a service by killing its whole process tree, and a deploy's restart no
+longer stops a job a button started. A Check press while Look for repeats (or the
+plan or the score) holds the lock is queued (`pipeline.py sync queued`) and fetches
+the moment that job ends.
+
+A run that stalls for more than 10 minutes (a paused VM) loses its lock to the next
+run; it notices within seconds and stops, rather than checking the same photos
+alongside it.
 
 **Logs.** Every run appends to `C:\GameSense\logs\pipeline.log` (rolled over at
 5 MB, three old files kept): Task Scheduler throws a scheduled run's output away.

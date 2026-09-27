@@ -124,10 +124,15 @@ def _ai_status(db: Session) -> dict:
 
     note = jobs.read_note(db, STATUS)
     holder = jobs.holder("pipeline")
+    # Only a run that checks photos is "checking now": the lock is also held by
+    # Look for repeats, tonight's plan and the morning score.
+    checking = holder is not None and holder.owner in jobs.CHECK_MODES
     return {
         "waiting": waiting_count(db),
         "failed": failed_count(db),
-        "running_since": holder.started if holder else None,
+        "running_since": holder.started if checking else None,
+        # Where the whole story is when checking stops: the owner runs the server.
+        "log_file": str(jobs.log_dir() / "pipeline.log"),
         "last_run_at": note.get("last_run_at"),
         "last_ok_at": note.get("last_ok_at"),
         "stopped": note.get("stopped"),

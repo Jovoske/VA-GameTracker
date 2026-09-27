@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai.checking import hunter_decided
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.db import get_db
@@ -206,5 +207,7 @@ def flag_image(
         image.processed_at = datetime.now(UTC)
     image.is_empty_frame = body.is_empty
     image.reviewed = True
+    # A photo the AI gave up on is judged now: not "couldn't check" any more.
+    hunter_decided(image, keep=not body.is_empty)
     db.commit()
     return {"id": str(image.id), "is_empty_frame": image.is_empty_frame, "reviewed": True}

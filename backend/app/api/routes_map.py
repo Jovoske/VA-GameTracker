@@ -126,11 +126,12 @@ def last_night_visits(db: Session, camera_ids: list, night: date) -> dict:
 
 
 def night_frames(db: Session, camera_ids: list, night: date) -> dict:
-    """{camera_id: (frames, unchecked)} inside the map's night (18:00-08:00).
+    """{camera_id: (frames, unchecked, failed)} inside the map's night (18:00-08:00).
 
     Every frame the camera sent, empty ones included (they are the proof it was
-    awake), and how many are still waiting for the detector: a photo that neither
-    it nor a hunter has called empty or kept, the ones CHECKED_ANIMAL can't judge.
+    awake), how many are still waiting for the detector (a photo that neither it
+    nor a hunter has called empty or kept, the ones CHECKED_ANIMAL can't judge), and
+    how many the AI gave up on after failing: not checked, and never "nothing there".
     """
     if not camera_ids:
         return {}
@@ -139,17 +140,20 @@ def night_frames(db: Session, camera_ids: list, night: date) -> dict:
     unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None),
                      Image.ai_failed_at.is_(None))
     rows = db.execute(
-        select(Image.camera_id, func.count(Image.id), func.count(Image.id).filter(unchecked))
+        select(Image.camera_id, func.count(Image.id), func.count(Image.id).filter(unchecked),
+               func.count(Image.id).filter(Image.ai_failed_at.isnot(None)))
         .where(Image.camera_id.in_(camera_ids), Image.captured_at >= start, Image.captured_at < end)
         .group_by(Image.camera_id)
     ).all()
-    return {r[0]: (int(r[1]), int(r[2])) for r in rows}
+    return {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in rows}
 
 
-def night_status(state: str | None, frames: int, unchecked: int) -> str | None:
+def night_status(state: str | None, frames: int, unchecked: int, failed: int = 0) -> str | None:
     """How far to trust last night's list, as one word the sheet turns into a sentence.
 
     checking    some of the night's frames haven't been through the detector yet
+    unreadable  some couldn't be checked at all (the AI gave up on them), so an
+                empty list is not a quiet night
     incomplete  it sent frames but ran out of photo credits, so not all of them
     watched     it was working, so an empty list is a quiet night
     blind       it sent nothing and may not have been working
@@ -160,6 +164,9 @@ def night_status(state: str | None, frames: int, unchecked: int) -> str | None:
     """
     if unchecked:
         return "checking"
+    if failed:
+        # A broken AI used to read here as "watched, nothing came".
+        return "unreadable"
     if frames:
         # Checked frames prove the camera was awake. Only a camera that ran out of
         # credits partway (the one way exposure says UNKNOWN with frames) sent less
@@ -281,7 +288,7 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
             "new_count": min(int(r.fresh or 0), NEW_CAP),
             "last_night": visits.get(c.id, []),
             "last_night_so_far": so_far,
-            "last_night_status": night_status(r.exposure_state, *sent.get(c.id, (0, 0))),
+            "last_night_status": night_status(r.exposure_state, *sent.get(c.id, (0, 0, 0))),
             "alerts": str(c.id) not in muted,
             "alerts_enabled": alerts_enabled,
         })

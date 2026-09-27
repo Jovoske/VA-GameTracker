@@ -9,8 +9,9 @@ Three rules keep a misread from reaching the hunter as a sighting:
 * A burst is one animal: frames of one visit that the model reads differently are
   put to a vote (vote_bursts), so the feed does not flip red deer / fallow deer /
   red deer and one stag does not count as two species.
-* A new species is only in the advice when it is game here (GAME). Every other
-  animal is tracked but has to be switched into the advice in Settings.
+* A new species is only in the advice when it is the big game the evening advice
+  is for (BIG_GAME). Every other animal is tracked but has to be switched into the
+  advice in Settings: fox and rabbit are small game here, and badger is protected.
 """
 from __future__ import annotations
 
@@ -28,10 +29,11 @@ from app.models import Detection, Image, Species
 log = get_logger(__name__)
 
 PRIORITY = {"wild_boar", "red_deer", "roe_deer", "fallow_deer", "fox", "mouflon", "ibex", "badger"}
-# Hunted here, so in the Tonight advice from the first sighting. Dogs, sheep, cows,
-# birds (and badger, protected in Spain) used to join the advice too, and a farm
-# dog could become a stand's "best species tonight".
-GAME = {"wild_boar", "red_deer", "roe_deer", "fallow_deer", "mouflon", "ibex"}
+# The big game the evening sits are for, so in the Tonight advice from the first
+# sighting. Dogs, sheep, cows, birds (and badger, protected in Spain) used to join the
+# advice too, and a farm dog could become a stand's "best species tonight". Fox and
+# rabbit are small game here: tracked, and in the advice only if switched on.
+BIG_GAME = {"wild_boar", "red_deer", "roe_deer", "fallow_deer", "mouflon", "ibex"}
 
 # Below this the model is guessing: DeepFaune's own tool calls anything under 0.8
 # "undefined". Lower here because a burst vote (vote_bursts) rescues the frames of
@@ -48,7 +50,8 @@ KEEP_OWN = 0.9
 
 def _ensure_species(db: Session, key: str, name: str) -> None:
     if db.get(Species, key) is None:
-        db.add(Species(id=key, common_name=name, is_priority=key in PRIORITY, huntable=key in GAME))
+        db.add(Species(id=key, common_name=name, is_priority=key in PRIORITY,
+                       huntable=key in BIG_GAME))
         db.flush()
 
 
@@ -63,7 +66,10 @@ def classify_image(db: Session, image: Image, boxes: list[dict] | None = None) -
     `boxes` are the detector's answer when the AI pass already has it; without them
     (a frame a hunter kept by hand) the detector runs here.
     """
-    # Two runs must never both write one: counts and alerts would double.
+    # Two runs must never both write one: counts and alerts would double. The photo's
+    # row is locked first, so a second run (one that took over a stalled run's lock)
+    # waits here until the first has committed its sighting, and then sees it.
+    db.execute(select(Image.id).where(Image.id == image.id).with_for_update())
     if db.scalar(select(exists().where(Detection.image_id == image.id))):
         return None
     if boxes is None:
@@ -180,6 +186,11 @@ def vote_bursts(db: Session, image_ids: list) -> int:
                     info["vote"] = {"species": label, "frames": len(run)}
                     mine = [_own(d)[1] for d, _ in run if _own(d)[0] == label]
                     det.species_conf = round(sum(mine) / len(mine), 4)
+                # Stag/hind and boar/sow belong to the species they were judged as: a
+                # hind relabelled wild boar is not a sow. The cloud pass looks at it
+                # again as what it is now; "own" keeps the vote undoable.
+                det.sex, det.sex_conf, det.sex_attempts, det.sex_checked_at = (
+                    "unknown", None, 0, None)
                 det.species_id = label
                 boxes = info.get("boxes")
                 if boxes is not None:

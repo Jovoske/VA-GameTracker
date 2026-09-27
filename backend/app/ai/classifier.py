@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import threading
 
-from app.ai.detector import discard, download
+from app.ai.detector import WeightsMismatch, discard, fetch_weights, loaded
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -68,11 +68,8 @@ _lock = threading.Lock()
 
 
 def _weights_path() -> str:
-    os.makedirs(settings.models_root, exist_ok=True)
-    path = os.path.join(settings.models_root, _FILE)
-    if not os.path.exists(path):
-        download(_URL, path, timeout=900, what="classifier")
-    return path
+    return fetch_weights(_URL, os.path.join(settings.models_root, _FILE),
+                         timeout=900, what="classifier")
 
 
 def _strip(key: str) -> str:
@@ -87,7 +84,8 @@ def _load_weights(torch, model, path: str) -> None:
 
     Plain tensors only where the file allows it (then no code runs while it is read).
     A file missing the classifier head used to load "fine" with strict=False and name
-    every animal at random; now it fails, is removed, and is fetched again next run.
+    every animal at random; now it fails, is removed, and is fetched again next run
+    (detector.discard, which keeps the file when the machine is the problem).
     """
     try:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
@@ -98,8 +96,8 @@ def _load_weights(torch, model, path: str) -> None:
     report = model.load_state_dict({_strip(k): v for k, v in state.items()}, strict=False)
     missing = list(report.missing_keys)
     if any(k.startswith("head.") for k in missing) or len(missing) > 10:
-        raise ValueError(f"checkpoint does not fit the model: {len(missing)} weights missing, "
-                         f"e.g. {', '.join(missing[:3])}")
+        raise WeightsMismatch(f"checkpoint does not fit the model: {len(missing)} weights "
+                              f"missing, e.g. {', '.join(missing[:3])}")
 
 
 def _get_model():
@@ -120,6 +118,7 @@ def _get_model():
                 except Exception as e:
                     discard(path, "classifier", e)
                     raise
+                loaded(path)
                 model.eval()
                 _model = model
                 _mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)

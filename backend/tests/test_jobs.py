@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as clock
 
 import pytest
 
@@ -29,6 +30,8 @@ from app.models import (
 )
 
 from .conftest import requires_db
+
+_REAL_SPAWN = jobs.spawn  # the autouse `spawned` fixture stands in for it in every test
 
 
 def _write_lock(name="pipeline", *, owner="sync", pid=None, host=None, started=None,
@@ -175,6 +178,45 @@ def test_waiting_for_the_lock_gets_it_once_the_running_job_ends():
     held.release()
 
 
+def test_a_run_notices_within_seconds_that_its_lock_was_taken_over(monkeypatch):
+    monkeypatch.setattr(jobs, "CHECK_SECONDS", 0)
+    lock = jobs.try_acquire("pipeline", "sync")
+    assert not jobs.lock_lost()  # no run in this process yet
+    jobs.run_under(lock)
+    try:
+        assert not jobs.lock_lost()
+        _write_lock(token="the-next-run")  # it stalled, and the next run took over
+        assert jobs.lock_lost() and lock.lost
+    finally:
+        jobs.run_under(None)
+        lock.release()
+    assert jobs.holder("pipeline").token == "the-next-run"  # never removed theirs
+
+
+def test_a_job_a_button_starts_is_not_a_child_of_the_web_server(tmp_path, monkeypatch):
+    """NSSM stops the web service by killing its whole process tree: a job a button
+    started must not be in it, or a deploy's restart stops it halfway."""
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    out = tmp_path / "ran.json"
+    (backend / "pipeline.py").write_text(
+        "import json, os, sys\n"
+        f"json.dump({{'ppid': os.getppid(), 'args': sys.argv[1:], 'cwd': os.getcwd()}}, "
+        f"open({str(out)!r}, 'w'))\n"
+        "sys.stderr.write('before logging starts\\n')\n"
+    )
+    monkeypatch.setattr(jobs, "BACKEND", backend)
+    assert _REAL_SPAWN("login", "abc") is True
+    deadline = time.monotonic() + 20
+    while not out.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.2)
+    ran = json.loads(out.read_text())
+    assert ran["args"] == ["login", "abc"] and ran["cwd"] == str(backend)
+    assert ran["ppid"] != os.getpid()  # its parent (the launcher) is gone
+    assert "before logging starts" in (jobs.log_dir() / "pipeline.log").read_text()
+
+
 # ── the pipeline runner ────────────────────────────────────────────────────────
 
 
@@ -220,6 +262,29 @@ def test_plan_and_score_fail_loudly_when_the_lock_never_frees(runner, monkeypatc
     held.release()
 
 
+def test_a_check_queued_behind_another_job_waits_once_and_runs_when_it_ends(
+    runner, monkeypatch,
+):
+    pipeline, ran = runner
+    monkeypatch.setattr(pipeline, "QUEUE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(pipeline, "WAIT_SECONDS", 10)
+    reid = jobs.try_acquire("pipeline", "reid")
+    first: list = []
+    waiter = threading.Thread(target=lambda: first.append(pipeline.main(["sync", "queued"])))
+    waiter.start()
+    deadline = time.monotonic() + 5
+    while jobs.holder("fetchqueue") is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert jobs.holder("fetchqueue") is not None
+    # A second tap while one is queued queues nothing more.
+    assert pipeline.main(["sync", "queued"]) == 0
+    assert [r for r in ran if r[0] != "log"] == []
+    reid.release()
+    waiter.join(10)
+    assert first == [0] and [r for r in ran if r[0] != "log"] == [("sync", ["queued"])]
+    assert jobs.holder("fetchqueue") is None and jobs.holder("pipeline") is None
+
+
 def test_every_run_writes_its_log_to_a_file(runner):
     pipeline, ran = runner
     assert pipeline.main(["sync"]) == 0
@@ -241,6 +306,12 @@ def test_busy_answers_the_deploy_script(runner, capsys):
     assert pipeline.main(["busy"]) == pipeline.BUSY_EXIT
     assert "busy: sync" in capsys.readouterr().out
     held.release()
+    # The stag/hind pass has a lock of its own, and a deploy still waits for it.
+    sex = jobs.try_acquire("sexpass", "sex")
+    assert pipeline.main(["busy"]) == pipeline.BUSY_EXIT
+    assert "busy: sex" in capsys.readouterr().out
+    sex.release()
+    assert pipeline.main(["busy"]) == 0
 
 
 def test_a_crash_is_logged_and_the_lock_released(runner, monkeypatch):
@@ -341,3 +412,89 @@ def test_a_missed_plan_is_written_by_the_fetch_before_dark_and_never_after(
     # Claimed now: the next fetch leaves it alone.
     assert pipeline.plan_catch_up(db_session, dusk + timedelta(minutes=15)) is None
     assert db_session.query(ModelRun).count() == 1
+
+
+@requires_db
+def test_the_plan_catch_up_has_a_window_every_evening_of_the_year(db_session, camera, monkeypatch):
+    """At Alatoz the sun sets before 17:45 from late November to Christmas: the fetch
+    must still be able to write tonight's claim then, and never after sunset."""
+    from zoneinfo import ZoneInfo
+
+    import pipeline
+    from app.core.config import settings
+    from app.enrichment.astro import solar
+    from app.forecasting import model
+
+    monkeypatch.setattr(model, "forecast_tonight", lambda db: {"where": [
+        {"camera": "Puente", "species_id": None, "probability": 0.3,
+         "best_window": {"start_hour": 17, "end_hour": 20}}]})
+    madrid = ZoneInfo("Europe/Madrid")
+    day = date(2026, 1, 3)
+    while day.year == 2026:
+        sunset = solar(settings.estate_lat, settings.estate_lon, day)["sunset"]
+        wrote = []
+        for minutes in range(15 * 60, 22 * 60, 15):  # a fetch every 15 minutes
+            at = datetime(day.year, day.month, day.day, minutes // 60, minutes % 60,
+                          tzinfo=madrid)
+            if pipeline.plan_catch_up(db_session, at.astimezone(UTC)):
+                wrote.append(at)
+        assert len(wrote) == 1, (day, wrote)  # one claim a night
+        assert wrote[0] < sunset and wrote[0].astimezone(madrid).hour >= 16, (day, wrote)
+        # Before sunset with room to spare: at least three fetches get the chance.
+        opens = min(datetime.combine(day, clock(17), tzinfo=madrid), sunset - timedelta(hours=1))
+        assert sunset - opens >= timedelta(minutes=45), day
+        db_session.query(Forecast).delete()
+        db_session.query(ModelRun).delete()
+        db_session.commit()
+        day += timedelta(days=4)
+
+    # 7 December, sunset 17:42: the 17:00 plan run crashed; the 17:15 fetch writes it.
+    dec = datetime(2026, 12, 7, 17, 15, tzinfo=madrid)
+    assert pipeline.plan_catch_up(db_session, dec.astimezone(UTC))["target_date"] == "2026-12-07"
+
+
+@requires_db
+def test_a_plan_run_leaves_a_night_the_fetch_already_claimed_alone(
+    db_session, camera, monkeypatch,
+):
+    import pipeline
+    from app.forecasting import model
+    from app.forecasting.scoring import local_today, persist_tonight
+
+    forecast = {"where": [{"camera": "Puente", "species_id": None, "probability": 0.3,
+                           "best_window": {"start_hour": 19, "end_hour": 22}}]}
+    monkeypatch.setattr(model, "forecast_tonight", lambda db: forecast)
+    persist_tonight(db_session, forecast, target=local_today())  # the catch-up's
+    db_session.commit()
+    assert pipeline._run("plan", [], db_session) == 0
+    assert db_session.query(ModelRun).count() == 1
+    db_session.query(Forecast).delete()
+    db_session.query(ModelRun).delete()
+    db_session.commit()
+    assert pipeline._run("plan", [], db_session) == 0
+    assert db_session.query(ModelRun).count() == 1
+
+
+@requires_db
+def test_a_queued_check_is_not_run_twice_when_the_scheduled_fetch_got_there_first(
+    db_session, monkeypatch,
+):
+    import pipeline
+    from app.ingestion import fetch
+    from app.models import SyncLog
+
+    fetched: list = []
+    monkeypatch.setattr(fetch, "run_fetch", lambda db: fetched.append(1) or {})
+    monkeypatch.setattr(pipeline, "plan_catch_up", lambda db: None)
+    asked = datetime.now(UTC) - timedelta(minutes=3)
+    jobs.note(db_session, "fetch_request", at=asked)
+    db_session.add(SyncLog(status="ok", started_at=asked - timedelta(minutes=10),
+                           details={"provider": "pipeline"}))
+    db_session.commit()
+    assert pipeline._run("sync", ["queued"], db_session) == 0
+    assert fetched == [1]  # the last fetch was before the press: this one runs
+    db_session.add(SyncLog(status="ok", started_at=asked + timedelta(minutes=1),
+                           details={"provider": "pipeline"}))
+    db_session.commit()
+    assert pipeline._run("sync", ["queued"], db_session) == 0
+    assert fetched == [1]  # the scheduled fetch after the press was it

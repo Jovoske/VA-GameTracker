@@ -24,6 +24,7 @@ import uuid
 from sqlalchemy import delete, distinct, func, select, update
 from sqlalchemy.orm import Session
 
+from app import jobs
 from app.core.logging import get_logger
 from app.models import (
     Detection,
@@ -74,6 +75,8 @@ def embed_detections(db: Session, *, limit: int = EMBED_PER_RUN) -> int:
             ) from e
     done = 0
     for det_id, path, bbox in rows:
+        if jobs.lock_lost():
+            break  # stalled, and another run has the lock now: stop here
         try:
             xyxy = bbox.get("xyxy") if isinstance(bbox, dict) else None
             emb = embed_crop(path, xyxy)
@@ -254,8 +257,14 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
 
 
 def recompute(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
-    """Full re-ID pass: embed any new detections, then (re)cluster into individuals."""
+    """Full re-ID pass: embed any new detections, then (re)cluster into individuals.
+
+    `stopped` is true when the run lost its lock partway (it stalled and another run
+    took over): what was embedded is kept, and the regrouping waits for the next run.
+    """
     embedded = embed_detections(db)
+    if jobs.lock_lost():
+        return {"embedded": embedded, "stopped": True}
     out = cluster(db, threshold=threshold)
     out["embedded"] = embedded
     out["still_to_embed"] = db.scalar(

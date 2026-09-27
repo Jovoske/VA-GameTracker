@@ -6,8 +6,13 @@ in librosa/torchaudio/soundfile we never use. Weights cache to the models volume
 """
 from __future__ import annotations
 
+import json
 import os
+import pickle
 import threading
+import time
+import zipfile
+from datetime import datetime
 
 import httpx
 
@@ -28,6 +33,20 @@ DETECT_CONF = 0.05
 
 _model = None
 _lock = threading.Lock()
+
+# Weights removed for failing to load are downloaded again at most this often, so a
+# load that keeps failing never pulls the file (1.2 GB for the species model) on
+# every 15-minute fetch while holding the pipeline up.
+REDOWNLOAD_SECONDS = 24 * 3600
+
+# What torch and ultralytics say when the file itself is broken (cut short, not a
+# checkpoint at all), as opposed to the machine (memory) or the libraries.
+_FILE_MARKERS = ("PytorchStreamReader", "invalid load key", "failed finding central directory",
+                 "unexpected EOF", "file might be corrupted", "not a zip file")
+
+
+class WeightsMismatch(ValueError):
+    """The file loaded, but it does not fit the model (its head or most weights missing)."""
 
 
 def download(url: str, path: str, *, timeout: float, what: str) -> None:
@@ -59,21 +78,87 @@ def download(url: str, path: str, *, timeout: float, what: str) -> None:
     log.info(f"{what}.downloaded", path=path, bytes=os.path.getsize(path))
 
 
-def discard(path: str, what: str, error: Exception) -> None:
-    """Weights that would not load are removed, so the next run downloads them again."""
-    log.error(f"{what}.bad_weights", path=path, error=str(error)[:300])
+def bad_file(error: BaseException) -> bool:
+    """Whether a load error says the weights file itself is broken.
+
+    Only then is the file worth fetching again. Running out of memory (the server
+    runs SQL Server too), or a library missing or at another version, says nothing
+    about the file: a new copy would fail the same way, after a 1.2 GB download.
+    """
+    if isinstance(error, (MemoryError, ImportError)):
+        return False
+    if isinstance(error, (pickle.UnpicklingError, EOFError, zipfile.BadZipFile, WeightsMismatch)):
+        return True
+    return isinstance(error, RuntimeError) and any(m in str(error) for m in _FILE_MARKERS)
+
+
+def _marker(path: str) -> str:
+    return path + ".bad"
+
+
+def _read_marker(path: str) -> dict:
     try:
-        os.remove(path)
+        with open(_marker(path), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_marker(path: str, **fields) -> None:
+    data = {**_read_marker(path), **fields}
+    try:
+        with open(_marker(path), "w", encoding="utf-8") as f:
+            json.dump(data, f)
     except OSError:
         pass
 
 
-def _weights_path() -> str:
-    os.makedirs(settings.models_root, exist_ok=True)
-    path = os.path.join(settings.models_root, _MODEL_FILE)
-    if not os.path.exists(path):
-        download(_MODEL_URL, path, timeout=300, what="detector")
+def discard(path: str, what: str, error: Exception) -> None:
+    """Weights that would not load: removed, so they are downloaded again, when the
+    error says the file is broken; kept when it is the machine or the libraries."""
+    if not bad_file(error):
+        log.error(f"{what}.load_failed", path=path, error=str(error)[:300])
+        return
+    log.error(f"{what}.bad_weights", path=path, error=str(error)[:300])
+    try:
+        os.remove(path)
+    except OSError:
+        return
+    _write_marker(path, removed_at=time.time())
+
+
+def loaded(path: str) -> None:
+    """The weights loaded: forget that an earlier copy was removed."""
+    try:
+        os.remove(_marker(path))
+    except OSError:
+        pass
+
+
+def fetch_weights(url: str, path: str, *, timeout: float, what: str) -> str:
+    """The weights file, downloaded first if it is not there.
+
+    After a copy was removed for failing to load, a new one is downloaded at once,
+    but not again within REDOWNLOAD_SECONDS if that one fails too.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        return path
+    last = _read_marker(path).get("downloaded_at")
+    if last and time.time() - float(last) < REDOWNLOAD_SECONDS:
+        after = datetime.fromtimestamp(float(last) + REDOWNLOAD_SECONDS).strftime("%d %b %H:%M")
+        raise RuntimeError(f"its weights would not load and were removed; they are "
+                           f"downloaded again after {after}")
+    download(url, path, timeout=timeout, what=what)
+    if os.path.exists(_marker(path)):
+        _write_marker(path, downloaded_at=time.time())
     return path
+
+
+def _weights_path() -> str:
+    path = os.path.join(settings.models_root, _MODEL_FILE)
+    return fetch_weights(_MODEL_URL, path, timeout=300, what="detector")
 
 
 def _get_model():
@@ -90,6 +175,7 @@ def _get_model():
                 except Exception as e:
                     discard(path, "detector", e)
                     raise
+                loaded(path)
                 log.info("detector.loaded")
     return _model
 

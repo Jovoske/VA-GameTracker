@@ -39,8 +39,8 @@ _DAY_CACHE: dict = {}
 
 # Weather is looked up while photos are stored, so a slow Open-Meteo held every new
 # photo back by its timeout, once per photo. A short timeout, and after a failure no
-# calls for a while: those photos are stored without weather, and it is filled in
-# when they are next enriched (enrich.enrich_image redoes an "unavailable" one).
+# calls for a while: those photos are stored without weather, and the end of every
+# fetch fills it in once Open-Meteo answers again (enrich.refill_unavailable).
 TIMEOUT_SECONDS = 5
 PAUSE_AFTER_FAILURE_SECONDS = 600
 _down_until = 0.0

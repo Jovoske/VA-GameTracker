@@ -61,12 +61,15 @@ def summarize(results: dict) -> dict:
 
 def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
     """Fetch from every provider; returns the summary row (stage "identifying")."""
+    from app import jobs
     from app.ingestion.sync import sync_all
     from app.ingestion.ubox_sync import sync_ubox_all
 
     started = datetime.now(UTC)
     results: dict = {}
     for provider, run in (("spypoint", sync_all), ("ubox", sync_ubox_all)):
+        if jobs.lock_lost():
+            break  # another run took the lock over and fetches now
         try:
             results[provider] = run(db)
         except Exception as exc:  # one provider's crash must not stop the other
@@ -102,8 +105,12 @@ def finish(db: Session, row: SyncLog, error: str | None = None) -> None:
 
 def check_and_recount(db: Session) -> tuple[dict, str | None]:
     """The AI pass over what came in, then the night recount; (results, what went
-    wrong in words or None). Shared by the routine fetch and the one-off imports."""
+    wrong in words or None). Shared by the routine fetch and the one-off imports.
+    Last, weather that Open-Meteo could not give when the photos came in is filled
+    in (enrich.refill_unavailable)."""
+    from app import jobs
     from app.ai.checking import check_photos
+    from app.enrichment.enrich import refill_unavailable
     from app.forecasting.exposure import recompute_camera_nights
 
     results: dict = {}
@@ -116,6 +123,8 @@ def check_and_recount(db: Session) -> tuple[dict, str | None]:
         db.rollback()
         log.error("fetch.ai_failed", error=str(exc))
         error = f"Looking for animals failed ({type(exc).__name__})"
+    if jobs.lock_lost():
+        return results, error  # the run that took the lock over recounts
     try:
         # Exposure is the denominator under every statistic in the app, and it only
         # becomes knowable once the frames are checked: an unchecked night is not an
@@ -124,6 +133,11 @@ def check_and_recount(db: Session) -> tuple[dict, str | None]:
     except Exception as exc:
         db.rollback()
         log.error("fetch.exposure_failed", error=str(exc))
+    try:
+        results["weather_refilled"] = refill_unavailable(db)
+    except Exception as exc:  # never a reason to fail the run
+        db.rollback()
+        log.warning("fetch.weather_refill_failed", error=str(exc))
     return results, error
 
 

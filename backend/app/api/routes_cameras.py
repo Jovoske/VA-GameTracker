@@ -38,6 +38,23 @@ def _pipeline_busy() -> bool:
     return jobs.holder("pipeline") is not None
 
 
+# What a job that holds the photo fetch up is doing, in words, by its lock's owner.
+BUSY_WITH = {
+    "reid": "looking for repeat visitors",
+    "plan": "writing tonight’s plan",
+    "score": "checking last night’s plan against the cameras",
+    "scan": "checking photos for animals",
+}
+
+
+def _busy_words() -> str:
+    """Why a one-off can't start now, in words: what holds the lock."""
+    holder = jobs.holder("pipeline")
+    what = "fetching photos" if holder is None or holder.owner in jobs.FETCH_MODES else (
+        BUSY_WITH.get(holder.owner, "busy with another job"))
+    return f"The server is {what}. Try again in a few minutes."
+
+
 def _lock_started() -> datetime | None:
     """When the run holding the pipeline lock began, or None when nothing holds it."""
     return jobs.busy_since("pipeline")
@@ -179,13 +196,27 @@ def trigger_sync(
 ) -> dict:
     # `since` is what the Check button waits for: a fetch summary started after it
     # is this check's result; an older one is somebody else's.
-    if _pipeline_busy():
-        return {"status": "busy", "since": _lock_started(),
+    holder = jobs.holder("pipeline")
+    if holder is not None and holder.owner in jobs.FETCH_MODES:
+        return {"status": "busy", "since": holder.started,
                 "note": "Already checking. New photos will show shortly."}
+    if jobs.holder("fetchqueue") is not None:
+        asked = jobs.read_note(db, FETCH_REQUEST).get("at")
+        return {"status": "queued", "since": asked,
+                "note": "Already asked. New photos come in as soon as the server is free."}
     since = datetime.now(UTC)
-    _start(db, "sync")
+    if holder is None:
+        _start(db, "sync")
+        jobs.note(db, FETCH_REQUEST, at=since)
+        return {"status": "started", "since": since}
+    # Something else holds the fetch up (Look for repeats, tonight's plan): the fetch
+    # waits for it and runs the moment it ends. It used to say "Already checking"
+    # although no fetch had been asked for, and none came.
+    _start(db, "sync", "queued")
     jobs.note(db, FETCH_REQUEST, at=since)
-    return {"status": "started", "since": since}
+    what = BUSY_WITH.get(holder.owner, "busy with another job")
+    return {"status": "queued", "since": since,
+            "note": f"The server is {what}. New photos come in when it finishes."}
 
 
 @router.post("/backfill")
@@ -195,7 +226,7 @@ def trigger_backfill(
     months: Annotated[int, Query(ge=1, le=24)] = 13,
 ) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
+        return {"status": "busy", "note": _busy_words()}
     _start(db, "backfill", str(months))
     jobs.note(db, FETCH_REQUEST, at=datetime.now(UTC))
     return {"status": "started", "months": months}
@@ -206,7 +237,7 @@ def trigger_scan(
     _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
 ) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
+        return {"status": "busy", "note": _busy_words()}
     _start(db, "scan")
     return {"status": "started"}
 
@@ -220,9 +251,11 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
     row = latest_run(db)
     asked = jobs.read_note(db, FETCH_REQUEST).get("at")
     asked = datetime.fromisoformat(asked) if asked else None
-    if not _pipeline_busy() and asked is not None and datetime.now(UTC) - asked < REQUEST_GRACE and (
-        row is None or row.started_at is None or row.started_at < asked
-    ):
+    if not _pipeline_busy() and asked is not None and (
+        # Queued behind another job, which has just ended: it takes the lock next.
+        jobs.holder("fetchqueue") is not None
+        or datetime.now(UTC) - asked < REQUEST_GRACE
+    ) and (row is None or row.started_at is None or row.started_at < asked):
         # Asked for, and its process is still starting: not yet anyone's result.
         return {"status": "running", "started_at": asked}
     if _pipeline_busy():

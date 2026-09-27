@@ -5,8 +5,10 @@ replaced by stand-ins that answer what each test needs.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -163,6 +165,62 @@ def test_two_runs_never_write_two_sightings_for_one_photo(db_session, cam, model
     db_session.commit()
     assert species.classify_image(db_session, img, boxes=BOAR) is None
     assert db_session.query(Detection).count() == 1
+
+
+@requires_db
+def test_a_second_run_on_the_same_photo_waits_for_the_first_ones_sighting(
+    db_session, cam, models,
+):
+    """A run that took over a stalled run's lock can reach the same photo: the photo's
+    row is locked while a sighting is written, so the second sees it and adds none."""
+    import threading
+
+    img = _frame(db_session, cam, NIGHT, is_empty_frame=False, processed_at=NIGHT)
+    first = sessionmaker(bind=db_session.get_bind())()
+    second = sessionmaker(bind=db_session.get_bind())()
+    try:
+        assert species.classify_image(first, first.get(Image, img.id), boxes=BOAR) == "wild_boar"
+        got: list = []
+        other = threading.Thread(target=lambda: got.append(
+            species.classify_image(second, second.get(Image, img.id), boxes=BOAR)))
+        other.start()
+        other.join(0.5)
+        assert other.is_alive()  # waiting on the first run's row lock
+        first.commit()
+        other.join(10)
+        second.commit()
+        assert got == [None]
+    finally:
+        first.close()
+        second.close()
+    assert db_session.query(Detection).filter_by(image_id=img.id).count() == 1
+
+
+@requires_db
+def test_a_run_that_lost_its_lock_stops_checking(db_session, cam, models, monkeypatch):
+    """It stalled past LOCK_STALE and another run took the lock: it stops at the next
+    photo instead of checking the same photos alongside the new owner."""
+    import json
+
+    frames = [_frame(db_session, cam, NIGHT + timedelta(minutes=i)) for i in range(3)]
+    monkeypatch.setattr(jobs, "CHECK_SECONDS", 0)
+    lock = jobs.try_acquire("pipeline", "sync")
+    jobs.run_under(lock)
+    try:
+        assert not jobs.lock_lost()
+        data = json.loads(lock.path.read_text())
+        lock.path.write_text(json.dumps({**data, "token": "the-new-owner"}))
+        result = checking.check_photos(db_session)
+    finally:
+        jobs.run_under(None)
+        lock.release()
+    assert result["status"] == "lost" and result["checked"] == 0
+    assert models["calls"] == []
+    assert all(db_session.get(Image, f.id).processed_at is None for f in frames)
+    # The run that has the lock now says how the pass went, not this one.
+    assert jobs.read_note(db_session, checking.STATUS) == {}
+    assert jobs.holder("pipeline") is not None  # never removed the new owner's lock
+    jobs.lock_path("pipeline").unlink()
 
 
 @requires_db
@@ -328,6 +386,74 @@ def test_the_frames_of_one_visit_take_the_species_they_agree_on(db_session, cam,
     assert voted.bbox["own"] == {"species": "fallow_deer", "conf": 0.6}
 
 
+@requires_db
+def test_a_vote_that_changes_the_species_forgets_the_sex_judged_for_the_old_one(
+    db_session, cam,
+):
+    from app.forecasting.model import class_label
+
+    for sid, name in (("red_deer", "Red Deer"), ("wild_boar", "Wild Boar")):
+        db_session.add(Species(id=sid, common_name=name, is_priority=True, huntable=True))
+    db_session.commit()
+    frames = [_frame(db_session, cam, NIGHT + timedelta(seconds=30 * i), is_empty_frame=False,
+                     processed_at=NIGHT) for i in range(3)]
+    hind = Detection(image_id=frames[0].id, species_id="red_deer", species_conf=0.6,
+                     bbox={"boxes": []}, sex="female", sex_conf=0.8, sex_attempts=1,
+                     sex_checked_at=NIGHT)
+    db_session.add(hind)
+    for f in frames[1:]:
+        db_session.add(Detection(image_id=f.id, species_id="wild_boar", species_conf=0.8,
+                                 bbox={"boxes": []}))
+    db_session.commit()
+    species.vote_bursts(db_session, [frames[2].id])
+    db_session.commit()
+    db_session.refresh(hind)
+    # Not a "Sow": the stag/hind answer was about a red deer. The boar/sow pass looks
+    # at it afresh, and the frame's own reading is kept, so the vote can be undone.
+    assert (hind.species_id, hind.sex, hind.sex_conf, hind.sex_attempts) == (
+        "wild_boar", "unknown", None, 0)
+    assert class_label(hind.species_id, "Wild Boar", hind.sex, hind.group_type) == "Wild boar"
+    assert hind.bbox["own"] == {"species": "red_deer", "conf": 0.6}
+
+
+@requires_db
+def test_a_hunters_flag_on_a_photo_the_ai_gave_up_on_is_a_check(db_session, cam, models):
+    """Keep or "nothing in it" is the hunter's judgement: the photo no longer says
+    "Couldn't check", and its night counts."""
+    from app.api.routes_images import FlagBody, flag_image
+    from app.models import User
+
+    user = User(estate_id=cam.estate_id, email="a@x", password_hash="x", role="admin")
+    db_session.add(user)
+    db_session.commit()
+    now = datetime.now(UTC)
+    kept = _frame(db_session, cam, NIGHT, path="boar.jpg", ai_attempts=3, ai_failed_at=now,
+                  ai_error="OSError: cannot identify image file")
+    empty = _frame(db_session, cam, NIGHT + timedelta(minutes=5), path="grass.jpg",
+                   ai_attempts=3, ai_failed_at=now)
+    unreadable = _frame(db_session, cam, NIGHT + timedelta(minutes=50), path="cut.jpg",
+                        ai_attempts=3, ai_failed_at=now)
+    flag_image(kept.id, FlagBody(is_empty=False), user, db_session)
+    flag_image(empty.id, FlagBody(is_empty=True), user, db_session)
+    flag_image(unreadable.id, FlagBody(is_empty=False), user, db_session)
+    ids = [kept.id, empty.id, unreadable.id]
+    assert checking.photo_states(db_session, ids) == {kept.id: "waiting", unreadable.id: "waiting"}
+
+    # The kept ones get one more try at naming the animal; one still can't be read.
+    models["raises"]["cut.jpg"] = OSError("image file is truncated")
+    checking.check_photos(db_session)
+    assert checking.photo_states(db_session, ids) == {}
+    named = {img.original_path: det.species_id for det, img in db_session.execute(
+        select(Detection, Image).join(Image, Image.id == Detection.image_id))}
+    # Not "couldn't check" over the hunter's word: an animal nobody has named.
+    assert named == {"boar.jpg": "wild_boar", "cut.jpg": None}
+    db_session.refresh(unreadable)
+    assert unreadable.ai_failed_at is None and "truncated" in unreadable.ai_error
+    assert checking.failed_count(db_session) == 0
+    recompute_camera_nights(db_session)
+    assert db_session.scalar(select(CameraNight.exposure_state)) == "CONFIRMED"
+
+
 # ── what the hunter and the admin see ─────────────────────────────────────────
 
 
@@ -360,6 +486,11 @@ def test_admin_status_shows_the_ai_backlog_and_its_last_error(db_session, cam, m
     held = jobs.try_acquire("pipeline", "sync")
     assert status(None, db_session)["ai"]["running_since"] is not None
     held.release()
+    # Look for repeats holds the same lock, but it is not checking photos.
+    held = jobs.try_acquire("pipeline", "reid")
+    assert status(None, db_session)["ai"]["running_since"] is None
+    held.release()
+    assert status(None, db_session)["ai"]["log_file"].endswith("pipeline.log")
 
 
 # ── the cloud stag/hind pass ──────────────────────────────────────────────────
@@ -492,6 +623,87 @@ def test_a_download_cut_short_leaves_nothing_behind(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir()] == ["MDV6.pt"]
 
 
+def test_weights_are_removed_only_when_the_file_is_broken_and_fetched_at_most_daily(
+    tmp_path, monkeypatch,
+):
+    """Out of memory or a library that won't import says nothing about the file: it is
+    kept (it used to be deleted, and 1.2 GB fetched again every 15 minutes)."""
+    import pickle
+    import sys
+    import types
+
+    from app.ai import classifier, detector
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "models_root", str(tmp_path))
+    weights = tmp_path / classifier._FILE
+    downloads: list = []
+
+    def download(url, path, **kw):
+        downloads.append(path)
+        with open(path, "wb") as f:
+            f.write(b"w" * 4096)
+
+    monkeypatch.setattr(detector, "download", download)
+    fake_torch = types.ModuleType("torch")
+    fake_timm = types.ModuleType("timm")
+    fake_timm.create_model = lambda *a, **k: object()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "timm", fake_timm)
+    monkeypatch.setattr(classifier, "_model", None)
+
+    def load_raising(error):
+        def load(*a, **k):
+            raise error
+        fake_torch.load = load
+
+    weights.write_bytes(b"w" * 4096)
+    for error in (RuntimeError("DefaultCPUAllocator: not enough memory: you tried to "
+                               "allocate 1216348160 bytes."), MemoryError()):
+        load_raising(error)
+        with pytest.raises(type(error)):
+            classifier.load()
+        assert weights.exists()
+    assert downloads == []
+
+    # A file cut short or not a checkpoint: removed, and fetched again once.
+    load_raising(pickle.UnpicklingError("invalid load key, '<'."))
+    with pytest.raises(pickle.UnpicklingError):
+        classifier.load()
+    assert not weights.exists()
+    with pytest.raises(pickle.UnpicklingError):
+        classifier.load()  # downloaded again, and still broken: removed again
+    assert downloads == [str(weights)] and not weights.exists()
+    # Not again today: a load that keeps failing never pulls the file every run.
+    with pytest.raises(RuntimeError, match="downloaded again after"):
+        classifier.load()
+    assert downloads == [str(weights)]
+    marker = json.loads((tmp_path / (classifier._FILE + ".bad")).read_text())
+    marker["downloaded_at"] -= detector.REDOWNLOAD_SECONDS + 1
+    (tmp_path / (classifier._FILE + ".bad")).write_text(json.dumps(marker))
+    with pytest.raises(pickle.UnpicklingError):
+        classifier.load()
+    assert len(downloads) == 2
+
+    # The detector: an ultralytics that can't import what the file needs keeps it.
+    dweights = tmp_path / detector._MODEL_FILE
+    dweights.write_bytes(b"y" * 4096)
+    fake_ul = types.ModuleType("ultralytics")
+
+    def yolo(path):
+        raise ModuleNotFoundError("No module named 'dill'")
+
+    fake_ul.YOLO = yolo
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_ul)
+    monkeypatch.setattr(detector, "_model", None)
+    with pytest.raises(ModuleNotFoundError):
+        detector.load()
+    assert dweights.exists()
+    fake_ul.YOLO = lambda path: object()
+    detector.load()
+    assert not (tmp_path / (detector._MODEL_FILE + ".bad")).exists()
+
+
 # ── weather on the photo path ─────────────────────────────────────────────────
 
 
@@ -527,6 +739,52 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Answer())
     again = enrich.enrich_image(db_session, frames[0])
     assert again.id == snaps[0].id and again.temp_c == 14.0 and again.source != "unavailable"
+
+
+@requires_db
+def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch(
+    db_session, cam, models, monkeypatch,
+):
+    import httpx
+
+    from app.enrichment import enrich, weather
+    from app.ingestion.fetch import check_and_recount
+    from app.models import EnvSnapshot
+
+    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_DAY_CACHE", {})
+    recent = datetime.now(UTC) - timedelta(hours=20)
+
+    def down(*a, **k):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(httpx, "get", down)
+    for i in range(3):
+        enrich.enrich_image(db_session, _frame(db_session, cam, recent + timedelta(minutes=i)))
+    old = _frame(db_session, cam, recent - timedelta(days=30))
+    enrich.enrich_image(db_session, old)
+    db_session.commit()
+    # Still down: the fetch ends as before, nothing filled in, asked once.
+    monkeypatch.setattr(weather, "_down_until", 0.0)
+    assert check_and_recount(db_session)[0]["weather_refilled"] == 0
+
+    class Answer:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            day = recent.astimezone(ZoneInfo("Europe/Madrid")).date().isoformat()
+            return {"hourly": {"time": [f"{day}T{h:02d}:00" for h in range(24)],
+                               "temperature_2m": [14.0] * 24}}
+
+    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: Answer())
+    assert check_and_recount(db_session)[0]["weather_refilled"] == 3
+    db_session.expire_all()
+    got = {s.observed_at == old.captured_at: (s.source, s.temp_c)
+           for s in db_session.scalars(select(EnvSnapshot))}
+    assert got[False] == ("open-meteo-forecast", 14.0)
+    assert got[True] == ("unavailable", None)  # a month old: left alone, bounded
 
 
 # ── Look for repeats ──────────────────────────────────────────────────────────
@@ -587,6 +845,39 @@ def test_the_check_button_starts_a_job_and_reads_running_until_it_has_the_lock(
     assert trigger_sync(None, db_session)["status"] == "busy"
     assert spawned == [("sync",)]
     held.release()
+
+
+@requires_db
+def test_the_check_button_queues_a_fetch_behind_another_job_and_says_so(
+    db_session, cam, spawned,
+):
+    """Look for repeats (or the plan, or the score) holds the lock: no fetch is running,
+    so "Already checking" would be untrue. The fetch waits for it instead."""
+    from app.api.routes_cameras import sync_status, trigger_sync
+
+    reid = jobs.try_acquire("pipeline", "reid")
+    r = trigger_sync(None, db_session)
+    assert r["status"] == "queued" and r["since"] is not None
+    assert r["note"] == ("The server is looking for repeat visitors. "
+                         "New photos come in when it finishes.")
+    assert spawned == [("sync", "queued")]
+    assert sync_status(None, db_session)["status"] == "running"
+    queued = jobs.try_acquire("fetchqueue", "sync")  # its process, waiting for the lock
+    again = trigger_sync(None, db_session)
+    assert again["status"] == "queued" and "Already asked" in again["note"]
+    assert spawned == [("sync", "queued")]  # one is on its way: not a second
+    reid.release()
+    # Look for repeats ran for a while, and the queued fetch has not taken the lock
+    # yet: still running, never an older fetch's result read as this one's.
+    from app.models import SyncLog
+
+    jobs.note(db_session, "fetch_request", at=datetime.now(UTC) - timedelta(minutes=20))
+    db_session.add(SyncLog(status="ok", started_at=datetime.now(UTC) - timedelta(hours=1),
+                           details={"provider": "pipeline"}))
+    db_session.commit()
+    assert sync_status(None, db_session)["status"] == "running"
+    queued.release()
+    assert sync_status(None, db_session)["status"] == "ok"
 
 
 @requires_db
