@@ -191,9 +191,16 @@ def start_load(db: Session) -> tuple[dict, bool]:
     """Mark a download as started, unless one already is. (status, started)."""
     from datetime import UTC, datetime
 
+    from sqlalchemy.dialects.postgresql import insert
+
     from app.models import AppSetting
 
-    row = db.get(AppSetting, STATUS_KEY, with_for_update=True)
+    # The row first, so two first-ever presses queue on its lock rather than both
+    # inserting it.
+    db.execute(insert(AppSetting).values(key=STATUS_KEY, value={})
+               .on_conflict_do_nothing(index_elements=[AppSetting.key]))
+    row = db.get(AppSetting, STATUS_KEY, with_for_update=True,
+                 populate_existing=True)
     now = row.value if row else {}
     if now.get("state") == "loading" and _age_s(now.get("started_at")) <= LOADING_STALE_S:
         db.rollback()
