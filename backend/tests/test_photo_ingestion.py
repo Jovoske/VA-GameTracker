@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -191,7 +190,7 @@ def test_repair_pass_fetches_files_the_listing_no_longer_shows(db_session, spypo
 
 @requires_db
 def test_a_photo_whose_file_never_came_stops_blinding_its_night(db_session, spypoint):
-    from app.ai import empty_filter
+    from app.ai import checking
 
     FakeSpypoint.cameras["owner@example.com"] = ["sp-1"]
     camera = Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="Charca")
@@ -203,14 +202,14 @@ def test_a_photo_whose_file_never_came_stops_blinding_its_night(db_session, spyp
                   cdn_url="https://cdn/b.jpg", created_at=NOW - timedelta(hours=30))
     db_session.add_all([fresh, stale])
     db_session.commit()
-    assert empty_filter.scan_unprocessed(db_session)["scanned"] == 1
+    assert checking.check_photos(db_session)["no_file"] == 1
     assert stale.processed_at is not None and stale.is_empty_frame is None
     assert fresh.processed_at is None  # still being retried by the fetch
 
 
 @requires_db
 def test_a_photo_the_fetch_gave_up_on_is_let_through_at_once(db_session, spypoint):
-    from app.ai import empty_filter
+    from app.ai import checking
 
     camera = Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="Charca")
     db_session.add(camera)
@@ -223,7 +222,7 @@ def test_a_photo_the_fetch_gave_up_on_is_let_through_at_once(db_session, spypoin
                      cdn_url="https://cdn/d.jpg", download_attempts=2)
     db_session.add_all([given_up, no_link, retrying])
     db_session.commit()
-    assert empty_filter.scan_unprocessed(db_session)["scanned"] == 2
+    assert checking.check_photos(db_session)["no_file"] == 2
     assert given_up.processed_at is not None and no_link.processed_at is not None
     assert retrying.processed_at is None  # the fetch is still trying for its file
 
@@ -605,14 +604,14 @@ def test_the_same_login_in_another_case_or_the_main_login_is_refused(
 
     user = _member(db_session, spypoint)
     add_account(AddAccountBody(username="julle@example.com", password="p"),
-                BackgroundTasks(), user, db_session)
+                user, db_session)
     for username, words in (
         ("Julle@Example.com", "That SPYPOINT login is already added"),
         ("OWNER@example.com", "This login is already connected as the estate's main account"),
     ):
         with pytest.raises(HTTPException) as exc:
             add_account(AddAccountBody(username=username, password="p"),
-                        BackgroundTasks(), user, db_session)
+                        user, db_session)
         assert exc.value.detail == words
     # And the database says so too, should two phones add it at the same moment.
     db_session.add(CameraAccount(estate_id=spypoint.id, username="JULLE@example.com",
@@ -861,19 +860,24 @@ def test_a_long_job_holding_the_pipeline_is_busy_not_stopped(
     assert logins.camera_logins(db_session, cameras)[cameras[0].id]["state"] == "stale"
 
 
-def test_the_pipeline_lock_file_says_when_a_job_began(monkeypatch, tmp_path):
+def test_the_pipeline_lock_says_when_a_job_began():
+    import json
     import os
+    import socket
 
-    monkeypatch.setattr(settings, "models_root", str(tmp_path / "models"))
+    from app import jobs
+
     assert logins.pipeline_busy_since() is None
-    lock = tmp_path / "pipeline.lock"
-    lock.write_text("sync 0")
+    lock = jobs.lock_path("pipeline")
+    lock.parent.mkdir(parents=True, exist_ok=True)
     began = datetime.now(UTC) - timedelta(minutes=20)
-    os.utime(lock, (began.timestamp(), began.timestamp()))
+    lock.write_text(json.dumps({"owner": "sync", "pid": os.getpid(), "host": socket.gethostname(),
+                                "started": began.timestamp(), "token": "t"}))
+    # Started 20 minutes ago, heartbeat fresh: a long job, still going.
     assert abs(logins.pipeline_busy_since() - began) < timedelta(seconds=1)
-    crashed = datetime.now(UTC) - timedelta(hours=4)
-    os.utime(lock, (crashed.timestamp(), crashed.timestamp()))
-    assert logins.pipeline_busy_since() is None  # left by a crashed run
+    beat = datetime.now(UTC) - timedelta(minutes=15)
+    os.utime(lock, (beat.timestamp(), beat.timestamp()))
+    assert logins.pipeline_busy_since() is None  # no heartbeat for 15 min: it died
 
 
 @pytest.mark.parametrize(("exc", "words"), [
@@ -935,7 +939,7 @@ def test_re_entering_a_password_while_the_provider_is_unreachable_says_so(
     monkeypatch.setattr(verified, "login", refused)
     with pytest.raises(HTTPException) as exc:
         accounts.add_account(accounts.AddAccountBody(username="new@example.com", password="x"),
-                             BackgroundTasks(), admin, db_session)
+                             admin, db_session)
     assert exc.value.status_code == 400
     assert exc.value.detail == (
         "SPYPOINT refused that email and password. Check them in the SPYPOINT app.")
@@ -944,7 +948,7 @@ def test_re_entering_a_password_while_the_provider_is_unreachable_says_so(
     with pytest.raises(HTTPException) as exc:
         accounts.add_account(accounts.AddAccountBody(username="ana@example.com", password="x",
                                                      provider="ubox"),
-                             BackgroundTasks(), admin, db_session)
+                             admin, db_session)
     assert exc.value.status_code == 503 and "Couldn't reach UBox" in exc.value.detail
 
 
@@ -1081,10 +1085,7 @@ def test_one_provider_crashing_never_stops_the_other(db_session, spypoint, monke
     monkeypatch.setattr(sync, "sync_all", crash)
     monkeypatch.setattr(ubox_sync, "sync_ubox_all", lambda db: {
         "status": "ok", "total": 3, "accounts": []})
-    for name in ("app.ai.empty_filter", "app.ai.species", "app.forecasting.exposure"):
-        monkeypatch.setitem(__import__("sys").modules, name, SimpleNamespace(
-            scan_unprocessed=lambda db: {}, classify_unclassified=lambda db: {},
-            recompute_camera_nights=lambda db: {}))
+    monkeypatch.setattr(fetch, "check_and_recount", lambda db: ({}, None))
     fetch.run_fetch(db_session)
     row = fetch.latest_run(db_session)
     assert (row.status, row.images_downloaded) == ("partial", 3)
@@ -1095,18 +1096,17 @@ def test_one_provider_crashing_never_stops_the_other(db_session, spypoint, monke
 
 @requires_db
 def test_sync_status_reports_the_count_while_the_detector_is_still_looking(
-    db_session, spypoint, monkeypatch, tmp_path,
+    db_session, spypoint,
 ):
+    from app import jobs
     from app.api import routes_cameras
 
-    lock = tmp_path / "pipeline.lock"
-    monkeypatch.setattr(routes_cameras, "_lock_path", lambda: lock)
     viewer = _member(db_session, spypoint, "viewer")
     db_session.add(SyncLog(status="ok", started_at=NOW - timedelta(hours=1),
                            images_downloaded=9, details={"provider": "pipeline",
                                                          "stage": "done", "problems": []}))
     db_session.commit()
-    lock.write_text("api 0")
+    lock = jobs.try_acquire("pipeline", "sync")
     assert routes_cameras.sync_status(viewer, db_session)["status"] == "running"
 
     problems = [{"label": "Marco's cameras", "error": "SPYPOINT refused the password."}]
@@ -1119,7 +1119,7 @@ def test_sync_status_reports_the_count_while_the_detector_is_still_looking(
     assert now["status"] == "identifying" and now["result"] == "partial"
     assert now["images_downloaded"] == 4 and now["problems"] == problems
 
-    lock.unlink()
+    lock.release()
     done = routes_cameras.sync_status(viewer, db_session)
     assert done["status"] == "partial" and done["problems"] == problems
     # A provider row written later does not hide the run's summary.
@@ -1140,7 +1140,7 @@ def test_a_new_login_shows_its_cameras_while_its_first_import_runs(
 
     user = _member(db_session, spypoint)
     add_account(AddAccountBody(username="new@example.com", password="p"),
-                BackgroundTasks(), user, db_session)
+                user, db_session)
     row = next(r for r in list_accounts(user, db_session) if r["username"] == "new@example.com")
     assert row["cameras"] == 3 and row["importing"] is True
 

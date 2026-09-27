@@ -12,8 +12,7 @@ from __future__ import annotations
 import os
 import threading
 
-import httpx
-
+from app.ai.detector import WeightsMismatch, discard, fetch_weights, loaded
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -40,6 +39,18 @@ def species_key(name: str) -> str:
     return name.replace(" ", "_")
 
 
+# The classes that can turn up at Alatoz. DeepFaune is trained on all of Europe, and
+# took its top guess whatever it was, so Spanish night frames came back as moose,
+# bison or reindeer. The rest can't be here: bison, beaver, chamois (Pyrenees and
+# Cantabria only), moose, wolverine, marmot, bear, nutria, raccoon, reindeer and wolf.
+ESTATE_CLASSES = frozenset({
+    "badger", "ibex", "red deer", "cat", "goat", "roe deer", "dog", "fallow deer",
+    "squirrel", "equid", "genet", "hedgehog", "lagomorph", "otter", "lynx",
+    "micromammal", "mouflon", "sheep", "mustelid", "bird", "fox", "wild boar", "cow",
+})
+ESTATE_KEYS = frozenset(species_key(n) for n in ESTATE_CLASSES)
+
+
 # DeepFaune's "lagomorph" is the taxonomic order (rabbits + hares); on this estate it is
 # shown simply as "Rabbit". Keep the model class / species key as "lagomorph"; only the
 # human-facing name is overridden.
@@ -57,17 +68,8 @@ _lock = threading.Lock()
 
 
 def _weights_path() -> str:
-    os.makedirs(settings.models_root, exist_ok=True)
-    path = os.path.join(settings.models_root, _FILE)
-    if not os.path.exists(path):
-        log.info("classifier.downloading", url=_URL)
-        with httpx.stream("GET", _URL, follow_redirects=True, timeout=900) as r:
-            r.raise_for_status()
-            with open(path, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
-        log.info("classifier.downloaded", bytes=os.path.getsize(path))
-    return path
+    return fetch_weights(_URL, os.path.join(settings.models_root, _FILE),
+                         timeout=900, what="classifier")
 
 
 def _strip(key: str) -> str:
@@ -75,6 +77,27 @@ def _strip(key: str) -> str:
         if key.startswith(p):
             return key[len(p):]
     return key
+
+
+def _load_weights(torch, model, path: str) -> None:
+    """Put the checkpoint's weights in the model, refusing a file that doesn't fit it.
+
+    Plain tensors only where the file allows it (then no code runs while it is read).
+    A file missing the classifier head used to load "fine" with strict=False and name
+    every animal at random; now it fails, is removed, and is fetched again next run
+    (detector.discard, which keeps the file when the machine is the problem).
+    """
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as e:  # a checkpoint that pickles more than tensors and numbers
+        log.warning("classifier.weights_not_plain", error=str(e)[:200])
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+    report = model.load_state_dict({_strip(k): v for k, v in state.items()}, strict=False)
+    missing = list(report.missing_keys)
+    if any(k.startswith("head.") for k in missing) or len(missing) > 10:
+        raise WeightsMismatch(f"checkpoint does not fit the model: {len(missing)} weights "
+                              f"missing, e.g. {', '.join(missing[:3])}")
 
 
 def _get_model():
@@ -85,13 +108,17 @@ def _get_model():
                 import timm
                 import torch
 
-                ckpt = torch.load(_weights_path(), map_location="cpu", weights_only=False)
-                state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+                path = _weights_path()
                 model = timm.create_model(
                     _BACKBONE, pretrained=False,
                     num_classes=len(DEEPFAUNE_CLASSES), dynamic_img_size=True,
                 )
-                model.load_state_dict({_strip(k): v for k, v in state.items()}, strict=False)
+                try:
+                    _load_weights(torch, model, path)
+                except Exception as e:
+                    discard(path, "classifier", e)
+                    raise
+                loaded(path)
                 model.eval()
                 _model = model
                 _mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -100,8 +127,25 @@ def _get_model():
     return _model
 
 
+def load() -> None:
+    """Load the model now (the AI pass does this once, before touching any photo)."""
+    _get_model()
+
+
+def square(bbox: list[float]) -> tuple[int, int, int, int]:
+    """The square around a box, centred on it (side = its longer edge).
+
+    DeepFaune was trained on square crops; squashing a long side-on boar into a square
+    distorted every crop. Where the square runs past the frame, PIL pads it with black.
+    """
+    x1, y1, x2, y2 = bbox
+    side = max(x2 - x1, y2 - y1)
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    return (round(cx - side / 2), round(cy - side / 2), round(cx + side / 2), round(cy + side / 2))
+
+
 def _input_tensor(image_path: str, bbox: list[float] | None):
-    """Crop → 182px → ImageNet-normalized [1,3,H,W] tensor (shared by classify + embed)."""
+    """Square crop → 182px → ImageNet-normalized [1,3,H,W] tensor (classify + embed)."""
     import numpy as np
     import torch
     from PIL import Image as PILImage
@@ -109,10 +153,20 @@ def _input_tensor(image_path: str, bbox: list[float] | None):
     _get_model()  # ensures _mean / _std are populated
     img = PILImage.open(image_path).convert("RGB")
     if bbox:
-        img = img.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
+        img = img.crop(square(bbox))
     img = img.resize((CROP_SIZE, CROP_SIZE))
     t = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
     return ((t - _mean) / _std).unsqueeze(0)
+
+
+def _best_allowed(probs) -> tuple[str, str, float]:
+    """The likeliest class that can be on this estate, with its own probability (not
+    renormalised: a frame split between "moose" and "red deer" stays unsure)."""
+    values = probs.tolist() if hasattr(probs, "tolist") else list(probs)
+    idx = max((i for i, n in enumerate(DEEPFAUNE_CLASSES) if n in ESTATE_CLASSES),
+              key=values.__getitem__)
+    name = DEEPFAUNE_CLASSES[idx]
+    return species_key(name), common_name(name), round(float(values[idx]), 4)
 
 
 def classify_crop(image_path: str, bbox: list[float] | None) -> tuple[str, str, float] | None:
@@ -124,9 +178,24 @@ def classify_crop(image_path: str, bbox: list[float] | None) -> tuple[str, str, 
     t = _input_tensor(image_path, bbox)
     with torch.no_grad():
         probs = F.softmax(model(t), dim=1)[0]
-    idx = int(torch.argmax(probs))
-    name = DEEPFAUNE_CLASSES[idx]
-    return species_key(name), common_name(name), round(float(probs[idx]), 4)
+    return _best_allowed(probs)
+
+
+def classify_and_embed(
+    image_path: str, bbox: list[float] | None,
+) -> tuple[tuple[str, str, float], list[float]]:
+    """classify_crop and embed_crop from one pass through the backbone: the species
+    pass stores the embedding "Look for repeats" needs at no extra cost."""
+    import torch
+    import torch.nn.functional as F
+
+    model = _get_model()
+    t = _input_tensor(image_path, bbox)
+    with torch.no_grad():
+        feats = model.forward_features(t)
+        probs = F.softmax(model.forward_head(feats), dim=1)[0]
+        emb = F.normalize(model.forward_head(feats, pre_logits=True)[0], dim=0)
+    return _best_allowed(probs), emb.tolist()
 
 
 def embed_crop(image_path: str, bbox: list[float] | None) -> list[float]:

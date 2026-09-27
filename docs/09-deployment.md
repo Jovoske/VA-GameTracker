@@ -13,8 +13,9 @@ laptop  --git push-->  github.com/Jovoske/VA-GameTracker  --git pull-->  Db01
 `deploy/update.ps1` runs on Db01 every 10 minutes as the `GameSense-Update`
 scheduled task (SYSTEM). Each run:
 
-1. Stands down if the sync/AI pipeline holds `C:\GameSense\data\pipeline.lock`,
-   so an update never interrupts a photo import.
+1. Stands down while a pipeline run holds its lock (`pipeline.py busy` exits 3),
+   so an update never interrupts a photo import. It asks again just before
+   restarting `GameSenseAPI` and waits up to 10 minutes for a job to finish.
 2. Fetches `origin/main`. **Exits silently when there is nothing new** — the
    normal case.
 3. `git reset --hard origin/main`. The server is deploy-only and never carries
@@ -48,10 +49,10 @@ driving `backend/pipeline.py`.
 | Task | When | Mode | Does |
 |---|---|---|---|
 | `GameSense-Update` | every 10 min | — | `deploy/update.ps1`, the loop above |
-| `GameSense-Sync` | every 15 min | `sync` | SPYPOINT and UBox Pro pull + local AI + exposure recompute |
+| `GameSense-Sync` | every 15 min | `sync` | SPYPOINT and UBox Pro pull + local AI (up to 300 photos, newest first) + exposure recompute |
 | `GameSense-Sex` | hourly | `sex` | cloud vision stag/hind pass (costs API credit) |
 | `GameSense-Plan` | 17:00 daily | `plan` | record tonight's claims **before** the night |
-| `GameSense-Score` | 11:00 daily | `score` | grade last night's claims against the cameras |
+| `GameSense-Score` | 11:00 daily | `score` | grade the claims of every finished night not graded yet (last 14 days) |
 
 Sighting notifications need no task of their own: the dispatcher runs at the end
 of every classification pass, so the `sync` task carries it. See
@@ -79,8 +80,58 @@ Invoke-Command -ComputerName Db01 {
 }
 ```
 
-A lock file serialises every `pipeline.py` mode, so these can never run on top of
-a sync that is holding the database and the CPU models.
+### The pipeline lock
+
+Every `pipeline.py` mode but `sex` takes one lock, `C:\GameSense\data\pipeline.lock`
+(`backend/app/jobs.py`), so no two runs ever hold the database and the CPU models at
+once. The lock is created atomically and names its owner (the mode, process id, host
+and start time); the run touches it every minute while it works. A lock whose run
+died (its process is gone, or it stopped touching the file 10 minutes ago) is taken
+over by the next run, so a crash or a reboot no longer blocks syncing for 3 hours,
+and a long backfill that keeps working is never mistaken for a dead one. A run only
+ever removes its own lock.
+
+- `sync` (and the app's one-off jobs) give way when the lock is held; the next fetch
+  is 15 minutes off.
+- `plan` and `score` **wait** for it (up to 40 minutes, inside the tasks' 1-hour
+  limit) and exit 1 if it never frees, so Task Scheduler shows a failure rather
+  than a silent success.
+- `score` grades every finished night of the last 14 days that still has an
+  ungraded claim, not only yesterday; a night whose photos were still being
+  checked is tried again the next morning.
+- If the 17:00 `plan` run never managed tonight's claim, the next fetch or photo
+  check writes it, from 17:00 (or an hour before sunset, in December) until sunset.
+  Never after dark: a claim made after dark is not a forecast. A `plan` run that
+  finds tonight already claimed leaves it be: one claim a night.
+- The cloud stag/hind pass (`sex`) has its own lock (`sexpass.lock`): it needs no
+  local model, and it must not hold the photo fetch up for an hour. A deploy still
+  waits for it, as it did when the pass shared the pipeline lock (`pipeline.py busy`
+  answers busy for either).
+
+The app's buttons (Check for new photos, a new camera login's first import, Look for
+repeats, the stag/hind pass) start `pipeline.py` as a process of its own under the
+same locks, so the AI models never load into the web server. They are started
+through a launcher that exits at once, so the job is not a child of GameSenseAPI:
+NSSM stops a service by killing its whole process tree, and a deploy's restart no
+longer stops a job a button started. A Check press while Look for repeats (or the
+plan or the score) holds the lock is queued (`pipeline.py sync queued`) and fetches
+the moment that job ends.
+
+A run that stalls for more than 10 minutes (a paused VM) loses its lock to the next
+run; it notices within seconds and stops, rather than checking the same photos
+alongside it.
+
+**Logs.** Every run appends to `C:\GameSense\logs\pipeline.log` (rolled over at
+5 MB, three old files kept): Task Scheduler throws a scheduled run's output away.
+Settings → Photo checking shows the AI backlog, the photos it gave up on and why
+the last pass stopped, if it did.
+
+```powershell
+# is anything running, and what?
+Invoke-Command -ComputerName Db01 { C:\GameSense\venv\Scripts\python.exe C:\GameSense\app\backend\pipeline.py busy }
+# what the scheduled runs did
+Invoke-Command -ComputerName Db01 { Get-Content C:\GameSense\logs\pipeline.log -Tail 40 }
+```
 
 ## Layout on Db01
 

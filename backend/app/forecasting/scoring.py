@@ -10,7 +10,9 @@ Two jobs:
 * ``persist_tonight`` writes what the app is claiming, at the moment it claims it,
   stamped with the code version that produced it. The app can then no longer
   silently rewrite its own history.
-* ``evaluate_night`` scores yesterday's claims the next morning.
+* ``evaluate_night`` scores yesterday's claims the next morning, and
+  ``evaluate_pending`` catches up any night of the last two weeks that was never
+  scored (a skipped run, or a night whose photos were still being checked).
 
 **What is scored, and why it is not sits.** The outcome is "was this species
 detected at this camera during the forecast window", checked against the exposure
@@ -28,10 +30,12 @@ A model that cannot beat both is not earning its place on the screen.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.forecasting.exposure import night_expr
 from app.models import (
@@ -48,6 +52,14 @@ from app.version import __version__
 log = get_logger(__name__)
 
 MIN_EVALUATED = 30  # below this, a hit rate is noise and is not shown
+# How far back the morning run looks for nights nobody scored. A night drops out of
+# reach after this, so a gap of more than two weeks in scoring stays a gap.
+CATCH_UP_DAYS = 14
+
+
+def local_today() -> date:
+    """The estate's date: the server's clock need not be on Madrid time."""
+    return datetime.now(ZoneInfo(settings.estate_timezone)).date()
 
 
 def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) -> ModelRun:
@@ -57,7 +69,7 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
     the app can never quietly rewrite what it said. Scoring deduplicates — see
     `_claims_for`.
     """
-    target = target or date.today()
+    target = target or local_today()
     run = ModelRun(
         kind="forecast",
         name="presence_baseline",
@@ -130,7 +142,7 @@ def _claims_for(rows: list[Forecast]) -> list[Forecast]:
 
 def evaluate_night(db: Session, *, night: date | None = None) -> dict:
     """Score the forecasts made for `night` against what the cameras recorded."""
-    night = night or (date.today() - timedelta(days=1))
+    night = night or (local_today() - timedelta(days=1))
 
     rows = _claims_for(
         list(db.scalars(select(Forecast).where(Forecast.target_date == night)).all())
@@ -173,6 +185,35 @@ def evaluate_night(db: Session, *, night: date | None = None) -> dict:
         "night": night.isoformat(),
         "evaluated": evaluated,
         "skipped_unverifiable": skipped,
+    }
+
+
+def evaluate_pending(db: Session, *, days: int = CATCH_UP_DAYS, today: date | None = None) -> dict:
+    """Score every finished night of the last `days` that has a claim with no outcome.
+
+    The morning run used to score only yesterday, so a run that did not happen (the
+    server was busy or down at 11:00), or a night whose photos were still being
+    checked, was never graded and the track record quietly stalled. A night the
+    cameras cannot vouch for yet stays unscored and is tried again the next morning,
+    until it falls out of the window.
+    """
+    today = today or local_today()
+    since = today - timedelta(days=days)
+    nights = db.scalars(
+        select(Forecast.target_date)
+        .outerjoin(ForecastOutcome, ForecastOutcome.forecast_id == Forecast.id)
+        .where(
+            Forecast.target_date >= since, Forecast.target_date < today,
+            ForecastOutcome.forecast_id.is_(None),
+        )
+        .distinct()
+        .order_by(Forecast.target_date)
+    ).all()
+    results = [evaluate_night(db, night=n) for n in nights]
+    return {
+        "nights": [r["night"] for r in results],
+        "evaluated": sum(r.get("evaluated", 0) for r in results),
+        "skipped_unverifiable": sum(r.get("skipped_unverifiable", 0) for r in results),
     }
 
 

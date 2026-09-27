@@ -29,6 +29,7 @@ from PIL import Image as PillowImage
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
+from app import jobs
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
@@ -371,6 +372,8 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
     listed: set[str] = set()
     answered: set = set()  # logins that listed their cameras
     for account in accounts:
+        if jobs.lock_lost():
+            break  # another run took the lock over and fetches now
         label = account.label or account.username
         summary = {"account_id": str(account.id), "label": label, "status": "ok", "error": None}
         account_results.append(summary)
@@ -389,6 +392,8 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
                 if devices:
                     answered.add(account.id)
                 for device in devices:
+                    if jobs.lock_lost():
+                        break
                     created_paths = []
                     try:
                         # A connection made while the pipeline was busy still gets

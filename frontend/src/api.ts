@@ -306,6 +306,18 @@ export function ageLabel(iso: string): string {
   return `${Math.round(hrs / 24)} d ago`
 }
 
+/** A server's reason without its technical detail: "The animal detector could not
+ * start (ModuleNotFoundError: …)." reads "The animal detector could not start." The
+ * detail, in brackets (nested ones too), belongs behind a fold. */
+export function plainWords(text: string): string {
+  let t = text
+  for (let before = ''; before !== t;) {
+    before = t
+    t = t.replace(/\s*\([^()]*\)/g, '')
+  }
+  return t.replace(/\s+([.,;:])/g, '$1').trim()
+}
+
 /** "21:40" today, "Tue 21:40" this week, "4 Sep 21:40" before that. */
 export function whenLabel(iso: string): string {
   const d = new Date(iso)

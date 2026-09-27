@@ -31,6 +31,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import jobs
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
@@ -485,6 +486,8 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
     tried: set = set()
     copies: set = set()
     for acct in accounts:
+        if jobs.lock_lost():
+            break  # another run took the lock over and fetches now
         key = str(acct["id"]) if acct["id"] else None
         summary = {"account_id": key, "label": acct["label"], "status": "ok", "error": None}
         account_results.append(summary)
@@ -515,6 +518,8 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
             fetch = per_camera if acct["imported"] or per_new_camera is None else per_new_camera
             failures: list[str] = []
             for cam in cameras:
+                if jobs.lock_lost():
+                    break
                 # A camera two logins list belongs to the first: the main login, then
                 # guests' in the order they were added.
                 owner = acct["id"] if cam.spypoint_id not in listed else KEEP

@@ -707,3 +707,93 @@ def test_client_errors_upgrade_down_and_up_again(fresh_db):
         assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
     finally:
         eng.dispose()
+
+
+@requires_db
+def test_ai_checking_upgrade_puts_old_misreads_right_and_goes_down_and_up_again(fresh_db):
+    """0022 on a real 0021 database: the new columns arrive with their defaults, a photo
+    flagged before the detector saw it stops blinding its night, a detector failure
+    stored as "kept" goes back to be checked, spring "hinds" are judged again, and
+    nothing else moves."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0021_client_errors")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0021 shape first.
+            for col in ("ai_attempts", "ai_error", "ai_failed_at", "detector_conf"):
+                c.execute(text(f"ALTER TABLE images DROP COLUMN {col}"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text("INSERT INTO species (id,common_name,is_priority,huntable,hidden) "
+                           "VALUES ('red_deer','Red Deer',true,true,false)"))
+
+            def image(**kw):
+                cols = {"captured_at": "2026-03-10 21:00+00", "original_path": "p.jpg",
+                        "reviewed": False, "created_at": "2026-03-10 21:05+00", **kw}
+                names = ",".join(cols)
+                marks = ",".join(f":{k}" for k in cols)
+                return c.execute(text(
+                    f"INSERT INTO images (id,camera_id,{names}) "
+                    f"VALUES (gen_random_uuid(),:cam,{marks}) RETURNING id"
+                ), {"cam": camera_id, **cols}).scalar_one()
+
+            flagged = image(reviewed=True, is_empty_frame=True)
+            failed = image(is_empty_frame=False, processed_at="2026-03-10 22:00+00")
+            named = image(is_empty_frame=False, processed_at="2026-03-10 22:00+00")
+            clean = image(is_empty_frame=True, animal_conf=0.02,
+                          processed_at="2026-03-10 22:00+00")
+            autumn = image(captured_at="2026-10-10 21:00+00", is_empty_frame=False,
+                           animal_conf=0.9, processed_at="2026-10-10 22:00+00")
+
+            def deer(img, sex):
+                return c.execute(text(
+                    "INSERT INTO detections (id,image_id,species_id,species_conf,sex,sex_conf,"
+                    "sex_attempts,age_class) VALUES (gen_random_uuid(),:i,'red_deer',0.9,:s,"
+                    "0.8,1,'unknown') RETURNING id"), {"i": img, "s": sex}).scalar_one()
+
+            spring_hind = deer(named, "female")
+            autumn_hind = deer(autumn, "female")
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            def row(i):
+                return c.execute(text(
+                    "SELECT processed_at, is_empty_frame, ai_attempts, ai_failed_at, "
+                    "detector_conf FROM images WHERE id=:i"), {"i": i}).one()
+
+            assert str(row(flagged)[0]).startswith("2026-03-10 21:05")  # its arrival, not now
+            assert row(failed)[:3] == (None, None, 0)
+            assert row(named)[1] is False and row(named)[0] is not None
+            assert row(clean)[1] is True and row(clean)[3:] == (None, None)
+            sexes = dict(c.execute(text(
+                "SELECT id, sex || ':' || sex_attempts FROM detections")).all())
+            assert sexes == {spring_hind: "unknown:0", autumn_hind: "female:1"}
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0021_client_errors")
+        assert not {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} & set(
+            _columns(eng, "images"))
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 5
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0021_client_errors")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(
+            _columns(eng, "images"))
+    finally:
+        eng.dispose()

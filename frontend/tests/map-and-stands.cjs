@@ -155,6 +155,12 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  assert.equal(await page.locator('.cam-sheet-night').innerText(),'Still checking last night’s photos.');
  await page.goto(base+'/map?camera=c1');await page.locator('.bsheet[aria-label="Camera: Valley camera"]').waitFor();
  assert.equal(await page.locator('.cam-sheet-night').innerText(),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nOut of photo credits last night, so this may not be everything.');
+ // R2BE-1: photos the AI gave up on are not "nothing on camera": a broken AI read as a quiet night.
+ cameras[1].last_night_status='unreadable';cameras[0].last_night_status='unreadable';
+ await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
+ assert.equal(await page.locator('.cam-sheet-night').innerText(),'Nothing found last night, but some photos couldn’t be checked, so this may not be everything.');
+ await page.goto(base+'/map?camera=c1');await page.locator('.bsheet[aria-label="Camera: Valley camera"]').waitFor();
+ assert.equal(await page.locator('.cam-sheet-night').innerText(),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nSome photos from last night couldn’t be checked, so this may not be everything.');
  cameras[1].last_night_status='blind';cameras[1].health={...ok,status:'offline',producing:false};cameras[1].last_report_at=new Date(Date.now()-3*86400e3).toISOString();
  await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
  assert.equal(await page.locator('.cam-sheet-status--warn').first().innerText(),'Not checking in. Last heard 3 d ago.');
@@ -164,6 +170,6 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const other=page.locator('#stand-s3');await other.waitFor();assert.equal(await other.getByRole('button').count(),0,'Other hunter reservations have no write controls');
  const free=page.locator('#stand-s1');await free.getByRole('button',{name:'Reserve',exact:true}).click();await free.getByRole('button',{name:'Cancel',exact:true}).waitFor();await free.getByRole('button',{name:'Cancel',exact:true}).click();await free.getByRole('button',{name:'Reserve',exact:true}).waitFor();
  if(process.env.UX_SCREENSHOTS)await page.screenshot({path:process.env.UX_SCREENSHOTS+'/stands-mobile.png',fullPage:true});
- assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/sheet snaps/layers, tile error and Try again keep every layer, Esri fallback and retry, overlapping pins ask which, camera header, camera photo and new count, seen clears it, strip thumbs open the viewer, last night worded by how far to trust it, crosshair draft/save, Back guards an outline, offline wind bar, mobile overflow, reservation ownership, cancelled reservations.');
+ assert.deepEqual(errors,[]);console.log('PASS: real MapLibre render, map selection/sheet snaps/layers, tile error and Try again keep every layer, Esri fallback and retry, overlapping pins ask which, camera header, camera photo and new count, seen clears it, strip thumbs open the viewer, last night worded by how far to trust it (photos the AI couldn’t check too), crosshair draft/save, Back guards an outline, offline wind bar, mobile overflow, reservation ownership, cancelled reservations.');
  } finally { await browser.close() }
 })().catch(e=>{console.error(e);process.exit(1)});

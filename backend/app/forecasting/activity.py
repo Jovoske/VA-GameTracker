@@ -92,13 +92,15 @@ def peak_window(hours: list[int], part: str) -> tuple[str | None, float]:
 
 
 def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
-    """{camera_id: {night: 'watched' | 'checking' | 'blind'}} for each night.
+    """{camera_id: {night: 'watched' | 'checking' | 'unreadable' | 'blind'}} for each night.
 
-    watched   camera_nights says it was working, or, where that table has no word
-              yet, it sent frames that night and the detector has checked them all
-    checking  frames from that night are still waiting for the detector, so its
-              visits aren't all known yet
-    blind     it wasn't working, ran out of photo credits, or nothing says either way
+    watched     camera_nights says it was working, or, where that table has no word
+                yet, it sent frames that night and the detector has checked them all
+    checking    frames from that night are still waiting for the detector, so its
+                visits aren't all known yet
+    unreadable  the AI gave up on some of that night's frames: what was in them is
+                not known, so the night does not count (as the exposure table says)
+    blind       it wasn't working, ran out of photo credits, or nothing says either way
     """
     if not camera_ids or not nights:
         return {}
@@ -112,14 +114,17 @@ def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
         ).all()
     }
     start, end = map_night_window(min(nights))[0], map_night_window(max(nights))[1]
-    unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None))
+    # Given up on after failing is not "still checking": it would say so for good.
+    unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None),
+                     Image.ai_failed_at.is_(None))
     night = map_night_expr()
     sent = {
-        (r[0], r[1]): (int(r[2]), int(r[3]))
+        (r[0], r[1]): (int(r[2]), int(r[3]), int(r[4]))
         for r in db.execute(
             select(
                 Image.camera_id, night, func.count(Image.id),
                 func.count(Image.id).filter(unchecked),
+                func.count(Image.id).filter(Image.ai_failed_at.isnot(None)),
             )
             .where(
                 Image.camera_id.in_(camera_ids), Image.captured_at >= start,
@@ -133,9 +138,13 @@ def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
         per: dict = {}
         for n in nights:
             state = states.get((cam, n))
-            frames, waiting = sent.get((cam, n), (0, 0))
+            frames, waiting, failed = sent.get((cam, n), (0, 0, 0))
             if waiting:
                 per[n] = "checking"
+            elif failed:
+                # Given up on: not "watched, nothing came", whatever the hourly
+                # rebuild said before the AI gave up.
+                per[n] = "unreadable"
             elif state in WATCHED:
                 per[n] = "watched"
             elif state is None or state == "UNPROCESSED":
@@ -152,7 +161,7 @@ def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
 
 def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_with: int,
                   blind: int, checking: int, part: str, peak: str | None, share: float,
-                  times: list[datetime], so_far: bool = False) -> str:
+                  times: list[datetime], so_far: bool = False, unreadable: int = 0) -> str:
     """The one line the card leads with: "Wild boar on 5 of 7 nights, mostly 21–23 h".
 
     `who` is the species ("Wild boar") or "Animals" for all of them. The count of
@@ -168,6 +177,9 @@ def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_wi
         if checking:
             return ("Still checking last night’s photos." if nights == 1
                     else "Still checking the photos.")
+        if unreadable and not blind:
+            return ("Not counted: last night’s photos couldn’t all be checked." if nights == 1
+                    else "Not counted: the photos couldn’t all be checked.")
         return ("Not counted: the camera may not have been working last night." if nights == 1
                 else "Not counted: the camera wasn’t working on these nights.")
     tail = ""
@@ -188,7 +200,8 @@ def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_wi
         noun = "animal" if who == "Animals" else lower
         plural = "" if visits == 1 else "s"
         return f"{visits} {noun} visit{plural}{' ' + when if when else ''} {night}{tail}"
-    qualifier = " it was working" if blind else " checked so far" if checking else ""
+    qualifier = (" it was working" if blind else " that could be checked" if unreadable
+                 else " checked so far" if checking else "")
     if not visits:
         none = "No animals" if who == "Animals" else f"No {lower}"
         return f"{none}{' ' + when if when else ''} on the {watched} nights{qualifier}."
@@ -241,6 +254,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
         peak = peak if len(mine) > 1 and share >= BUSY_SHARE else None
         blind = sum(1 for s in state.values() if s == "blind")
         checking = sum(1 for s in state.values() if s == "checking")
+        unreadable = sum(1 for s in state.values() if s == "unreadable")
         out.append({
             "camera_id": str(cam.id),
             "name": cam.name,
@@ -250,6 +264,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
             "watched_nights": len(counted),
             "blind_nights": blind,
             "checking_nights": checking,
+            "unreadable_nights": unreadable,
             "nights_with": nights_with,
             "per_night": round(len(mine) / len(counted), 2) if counted else None,
             "peak": peak,
@@ -264,6 +279,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
                 who=who, visits=len(mine), watched=len(counted), nights=nights,
                 nights_with=nights_with, blind=blind, checking=checking, part=part, peak=peak,
                 share=share, times=[v["first_at"] for v in mine], so_far=so_far,
+                unreadable=unreadable,
             ),
         })
     return {

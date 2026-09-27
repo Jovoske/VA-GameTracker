@@ -38,6 +38,8 @@ export type SpeciesVisits = { species_id: string | null; label: string; visits: 
 export type ActivityCamera = {
   camera_id: string; name: string; lat: number | null; lon: number | null
   visits: number; watched_nights: number; blind_nights: number; checking_nights: number
+  // Nights left out because the AI couldn't check some of their photos.
+  unreadable_nights?: number
   nights_with: number; per_night: number | null; peak: string | null
   by_species: SpeciesVisits[]; read: string
 }

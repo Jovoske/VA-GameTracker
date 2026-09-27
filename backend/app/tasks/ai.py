@@ -1,7 +1,10 @@
-"""AI Celery tasks — empty-frame scanning, species classification, re-ID."""
-from app.ai.empty_filter import scan_unprocessed
-from app.ai.reid import recompute as reid_recompute
-from app.ai.species import classify_unclassified
+"""AI Celery tasks (the Docker build) — the photo check, re-ID and the sex pass.
+
+They take the same locks as pipeline.py (app.jobs), so beat, a button and a manual
+`pipeline.py` run never overlap, and a busy lock skips the run: the next beat tick
+picks up where it left off.
+"""
+from app import jobs
 from app.core.db import SessionLocal
 from app.core.logging import get_logger
 from app.tasks.celery_app import celery
@@ -9,20 +12,26 @@ from app.tasks.celery_app import celery
 log = get_logger(__name__)
 
 
+def _check() -> dict:
+    lock = jobs.try_acquire("pipeline", "celery:check")
+    if lock is None:
+        return {"status": "busy"}
+    with lock, SessionLocal() as db:
+        from app.ingestion.fetch import check_and_recount
+
+        result, error = check_and_recount(db)
+    log.info("check_photos.done", error=error, **(result.get("ai") or {}))
+    return result
+
+
 @celery.task(name="app.tasks.ai.scan_empty")
 def scan_empty(limit: int = 5000) -> dict:
-    with SessionLocal() as db:
-        result = scan_unprocessed(db, limit=limit)
-    log.info("scan_empty.done", **result)
-    return result
+    return _check()
 
 
 @celery.task(name="app.tasks.ai.classify_species")
 def classify_species(limit: int = 2000) -> dict:
-    with SessionLocal() as db:
-        result = classify_unclassified(db, limit=limit)
-    log.info("classify_species.done", classified=result.get("classified"))
-    return result
+    return _check()
 
 
 @celery.task(name="app.tasks.ai.reid")
@@ -32,7 +41,12 @@ def reid() -> dict:
     Not scheduled on beat — re-clustering should only run when the user asks, so it
     never disturbs manual curation between sessions.
     """
-    with SessionLocal() as db:
+    from app.ai.reid import recompute as reid_recompute
+
+    lock = jobs.acquire("pipeline", "celery:reid", wait=40 * 60)
+    if lock is None:
+        return {"status": "busy"}
+    with lock, SessionLocal() as db:
         result = reid_recompute(db)
     log.info("reid.done", **result)
     return result
@@ -41,11 +55,12 @@ def reid() -> dict:
 @celery.task(name="app.tasks.ai.sex_pass")
 def sex_pass() -> dict:
     """On-demand cloud-vision sex pass: stag/hind + boar sex (costs API credit per call)."""
-    from app.ai.vision_sex import sex_unclassified
+    from app.ai.vision_sex import sex_pass as run
 
-    out: dict = {}
-    with SessionLocal() as db:
-        for sp in ("red_deer", "wild_boar"):
-            out[sp] = sex_unclassified(db, sp)
-    log.info("sex_pass.done", **{k: v.get("processed") for k, v in out.items()})
+    lock = jobs.try_acquire("sexpass", "celery:sex")
+    if lock is None:
+        return {"status": "busy"}
+    with lock, SessionLocal() as db:
+        out = run(db)
+    log.info("sex_pass.done", stopped=out.get("stopped"))
     return out

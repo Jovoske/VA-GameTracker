@@ -608,6 +608,50 @@ def test_last_night_says_how_far_to_trust_it(client, db_session, estate):
     assert cams["No record"]["latest"] is None and cams["No record"]["new_count"] == 0
 
 
+def test_a_night_the_ai_gave_up_on_is_never_a_quiet_night(client, db_session, estate):
+    """Frames the AI failed on three times are not checked: the sheet and the activity
+    map must not read them as "watched, nothing came", as the exposure table doesn't."""
+    from app.forecasting.exposure import recompute_camera_nights
+
+    _, headers = _user(db_session, estate)
+    night = last_completed_night()
+    start, _ = night_window(night)
+    broken = _camera(db_session, estate, "Broken")
+    mixed = _camera(db_session, estate, "Mixed", lat=39.1, lon=-1.37)
+    now = datetime.now(UTC)
+    for i in range(3):
+        img = _photo(db_session, broken, start + timedelta(hours=2, minutes=i), (), empty=None)
+        img.ai_attempts, img.ai_failed_at, img.ai_error = 3, now, "OSError: truncated"
+    # A boar was named, and one frame of the night could not be read.
+    _photo(db_session, mixed, start + timedelta(hours=1))
+    lost = _photo(db_session, mixed, start + timedelta(hours=4), (), empty=None)
+    lost.ai_attempts, lost.ai_failed_at = 3, now
+    db_session.commit()
+    recompute_camera_nights(db_session)
+    assert db_session.scalar(select(CameraNight.exposure_state).where(
+        CameraNight.camera_id == broken.id, CameraNight.night == night)) == "UNPROCESSED"
+
+    cams = _map(client, headers)
+    assert (cams["Broken"]["last_night_status"], cams["Broken"]["last_night"]) == (
+        "unreadable", [])
+    assert cams["Mixed"]["last_night_status"] == "unreadable"
+    assert cams["Mixed"]["last_night"] == [
+        {"species_id": "wild_boar", "label": "Wild boar", "visits": 1}]
+
+    act = {c["name"]: c for c in client.get(
+        "/api/map/activity?nights=1", headers=headers).json()["cameras"]}
+    for name in ("Broken", "Mixed"):
+        got = act[name]
+        assert (got["watched_nights"], got["unreadable_nights"], got["per_night"]) == (0, 1, None)
+        assert got["read"] == "Not counted: last night’s photos couldn’t all be checked."
+
+    # A hunter judges the broken frames ("nothing in it"): checked now, a quiet night.
+    for img in db_session.scalars(select(Image).where(Image.camera_id == broken.id)):
+        r = client.post(f"/api/images/{img.id}/flag", json={"is_empty": True}, headers=headers)
+        assert r.status_code == 200
+    assert _map(client, headers)["Broken"]["last_night_status"] == "watched"
+
+
 def test_a_kept_photo_nobody_has_named_is_an_animal_visit(client, db_session, estate):
     """The detector kept it and the species pass hasn't named it (or couldn't).
 

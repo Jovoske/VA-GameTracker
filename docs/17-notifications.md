@@ -43,17 +43,18 @@ the installed app. Push also needs a secure origin, so it works at
 
 ```
 pipeline sync (every 15 min)
-  └─ classify_unclassified()            new Detection rows
-       └─ dispatch_new_sightings()      app/notifications/dispatch.py
+  └─ check_photos()                     app/ai/checking.py: new Detection rows
+       └─ dispatch_new_sightings()      every 20 photos, and at the end
             ├─ detections created since the watermark, photos < 24h old
             ├─ grouped per species: cameras, visits (not frames), latest time
             ├─ one Notification row per (user, species) for users whose prefs match
             └─ push.send_to_user()      pywebpush, VAPID-signed, aes128gcm
 ```
 
-**Trigger.** The dispatcher runs at the end of every classification pass, whether
-that pass came from the scheduled `sync`, the in-app "Sync now" / "Scan" buttons,
-or a guest connecting a SPYPOINT account. No new scheduled task is needed.
+**Trigger.** The dispatcher runs after every batch of 20 photos the AI pass checks,
+and at its end, whether that pass came from the scheduled `sync`, the in-app "Check
+for new photos" button, or a guest connecting a camera login (each a `pipeline.py`
+run). No new scheduled task is needed.
 
 **Watermark, not flags.** `app_settings.notify_cursor` holds the newest
 `detections.created_at` already announced. The first run ever only primes it: a

@@ -287,6 +287,16 @@ class Image(Base):
     animal_conf: Mapped[float | None] = mapped_column(Float)
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The AI pass (app.ai.checking): how often checking this photo failed, the last
+    # error, and when it was given up on (after MAX_AI_ATTEMPTS). A given-up photo is
+    # "not checked", never "checked, nothing in it".
+    ai_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    ai_error: Mapped[str | None] = mapped_column(Text)
+    ai_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The box confidence the detector ran at; NULL = an older build, at its 0.25.
+    detector_conf: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         Index("ix_images_camera_captured", "camera_id", "captured_at"),
@@ -462,8 +472,9 @@ class CameraNight(Base):
     exposure_state:
       CONFIRMED    — frames exist inside the night window and have been processed.
       PRESUMED_UP  — no frames, but frames exist either side; admitted as a true zero.
-      UNPROCESSED  — frames exist but have not been through the detector yet. NULL:
-                     counting these as zero animals is the backlog artefact.
+      UNPROCESSED  — frames exist that the AI has not checked yet, or gave up on after
+                     failing. NULL: counting these as zero animals is the backlog
+                     artefact.
       UNKNOWN      — anything else, including nights the camera was out of photo
                      credits. NULL, and the excluded count is reported.
     """

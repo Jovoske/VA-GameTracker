@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, plainWords, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
@@ -23,6 +23,8 @@ type SyncStatus = {
   images_downloaded?: number | null
   started_at?: string | null
   problems?: { label: string; error: string }[]
+  // The run's summary; ai_error: why looking for animals in the photos stopped.
+  details?: { ai_error?: string | null } | null
 }
 type SyncLine = { state: 'idle' | 'running' | 'ok' | 'quiet' | 'warn' | 'error'; msg: string; logins?: boolean }
 type Camera = {
@@ -59,6 +61,15 @@ type Img = {
   group_size: number | null
   sex: string | null
   notes_count: number
+  // The AI hasn't finished with it: still to be checked, or given up on after failing.
+  checking?: 'waiting' | 'failed' | null
+}
+
+/** What a photo nobody has named is called: an animal only once the AI has looked. */
+function unnamed(im: Img): string {
+  if (im.checking === 'waiting') return 'Not checked yet'
+  if (im.checking === 'failed') return 'Couldn’t check'
+  return 'Unknown animal'
 }
 
 // Species + group make-up (+ sex once known) as one short label.
@@ -165,6 +176,17 @@ function HealthNote({ c }: { c: Camera }) {
 
 /** What a finished fetch came to, count first, then what needs a look. */
 function resultLine(s: SyncStatus): SyncLine {
+  const line = fetchLine(s)
+  const ai = s.details?.ai_error
+  if (!ai || line.state === 'error') return line
+  // The photos came in, but the animal check did not run: they show as not checked
+  // yet. The technical detail (in brackets) is for Settings, not this line.
+  const why = plainWords(ai)
+  const which = (s.images_downloaded ?? 0) > 0 ? 'They' : 'Photos'
+  return { ...line, state: 'warn', msg: `${line.msg} ${which} can’t be checked for animals just now. ${why}`.trim() }
+}
+
+function fetchLine(s: SyncStatus): SyncLine {
   const n = s.images_downloaded ?? 0
   const photos = n > 0 ? `${n} new photo${n === 1 ? '' : 's'} came in.` : ''
   const problems = s.problems ?? []
@@ -300,7 +322,7 @@ function toPhoto(cam: string, im: Img): LightboxPhoto {
     file_url: im.file_url as string,
     captured_at: im.captured_at,
     camera: cam,
-    label: im.is_empty_frame ? 'No animal' : classLabel(im) || 'Unknown animal',
+    label: im.is_empty_frame ? 'No animal' : classLabel(im) || unnamed(im),
     notes_count: im.notes_count,
     // Where a hunter finds what the detector missed: a note keeps it (PhotoNotes).
     empty: im.is_empty_frame === true,
@@ -309,9 +331,10 @@ function toPhoto(cam: string, im: Img): LightboxPhoto {
 
 /** The one line that matters under the name: what the camera last saw, and when. */
 function lastSeenLine(c: Camera, imgs: Img[]): string {
-  const latest = imgs.find((im) => im.is_empty_frame !== true)
+  // A frame the AI hasn't checked (or couldn't) is often grass: not "seen" until checked.
+  const latest = imgs.find((im) => im.is_empty_frame !== true && !im.checking)
   if (latest) {
-    const what = classLabel(latest) || 'Unknown animal'
+    const what = classLabel(latest) || unnamed(latest)
     return `Last seen: ${what}, ${timeAgo(latest.captured_at)}`
   }
   if (c.last_capture) return `Last photo ${timeAgo(c.last_capture)}`
@@ -433,6 +456,8 @@ export default function Cameras() {
       const r = await api<{ status: string; since?: string | null; note?: string }>('/cameras/sync', { method: 'POST' })
       if (r.since) since = new Date(r.since).getTime() - 5000
       if (r.status === 'busy') setSync({ state: 'running', msg: 'Already checking. Waiting for it to finish…' })
+      // Another job (Look for repeats, tonight's plan) holds the fetch up: it runs next.
+      if (r.status === 'queued') setSync({ state: 'running', msg: r.note ?? 'Waiting for the server to finish another job…' })
     } catch (e) {
       setSync({ state: 'error', msg: `Could not start the check. ${(e as Error).message}` })
       setSyncing(false)
@@ -551,7 +576,7 @@ export default function Cameras() {
                         className="pressable cam-thumb"
                         role="button"
                         tabIndex={0}
-                        aria-label={`Open photo from ${c.name}: ${isEmpty ? 'no animal' : classLabel(im) || 'unknown animal'}`}
+                        aria-label={`Open photo from ${c.name}: ${isEmpty ? 'no animal' : (classLabel(im) || unnamed(im)).toLowerCase()}`}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                         src={thumbUrl(im.id)}
                         alt={im.species || 'trail-camera photo'}
@@ -585,6 +610,9 @@ export default function Cameras() {
                       )}
                       {!isEmpty && im.species && (
                         <div className="cam-thumb-tag cam-thumb-tag--label">{classLabel(im)}</div>
+                      )}
+                      {!isEmpty && !im.species && im.checking && (
+                        <div className="cam-thumb-tag" data-checking={im.checking}>{unnamed(im)}</div>
                       )}
                     </div>
                   )

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import httpx
 from sqlalchemy import func, select
@@ -34,8 +33,6 @@ PRIMARY_KEY = "spypoint_primary_login"
 PRIMARY_LABEL = "Main SPYPOINT login"
 # Fetches run every 15 minutes: two hours without a good one is a stoppage, not a blip.
 STALE_AFTER = timedelta(hours=2)
-# A pipeline lock older than this was left by a crashed run (pipeline.py ignores it too).
-LOCK_STALE = timedelta(hours=3)
 
 UNREADABLE = "The saved password can't be read. Re-enter it."
 SPYPOINT_REFUSED = "SPYPOINT refused the password. Re-enter it."
@@ -234,16 +231,12 @@ def primary_status(db: Session) -> dict | None:
 def pipeline_busy_since(now: datetime | None = None) -> datetime | None:
     """When the run holding the pipeline lock began, or None when none holds it.
 
-    pipeline.py and the app's buttons share one lock file beside the models, written
-    when a run starts; one left by a crashed run stops counting after LOCK_STALE.
+    pipeline.py and the app's buttons share one lock (app.jobs); one left by a run
+    that died stops counting within minutes. `now` is kept for the callers' sake.
     """
-    now = now or datetime.now(UTC)
-    try:
-        started = datetime.fromtimestamp(
-            (Path(settings.models_root).parent / "pipeline.lock").stat().st_mtime, UTC)
-    except OSError:
-        return None
-    return started if now - started < LOCK_STALE else None
+    from app import jobs
+
+    return jobs.busy_since("pipeline")
 
 
 def state(last_attempt_at, last_ok_at, last_error, now: datetime,

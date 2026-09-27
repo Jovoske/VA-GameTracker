@@ -38,6 +38,42 @@
 - `Unknown` is a first-class, preferred answer over a low-confidence guess.
 - `model_runs` records which model/version produced each detection, so results are reproducible and re-scorable after upgrades — and so the system can later **show its own track record**.
 
+## As built (Sep 2026)
+
+The design above is the original plan. What runs today (`backend/app/ai/checking.py`):
+
+- **One pass, one look per photo.** Each photo waiting goes through MegaDetector v6
+  once, asked for boxes down to 0.05 (Ultralytics' default of 0.25 used to hide the
+  faint ones). Under 0.10 it is empty; a kept one goes straight to DeepFaune with
+  the same boxes, cropped square around the surest box. Newest first, at most 300
+  photos or 10 minutes a run, so a backlog never holds the photo fetch up.
+- **Only this estate's animals, only when sure.** DeepFaune picks among the classes
+  that can be at Alatoz (no moose, bison, reindeer, chamois, wolf…) and names one
+  only at 0.5 or more; below that the photo is an "Animal" nobody named, and the
+  guess is kept with the sighting (`bbox.guess`). A new species joins the Tonight
+  advice only when it is game here (boar, red/roe/fallow deer, mouflon, ibex).
+- **Groups.** A box mostly inside a bigger one is the same animal (no more "Sow +
+  piglets" for one boar with its head boxed twice), and a smaller animal is only a
+  youngster when it stands on the same ground line, not further back.
+- **One visit, one species.** Frames of a camera within 2 minutes of each other vote
+  (by confidence); frames that disagree or could not name it take the visit's
+  species, unless the model was sure of its own (0.9+). Each frame's own reading is
+  kept (`bbox.own`), so a vote can always be taken again.
+- **Failures are never "empty".** A model that cannot load stops the pass before it
+  touches a photo, and says why in Settings → Photo checking. A photo that fails is
+  tried on the next runs and given up on after 3 (`images.ai_failed_at`); its night
+  stays "not checked" in the exposure table. Several failing in a row are checked
+  against a plain test picture first: if the models fail there too, the pass stops
+  without counting it against the photos.
+- **A hunter's flag always wins.** The detector's verdict is written only while the
+  photo is still unreviewed, in one statement.
+- **Stag / hind** (cloud, `vision_sex.py`, hourly, its own lock): newest first; the
+  prompt knows the month, so from February to April "no antlers" is not a hind. A
+  refused key, no credit or no answer from Anthropic stops the pass and is not
+  counted as the photo's one attempt.
+- Photos judged empty at the old 0.25 cut-off in the last 30 days are looked at again
+  at 0.05, 100 a run, in daylight only.
+
 ## Tests (one of the three risky bits, per spec)
 
 Re-ID matcher gets unit tests on synthetic embeddings (known same/different individuals → expected match/no-match), threshold behavior, and merge/split bookkeeping. Detection/classification tested against a small fixture image set with expected species + box counts.

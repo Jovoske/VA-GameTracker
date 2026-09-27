@@ -25,6 +25,11 @@ type SpImg = {
   group_size: number | null
   notes_count: number
 }
+type RepeatStatus = {
+  state: 'never' | 'queued' | 'waiting' | 'running' | 'done' | 'failed'
+  result: { new_candidates?: number; still_to_embed?: number } | null
+  error: string | null
+}
 type Animal = {
   id: string
   label: string
@@ -201,15 +206,60 @@ export default function Animals() {
     }
   }
 
+  // "Look for repeats" runs on the server as a job of its own (minutes, the first time):
+  // start it, then follow it here, and say in words where it is. Leaving the page
+  // stops only the following; the job carries on.
+  const [repeatMsg, setRepeatMsg] = useState('')
+  const following = useRef(false)
+  useEffect(() => () => { following.current = false }, [])
+
+  async function followRepeats() {
+    following.current = true
+    const began = Date.now()
+    while (following.current && Date.now() - began < 20 * 60_000) {
+      await new Promise((res) => setTimeout(res, Date.now() - began < 60_000 ? 3000 : 10_000))
+      if (!following.current) return
+      let s: RepeatStatus
+      try {
+        s = await api<RepeatStatus>('/animals/recompute/status', { timeoutMs: 15_000 })
+      } catch {
+        continue // no signal for a moment: keep following it
+      }
+      if (s.state === 'waiting') setRepeatMsg('Waiting for the photo check to finish, then looking…')
+      else if (s.state === 'queued' || s.state === 'running') setRepeatMsg('Looking for repeat visitors… This takes a few minutes.')
+      else {
+        following.current = false
+        setBusy('')
+        if (s.state === 'done') {
+          const n = s.result?.new_candidates ?? 0
+          const more = s.result?.still_to_embed ? ' Some older photos are still to go: tap again later.' : ''
+          setRepeatMsg(`Done. ${n} possible repeat visitor${n === 1 ? '' : 's'} to look at.${more}`)
+          setSel(new Set())
+          load()
+        } else {
+          // The technical detail (in brackets) is for the server's log, not this line.
+          const why = (s.error ?? '').replace(/\s*\([^)]*\)/g, '')
+          setRepeatMsg(`It stopped before finishing. ${why} Try again later.`.replace(/\s+/g, ' ').trim())
+        }
+        return
+      }
+    }
+    if (following.current) {
+      following.current = false
+      setBusy('')
+      setRepeatMsg('Still going on the server. Come back to this page later.')
+    }
+  }
+
   async function recompute() {
     setBusy('Looking…')
+    setErr('')
     try {
-      await api('/animals/recompute', { method: 'POST' })
-      setSel(new Set())
-      load()
+      const r = await api<{ status: string; note?: string }>('/animals/recompute', { method: 'POST' })
+      setRepeatMsg(r.note ?? 'Looking for repeat visitors…')
+      void followRepeats()
     } catch (e) {
       setErr((e as Error).message)
-    } finally {
       setBusy('')
     }
   }
@@ -304,6 +354,7 @@ export default function Animals() {
             </button>
           </div>
 
+          {repeatMsg && <div className="an-dim" role="status" data-repeats>{repeatMsg}</div>}
           {err && <div className="an-error" role="alert">{err}</div>}
 
           {sel.size > 0 && (
