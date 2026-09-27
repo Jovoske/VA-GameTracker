@@ -13,6 +13,7 @@ import {
 } from '../api'
 import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import SitPrompts from '../components/SitPrompts'
+import { WindWeekLine, WindWeekStrip, useWindWeek } from '../components/WindWeek'
 import { isCall } from '../map/geometry'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
@@ -32,7 +33,7 @@ type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
 type Changed = { kind: string; camera: string | null; text: string }
 // One verdict for a stand, as the map, Stands and Sit mode give it, for the sit time
 // (`at_local`: 45 min after sunset, or `now` once that has passed).
-type Wind = { status: string; text: string; is_advice: boolean; at_local?: string; now?: boolean; stand?: string | null }
+type Wind = { status: string; text: string; is_advice: boolean; at_local?: string; now?: boolean; stand?: string | null; stand_id?: string | null }
 // Clock times on the estate's clock ("20:45"); the hours are what an older plan carries.
 // None when the animals were never seen at an hour somebody can sit.
 type Window = { start_hour: number; end_hour: number; start?: string; end?: string } | null
@@ -145,6 +146,35 @@ function savePick(sel: string[]) {
 }
 const huntable = (all: SpeciesOpt[]) => all.filter((s) => s.huntable && s.detections > 0)
 const samePick = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x))
+
+// The week's wind asks again this often while Tonight stays open.
+const WEEK_EVERY_MS = 15 * 60_000
+
+/** The stand the wind line is for, through the week: "Right wind for Charca: tonight
+ *  19–21 h, Thu, Sat", with the hours behind a fold (feature 22). Its room is kept
+ *  while it loads, so nothing under it moves when it comes. */
+function TonightWeek({ standId }: { standId: string }) {
+  const wk = useWindWeek(`/forecast/wind-week?stand=${encodeURIComponent(standId)}`)
+  const reload = wk.reload
+  useEffect(() => {
+    const tick = window.setInterval(() => { if (document.visibilityState === 'visible') reload() }, WEEK_EVERY_MS)
+    return () => window.clearInterval(tick)
+  }, [reload])
+  useRefetchOnReturn(reload)
+  const row = wk.week?.stands.find((x) => x.stand_id === standId)
+  return (
+    <div className="tn-line tn-week">
+      <span className="tn-line-k">This week</span>
+      <span className="tn-line-v">
+        {row ? <WindWeekLine stand={row} className="tn-week-line" /> : <span className="tn-week-wait" role="status">{wk.wait}</span>}
+        <details className="tn-week-hours">
+          <summary>Hour by hour</summary>
+          {row && wk.week ? <WindWeekStrip week={wk.week} stand={row} /> : <p className="ww-note">{wk.wait}</p>}
+        </details>
+      </span>
+    </div>
+  )
+}
 
 export default function Tonight() {
   // Which animals the verdict is ranked for. Empty = every species left on in
@@ -425,6 +455,7 @@ export default function Tonight() {
                 </span>
               </div>
             )}
+            {f.wind?.stand_id && <TonightWeek standId={f.wind.stand_id} />}
 
             {f.changed?.text && (
               <div className="tn-line">

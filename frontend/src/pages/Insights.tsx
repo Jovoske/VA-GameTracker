@@ -205,7 +205,9 @@ export default function Insights() {
         </div>
       )}
 
-      <WeatherPatterns patterns={pat} scope={patScope} onScope={setPatScope} error={patErr} loading={patLoading} retry={loadPatterns} />
+      {/* After the findings, not before them: the weather is often back first, and the
+          findings then pushed it (and the chip under a thumb) 547 px down (audit G-21). */}
+      {(d || err) && <WeatherPatterns patterns={pat} scope={patScope} onScope={setPatScope} error={patErr} loading={patLoading} retry={loadPatterns} />}
 
       {d && <div className="block insights-calendar">
         <h2 className="sect">Moon and last light this week</h2>
@@ -255,7 +257,7 @@ export default function Insights() {
               </span>
               <button
                 onClick={close}
-                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: 'var(--r-ctl)', padding: '4px 10px', cursor: 'pointer', fontSize: 13 }}
+                style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--r-ctl)', padding: '8px 14px', minHeight: 44, cursor: 'pointer', fontSize: 14 }}
               >
                 Close
               </button>

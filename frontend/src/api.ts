@@ -3,6 +3,7 @@ import { forgetThisDevice } from './push'
 const TOKEN_KEY = 'gs_token'
 const ME_KEY = 'gs_me'
 const PASS_KEY = 'gs_img'
+const LOGIN_PATH = '/auth/login'
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -221,7 +222,9 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
   const { timeoutMs, ...init } = options
   const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
-  const token = getToken()
+  // Signing in never carries the old sign-in: a wrong password there is a wrong
+  // password, not a session that ran out (audit D-16).
+  const token = path === LOGIN_PATH ? null : getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
   const outer = init.signal
@@ -264,7 +267,8 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
     if (resp.status === 401 && token) {
       setToken(null)
       if (!window.location.pathname.startsWith('/login')) {
-        window.location.assign('/login?expired=1')
+        // Back to this page after signing in again: the photo an alert opened, not Tonight (D-10).
+        window.location.assign(loginPath(window.location.pathname + window.location.search, true))
       }
       throw new Error('You were signed out. Sign in again.')
     }
@@ -293,6 +297,8 @@ function detailText(detail: unknown, status: number): string {
     if (first) return `That wasn’t accepted: ${String(first.msg).replace(/^Value error, /, '')}`
   }
   if (status >= 500) return SERVER_DOWN
+  if (status === 403) return 'Only the estate admin can do that.'
+  if (status === 404) return 'That isn’t on the app any more. Go back and look again.'
   // The status rides along so a caller can say something specific about a 409.
   return `Something went wrong (${status})`
 }
@@ -566,6 +572,27 @@ function savedMe(token: string | null): Me | null {
   }
 }
 
+/**
+ * Where to go after signing in: a page of this app, never another site. `next` comes
+ * from the address, so anything but a plain path here ("//evil.example", "/\\x",
+ * "https:…") goes to Tonight instead (audit D-10, I-22).
+ */
+export function safeNext(next: string | null | undefined): string {
+  if (!next || !next.startsWith('/') || next.startsWith('//') || next.startsWith('/\\')) return '/'
+  if (next === '/login' || next.startsWith('/login?') || next.startsWith('/login/')) return '/'
+  return next
+}
+
+/** The sign-in page, remembering the page to come back to. */
+export function loginPath(next?: string, expired = false): string {
+  const q = new URLSearchParams()
+  if (expired) q.set('expired', '1')
+  const back = safeNext(next)
+  if (back !== '/') q.set('next', back)
+  const qs = q.toString()
+  return qs ? `/login?${qs}` : '/login'
+}
+
 /** Who signed in last on this phone, to fill the sign-in form (never a guess). */
 export const LAST_EMAIL_KEY = 'gs_last_email'
 
@@ -578,7 +605,7 @@ export const PHONE_KEY = 'gs_phone'
 export async function login(email: string, password: string): Promise<void> {
   let phone: string | null = null
   try { phone = localStorage.getItem(PHONE_KEY) } catch { /* private mode */ }
-  const data = await api<{ access_token: string; image_token?: string | null; known_phone?: string | null }>('/auth/login', {
+  const data = await api<{ access_token: string; image_token?: string | null; known_phone?: string | null }>(LOGIN_PATH, {
     method: 'POST',
     body: JSON.stringify({ email, password, known_phone: phone }),
   })

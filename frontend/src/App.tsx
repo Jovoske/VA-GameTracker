@@ -1,6 +1,6 @@
 import { type ReactNode, Suspense, lazy } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
-import { getToken } from './api'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { getToken, loginPath } from './api'
 import Layout from './components/Layout'
 import Admin from './pages/Admin'
 import Animals from './pages/Animals'
@@ -23,8 +23,11 @@ import Stands from './pages/Stands'
  */
 const MapPage = lazy(() => import('./pages/Map'))
 
+/** Signed out, the page asked for is kept for after signing in: an alert's photo
+ *  opens once the hunter is back, not Tonight (audit D-10, I-22). */
 function RequireAuth({ children }: { children: ReactNode }) {
-  return getToken() ? <>{children}</> : <Navigate to="/login" replace />
+  const loc = useLocation()
+  return getToken() ? <>{children}</> : <Navigate to={loginPath(loc.pathname + loc.search)} replace />
 }
 
 export default function App() {

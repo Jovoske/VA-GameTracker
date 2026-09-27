@@ -62,7 +62,7 @@ const NAV_WAIT_MS = 3000
 
 // Endpoints worth replaying offline: the plan and the ground it describes. Writes
 // are never served from cache.
-const CACHEABLE_API = ['/api/forecast/tonight', '/api/stands', '/api/sits', '/api/alerts', '/api/map/tonight', '/api/map/cameras']
+const CACHEABLE_API = ['/api/forecast/tonight', '/api/forecast/wind-week', '/api/stands', '/api/sits', '/api/alerts', '/api/map/tonight', '/api/map/cameras']
 
 self.addEventListener('install', (e) => {
   e.waitUntil(storeBuild().then(() => self.skipWaiting()))

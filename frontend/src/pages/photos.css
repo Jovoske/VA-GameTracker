@@ -2,7 +2,7 @@
 .photos-filters { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .photos-filter-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .photos-filter-row .photos-filter-name { font-size: 12px; color: var(--text-dim); min-width: 58px; }
-.photos-chip { font-size: 12px; border-radius: var(--r-pill); padding: 5px 12px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; min-height: 32px; }
+.photos-chip { font-size: 12px; border-radius: var(--r-pill); padding: 5px 12px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; min-height: 44px; }
 .photos-chip[aria-pressed='true'] { background: var(--go); color: #06210C; font-weight: 700; }
 .photos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .photos-tile { position: relative; background: var(--surface-2); border-radius: var(--r-ctl); overflow: hidden; cursor: pointer; }

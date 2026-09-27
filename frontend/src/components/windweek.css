@@ -1,0 +1,25 @@
+/* The wind hour by hour (WindWeek): the line up front, the week's strip behind a fold. */
+
+.ww-line { margin: 0; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+.ww-line[data-right] { color: var(--text); }
+
+.ww { margin: 8px 0 4px; }
+/* Eight hours and the evening's name fit a 320 px screen: fixed columns, no sideways scroll. */
+.ww-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 2px; font-variant-numeric: tabular-nums; }
+.ww-table th { font-size: 11px; font-weight: 500; color: var(--text-dim); padding: 0 0 2px; text-align: center; }
+.ww-table thead th:first-child, .ww-table tbody th { width: 50px; text-align: left; }
+.ww-table tbody th { font-size: 12px; letter-spacing: -0.02em; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ww-table tbody tr[data-right] th { color: var(--v-best); font-weight: 600; }
+.ww-table td {
+  height: 38px; padding: 2px 0; text-align: center; vertical-align: middle;
+  background: var(--surface-2); border-radius: var(--r-chip);
+}
+.ww-table td[data-status='clean'] { background: color-mix(in srgb, var(--v-best) 16%, var(--surface-2)); }
+.ww-table td[data-gone] { opacity: 0.4; }
+.ww-glyph { display: block; font-size: 14px; font-weight: 700; line-height: 1.1; }
+.ww-from { display: block; font-size: 9px; line-height: 1.2; color: var(--text-dim); letter-spacing: -0.02em; }
+.ww-note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+@media (min-width: 420px) {
+  .ww-table thead th:first-child, .ww-table tbody th { width: 58px; }
+  .ww-from { font-size: 10px; }
+}

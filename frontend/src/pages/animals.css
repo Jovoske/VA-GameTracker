@@ -21,8 +21,8 @@
 .an-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .an-chips--full { width: 100%; margin-top: 0; }
 .an-chip {
-  font-size: 12px; background: var(--surface-2); border: 1px solid var(--border);
-  color: var(--text); border-radius: var(--r-ctl); padding: 5px 10px; cursor: pointer;
+  font-size: 13px; background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--r-ctl); padding: 8px 12px; min-height: 44px; cursor: pointer;
 }
 .an-chip--on { background: var(--go); color: #06210C; font-weight: 700; }
 
@@ -42,7 +42,7 @@
 .an-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; font-size: 12px; }
 .an-btn {
   background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
-  border-radius: var(--r-ctl); padding: 6px 10px; min-height: 36px; font-size: 12px; cursor: pointer;
+  border-radius: var(--r-ctl); padding: 8px 12px; min-height: 44px; font-size: 13px; cursor: pointer;
 }
 .an-btn--right { margin-left: auto; }
 .an-selbar {
@@ -93,12 +93,7 @@
 .an-gallery-date { flex-shrink: 0; }
 .an-gallery-more { width: 100%; margin-top: 12px; }
 
-/* Naming an animal, on its card (admins). The name is a button, big enough to hit. */
-.an-animal-name--edit {
-  display: block; width: 100%; min-height: 44px; margin: -8px 0 0; padding: 8px 0 4px; text-align: left;
-  background: none; border: 0; color: var(--text); font: inherit; font-size: 13px; font-weight: 600;
-  text-decoration: underline dotted var(--text-dim); text-underline-offset: 3px; cursor: pointer;
-}
+/* Naming an animal, on its card (admins): the form "Name" opens, in the bar above. */
 .an-name-form { display: flex; flex-direction: column; gap: 6px; }
 .an-name-form .input { font-size: 16px; min-height: 44px; }
 .an-name-buttons { display: flex; gap: 6px; }

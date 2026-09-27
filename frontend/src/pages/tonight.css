@@ -6,14 +6,15 @@
 .tn-after { margin-bottom: 14px; }
 .tn-after-label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
 .tn-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+/* A glove's height: these are tapped every evening, at dusk, often in gloves (A-21). */
 .tn-chip {
-  font: inherit; font-size: 13px; line-height: 1.2;
-  border-radius: var(--r-pill); padding: 7px 14px; min-height: 34px;
+  font: inherit; font-size: 14px; line-height: 1.2;
+  border-radius: var(--r-pill); padding: 8px 16px; min-height: 44px;
   cursor: pointer; border: 1px solid var(--border);
   background: transparent; color: var(--text-dim); font-weight: 400;
 }
 .tn-chip[aria-pressed='true'] { background: var(--go); color: #06210C; font-weight: 700; border-color: var(--go); }
-.tn-chip-edit { font-size: 12px; color: var(--text-dim); padding: 5px 6px; text-decoration: underline; text-underline-offset: 3px; }
+.tn-chip-edit { display: inline-flex; align-items: center; min-height: 44px; font-size: 13px; color: var(--text-dim); padding: 0 10px; text-decoration: underline; text-underline-offset: 3px; }
 
 /* ── freshness ────────────────────────────────────────────── */
 .tn-fresh { font-size: 11px; color: var(--text-dim); margin: 0 0 10px; }
@@ -46,6 +47,18 @@
 .tn-line-v[data-soft='true'] { opacity: 0.75; }
 /* Which stand and what time the wind line is for. */
 .tn-line-when { display: block; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+/* The stand's week (feature 22): the line, and the hours behind their own small fold. */
+.tn-week .tn-line-v { flex: 1; min-width: 0; }
+.tn-week-line.ww-line { font-size: 14px; }
+.tn-week-wait { display: block; font-size: 13px; color: var(--text-dim); min-height: 21px; }
+.tn-week-hours { margin-top: 2px; }
+.tn-week-hours > summary {
+  list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; font-size: 13px; color: var(--sand);
+}
+.tn-week-hours > summary::-webkit-details-marker { display: none; }
+.tn-week-hours > summary::before { content: '▸'; font-size: 11px; color: var(--text-dim); }
+.tn-week-hours[open] > summary::before { content: '▾'; }
 .tn-cond { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-top: 12px; }
 .tn-classes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
 .tn-class { font-size: 12px; background: var(--surface-2); border-radius: var(--r-ctl); padding: 2px 8px; }
