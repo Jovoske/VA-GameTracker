@@ -52,7 +52,7 @@ class CameraAccount(Base):
     """A provider login whose cameras feed this estate (guests' own accounts).
 
     The primary SPYPOINT account stays in .env; these are added via Settings. Each
-    password is encrypted at rest (Fernet, key derived from JWT_SECRET).
+    password is encrypted at rest (Fernet, see app.core.crypto).
     """
     __tablename__ = "camera_accounts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
@@ -72,7 +72,20 @@ class CameraAccount(Base):
     ubox_max_images_per_day: Mapped[int] = mapped_column(
         Integer, nullable=False, default=500, server_default=text("500")
     )
+    # Set once a fetch has imported this login's history; None means that is still due.
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Whether the login still works, for Settings and the camera cards (see
+    # app.ingestion.logins). A fetch that could not sign in or list the cameras sets
+    # last_error, in words a hunter can act on, and leaves last_ok_at alone.
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    # How many cameras the provider listed last time, so a login shows its cameras
+    # before the first import has linked them.
+    reported_cameras: Mapped[int | None] = mapped_column(Integer)
+    # The provider's sign-in token, encrypted like the password, kept between fetches
+    # so a login is not signed in afresh every 15 minutes; None signs in anew.
+    session_enc: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("provider IN ('spypoint','ubox')", name="provider_valid"),
@@ -84,6 +97,11 @@ class CameraAccount(Base):
         ),
         # Device identifiers are global: one provider account belongs to one estate.
         UniqueConstraint("provider", "username", name="uq_camera_accounts_provider_username"),
+        # Emails are case-blind: Julle@ and julle@ are one login, fetched once.
+        Index(
+            "uq_camera_accounts_provider_login", "provider", text("lower(username)"),
+            unique=True, postgresql_where=text("active"),
+        ),
     )
 
 
@@ -118,13 +136,55 @@ class Camera(Base):
     photo_limit: Mapped[int | None] = mapped_column(Integer)
     plan_name: Mapped[str | None] = mapped_column(String)
     cycle_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # False once no login reaches the camera (its login was removed); a login that
+    # lists it again switches it back on. Its photos stay either way.
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
+    # pages back to it (less an overlap) rather than reading only the newest page.
+    photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SPYPOINT: a stretch below photos_listed_to not listed yet (captures after
+    # photos_gap_from, up to photos_gap_to), left by a fetch its page cap cut short;
+    # later fetches page on through it with what is left of their cap.
+    photos_gap_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    photos_gap_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Why the last fetch could not list this camera's photos although its login
+    # worked, in words; None once a fetch lists them again.
+    fetch_error: Mapped[str | None] = mapped_column(Text)
+    # UBox snapshots that would not download, {event_id: [attempts, captured_at]}:
+    # retried on later fetches, then given up on so one dead link can't hold the
+    # camera's import back (ubox_sync).
+    import_failures: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint(
             "spypoint_id IS NULL OR ubox_uid IS NULL", name="provider_exclusive"
         ),
     )
+
+
+class CameraView(Base):
+    """What each person had of each camera when they last opened it on the map.
+
+    seen_at is the newest arrival or check stamp (images.created_at, processed_at)
+    among the camera's photos at that moment, not the clock: a photo stored by a sync
+    that began before you looked carries an earlier stamp than your look, and must
+    still count as new (see routes_map.seen_mark). The count on a camera's map
+    callout is its photos that became showable after it: arrived, or were passed by
+    the detector or kept by a hunter (routes_map.shown_after). Per person, because
+    the team does not look at the same cameras at the same time. No row means never
+    opened.
+    """
+
+    __tablename__ = "camera_views"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    camera_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cameras.id", ondelete="CASCADE"), primary_key=True
+    )
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class Stand(Base):
@@ -212,9 +272,15 @@ class Image(Base):
     ubox_event_id: Mapped[str | None] = mapped_column(String, unique=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     original_path: Mapped[str | None] = mapped_column(String)
+    # The small WebP the grids and the map show, made on first request (routes_images).
+    thumbnail_path: Mapped[str | None] = mapped_column(String)
     annotated_path: Mapped[str | None] = mapped_column(String)
     cdn_url: Mapped[str | None] = mapped_column(String)
     file_hash: Mapped[str | None] = mapped_column(String)
+    # Tries at fetching a SPYPOINT photo's file that failed; retried until MAX in sync.
+    download_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     is_empty_frame: Mapped[bool | None] = mapped_column(Boolean)
@@ -226,6 +292,8 @@ class Image(Base):
         Index("ix_images_camera_captured", "camera_id", "captured_at"),
         # camera-first index is useless for global min/max/date_trunc scans
         Index("ix_images_captured_at", text("captured_at DESC")),
+        # A camera's newest arrival and what arrived since: the map's "new" count.
+        Index("ix_images_camera_created", "camera_id", "created_at"),
     )
 
 
@@ -494,8 +562,38 @@ class NotificationPref(Base):
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     species_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Cameras this person hears nothing from (the busy feeder), as camera id strings.
+    # Every camera is on until muted, so a camera added later is heard by default.
+    muted_camera_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PhotoNote(Base):
+    """A photo someone on the team marked "Worth a look", with an optional note.
+
+    The team's own read of the camera output, shown to everyone newest first. `text`
+    is NULL for a mark with nothing said. Removing a person keeps what they said
+    (user_id goes NULL and the name falls back to "Hunter"); removing the photo
+    removes its notes.
+    """
+
+    __tablename__ = "photo_notes"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    image_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    text: Mapped[str | None] = mapped_column(String(140))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (
+        Index("ix_photo_notes_image_id", "image_id"),
+        Index("ix_photo_notes_created_at", "created_at"),
     )
 
 
@@ -552,3 +650,32 @@ class Notification(Base):
     )
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (Index("ix_notifications_user_created", "user_id", "created_at"),)
+
+
+class ClientError(Base):
+    """A crash or blank screen on someone's phone, as the app reported it.
+
+    Hunters never see a stack trace and rarely say "it went black" until days
+    later, so the app posts what broke to /api/client-errors and admins read the
+    last few in Settings. Kept short (the newest 200) because this is a smoke
+    alarm, not a log archive: the full stream also goes to the server log.
+    Removing a person keeps what their phone reported, with no name on it.
+    """
+
+    __tablename__ = "client_errors"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # error / rejection / render / chunk: where in the app it was caught.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    stack: Mapped[str | None] = mapped_column(Text)
+    route: Mapped[str | None] = mapped_column(String(200))
+    build: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(300))
+    # When it happened by the phone's clock; a report that waited for signal
+    # arrives (created_at) later. Null when the phone didn't say or its clock is off.
+    happened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (Index("ix_client_errors_created_at", "created_at"),)

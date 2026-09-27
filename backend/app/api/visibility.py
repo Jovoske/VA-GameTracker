@@ -25,3 +25,7 @@ VISIBLE_ANIMAL = and_(
     Image.is_empty_frame.isnot(True),
     or_(_VISIBLE_DETECTION, ~_HIDDEN_DETECTION),
 )
+
+# The other half of it: a photo of nothing but hidden species, which no flag on the
+# photo itself can bring back (only showing the animal again in Admin does).
+ONLY_HIDDEN_SPECIES = and_(_HIDDEN_DETECTION, ~_VISIBLE_DETECTION)

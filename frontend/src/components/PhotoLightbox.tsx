@@ -5,12 +5,19 @@ import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } f
 import { imageUrl } from '../api'
 import { useReducedMotion } from '../hooks'
 import Overlay from './Overlay'
+import PhotoNotesPanel from './PhotoNotes'
 
 /**
  * The one photo viewer. Cameras, the species gallery on Animals and the class
  * gallery on Insights all open photos through this, so paging, zoom, download
  * and the back button behave the same everywhere. There used to be three: one
  * with paging and two that were a bare <img> you could only look at.
+ *
+ * Under the photo are the team's notes on it and, for members and admins, the
+ * "Worth a look" button (PhotoNotes). That band has a fixed height, so the photo
+ * keeps its place as you page between photos with and without notes. On a phone
+ * turned on its side (and a wide screen) the band goes beside the photo instead,
+ * where it costs width the photo has to spare rather than height it hasn't.
  */
 
 export type LightboxPhoto = {
@@ -20,6 +27,10 @@ export type LightboxPhoto = {
   camera: string
   /** What is in the frame: "Stag", "Sow + piglets (4)", "No animal". */
   label: string
+  /** The team's notes on it, when the list knows; 0 spares a call per photo. */
+  notes_count?: number
+  /** Marked "nothing in it" (Cameras shows these on request). A note on it keeps it. */
+  empty?: boolean
 }
 
 /**
@@ -49,15 +60,38 @@ export default function PhotoLightbox({
   backLabel,
   zIndex,
   onClose,
+  onNotesChange,
+  onKept,
 }: {
   photos: LightboxPhoto[]
   start?: number
   backLabel: string
   zIndex?: number
   onClose: () => void
+  /** A note was added or removed here: the photo's count now, for its tile and strips. */
+  onNotesChange?: (imageId: string, count: number) => void
+  /** A note kept a photo that was marked "nothing in it": it is an animal photo now. */
+  onKept?: (imageId: string) => void
 }) {
-  const [idx, setIdx] = useState(Math.min(Math.max(0, start), photos.length - 1))
-  const im = photos[idx]
+  // The photo on show, by id: a list refreshed underneath (a new photo on top, a page
+  // dropped) keeps showing the same photo instead of whatever took its place. When it
+  // has left the list, the one now in its place, or the last.
+  const [shownId, setShownId] = useState(() => photos[Math.min(Math.max(0, start), photos.length - 1)]?.id)
+  const lastIdx = useRef(Math.min(Math.max(0, start), photos.length - 1))
+  const found = photos.findIndex((p) => p.id === shownId)
+  const idx = found >= 0 ? found : Math.max(0, Math.min(lastIdx.current, photos.length - 1))
+  lastIdx.current = idx
+  const im = photos[idx] as LightboxPhoto | undefined
+  // Counts changed in this viewer, so paging back to a photo shows its new notes
+  // even when the list that opened the viewer doesn't keep count itself.
+  const [counts, setCounts] = useState<Record<string, number>>({})
+  // Photos kept as animal photos by a note here, for the same reason.
+  const [kept, setKept] = useState<Record<string, true>>({})
+  // The note sheet is open: no paging, swiping or zooming until it is done, so a
+  // note being written stays with its photo (PhotoNotes asks before throwing it away).
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const holding = useRef(false)
+  holding.current = sheetOpen
   const [imgReady, setImgReady] = useState(false)
   const [imgError, setImgError] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -75,10 +109,25 @@ export default function PhotoLightbox({
   const pan = useRef<{ x: number; y: number; v0: View; moved: boolean } | null>(null)
   const lastTap = useRef<{ t: number; x: number; y: number } | null>(null)
 
+  // The photos either side load while this one is looked at, so a swipe on a weak
+  // signal shows the next at once rather than "Loading photo…" (audit C-04).
+  useEffect(() => {
+    for (const near of [photos[idx + 1], photos[idx - 1]]) {
+      if (!near) continue
+      const img = new Image()
+      img.decoding = 'async'
+      img.src = imageUrl(near.file_url)
+    }
+  }, [idx, photos])
+
   // Keyboard: ← → to move, + − 0 to zoom. Escape belongs to Overlay, so that
   // every panel in the app answers it rather than only this one.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (holding.current) return
+      // Typing a note is not paging or zooming.
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       if (e.key === 'ArrowLeft') step(-1)
       if (e.key === 'ArrowRight') step(1)
       if (e.key === '+' || e.key === '=') setView((v) => zoomAt(v.s * 1.5, { x: 0, y: 0 }, v, true))
@@ -88,7 +137,7 @@ export default function PhotoLightbox({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idx])
+  }, [idx, photos])
 
   // Wheel zoom wants preventDefault (ctrl+wheel would otherwise zoom the whole
   // page), and React registers wheel as passive, so this one is bound by hand.
@@ -110,13 +159,13 @@ export default function PhotoLightbox({
   /** Move through the photos, stopping at both ends. */
   function step(d: number) {
     const i = idx + d
-    if (i < 0 || i >= photos.length) return
+    if (holding.current || i < 0 || i >= photos.length) return
     // The next photo fades in once it has actually decoded. Swapping src alone
     // gave a blank frame and then a jump as the stage resized to fit it.
     setImgReady(false)
     setImgError(false)
     setView(FIT)
-    setIdx(i)
+    setShownId(photos[i].id)
   }
 
   /** A pointer position in stage-centre coordinates, which is where the photo's transform is anchored. */
@@ -158,6 +207,7 @@ export default function PhotoLightbox({
    * pinch. A double-tap toggles between fit and a close look at that spot.
    */
   function pointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (holding.current) return
     try {
       e.currentTarget.setPointerCapture(e.pointerId)
     } catch {
@@ -254,8 +304,12 @@ export default function PhotoLightbox({
     setView(v.s > 1 ? FIT : zoomAt(TAP_ZOOM, { x: 0, y: 0 }, v, true))
   }
 
+  // Nothing left to show (the list emptied under the viewer): close rather than crash.
+  useEffect(() => { if (!im) onClose() }, [im, onClose])
+  if (!im) return null
+
   async function download() {
-    if (saving) return
+    if (saving || !im) return
     const src = imageUrl(im.file_url)
     const name = downloadName(im.camera, im.captured_at)
     setSaving(true)
@@ -286,6 +340,9 @@ export default function PhotoLightbox({
     }
   }
 
+  // Kept by a note here: no longer "No animal", and nothing for the sheet to keep.
+  const empty = !!im.empty && !kept[im.id]
+  const label = im.empty && !empty ? 'Animal' : im.label
   const when = new Date(im.captured_at).toLocaleString(undefined, {
     weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   })
@@ -317,72 +374,86 @@ export default function PhotoLightbox({
     >
       {(_close) => (
         <>
-          {/* A stage of fixed size. Photos come off the cameras at mixed aspect
-              ratios, and letting each one set the frame meant the picture jumped
-              around the screen as you paged through. */}
-          <div
-            ref={stageRef}
-            className="ov-panel lb-stage"
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={pointerDown}
-            onPointerMove={pointerMove}
-            onPointerUp={pointerUp}
-            onPointerCancel={pointerCancel}
-            style={{ cursor: view.s > 1 ? 'grab' : 'default' }}
-          >
-            {imgError && <div role="alert" className="lb-status">This photo did not load. Try the next one.</div>}
-            {!imgReady && !imgError && <span role="status" className="lb-status">Loading photo…</span>}
-            <img
-              ref={imgRef}
-              key={im.id}
-              src={imageUrl(im.file_url)}
-              alt={im.label}
-              draggable={false}
-              onLoad={() => setImgReady(true)}
-              onError={() => setImgError(true)}
-              style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
-                borderRadius: 'var(--r-ctl)',
-                opacity: imgReady ? 1 : 0,
-                transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`,
-                transition:
-                  view.snap && !reduced
-                    ? 'opacity var(--d-fast) var(--ease-out), transform var(--d-base) var(--ease-out)'
-                    : 'opacity var(--d-fast) var(--ease-out)',
-                willChange: 'transform',
-                display: imgError ? 'none' : undefined,
-              }}
-            />
-          </div>
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              marginTop: 10, display: 'flex', alignItems: 'center', gap: 12,
-              background: 'rgba(0,0,0,0.55)', borderRadius: 'var(--r-ctl)', padding: '8px 14px',
-              fontSize: 13, color: '#fff', maxWidth: '94vw', flexWrap: 'wrap', justifyContent: 'center',
-            }}
-          >
-            <b>{im.camera}</b>
-            <span>{im.label}</span>
-            <span style={{ opacity: 0.75 }}>{when}</span>
-            <span style={{ opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
-              {idx + 1} / {photos.length}
-            </span>
+          {/* The stage and, beside or under it, the caption and the notes. The
+              wrappers take no room of their own until a phone is on its side. */}
+          <div className="lb-body">
+            {/* A stage of fixed size. Photos come off the cameras at mixed aspect
+                ratios, and letting each one set the frame meant the picture jumped
+                around the screen as you paged through. */}
+            <div
+              ref={stageRef}
+              className="ov-panel lb-stage"
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={pointerDown}
+              onPointerMove={pointerMove}
+              onPointerUp={pointerUp}
+              onPointerCancel={pointerCancel}
+              style={{ cursor: view.s > 1 ? 'grab' : 'default' }}
+            >
+              {imgError && <div role="alert" className="lb-status">This photo did not load. Try the next one.</div>}
+              {!imgReady && !imgError && <span role="status" className="lb-status">Loading photo…</span>}
+              <img
+                ref={imgRef}
+                key={im.id}
+                src={imageUrl(im.file_url)}
+                alt={label}
+                draggable={false}
+                onLoad={() => setImgReady(true)}
+                onError={() => setImgError(true)}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  borderRadius: 'var(--r-ctl)',
+                  opacity: imgReady ? 1 : 0,
+                  transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`,
+                  transition:
+                    view.snap && !reduced
+                      ? 'opacity var(--d-fast) var(--ease-out), transform var(--d-base) var(--ease-out)'
+                      : 'opacity var(--d-fast) var(--ease-out)',
+                  willChange: 'transform',
+                  display: imgError ? 'none' : undefined,
+                }}
+              />
+            </div>
+            <div className="lb-side">
+              <div className="lb-caption" onClick={(e) => e.stopPropagation()}>
+                <b>{im.camera}</b>
+                <span>{label}</span>
+                <span style={{ opacity: 0.75 }}>{when}</span>
+                <span style={{ opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
+                  {idx + 1} / {photos.length}
+                </span>
+              </div>
+              <PhotoNotesPanel
+                key={im.id}
+                imageId={im.id}
+                label={label}
+                camera={im.camera}
+                count={counts[im.id] ?? im.notes_count}
+                empty={empty}
+                onCount={(id, n) => {
+                  setCounts((c) => ({ ...c, [id]: n }))
+                  onNotesChange?.(id, n)
+                }}
+                onSheet={setSheetOpen}
+                onKept={(id) => {
+                  setKept((k) => ({ ...k, [id]: true }))
+                  onKept?.(id)
+                }}
+              />
+            </div>
           </div>
           <button
-            className="lb-nav"
-            style={{ left: 8 }}
-            disabled={idx === 0}
+            className="lb-nav lb-nav--prev"
+            disabled={idx === 0 || sheetOpen}
             onClick={(e) => { e.stopPropagation(); step(-1) }}
             aria-label="Previous photo"
           >
             ‹
           </button>
           <button
-            className="lb-nav"
-            style={{ right: 8 }}
-            disabled={idx === photos.length - 1}
+            className="lb-nav lb-nav--next"
+            disabled={idx === photos.length - 1 || sheetOpen}
             onClick={(e) => { e.stopPropagation(); step(1) }}
             aria-label="Next photo"
           >

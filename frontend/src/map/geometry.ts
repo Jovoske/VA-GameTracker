@@ -1,4 +1,27 @@
-export type Camera = { id: string; name: string; lat: number | null; lng: number | null; sightings: number; battery_pct: number | null }
+// A camera as the map has it (GET /map/cameras): its newest photo worth showing,
+// how many photos are new to you, and last night in visits, never in frames.
+export type CameraHealth = {
+  status: string; detail: string; producing: boolean; hours_since_report: number | null
+  // With status not_syncing: the login that fetches this camera, and what is wrong with it.
+  // `camera`: the login works, only this camera's photos could not be listed.
+  login?: { label: string | null; error: string | null; camera?: boolean }
+}
+export type LatestPhoto = { image_id: string; captured_at: string; species_id: string | null; label: string }
+export type Visits = { species_id: string | null; label: string; visits: number }
+// How far to trust last night's list (routes_map.night_status): working, so an empty
+// list is a quiet night; frames still being checked; out of credits partway; or
+// nothing sent and maybe not working. null is no record either way.
+export type NightStatus = 'watched' | 'checking' | 'incomplete' | 'blind'
+export type Camera = {
+  id: string; name: string; lat: number | null; lon: number | null
+  battery_pct: number | null; signal_pct: number | null; last_report_at: string | null
+  health: CameraHealth; can_rename: boolean
+  latest: LatestPhoto | null; new_count: number
+  // Last night runs 18:00 to 08:00, as Activity and Replay count it; until 08:00 it is still going.
+  last_night: Visits[]; last_night_status: NightStatus | null; last_night_so_far?: boolean
+  // This camera's alert switch for you (false: muted), and whether your alerts are on at all.
+  alerts: boolean; alerts_enabled: boolean
+}
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string }
 export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }
@@ -11,13 +34,19 @@ export type MapData = {
   scent_range_m: number; terrain_loaded: boolean
 }
 export const compass = (degrees: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((degrees % 360) + 360) % 360 / 45) % 8]
+// Compass words, not degrees. "From the north-west" reads at a glance.
+const DIRECTION: Record<string, string> = { N: 'north', NE: 'north-east', E: 'east', SE: 'south-east', S: 'south', SW: 'south-west', W: 'west', NW: 'north-west' }
+export const direction = (degrees: number) => DIRECTION[compass(degrees)]
 export const downwind = (from: number) => (from + 180) % 360
 export function offset(lat: number, lon: number, bearing: number, metres: number): [number, number] {
   const r = bearing * Math.PI / 180
   return [lon + metres * Math.sin(r) / (111320 * Math.cos(lat * Math.PI / 180)), lat + metres * Math.cos(r) / 111320]
 }
 export const windLabel = (status: string) => status === 'clean' ? 'Away from mapped bedding' : status === 'scent_carries' ? 'Toward mapped bedding' : 'Direction uncertain'
-export const windColor = (status: string) => status === 'clean' ? '#a6c7b1' : status === 'scent_carries' ? '#e2ad83' : '#a2aaa5'
+// Theme tokens, so the map and the Stands page share one palette. Amber, not red:
+// red is kept for safety, and a wrong wind is a reason to sit elsewhere, not a stop.
+export const windToken = (status: string) => status === 'clean' ? '--v-best' : status === 'scent_carries' ? '--marginal' : '--v-quiet'
+export const windColor = (status: string) => `var(${windToken(status)})`
 export function windGeometry(stand: MapStand, fallbackRange: number) {
   const { lat, lon, wind } = stand
   // The API retains a fallback bearing for uncertain flow. Do not draw it as advice.
@@ -37,4 +66,79 @@ export function windGeometry(stand: MapStand, fallbackRange: number) {
   for (let i = 0; i <= 20; i++) ring.push(offset(lat, lon, bearing - half + 2 * half * i / 20, range))
   ring.push([lon, lat])
   return { arrow, cone: { type: 'Polygon', coordinates: [ring] } as GeoJSON.Polygon }
+}
+
+// ── measuring ──
+// Distances on an estate are a few hundred metres, so a sphere is plenty and a flat
+// projection around the shape's own latitude is plenty for areas.
+export type LngLat = [number, number]
+const EARTH_M = 6371008.8
+const rad = (d: number) => d * Math.PI / 180
+export function validLngLat(lon: unknown, lat: unknown): boolean {
+  return typeof lon === 'number' && typeof lat === 'number' && Number.isFinite(lon) && Number.isFinite(lat) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+}
+export function distanceM(a: LngLat, b: LngLat): number {
+  const dLat = rad(b[1] - a[1]), dLon = rad(b[0] - a[0])
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[1])) * Math.cos(rad(b[1])) * Math.sin(dLon / 2) ** 2
+  return 2 * EARTH_M * Math.asin(Math.min(1, Math.sqrt(h)))
+}
+/** Initial bearing from a to b, 0-360 clockwise from north. */
+export function bearingDeg(a: LngLat, b: LngLat): number {
+  const y = Math.sin(rad(b[0] - a[0])) * Math.cos(rad(b[1]))
+  const x = Math.cos(rad(a[1])) * Math.sin(rad(b[1])) - Math.sin(rad(a[1])) * Math.cos(rad(b[1])) * Math.cos(rad(b[0] - a[0]))
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+}
+/** Area of an open ring (first corner not repeated) in square metres. */
+export function areaM2(ring: LngLat[]): number {
+  if (ring.length < 3) return 0
+  const lat0 = rad(ring.reduce((sum, p) => sum + p[1], 0) / ring.length)
+  const xy = ring.map(([lon, lat]) => [rad(lon) * EARTH_M * Math.cos(lat0), rad(lat) * EARTH_M])
+  let twice = 0
+  for (let i = 0; i < xy.length; i++) {
+    const [x1, y1] = xy[i], [x2, y2] = xy[(i + 1) % xy.length]
+    twice += x1 * y2 - x2 * y1
+  }
+  return Math.abs(twice) / 2
+}
+export const formatDistance = (m: number) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
+export const formatArea = (m2: number) => m2 < 1000 ? `${Math.round(m2)} m²` : `${(m2 / 10_000).toFixed(1)} ha`
+
+// ── drawing an outline ──
+// Closer than this to the last corner is the same corner pressed twice (a gloved
+// double press), and closer than this to the first is the shape closing on itself.
+const SAME_CORNER_M = 1
+/** Whether `p` would be a real next corner, not a repeat of the last or the first. */
+export function isNewCorner(points: LngLat[], p: LngLat): boolean {
+  const last = points[points.length - 1]
+  if (last && distanceM(last, p) < SAME_CORNER_M) return false
+  return !(points.length > 1 && distanceM(points[0], p) < SAME_CORNER_M)
+}
+export const nearFirstCorner = (points: LngLat[], p: LngLat | null) => !!p && points.length > 2 && distanceM(points[0], p) < SAME_CORNER_M * 8
+/**
+ * Whether any two edges cross: a bow-tie, not an area (B-10). `closed` includes the
+ * edge from the last corner back to the first, which Finish shape would draw.
+ */
+export function crossesItself(points: LngLat[], closed = true): boolean {
+  const n = points.length
+  const edges = closed ? n : n - 1
+  if (n < 4) return false
+  const k = Math.cos(rad(points[0][1]))
+  const xy = points.map(([lon, lat]) => [lon * k, lat])
+  const side = (a: number[], b: number[], c: number[]) => Math.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+  for (let i = 0; i < edges; i++) {
+    const a = xy[i], b = xy[(i + 1) % n]
+    for (let j = i + 2; j < edges; j++) {
+      if (closed && i === 0 && j === n - 1) continue // the two edges that meet at the first corner
+      const c = xy[j], d = xy[(j + 1) % n]
+      if (side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0) return true
+    }
+  }
+  return false
+}
+/** "134 m · north-east": how far, and which way to walk from the first point. */
+export const measureLabel = (a: LngLat, b: LngLat) => `${formatDistance(distanceM(a, b))} · ${direction(bearingDeg(a, b))}`
+export function circle(center: LngLat, radiusM: number, steps = 48): GeoJSON.Polygon {
+  const ring: [number, number][] = []
+  for (let i = 0; i <= steps; i++) ring.push(offset(center[1], center[0], 360 * i / steps, radiusM))
+  return { type: 'Polygon', coordinates: [ring] }
 }

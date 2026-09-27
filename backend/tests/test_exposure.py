@@ -6,7 +6,7 @@ counting photographs as if they were animals.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
@@ -231,3 +231,37 @@ def test_excluded_nights_are_reported_not_hidden(db_session, monkeypatch):
     assert out["exposure"]["excluded_nights"] == 2
     assert "2 nights left out" in out["exposure"]["note"]
     assert "camera was not watching" in out["exposure"]["note"]
+
+
+@requires_db
+def test_one_frame_from_a_reset_clock_does_not_make_years_of_empty_nights(
+    db_session, estate_and_camera,
+):
+    """E-03: a 2020 frame and ten real nights are ten watched nights, not 2,263."""
+    _, cam = estate_and_camera
+    _frame(db_session, cam, datetime(2020, 7, 17, 22, 12, tzinfo=UTC), empty=True)
+    base = datetime(2026, 8, 1, 21, 0, tzinfo=UTC)
+    for i in (0, 2, 4, 6, 8, 10, 12, 14, 16, 18):
+        _frame(db_session, cam, base + timedelta(days=i), empty=True)
+    recompute_camera_nights(db_session)
+    states = _states(db_session, cam)
+    tally = {s: sum(1 for v in states.values() if v == s) for s in set(states.values())}
+    assert tally["CONFIRMED"] == 11
+    # The short gaps between real nights are still presumed watched; the six-year one is not.
+    assert tally["PRESUMED_UP"] == 9
+    assert states[date(2023, 1, 1)] == "UNKNOWN"
+
+
+@requires_db
+def test_a_clock_running_ahead_does_not_presume_nights_that_have_not_happened(
+    db_session, estate_and_camera,
+):
+    _, cam = estate_and_camera
+    today = datetime.now(UTC).replace(hour=21, minute=0, second=0, microsecond=0)
+    _frame(db_session, cam, today - timedelta(days=2), empty=True)
+    _frame(db_session, cam, today + timedelta(days=5), empty=True)
+    recompute_camera_nights(db_session)
+    states = _states(db_session, cam)
+    future = [n for n, s in states.items() if n > today.date() and s == "PRESUMED_UP"]
+    assert future == []
+    assert states[(today - timedelta(days=1)).date()] == "PRESUMED_UP"

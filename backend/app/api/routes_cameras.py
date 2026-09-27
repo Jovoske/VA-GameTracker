@@ -2,20 +2,25 @@
 import time
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
+from app.api.routes_map import seen_mark
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.core.db import get_db
 from app.health import camera_health
-from app.models import Camera, Detection, Image, Species, SyncLog, User
+from app.ingestion.logins import camera_logins
+from app.models import Camera, CameraView, Detection, Image, Species, User
+from app.notes import note_counts
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -48,36 +53,20 @@ def _run_locked(work) -> None:
             pass
 
 
-def _sync_work(db: Session) -> None:
-    from app.ai.empty_filter import scan_unprocessed
-    from app.ai.species import classify_unclassified
-    from app.ingestion.sync import sync_all
-    from app.ingestion.ubox_sync import sync_ubox_all
-
-    results = {}
-    error = None
+def _lock_started() -> datetime | None:
+    """When the run holding the pipeline lock began, or None when nothing holds it."""
     try:
-        results["spypoint"] = sync_all(db)
-        results["ubox"] = sync_ubox_all(db)
-        scan_unprocessed(db)
-        classify_unclassified(db)
-        from app.forecasting.exposure import recompute_camera_nights
+        return datetime.fromtimestamp(_lock_path().stat().st_mtime, UTC)
+    except FileNotFoundError:
+        return None
 
-        recompute_camera_nights(db)
-    except Exception as exc:
-        db.rollback()
-        error = f"Sync failed ({type(exc).__name__})"
-    # Provider imports each keep a diagnostic log. This final summary gives the
-    # Sync button a combined count after both providers and the AI pass finish.
-    now = datetime.now(timezone.utc)
-    db.add(SyncLog(
-        status="error" if error or any(r.get("status") == "error" for r in results.values())
-        else "ok",
-        started_at=now, finished_at=now, error=error,
-        images_downloaded=sum(r.get("total", 0) for r in results.values()),
-        details={"provider": "pipeline", "results": results},
-    ))
-    db.commit()
+
+def _sync_work(db: Session) -> None:
+    # The same run as the scheduled fetch (pipeline.py): both providers, then the AI
+    # pass, with one summary row the Check button reads (app.ingestion.fetch).
+    from app.ingestion.fetch import run_fetch
+
+    run_fetch(db)
 
 
 @router.get("")
@@ -87,6 +76,8 @@ def list_cameras(
     rows = db.scalars(
         select(Camera).where(Camera.estate_id == user.estate_id).order_by(Camera.name)
     ).all()
+    now = datetime.now(UTC)
+    login_states = camera_logins(db, rows, now)
     out = []
     for c in rows:
         last = db.scalar(
@@ -121,7 +112,7 @@ def list_cameras(
             "sd_used_mb": c.sd_used_mb, "sd_total_mb": c.sd_total_mb,
             "image_count": count or 0, "empty_count": empty or 0, "sightings": sightings,
             "lat": lat, "lng": lng,
-            "health": camera_health(c),
+            "health": camera_health(c, now, login_states.get(c.id)),
         })
     return out
 
@@ -170,12 +161,48 @@ def rename_camera(
     }
 
 
+@router.post("/{camera_id}/seen")
+def mark_seen(
+    camera_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """You opened this camera: its photos so far are no longer new to you.
+
+    Any signed-in role, viewers included: it records what this person has looked
+    at, not anything about the camera. What it records is the newest arrival or
+    check stamp among the camera's photos, not the time now, so a photo a running
+    sync is still storing, or one the detector hasn't passed yet, counts as new
+    once it shows (routes_map.seen_mark).
+    """
+    camera = db.scalar(select(Camera.id).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ))
+    if camera is None:
+        raise HTTPException(404, "Camera not found.")
+    stmt = pg_insert(CameraView).values(
+        user_id=user.id, camera_id=camera_id, seen_at=seen_mark(camera_id),
+    )
+    seen_at = db.scalar(
+        stmt.on_conflict_do_update(
+            index_elements=[CameraView.user_id, CameraView.camera_id],
+            set_={"seen_at": stmt.excluded.seen_at},
+        ).returning(CameraView.seen_at)
+    )
+    db.commit()
+    return {"camera_id": str(camera_id), "seen_at": seen_at}
+
+
 @router.post("/sync")
 def trigger_sync(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+    # `since` is what the Check button waits for: a fetch summary started after it
+    # is this check's result; an older one is somebody else's.
     if _pipeline_busy():
-        return {"status": "busy", "note": "Already checking. New photos will show shortly."}
+        return {"status": "busy", "since": _lock_started(),
+                "note": "Already checking. New photos will show shortly."}
+    since = datetime.now(UTC)
     background.add_task(_run_locked, _sync_work)
-    return {"status": "started"}
+    return {"status": "started", "since": since}
 
 
 @router.post("/backfill")
@@ -215,15 +242,33 @@ def trigger_scan(background: BackgroundTasks, _: User = Depends(get_current_admi
 
 @router.get("/sync/status")
 def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Where the latest photo fetch is: running, identifying (photos in, the detector
+    looking at them) or its result, with the logins that need attention in words."""
+    from app.ingestion.fetch import latest_run
+
+    row = latest_run(db)
     if _pipeline_busy():
-        return {"status": "running"}
-    row = db.scalar(select(SyncLog).order_by(SyncLog.started_at.desc()).limit(1))
+        started = _lock_started()
+        details = (row.details or {}) if row is not None else {}
+        if (
+            row is not None and started is not None
+            and details.get("stage") == "identifying"
+            and row.started_at >= started - timedelta(seconds=5)
+        ):
+            return {
+                "status": "identifying", "result": row.status,
+                "images_downloaded": row.images_downloaded, "started_at": row.started_at,
+                "problems": details.get("problems", []),
+            }
+        return {"status": "running", "started_at": started}
     if row is None:
         return {"status": "never"}
+    details = row.details or {}
     return {
         "status": row.status, "images_downloaded": row.images_downloaded,
         "started_at": row.started_at, "finished_at": row.finished_at, "error": row.error,
-        "details": row.details,
+        "problems": details.get("problems", []),
+        "details": details,
     }
 
 
@@ -278,6 +323,7 @@ def camera_images(
             }
             for r in drows
         }
+    counts = note_counts(db, ids)
     return [{
         "id": str(i.id),
         "captured_at": i.captured_at,
@@ -289,4 +335,5 @@ def camera_images(
         "is_empty_frame": i.is_empty_frame,
         "reviewed": i.reviewed,
         "animal_conf": i.animal_conf,
+        "notes_count": counts.get(i.id, 0),
     } for i in rows]

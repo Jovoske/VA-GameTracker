@@ -9,6 +9,7 @@ explicit recover command after a crash. No detector or cloud AI is invoked here.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import io
 import json
@@ -32,6 +33,16 @@ MAX_PIXELS = 40_000_000
 PACKAGE_NAME = re.compile(r"(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\Z")
 FILENAME_DATE = re.compile(r"(?:IMG_|SUNTEK_)?(\d{8})[_-]?(\d{6})(?:[_-]\d{1,6})?", re.I)
 SUNTEK_FTP_DATE = re.compile(r"PICT_(\d{8})_(\d{4})", re.I)
+CLOCK_BEHIND = timedelta(days=30)
+# A full disk, a permission problem or a file another program holds open (antivirus
+# on Db01's media folder) passes: the package goes back to ready/ and is tried again
+# on the next pass, and only after this many tries is it parked in failed/.
+MAX_DISK_ATTEMPTS = 5
+_DISK_ERRNOS = {errno.ENOSPC, errno.EACCES, errno.EBUSY, errno.EAGAIN,
+                getattr(errno, "EDQUOT", 122)}
+_WINDOWS_SHARING = {32, 33}  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+# Tries per package when attempts.json can't be written (the disk is full).
+_attempts_in_memory: dict[str, int] = {}
 
 
 class InvalidPackage(ValueError):
@@ -115,6 +126,10 @@ def _timestamp(exif: dict, filename: str, received: datetime, tz: ZoneInfo):
     def plausible(value):
         if value.year < 2000 or value > received + timedelta(days=1):
             raise ValueError("capture time is implausible relative to receipt")
+        # A clock reset by a battery swap stamps an old date on photos sent today;
+        # one such frame would stretch the camera's history back years.
+        if value < received - CLOCK_BEHIND:
+            raise ValueError("capture time is over 30 days before receipt; camera clock not set")
         return value.astimezone(UTC)
 
     original = exif.get(36867)
@@ -332,6 +347,43 @@ def _transient_db_failure(exc: Exception) -> bool:
     )
 
 
+def _transient_disk_failure(exc: Exception) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    return isinstance(exc, OSError) and (
+        exc.errno in _DISK_ERRNOS or getattr(exc, "winerror", None) in _WINDOWS_SHARING
+    )
+
+
+def _count_attempt(package: Path) -> int:
+    """This package's disk-failure tries so far, this one included."""
+    try:
+        seen = json.loads(_read_regular(package / "attempts.json", 1024)).get("disk", 0)
+    except (OSError, ValueError, InvalidPackage, AttributeError):
+        seen = _attempts_in_memory.get(package.name, 0)
+    attempts = int(seen) + 1
+    _attempts_in_memory[package.name] = attempts
+    try:
+        _json_write(package / "attempts.json", {"disk": attempts})
+    except OSError:
+        pass  # the disk is the problem; the count in memory carries on
+    return attempts
+
+
+def spool_counts(spool: str | Path) -> dict | None:
+    """Packages waiting in ready/ and parked in failed/, or None with no spool there."""
+    root = Path(spool)
+    if not (root / "ready").is_dir():
+        return None
+    counts = {}
+    for name in ("ready", "failed"):
+        try:
+            counts[name] = len(_packages(root / name)) if (root / name).is_dir() else 0
+        except OSError:
+            counts[name] = None
+    return counts
+
+
 def run_once(
     spool: str | Path, camera_id: uuid.UUID | str, *, timezone_name: str | None = None,
     session_factory=None, media_root: str | Path | None = None, max_bytes: int = MAX_BYTES,
@@ -389,21 +441,38 @@ def run_once(
                 _logger().warning("ftp.processed_cleanup_failed",
                                   package=finished.name, error=str(exc))
         except Exception as exc:
-            if _transient_db_failure(exc) and claimed.exists():
+            database = _transient_db_failure(exc)
+            if claimed.exists() and (database or (
+                _transient_disk_failure(exc) and _count_attempt(claimed) < MAX_DISK_ATTEMPTS
+            )):
                 # The Session context has rolled back/closed before returning the
                 # package. An uncertain commit is safe: the next pass deduplicates.
-                _move_package(claimed, paths["ready"] / claimed.name)
+                try:
+                    _move_package(claimed, paths["ready"] / claimed.name)
+                except OSError as move_exc:
+                    _logger().error("ftp.requeue_failed", package=claimed.name,
+                                    error=str(move_exc))
                 summary["deferred"] += 1
-                _logger().warning("ftp.database_unavailable", package=claimed.name, error=str(exc))
-                break  # avoid hammering an unavailable database with the rest of the batch
+                _logger().warning("ftp.database_unavailable" if database else "ftp.disk_busy",
+                                  package=claimed.name, error=str(exc))
+                break  # avoid hammering an unavailable database or disk with the batch
             summary["failed"] += 1
             _logger().error("ftp.import_failed", package=claimed.name, error=str(exc))
             if claimed.exists():
+                # Neither note nor move may take the watcher down with it (a full disk
+                # can fail both); a package left in processing/ is logged for recover.
                 try:
                     _json_write(claimed / "error.json", {"error": str(exc),
                                 "failed_at": datetime.now(UTC).isoformat()})
-                finally:
+                except OSError as note_exc:
+                    _logger().error("ftp.error_note_failed", package=claimed.name,
+                                    error=str(note_exc))
+                try:
                     _move_package(claimed, paths["failed"] / claimed.name)
+                except OSError as move_exc:
+                    _logger().error("ftp.park_failed", package=claimed.name,
+                                    error=str(move_exc))
+                    break
     return summary
 
 

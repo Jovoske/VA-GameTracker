@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin
 from app.core.db import get_db
-from app.models import Camera, Detection, Image, SyncLog, User
+from app.models import Camera, Detection, Image, User
 from app.version import __version__
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -74,15 +74,34 @@ def version_check(_: User = Depends(get_current_admin)) -> dict:
     }
 
 
+def _suntek_spool() -> dict | None:
+    """Suntek photos waiting to be imported and parked after failing, when there is a
+    spool on this server (FTP or email camera); None when there is not."""
+    from pathlib import Path
+
+    from app.core.config import settings
+    from app.ingestion.ftp_import import spool_counts
+
+    root = settings.ftp_spool_root or str(Path(settings.models_root).parent / "ftp-spool")
+    try:
+        return spool_counts(root)
+    except OSError:
+        return None
+
+
 @router.get("/status")
 def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) -> dict:
-    last = db.scalar(select(SyncLog).order_by(SyncLog.started_at.desc()).limit(1))
+    from app.ingestion.fetch import latest_run
+
+    # The fetch summary (every provider together), not whichever provider wrote last.
+    last = latest_run(db)
     return {
         "cameras": db.scalar(select(func.count(Camera.id))) or 0,
         "images": db.scalar(select(func.count(Image.id))) or 0,
         "detections": db.scalar(select(func.count(Detection.id))) or 0,
         "empty": db.scalar(select(func.count(Image.id)).where(Image.is_empty_frame.is_(True))) or 0,
         "last_sync": (
-            {"status": last.status, "at": last.finished_at} if last else None
+            {"status": last.status, "at": last.finished_at or last.started_at} if last else None
         ),
+        "suntek": _suntek_spool(),
     }

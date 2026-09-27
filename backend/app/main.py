@@ -10,11 +10,14 @@ from app.api import (
     routes_auth,
     routes_camera_accounts,
     routes_cameras,
+    routes_client_errors,
     routes_estate,
     routes_forecast,
     routes_health,
     routes_images,
     routes_insights,
+    routes_map,
+    routes_notes,
     routes_notifications,
     routes_photos,
     routes_species,
@@ -56,11 +59,14 @@ app.include_router(routes_camera_accounts.router, prefix=API_PREFIX)
 app.include_router(routes_zones.router, prefix=API_PREFIX)
 app.include_router(routes_notifications.router, prefix=API_PREFIX)
 app.include_router(routes_photos.router, prefix=API_PREFIX)
+app.include_router(routes_map.router, prefix=API_PREFIX)
+app.include_router(routes_notes.router, prefix=API_PREFIX)
+app.include_router(routes_client_errors.router, prefix=API_PREFIX)
 
 import mimetypes
 import os
-from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
+
+from app.frontend import mount_frontend
 
 # Windows has no registry entry for these, so Starlette guessed text/plain and
 # served the app's own typeface as if it were a text file. Browsers do not
@@ -70,20 +76,4 @@ mimetypes.add_type("font/woff2", ".woff2")
 mimetypes.add_type("font/woff", ".woff")
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
-_DIST = os.environ.get("FRONTEND_DIST", "")
-if _DIST and os.path.isdir(_DIST):
-    _assets = os.path.join(_DIST, "assets")
-    if os.path.isdir(_assets):
-        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
-
-    @app.get("/{full_path:path}")
-    def _spa(full_path: str):
-        # os.path.join() happily walks out of the directory: a request for
-        # ..%2f..%2fetc/passwd resolved to a real file and was served. Resolve the
-        # candidate and confirm it is still inside the dist root.
-        _root = os.path.realpath(_DIST)
-        candidate = os.path.realpath(os.path.join(_root, full_path))
-        inside = candidate == _root or candidate.startswith(_root + os.sep)
-        if full_path and inside and os.path.isfile(candidate):
-            return FileResponse(candidate)
-        return FileResponse(os.path.join(_DIST, "index.html"))
+mount_frontend(app, os.environ.get("FRONTEND_DIST", ""))

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.core.security import create_access_token, decode_token
@@ -31,6 +31,14 @@ def _columns(engine, table: str) -> dict[str, str]:
             {"t": table},
         ).all()
     return {r[0]: r[1] for r in rows}
+
+
+def _index(engine, table: str, name: str) -> list[str] | None:
+    """The columns of index `name` on `table`, or None when there is no such index."""
+    for ix in inspect(engine).get_indexes(table):
+        if ix["name"] == name:
+            return ix["column_names"]
+    return None
 
 
 @requires_db
@@ -53,6 +61,20 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         notes = _columns(eng, "notifications")
         assert "push_status" in notes and "read_at" in notes
         assert "species_ids" in _columns(eng, "notification_prefs")
+        assert set(_columns(eng, "camera_views")) == {"user_id", "camera_id", "seen_at"}
+        assert "thumbnail_path" in images
+        assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
+        assert _columns(eng, "notification_prefs")["muted_camera_ids"] == "jsonb"
+        assert set(_columns(eng, "photo_notes")) == {
+            "id", "image_id", "user_id", "text", "created_at",
+        }
+        assert _index(eng, "photo_notes", "ix_photo_notes_image_id") == ["image_id"]
+        assert _index(eng, "photo_notes", "ix_photo_notes_created_at") == ["created_at"]
+        assert set(_columns(eng, "client_errors")) == {
+            "id", "user_id", "kind", "message", "stack", "route", "build", "user_agent",
+            "happened_at", "created_at",
+        }
+        assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
     finally:
         eng.dispose()
 
@@ -103,6 +125,15 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "ubox_uid" in _columns(eng, "cameras")
         assert "ubox_event_id" in _columns(eng, "images")
         assert "details" in _columns(eng, "sync_log")
+        assert _columns(eng, "camera_views")
+        assert "thumbnail_path" in _columns(eng, "images")
+        assert _index(eng, "images", "ix_images_camera_created")
+        assert "muted_camera_ids" in _columns(eng, "notification_prefs")
+        assert _columns(eng, "photo_notes")
+        assert "last_error" in _columns(eng, "camera_accounts")
+        assert "photos_listed_to" in _columns(eng, "cameras")
+        assert "download_attempts" in _columns(eng, "images")
+        assert _columns(eng, "client_errors")
     finally:
         eng.dispose()
 
@@ -314,5 +345,365 @@ def test_upgrading_an_existing_install_preserves_its_rows(fresh_db):
         assert decode_token(pre_upgrade_token)["sub"] == user_id, (
             "a session issued before the upgrade must still be accepted after it"
         )
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_views_upgrade_down_and_up_again_keeping_the_photos(fresh_db):
+    """0017 on a real 0016 database, then back down and up again.
+
+    0001 builds today's ORM even at 0016, so the 0016 shape is restored by hand
+    first; otherwise the upgrade would have nothing to do and prove nothing.
+    """
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0016_species_hidden")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            c.execute(text("DROP TABLE camera_views"))
+            c.execute(text("ALTER TABLE images DROP COLUMN thumbnail_path"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            user_id = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'m@x.local','h','member') RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            image_id = c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),'photo.jpg',false) RETURNING id"
+            ), {"c": camera_id}).scalar_one()
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            assert c.execute(text("SELECT original_path, thumbnail_path FROM images WHERE id=:i"),
+                             {"i": image_id}).one() == ("photo.jpg", None)
+            c.execute(text("INSERT INTO camera_views (user_id,camera_id,seen_at) "
+                           "VALUES (:u,:c,now())"), {"u": user_id, "c": camera_id})
+            # One row per person and camera.
+            with pytest.raises(IntegrityError), c.begin_nested():
+                c.execute(text("INSERT INTO camera_views (user_id,camera_id,seen_at) "
+                               "VALUES (:u,:c,now())"), {"u": user_id, "c": camera_id})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        # Removing the person removes what they had seen, nothing else.
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user_id})
+            assert c.execute(text("SELECT count(*) FROM camera_views")).scalar_one() == 0
+            assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 1
+
+        command.downgrade(cfg, "0016_species_hidden")
+        assert "camera_views" not in inspect(eng).get_table_names()
+        assert "thumbnail_path" not in _columns(eng, "images")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0016_species_hidden")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert set(_columns(eng, "camera_views")) == {"user_id", "camera_id", "seen_at"}
+        assert "thumbnail_path" in _columns(eng, "images")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_image_arrivals_index_upgrade_down_and_up_again(fresh_db):
+    """0018 on a real 0017 database: the index the map's "new" count reads."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0017_camera_views")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM, index included; restore the 0017 shape first.
+            c.execute(text("DROP INDEX ix_images_camera_created"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),'photo.jpg',false)"
+            ), {"c": camera_id})
+        assert _index(eng, "images", "ix_images_camera_created") is None
+
+        command.upgrade(cfg, "head")
+        assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0017_camera_views")
+        assert _index(eng, "images", "ix_images_camera_created") is None
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0017_camera_views")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert _index(eng, "images", "ix_images_camera_created") == ["camera_id", "created_at"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_alerts_and_photo_notes_upgrade_down_and_up_again(fresh_db):
+    """0019 on a real 0018 database: people's alert choices survive and every camera
+    starts on; notes go with their photo but outlive the person who wrote them."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0018_image_arrivals")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0018 shape first.
+            c.execute(text("DROP TABLE photo_notes"))
+            c.execute(text("ALTER TABLE notification_prefs DROP COLUMN muted_camera_ids"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            user_id = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'pedro@x.local','h','member') RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text(
+                "INSERT INTO notification_prefs (user_id,enabled,species_ids) "
+                "VALUES (:u,true,'[\"wild_boar\"]'::jsonb)"
+            ), {"u": user_id})
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            image_id = c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),'photo.jpg',false) RETURNING id"
+            ), {"c": camera_id}).scalar_one()
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            pref = c.execute(text("SELECT enabled, species_ids, muted_camera_ids "
+                                  "FROM notification_prefs")).one()
+            assert pref == (True, ["wild_boar"], [])  # kept, and every camera on
+            for words in (None, "Big boar, third night running"):
+                c.execute(text("INSERT INTO photo_notes (id,image_id,user_id,text) "
+                               "VALUES (gen_random_uuid(),:i,:u,:t)"),
+                          {"i": image_id, "u": user_id, "t": words})
+            with pytest.raises(DBAPIError), c.begin_nested():
+                c.execute(text("INSERT INTO photo_notes (id,image_id,text) "
+                               "VALUES (gen_random_uuid(),:i,:t)"), {"i": image_id, "t": "x" * 141})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        # The person goes, what they said stays; the photo goes, its notes go.
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user_id})
+            assert c.execute(text("SELECT count(*) FROM photo_notes "
+                                  "WHERE user_id IS NULL")).scalar_one() == 2
+            c.execute(text("DELETE FROM images WHERE id=:i"), {"i": image_id})
+            assert c.execute(text("SELECT count(*) FROM photo_notes")).scalar_one() == 0
+
+        command.downgrade(cfg, "0018_image_arrivals")
+        assert "photo_notes" not in inspect(eng).get_table_names()
+        assert "muted_camera_ids" not in _columns(eng, "notification_prefs")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0018_image_arrivals")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "muted_camera_ids" in _columns(eng, "notification_prefs")
+        assert _index(eng, "photo_notes", "ix_photo_notes_image_id") == ["image_id"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
+    """0020 on a real 0019 database: a login added twice (in two cases) becomes one,
+    its cameras and photos kept; a UBox camera whose login was removed is switched
+    off; every photo starts with no failed download against it."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0019_camera_alerts_photo_notes")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0019 shape first.
+            c.execute(text("DROP TABLE client_errors"))
+            c.execute(text("DROP INDEX uq_camera_accounts_provider_login"))
+            for table, column in (
+                ("camera_accounts", "last_attempt_at"), ("camera_accounts", "last_ok_at"),
+                ("camera_accounts", "last_error"), ("camera_accounts", "reported_cameras"),
+                ("camera_accounts", "session_enc"),
+                ("cameras", "photos_listed_to"), ("cameras", "import_failures"),
+                ("cameras", "photos_gap_from"), ("cameras", "photos_gap_to"),
+                ("cameras", "fetch_error"), ("images", "download_attempts"),
+            ):
+                c.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            first, second = (c.execute(text(
+                "INSERT INTO camera_accounts (id,estate_id,username,provider,password_enc,"
+                "active,created_at) VALUES (gen_random_uuid(),:e,:u,'spypoint','x',true,"
+                "now() - make_interval(days => :d)) RETURNING id"
+            ), {"e": estate_id, "u": user, "d": days}).scalar_one()
+                for user, days in (("julle@x.local", 2), ("Julle@x.local", 1)))
+            doubled = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,account_id,spypoint_id,name,"
+                "name_is_custom,active) VALUES (gen_random_uuid(),:e,:a,'sp-1','Charca',"
+                "false,true) RETURNING id"
+            ), {"e": estate_id, "a": second}).scalar_one()
+            orphan = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,ubox_uid,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'ubox-1','Orchard',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            suntek = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Suntek',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,spypoint_photo_id,captured_at,reviewed) "
+                "VALUES (gen_random_uuid(),:c,'p-1',now(),false)"
+            ), {"c": doubled})
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            accounts = dict(c.execute(text(
+                "SELECT id, active FROM camera_accounts")).all())
+            assert accounts == {first: True, second: False}  # the first copy stays
+            cameras = dict(c.execute(text("SELECT id, active FROM cameras")).all())
+            assert cameras == {doubled: True, orphan: False, suntek: True}
+            assert c.execute(text("SELECT account_id FROM cameras WHERE id=:c"),
+                             {"c": doubled}).scalar_one() == first
+            assert c.execute(text(
+                "SELECT download_attempts, spypoint_photo_id FROM images")).one() == (0, "p-1")
+            assert c.execute(text("SELECT import_failures FROM cameras WHERE id=:c"),
+                             {"c": orphan}).scalar_one() == {}
+            # Nothing listed or failing yet: the first fetch finds its own place.
+            assert c.execute(text(
+                "SELECT photos_listed_to, photos_gap_from, photos_gap_to, fetch_error "
+                "FROM cameras WHERE id=:c"), {"c": doubled}).one() == (None, None, None, None)
+            assert c.execute(text("SELECT session_enc FROM camera_accounts WHERE id=:a"),
+                             {"a": first}).scalar_one() is None
+            # One active copy of a login from now on, whatever the case of its email.
+            with pytest.raises(IntegrityError), c.begin_nested():
+                c.execute(text(
+                    "INSERT INTO camera_accounts (id,estate_id,username,provider,"
+                    "password_enc,active) VALUES (gen_random_uuid(),:e,'JULLE@x.local',"
+                    "'spypoint','x',true)"), {"e": estate_id})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0019_camera_alerts_photo_notes")
+        assert "last_error" not in _columns(eng, "camera_accounts")
+        assert "photos_listed_to" not in _columns(eng, "cameras")
+        gone = {"photos_gap_from", "photos_gap_to", "fetch_error"}
+        assert not gone & set(_columns(eng, "cameras"))
+        assert "session_enc" not in _columns(eng, "camera_accounts")
+        assert "download_attempts" not in _columns(eng, "images")
+        assert _index(eng, "camera_accounts", "uq_camera_accounts_provider_login") is None
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM camera_accounts")).scalar_one() == 2
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0019_camera_alerts_photo_notes")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "last_ok_at" in _columns(eng, "camera_accounts")
+        assert "import_failures" in _columns(eng, "cameras")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_client_errors_upgrade_down_and_up_again(fresh_db):
+    """0021 on a real 0020 database: the new table arrives empty beside the rows already
+    there, a report outlives the person whose phone sent it, and going back down
+    removes only the reports."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0020_camera_login_status")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0020 shape first.
+            c.execute(text("DROP TABLE client_errors"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            user_id = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'pedro@x.local','h','member') RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            assert c.execute(text("SELECT count(*) FROM users")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM client_errors")).scalar_one() == 0
+            c.execute(text(
+                "INSERT INTO client_errors (id,user_id,kind,message,route,happened_at) "
+                "VALUES (gen_random_uuid(),:u,'chunk',:m,'/map',now() - interval '3 hours')"
+            ), {"u": user_id, "m": "Failed to fetch dynamically imported module"})
+            with pytest.raises(DBAPIError), c.begin_nested():
+                c.execute(text("INSERT INTO client_errors (id,kind,message) "
+                               "VALUES (gen_random_uuid(),'error',:m)"), {"m": "x" * 501})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user_id})
+            assert c.execute(text("SELECT count(*) FROM client_errors "
+                                  "WHERE user_id IS NULL")).scalar_one() == 1
+
+        command.downgrade(cfg, "0020_camera_login_status")
+        assert "client_errors" not in inspect(eng).get_table_names()
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM estates")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0020_camera_login_status")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
     finally:
         eng.dispose()

@@ -42,6 +42,19 @@ A runnable foundation:
 - Celery worker + beat scheduler (SPYPOINT sync is a heartbeat until M1).
 - React + TypeScript frontend shell: login + an honest "still learning" Tonight placeholder.
 
+### The cameras on the map (September 2026)
+
+The Map tab is built around what the trail cameras see, WeHunt-style ([scope](docs/wehunt-features.md),
+[details](docs/map-ux-update.md)). Each camera sits on the map as its latest animal photo with a count of
+what is new to *you*; tapping it opens a sheet with last night in visits ("Wild boar · 2 visits"), a strip
+of its photos, and its alert switch. **Activity** sizes a circle at each camera by visits per night it was
+working, filtered by animal, part of the night and period; **Replay** plays one night back camera by camera,
+with a dashed arrow, marked as a guess, where the same animal likely went next. Every view counts visits
+(a burst of frames is one visit) over the same 18:00–08:00 night, and hidden species and "nothing in it"
+photos never count. Each person can mute a busy camera, and anyone but a viewer can mark a photo
+**Worth a look** with a short note, which the team finds on Photos and on that camera's sheet. Hunt
+planning, collaboration and safety are parked for later.
+
 See [`docs/`](docs/00-overview.md) for the full design (audit, architecture, schema, SPYPOINT,
 AI pipeline, forecasting, deployment, Git self-update). Build order and roadmap are in
 [`docs/00-overview.md`](docs/00-overview.md).

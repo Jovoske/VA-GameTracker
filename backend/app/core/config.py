@@ -13,6 +13,11 @@ class Settings(BaseSettings):
 
     # Security
     jwt_secret: str = "dev-secret-change-me"
+    # Key for saved camera-login passwords. Unset, JWT_SECRET is used. Set it (and let
+    # one fetch run) before changing JWT_SECRET, or put the old JWT_SECRET in
+    # PREVIOUS_JWT_SECRET, and saved logins keep working (app.core.crypto).
+    credentials_key: str = ""
+    previous_jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 43200  # 30 days — a field app shouldn't log you out weekly
 
@@ -28,6 +33,10 @@ class Settings(BaseSettings):
     spypoint_username: str = ""
     spypoint_password: str = ""
     sync_interval_minutes: int = 15
+
+    # Where the Suntek FTP/email importer keeps its spool (ready/, failed/ ...), for the
+    # counts on the admin status. Unset: <data>/ftp-spool beside the models folder.
+    ftp_spool_root: str = ""
 
     # Notifications (Web Push). The VAPID key pair is generated on first use and kept
     # in the database, so nothing here is required. The subject is the contact a push

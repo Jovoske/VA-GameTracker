@@ -8,14 +8,17 @@ import {
   subscribeThisDevice,
   unsubscribeThisDevice,
 } from '../push'
+import CameraAlertRow from './CameraAlerts'
 import SettingsSection from './SettingsSection'
-import Toggle from './Toggle'
+import SwitchRow from './SwitchRow'
 
 type SpeciesPref = { id: string; common_name: string; selected: boolean; detections: number }
+type CameraPref = { id: string; name: string; alerts: boolean }
 type Settings = {
   enabled: boolean
   configured: boolean
   species: SpeciesPref[]
+  cameras: CameraPref[]
   public_key: string
   subscriptions: number
 }
@@ -60,6 +63,14 @@ const row = {
  * on once; each phone or tablet is then added from that device. Alerts off
  * silences all of them.
  */
+/** The line over the camera switches, true to them: how many are on, and what muting does. */
+function camerasHint(cameras: { alerts: boolean }[]): string {
+  const on = cameras.filter((c) => c.alerts).length
+  if (on === cameras.length) return 'Every camera is on. Mute a busy one, like a feeder, and you hear nothing from it. Only for you.'
+  if (on === 0) return 'Every camera is muted, so you hear nothing from any of them. Only for you: the team still hears.'
+  return `${on} of ${cameras.length} cameras on. A muted one sends you nothing; the team still hears from it. Only for you.`
+}
+
 export default function NotificationSettings() {
   const [s, setS] = useState<Settings | null>(null)
   const [loadErr, setLoadErr] = useState('')
@@ -201,18 +212,8 @@ export default function NotificationSettings() {
         <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
       ) : (
         <>
-          <div style={row}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 14 }}>Alerts</div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>{deviceLine}</div>
-            </div>
-            <Toggle
-              on={s.enabled}
-              disabled={busy}
-              onChange={() => setEnabled(!s.enabled)}
-              label="Alerts"
-            />
-          </div>
+          {/* The same whole-row switch as the cameras below and the map's sheets. */}
+          <SwitchRow label="Alerts" note={deviceLine} on={s.enabled} disabled={busy} onChange={() => setEnabled(!s.enabled)} />
 
           {s.enabled && support.ok && perm !== 'denied' && device === 'not_subscribed' && (
             <div style={{ padding: '4px 0 8px' }}>
@@ -231,23 +232,29 @@ export default function NotificationSettings() {
             </div>
           ) : (
             s.species.map((sp) => (
-              <div key={sp.id} style={row}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, color: sp.selected ? 'var(--text)' : 'var(--text-dim)' }}>
-                    {sp.common_name}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                    {sp.detections} sighting{sp.detections === 1 ? '' : 's'}
-                  </div>
-                </div>
-                <Toggle
-                  on={sp.selected}
-                  disabled={savingId === sp.id}
-                  onChange={() => toggleSpecies(sp)}
-                  label={`Alerts about ${sp.common_name}`}
-                />
-              </div>
+              <SwitchRow key={sp.id} label={sp.common_name} on={sp.selected} disabled={savingId === sp.id}
+                note={`${sp.detections} sighting${sp.detections === 1 ? '' : 's'}`} onChange={() => toggleSpecies(sp)} />
             ))
+          )}
+
+          {s.cameras.length > 0 && (
+            <>
+              <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
+                Cameras
+              </div>
+              <p className="settings-hint">{camerasHint(s.cameras)}</p>
+              {s.cameras.map((c) => (
+                <CameraAlertRow
+                  key={c.id}
+                  id={c.id}
+                  name={c.name}
+                  alerts={c.alerts}
+                  onSaved={(r) => setS((cur) => cur && {
+                    ...cur, cameras: cur.cameras.map((x) => (x.id === c.id ? { ...x, alerts: r.alerts } : x)),
+                  })}
+                />
+              ))}
+            </>
           )}
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>

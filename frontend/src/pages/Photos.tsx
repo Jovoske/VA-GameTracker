@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, imageUrl } from '../api'
-import PhotoLightbox from '../components/PhotoLightbox'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
+import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import './photos.css'
 
 /**
  * Every animal photo from every camera, newest first. Pick the animals and
  * cameras you want with the chips, or none for everything. Empty frames and
- * hidden animals (Settings) never appear here.
+ * hidden animals (Settings) never appear here. Above them, the photos the team
+ * marked "Worth a look", once there are any.
  */
 
 type Filters = {
@@ -24,8 +26,14 @@ type Photo = {
   label: string
   species_id: string | null
   group_size: number | null
+  notes_count: number
 }
 type Page = { items: Photo[]; next_before: string | null }
+type Failure = Error & { status?: number }
+
+const toViewer = (p: Photo): LightboxPhoto => ({
+  id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count,
+})
 
 const PICK_KEY = 'gs.photos.pick'
 const PAGE = 60
@@ -50,6 +58,10 @@ const dayOf = (iso: string) => {
 }
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
+/** Newest first, as the server orders the feed: by when the photo was taken, then id. */
+const feedOrder = (a: Photo, b: Photo) =>
+  Date.parse(b.captured_at) - Date.parse(a.captured_at) || (b.image_id < a.image_id ? -1 : b.image_id > a.image_id ? 1 : 0)
+
 export default function Photos() {
   const [params, setParams] = useSearchParams()
   const [filters, setFilters] = useState<Filters | null>(null)
@@ -60,14 +72,34 @@ export default function Photos() {
     if (sp || cam) return { species: sp ? sp.split(',') : [], cameras: cam ? cam.split(',') : [] }
     return readPick()
   })
+  // The newest page from earlier in this session paints at once, then the network
+  // replaces it: coming back to Photos from another tab is not "Loading…" again.
   const [photos, setPhotos] = useState<Photo[] | null>(null)
   const [nextBefore, setNextBefore] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const [err, setErr] = useState('')
+  // The feed on screen is what this session saw earlier, because the network didn't answer.
+  const [savedCopy, setSavedCopy] = useState<Got<Page> | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
+  // A photo a link named that isn't in the loaded pages: opened on its own.
+  const [single, setSingle] = useState<Photo | null>(null)
+  const [notice, setNotice] = useState('')
+  // Bumped when a note changes from the grid, so the strip above asks again.
+  const [notesTick, setNotesTick] = useState(0)
   const wantImage = useRef<string | null>(params.get('image'))
   const request = useRef(0)
   const sentinel = useRef<HTMLDivElement>(null)
+  const photosRef = useRef(photos)
+  photosRef.current = photos
+  const nextBeforeRef = useRef(nextBefore)
+  nextBeforeRef.current = nextBefore
+  // What the page is still asking for; leaving the page drops it (audit K-08).
+  const ctl = useRef<AbortController | null>(null)
+  const signal = () => {
+    if (!ctl.current || ctl.current.signal.aborted) ctl.current = new AbortController()
+    return ctl.current.signal
+  }
+  useEffect(() => () => ctl.current?.abort(), [])
 
   const query = useCallback((before?: string | null) => {
     const q = new URLSearchParams()
@@ -81,37 +113,127 @@ export default function Photos() {
   const load = useCallback(() => {
     const id = ++request.current
     setErr('')
-    api<Page>(query())
-      .then((page) => {
+    const hit = peek<Page>(query())
+    if (hit) { setPhotos(hit.data.items); setNextBefore(hit.data.next_before) }
+    getFresh<Page>(query(), { signal: signal() })
+      .then((got) => {
         if (id !== request.current) return
-        setPhotos(page.items)
-        setNextBefore(page.next_before)
+        setPhotos(got.data.items)
+        setNextBefore(got.data.next_before)
+        setSavedCopy(got.stale ? got : null)
       })
-      .catch((e) => { if (id === request.current) setErr(e.message) })
-    api<Filters>('/photos/filters').then(setFilters).catch(() => {})
+      .catch((e) => { if (id === request.current && (e as Error).name !== 'AbortError') setErr(e.message) })
   }, [query])
 
-  useEffect(load, [load])
-  useRefetchOnReturn(load, 120_000)
+  // The chips, once they arrive, also clean the saved pick: an animal hidden or
+  // turned off since, or a camera taken down, filtered the feed invisibly with no
+  // chip lit (audit C-27, I-07). Only against a fresh list, never a saved one.
+  const loadFilters = useCallback(() => {
+    const hit = peek<Filters>('/photos/filters')
+    if (hit) setFilters(hit.data)
+    getFresh<Filters>('/photos/filters', { signal: signal() })
+      .then((got) => {
+        setFilters(got.data)
+        if (got.stale) return
+        const sp = new Set(got.data.species.map((x) => x.id))
+        const cams = new Set(got.data.cameras.map((x) => x.id))
+        setPick((p) => {
+          const next = { species: p.species.filter((x) => sp.has(x)), cameras: p.cameras.filter((x) => cams.has(x)) }
+          if (next.species.length === p.species.length && next.cameras.length === p.cameras.length) return p
+          try { localStorage.setItem(PICK_KEY, JSON.stringify(next)) } catch { /* private mode */ }
+          return next
+        })
+      })
+      .catch(() => {})
+  }, [])
 
-  // Open the photo a notification pointed at, once it is in the list.
+  // Not with a photo open: the list would change under it (and under a note being
+  // written, which is often when someone steps out to copy a message). The strip
+  // above asks again by itself.
+  const viewing = useRef(false)
+  viewing.current = zoom != null || single != null
+
+  /**
+   * Back in the app: put the photos that came in since into the list.
+   *
+   * This used to start the list over from the newest 60, which threw away every
+   * page scrolled through and, with a photo open, pulled the list out from under
+   * the viewer (a black screen, audit C-02 and I-01). Now the pages already loaded
+   * stay, and only when more than a page of new photos came in (the hunter was away
+   * a long time) does it start over from the newest.
+   *
+   * Merged by when each photo was taken, not only put on top: the cameras deliver
+   * at different delays (SPYPOINT's sync, UBox, an FTP upload), so a photo that
+   * arrives late can be older than the newest one already on screen. Anything down
+   * to the oldest photo loaded belongs in the list; older ones come with "Show older".
+   */
+  const loadNewer = useCallback(() => {
+    const top = photosRef.current?.[0]
+    if (!top) { load(); return }
+    const id = request.current
+    loadFilters()
+    getFresh<Page>(query(), { signal: signal() })
+      .then((got) => {
+        if (id !== request.current || viewing.current) return
+        setSavedCopy(got.stale ? got : null)
+        if (got.stale) return
+        const page = got.data
+        const since = Date.parse(top.captured_at)
+        const oldest = page.items[page.items.length - 1]
+        if (page.items.length >= PAGE && oldest && Date.parse(oldest.captured_at) > since) {
+          setPhotos(page.items)
+          setNextBefore(page.next_before)
+          return
+        }
+        setPhotos((prev) => {
+          if (!prev?.length) return page.items
+          const have = new Set(prev.map((p) => p.image_id))
+          const floor = Date.parse(prev[prev.length - 1].captured_at)
+          const fresh = page.items.filter((p) => !have.has(p.image_id) && (!nextBeforeRef.current || Date.parse(p.captured_at) >= floor))
+          return fresh.length ? [...prev, ...fresh].sort(feedOrder) : prev
+        })
+      })
+      .catch(() => {})
+  }, [load, loadFilters, query])
+
+  useEffect(load, [load])
+  useEffect(loadFilters, [loadFilters])
+  useRefetchOnReturn(() => { if (!viewing.current) loadNewer() }, 120_000)
+
+  // Open the photo a notification pointed at: in the list when it is on the first
+  // page, otherwise asked for by itself (a push tapped the next morning can be
+  // many pages down by then).
   useEffect(() => {
     const want = wantImage.current
     if (!want || !photos) return
     wantImage.current = null
     setParams({}, { replace: true })
     const at = photos.findIndex((p) => p.image_id === want)
-    if (at >= 0) setZoom(at)
+    if (at >= 0) { setZoom(at); return }
+    api<Photo>(`/photos/${encodeURIComponent(want)}`, { timeoutMs: 20_000 })
+      .then(setSingle)
+      .catch((e: Failure) => setNotice(e.status === 404 || e.status === 422
+        ? 'That photo isn’t available any more.'
+        : `Couldn’t open that photo. ${e.message}`))
   }, [photos, setParams])
+
+  /** A note was added or removed in a viewer: the tile's marker and the strip follow. */
+  const notesChanged = useCallback((id: string, n: number) => {
+    setPhotos((prev) => prev && prev.map((p) => (p.image_id === id ? { ...p, notes_count: n } : p)))
+  }, [])
 
   const loadMore = useCallback(() => {
     if (!nextBefore || loadingMore) return
     const id = request.current
     setLoadingMore(true)
-    api<Page>(query(nextBefore))
+    api<Page>(query(nextBefore), { signal: signal(), timeoutMs: 20_000 })
       .then((page) => {
         if (id !== request.current) return
-        setPhotos((prev) => [...(prev ?? []), ...page.items])
+        // Never twice: a late photo merged on return may sit on a page boundary.
+        setPhotos((prev) => {
+          const have = new Set((prev ?? []).map((p) => p.image_id))
+          return [...(prev ?? []), ...page.items.filter((p) => !have.has(p.image_id))]
+        })
         setNextBefore(page.next_before)
       })
       .catch((e) => { if (id === request.current) setErr(e.message) })
@@ -149,6 +271,9 @@ export default function Photos() {
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
       <h1 className="page-title">Photos</h1>
 
+      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>}
+      <HighlightStrip refreshKey={notesTick} backLabel="Back to photos" onChange={notesChanged} />
+
       <div className="photos-filters">
         <div className="photos-filter-row">
           <button className="photos-chip" aria-pressed={everything} onClick={() => choose({ species: [], cameras: [] })}>
@@ -177,6 +302,12 @@ export default function Photos() {
       </div>
 
       {err && <div className="status-panel" role="alert">Could not load photos: {err}<button className="text-action" onClick={load}>Retry</button></div>}
+      {savedCopy && !err && (
+        <div className="status-panel" role="status">
+          {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
+          <button className="text-action" onClick={load}>Try again</button>
+        </div>
+      )}
       {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
       {photos && photos.length === 0 && (
         <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>
@@ -197,7 +328,8 @@ export default function Photos() {
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => setZoom(g.start + j)}
               >
-                <img src={imageUrl(p.file_url)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
+                <img src={thumbUrl(p.image_id)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
+                <NoteMark count={p.notes_count} />
                 <div className="photos-tile-meta">
                   <span className="photos-tile-label">{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
                   <span className="photos-tile-when">{timeOf(p.captured_at)}</span>
@@ -222,10 +354,19 @@ export default function Photos() {
 
       {zoom != null && photos && (
         <PhotoLightbox
-          photos={photos.map((p) => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label }))}
+          photos={photos.map(toViewer)}
           start={zoom}
           backLabel="Back to photos"
           onClose={() => setZoom(null)}
+          onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
+        />
+      )}
+      {single && (
+        <PhotoLightbox
+          photos={[toViewer(single)]}
+          backLabel="Back to photos"
+          onClose={() => setSingle(null)}
+          onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
         />
       )}
     </div>

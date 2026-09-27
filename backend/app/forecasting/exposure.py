@@ -22,14 +22,16 @@ counts arrivals instead, and `group_size` recovers the herd.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from bisect import bisect_left
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, cast, func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models import Camera, CameraNight, Detection, Image
+from app.models import Camera, CameraNight, Image
 
 log = get_logger(__name__)
 
@@ -50,10 +52,19 @@ VISIT_GAP = timedelta(minutes=30)
 # throttled camera's silence as an observation of absence.
 CREDIT_BLIND_DAYS = 7
 
+# A camera silent for longer than this, frames on both sides or not, is not presumed
+# to have been watching: two weeks of nothing is a fault or a wrong clock.
+MAX_PRESUMED_GAP_DAYS = 14
+
 
 def night_expr(col=Image.captured_at):
     """SQL expression for the night an image belongs to."""
     return func.date(func.timezone(_TZ, col) - NIGHT_SHIFT)
+
+
+def night_key_start(night: date) -> datetime:
+    """The first moment night_expr puts on `night`: 06:00 local that morning."""
+    return datetime.combine(night, time(6), tzinfo=ZoneInfo(_TZ))
 
 
 def local_hour(col=Image.captured_at):
@@ -97,6 +108,7 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
     by_night = {r.night: r for r in rows}
     first, last = rows[0].night, rows[-1].night
     observed = sorted(by_night)
+    today = datetime.now(ZoneInfo(_TZ)).date()
 
     # SPYPOINT reports each camera's photo-credit usage and billing cycle. A camera
     # that hit its monthly limit stopped *sending*, not necessarily stopped seeing —
@@ -124,10 +136,17 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
             # No frames at all. If the camera produced frames on both sides it was
             # almost certainly up and simply saw nothing — a real zero. Otherwise we
             # genuinely do not know, and guessing is what caused the original bug.
-            has_before = any(n < cur for n in observed)
-            has_after = any(n > cur for n in observed)
-            state = "PRESUMED_UP" if (has_before and has_after) else "UNKNOWN"
-            states[cur] = (state, 0, 0)
+            # Not across a long silence, though (one frame from a reset camera clock
+            # would otherwise make years of "watched, saw nothing"), and never for a
+            # night that has not happened yet (a clock running ahead).
+            at = bisect_left(observed, cur)
+            before = observed[at - 1] if at > 0 else None
+            after = observed[at] if at < len(observed) else None
+            presumed = (
+                before is not None and after is not None
+                and (after - before).days <= MAX_PRESUMED_GAP_DAYS and cur < today
+            )
+            states[cur] = ("PRESUMED_UP" if presumed else "UNKNOWN", 0, 0)
         elif row.unprocessed:
             # Frames exist but the detector has not seen them. Counting this as
             # "no animals" is the backlog artefact; it is not an observation yet.
@@ -189,57 +208,39 @@ def excluded_nights(db: Session, camera_id=None) -> int:
 # ── independent visits ──────────────────────────────────────────────────────
 
 
-def visits_by_night(db: Session, *, camera_id=None, species_id=None) -> dict:
+def visits_by_night(db: Session, *, camera_id=None, species_id=None,
+                    start: datetime | None = None, end: datetime | None = None) -> dict:
     """{(night, camera_id, species_id): {frames, visits, animals}}
 
     A visit is an arrival: consecutive detections of the same species at the same
-    camera separated by more than VISIT_GAP. `animals` uses group_size, which the
-    pipeline already computes per frame and which nothing has ever used.
-    """
-    gap_seconds = int(VISIT_GAP.total_seconds())
-    where = ["1=1"]
-    params: dict = {"gap": gap_seconds, "tz": _TZ}
-    if camera_id:
-        where.append("i.camera_id = :camera_id")
-        params["camera_id"] = camera_id
-    if species_id:
-        where.append("d.species_id = :species_id")
-        params["species_id"] = species_id
+    camera separated by more than VISIT_GAP. The visits themselves come from
+    visits.visit_rows, the rule every map view counts with, so this agrees with
+    them: only checked animal photos, never a hidden species, and a kept photo
+    nobody has named is an unnamed (None) visit. A visit belongs to the night of its
+    first frame. `animals` uses group_size, which the pipeline already computes per
+    frame and which nothing has ever used.
 
-    sql = text(
-        f"""
-        WITH ordered AS (
-            SELECT
-                i.camera_id,
-                d.species_id,
-                i.captured_at,
-                COALESCE(d.group_size, 1) AS group_size,
-                date(timezone(:tz, i.captured_at) - interval '6 hours') AS night,
-                LAG(i.captured_at) OVER (
-                    PARTITION BY i.camera_id, d.species_id ORDER BY i.captured_at
-                ) AS prev_at
-            FROM detections d
-            JOIN images i ON i.id = d.image_id
-            WHERE {' AND '.join(where)}
-        ), marked AS (
-            SELECT *,
-                CASE
-                    WHEN prev_at IS NULL
-                      OR EXTRACT(EPOCH FROM (captured_at - prev_at)) > :gap
-                    THEN 1 ELSE 0
-                END AS is_new_visit
-            FROM ordered
-        )
-        SELECT night, camera_id, species_id,
-               COUNT(*)                AS frames,
-               SUM(is_new_visit)       AS visits,
-               MAX(group_size)         AS animals
-        FROM marked
-        GROUP BY night, camera_id, species_id
-        """
-    )
+    Only frames in [start, end) are read. Without them this is every photo ever
+    taken, which grows with the archive: a caller that wants a month should start
+    a whole night before the first night it keeps (night_key_start of that night
+    before), so a visit already under way is counted on its own night, not cut
+    in two at `start`.
+    """
+    # Imported here: visits reads VISIT_GAP and night_expr from this module.
+    from app.forecasting.visits import visit_rows
+
+    v = visit_rows(start=start, end=end, camera_ids=[camera_id] if camera_id else None,
+                   species_id=species_id)
+    rows = db.execute(
+        select(
+            v.c.night, v.c.camera_id, v.c.species_id,
+            func.sum(v.c.frames).label("frames"),
+            func.count().label("visits"),
+            func.max(v.c.max_group).label("animals"),
+        ).group_by(v.c.night, v.c.camera_id, v.c.species_id)
+    ).all()
     out: dict = {}
-    for r in db.execute(sql, params).all():
+    for r in rows:
         out[(r.night, r.camera_id, r.species_id)] = {
             "frames": int(r.frames),
             "visits": int(r.visits or 0),

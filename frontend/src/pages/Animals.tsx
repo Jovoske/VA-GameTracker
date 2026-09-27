@@ -1,9 +1,10 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, imageUrl } from '../api'
+import { api, getFresh, peek, thumbUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
+import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import './animals.css'
 
@@ -22,6 +23,7 @@ type SpImg = {
   camera: string
   label: string
   group_size: number | null
+  notes_count: number
 }
 type Animal = {
   id: string
@@ -51,9 +53,21 @@ function lastSeen(s: string | null): string {
   return `Last seen ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
 }
 
+// Counting every sighting is slower than a page on the estate box, but never forever.
+const SLOW_MS = 30_000
+
 export default function Animals() {
+  // Leaving the page drops what it was still asking for, so the next tab on a thin
+  // link isn't queued behind it; what this session last saw paints at once (K-08).
+  const ctl = useRef<AbortController | null>(null)
+  const signal = () => {
+    if (!ctl.current || ctl.current.signal.aborted) ctl.current = new AbortController()
+    return ctl.current.signal
+  }
+  useEffect(() => () => ctl.current?.abort(), [])
+
   // ── species browser ─────────────────────────────────────
-  const [species, setSpecies] = useState<SpeciesRow[]>([])
+  const [species, setSpecies] = useState<SpeciesRow[]>(() => peek<SpeciesRow[]>('/species/spotted')?.data ?? [])
   const [spErr, setSpErr] = useState('')
   const [spLoading, setSpLoading] = useState(true)
   const [galleryErr, setGalleryErr] = useState('')
@@ -72,16 +86,17 @@ export default function Animals() {
   )
 
   function loadSpecies() {
+    const sig = signal()
     setSpErr('')
     setSpLoading(true)
-    api<SpeciesRow[]>('/species/spotted').then((rows) => {
+    getFresh<SpeciesRow[]>('/species/spotted', { signal: sig, timeoutMs: SLOW_MS }).then(({ data: rows }) => {
       setSpecies(rows)
       const want = deepLink.current
       if (!want) return
       const sp = rows.find((r) => r.id === want.species)
       if (sp) openGallery(sp, null)
       else { deepLink.current = null; setParams({}, { replace: true }) }
-    }).catch((e) => setSpErr(e.message)).finally(() => setSpLoading(false))
+    }).catch((e) => { if (!sig.aborted) setSpErr(e.message) }).finally(() => setSpLoading(false))
   }
   useEffect(loadSpecies, [])
   useEffect(() => {
@@ -102,7 +117,7 @@ export default function Animals() {
     setGalleryImgs(null)
     try {
       const q = label ? `?label=${encodeURIComponent(label)}` : ''
-      const photos = await api<SpImg[]>(`/species/${sp.id}/images${q}`)
+      const photos = await api<SpImg[]>(`/species/${sp.id}/images${q}`, { signal: signal(), timeoutMs: SLOW_MS })
       if (request === galleryRequest.current) setGalleryImgs(photos)
     } catch {
       if (request === galleryRequest.current) setGalleryErr('Photos did not load. Check your signal and try again.')
@@ -115,7 +130,7 @@ export default function Animals() {
   }
 
   // ── named animals (experimental) ────────────────────────
-  const [items, setItems] = useState<Animal[]>([])
+  const [items, setItems] = useState<Animal[]>(() => peek<Animal[]>('/animals')?.data ?? [])
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
   const [sel, setSel] = useState<Set<string>>(new Set())
@@ -123,11 +138,12 @@ export default function Animals() {
   const [busy, setBusy] = useState('')
 
   function load() {
+    const sig = signal()
     setErr('')
     setLoading(true)
-    api<Animal[]>('/animals')
-      .then((d) => setItems(d))
-      .catch((e) => setErr(e.message))
+    getFresh<Animal[]>('/animals', { signal: sig, timeoutMs: SLOW_MS })
+      .then((got) => setItems(got.data))
+      .catch((e) => { if (!sig.aborted) setErr(e.message) })
       .finally(() => setLoading(false))
   }
   useEffect(load, [])
@@ -222,7 +238,7 @@ export default function Animals() {
             >
               {sp.thumb_image_id && (
                 <img
-                  src={imageUrl(`/api/images/${sp.thumb_image_id}/file`)}
+                  src={thumbUrl(sp.thumb_image_id)}
                   loading="lazy"
                   alt={sp.name}
                 />
@@ -325,7 +341,7 @@ export default function Animals() {
                     <div className="an-animal-photo">
                       {a.thumb_image_id && (
                         <img
-                          src={imageUrl(`/api/images/${a.thumb_image_id}/file`)}
+                          src={thumbUrl(a.thumb_image_id)}
                           loading="lazy"
                           alt={a.label}
                         />
@@ -407,7 +423,8 @@ export default function Animals() {
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                     onClick={() => setZoom(i)}
                   >
-                    <img src={imageUrl(im.file_url)} loading="lazy" alt={im.label} />
+                    <img src={thumbUrl(im.image_id)} loading="lazy" alt={im.label} />
+                    <NoteMark count={im.notes_count} />
                     <div className="an-gallery-caption">
                       <span className="an-gallery-label">{im.label}</span>
                       <span className="an-gallery-date">
@@ -425,11 +442,12 @@ export default function Animals() {
       {/* ── Fullscreen photo ──────────────────────────────── */}
       {zoom != null && galleryImgs && (
         <PhotoLightbox
-          photos={galleryImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label }))}
+          photos={galleryImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label, notes_count: im.notes_count }))}
           start={zoom}
           backLabel="Back to gallery"
           zIndex={60}
           onClose={() => setZoom(null)}
+          onNotesChange={(id, n) => setGalleryImgs((imgs) => imgs && imgs.map((im) => (im.image_id === id ? { ...im, notes_count: n } : im)))}
         />
       )}
     </div>

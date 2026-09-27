@@ -8,6 +8,8 @@ from PIL import Image as PillowImage
 from sqlalchemy import func, select, text
 
 from app.core.crypto import encrypt
+from app.health import camera_health
+from app.ingestion import logins
 from app.ingestion import ubox_sync as sync
 from app.ingestion.ubox import UboxDevice, UboxError, UboxEvent, UboxPageLimitError
 from app.models import Camera, CameraAccount, Estate, Image, SyncLog, User
@@ -92,6 +94,9 @@ class FakeClient:
     payloads = {}
     devices = [UboxDevice("cam-1", "UBox orchard", battery_pct=82, online=True)]
     fail_listing = False
+    signins = 0
+    token = None
+    token_valid_hours = None
 
     def __init__(self, username, password):
         assert password == "example-password"
@@ -103,7 +108,11 @@ class FakeClient:
         pass
 
     def login(self):
-        pass
+        FakeClient.signins += 1
+        self.token, self.token_valid_hours = f"session-{FakeClient.signins}", 696
+
+    def use_token(self, token):
+        self.token = token
 
     def list_devices(self):
         return self.devices
@@ -133,6 +142,7 @@ def setup(db_session, monkeypatch, tmp_path):
     FakeClient.events, FakeClient.downloads, FakeClient.windows = [], [], []
     FakeClient.payloads = {}
     FakeClient.fail_listing = False
+    FakeClient.signins = 0
     FakeClient.devices = [UboxDevice("cam-1", "UBox orchard", battery_pct=82, online=True)]
     monkeypatch.setattr(sync, "UboxClient", FakeClient)
     monkeypatch.setattr(sync.settings, "media_root", str(tmp_path / "media"))
@@ -168,7 +178,11 @@ def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, 
     assert camera.ubox_uid == "cam-1" and camera.spypoint_id is None
     assert camera.battery_pct == 82 and camera.photo_limit is None
     assert camera.last_report_at and camera.last_sync_at
-    user = User(id=setup.id, estate_id=setup.estate_id)
+    # A real login: the photo endpoints look the person up, as every other one does.
+    user = User(estate_id=setup.estate_id, email="viewer@ubox.local", password_hash="x",
+                role="viewer")
+    db_session.add(user)
+    db_session.commit()
     gallery = camera_images(camera.id, limit=40, include_empty=False, user=user, db=db_session)
     assert len(gallery) == 2 and all(i["file_url"] for i in gallery)
     for image in db_session.scalars(select(Image)):
@@ -211,10 +225,18 @@ def test_duplicate_content_no_image_and_bad_download_are_not_blank_tiles(db_sess
                            "https://example.com/bad": b"<html>expired</html>"}
     result = sync.sync_ubox_all(db_session)
     assert result["downloaded"] == 1 and result["duplicate"] == 1
-    assert result["no_image"] == 1 and result["failed"] == 1 and result["status"] == "error"
+    assert result["no_image"] == 1 and result["failed"] == 1
+    # One dead snapshot is a warning, not a failed login (E-08): the login counts as
+    # fetched, and the camera holds its place at the snapshot to try it again.
+    assert result["status"] == "partial"
+    assert result["accounts"][0]["error"] == (
+        "1 photo wouldn't download. It is tried again on the next fetch.")
     assert db_session.scalar(select(func.count(Image.id))) == 1
-    assert db_session.scalar(select(Camera)).last_sync_at is None
-    assert setup.last_sync_at is None
+    camera = db_session.scalar(select(Camera))
+    assert camera.last_sync_at == NOW + timedelta(seconds=360)
+    assert camera.import_failures["cam-1:bad"][0] == 1
+    assert setup.last_sync_at == NOW + timedelta(hours=1)
+    assert setup.last_error is None and setup.last_ok_at is not None
 
 
 @requires_db
@@ -233,7 +255,7 @@ def test_broken_snapshot_batch_stops_after_five_attempts(db_session, setup):
     FakeClient.payloads = {e.image_url: UboxError("expired") for e in FakeClient.events}
     result = sync.sync_ubox_all(db_session)
     assert result["failed"] == 5 and len(FakeClient.downloads) == 5
-    assert result["status"] == "error"
+    assert result["status"] == "partial"
 
 
 @requires_db
@@ -350,11 +372,13 @@ def test_failed_camera_commit_cleans_files_and_allows_next_camera(db_session, se
 
     monkeypatch.setattr(db_session, "commit", fail_first_camera_commit)
     result = sync.sync_ubox_all(db_session)
-    assert result["status"] == "error" and result["total"] == 1
+    # One camera's photos came in and the other's did not: partial, not a failure.
+    assert result["status"] == "partial" and result["total"] == 1
     assert db_session.scalar(select(Camera)).ubox_uid == "cam-2"
     assert db_session.scalar(select(func.count(Image.id))) == 1
     assert len(list(Path(sync.settings.media_root).rglob("*.jpg"))) == 1
-    assert db_session.scalar(select(SyncLog)).status == "error"
+    assert db_session.scalar(select(SyncLog)).status == "partial"
+    assert result["accounts"][0]["error"].startswith("1 of 2 cameras failed.")
 
 
 @requires_db
@@ -382,3 +406,132 @@ def test_concurrent_syncs_share_one_persisted_camera_allowance(db_session, setup
     assert db_session.scalar(select(func.count(Camera.id))) == 1
     assert db_session.scalar(select(func.count(Image.id))) == 1
     assert len(FakeClient.downloads) == 1
+
+
+@requires_db
+def test_a_long_outage_is_caught_up_not_left_as_a_hole(db_session, setup):
+    """E-06: three days without a fetch; the next one reads back to where it stopped."""
+    stopped = NOW - timedelta(days=3)
+    db_session.add(Camera(estate_id=setup.estate_id, account_id=setup.id, ubox_uid="cam-1",
+                          name="Orchard", last_sync_at=stopped))
+    setup.last_sync_at = stopped
+    db_session.commit()
+    FakeClient.events = [event("during", -2 * 86400), event("1")]
+    result = sync.sync_ubox_all(db_session)
+    assert result["downloaded"] == 2
+    assert min(start for start, _ in FakeClient.windows) == stopped - timedelta(hours=2)
+
+
+@requires_db
+def test_catch_up_stops_at_what_ubox_still_lists(db_session, setup):
+    stopped = NOW - timedelta(days=20)
+    db_session.add(Camera(estate_id=setup.estate_id, account_id=setup.id, ubox_uid="cam-1",
+                          name="Orchard", last_sync_at=stopped))
+    setup.last_sync_at = stopped
+    db_session.commit()
+    sync.sync_ubox_all(db_session)
+    until = NOW + timedelta(hours=1)
+    assert min(start for start, _ in FakeClient.windows) == until - sync.CATCH_UP
+
+
+@requires_db
+def test_a_dead_snapshot_is_tried_three_times_then_let_go(db_session, setup):
+    """E-08: it holds the camera's place while it may still come, then stops doing so."""
+    FakeClient.events = [event("1", 60), event("bad")]
+    FakeClient.payloads = {"https://example.com/bad": UboxError("expired")}
+    for attempt in (1, 2, 3):
+        result = sync.sync_ubox_all(db_session)
+        assert result["failed"] == 1 and result["status"] == "partial"
+        camera = db_session.scalar(select(Camera))
+        assert camera.import_failures["cam-1:bad"][0] == attempt
+        # Said as it is: tried again, or, on the last try, let go.
+        assert result["accounts"][0]["error"] == (
+            "1 photo wouldn't download. It is tried again on the next fetch." if attempt < 3
+            else "1 photo wouldn't download. It was tried 3 times, so it is left out.")
+    assert camera.last_sync_at == NOW + timedelta(hours=1)  # no longer held back
+    fourth = sync.sync_ubox_all(db_session)
+    assert fourth["failed"] == 0 and fourth["given_up"] == 1 and fourth["status"] == "ok"
+    assert FakeClient.downloads.count("https://example.com/bad") == 3
+    assert setup.last_error is None
+
+
+@requires_db
+@pytest.mark.parametrize(("error", "words"), [
+    (UboxError("UBox rejected the account or password"),
+     "UBox refused the password. Re-enter it."),
+    (UboxError("Unable to reach UBox for login"),
+     "Couldn't reach UBox. It tries again on the next fetch."),
+    (UboxError("UBox login failed (HTTP 503)"),
+     "UBox isn't answering properly right now. It tries again on the next fetch."),
+])
+def test_a_login_problem_is_said_in_words_not_a_class_name(
+    db_session, setup, monkeypatch, error, words,
+):
+    """E-18: and it is kept on the login, where Settings shows it."""
+    def refuse(self):
+        raise error
+
+    monkeypatch.setattr(FakeClient, "login", refuse)
+    result = sync.sync_ubox_all(db_session)
+    assert result["status"] == "error"
+    assert result["accounts"][0]["error"] == words
+    db_session.refresh(setup)
+    assert setup.last_error == words and setup.last_ok_at is None
+
+
+@requires_db
+def test_an_unreadable_ubox_password_asks_to_be_re_entered(db_session, setup, monkeypatch):
+    setup.password_enc = "not-a-token-this-server-can-read"
+    db_session.commit()
+    result = sync.sync_ubox_all(db_session)
+    assert result["accounts"][0]["error"] == "The saved password can't be read. Re-enter it."
+
+
+@requires_db
+def test_a_login_keeps_its_ubox_sign_in_between_fetches(db_session, setup, monkeypatch):
+    """E-21: UBox gives a sign-in for weeks; it is kept, not renewed every 15 minutes."""
+    for _ in range(3):
+        sync.sync_ubox_all(db_session)
+    assert FakeClient.signins == 1
+    db_session.refresh(setup)
+    assert logins.saved_session(db_session, setup) == "session-1"
+
+    def refuse(self):
+        raise UboxError("UBox rejected the account or password")
+
+    def lapsed(self):
+        if self.token == "session-1":
+            raise UboxError("UBox authentication expired after retry; reconnect the account")
+        return self.devices
+
+    # UBox let it lapse and the password was changed: said so, and forgotten.
+    monkeypatch.setattr(FakeClient, "list_devices", lapsed)
+    monkeypatch.setattr(FakeClient, "login", refuse)
+    result = sync.sync_ubox_all(db_session)
+    assert result["accounts"][0]["error"] == "UBox refused the password. Re-enter it."
+    db_session.refresh(setup)
+    assert setup.session_enc is None
+
+
+@requires_db
+def test_one_ubox_camera_that_cannot_be_read_says_so_on_its_card(db_session, setup, monkeypatch):
+    FakeClient.devices.append(UboxDevice("cam-2", "Second camera", online=True))
+    real = FakeClient.list_events
+
+    def second_fails(self, uid, since, until, page_size=100):
+        if uid == "cam-2":
+            raise UboxError("UBox request failed (HTTP 502)")
+        return real(self, uid, since, until, page_size)
+
+    sync.sync_ubox_all(db_session)  # both come in once
+    monkeypatch.setattr(FakeClient, "list_events", second_fails)
+    result = sync.sync_ubox_all(db_session)
+    assert result["status"] == "partial"
+    cams = {c.ubox_uid: c for c in db_session.scalars(select(Camera))}
+    assert cams["cam-1"].fetch_error is None
+    assert cams["cam-2"].fetch_error == (
+        "UBox isn't answering properly right now. It tries again on the next fetch.")
+    states = logins.camera_logins(db_session, list(cams.values()))
+    health = camera_health(cams["cam-2"], login=states[cams["cam-2"].id])
+    assert health["status"] == "not_syncing" and health["login"]["camera"] is True
+    assert camera_health(cams["cam-1"], login=states[cams["cam-1"].id])["status"] != "not_syncing"

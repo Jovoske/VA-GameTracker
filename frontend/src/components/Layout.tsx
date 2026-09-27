@@ -6,9 +6,12 @@ import { MapTrifoldIcon } from '@phosphor-icons/react/dist/csr/MapTrifold'
 import { MoonStarsIcon } from '@phosphor-icons/react/dist/csr/MoonStars'
 import { ImagesIcon } from '@phosphor-icons/react/dist/csr/Images'
 import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { setToken } from '../api'
+import { confirmLeave } from '../map/draftGuard'
+import { useNewerBuild } from '../serviceWorker'
+import { PageBoundary } from './ErrorBoundary'
 
 /**
  * Icons are drawn, from one family, at one weight.
@@ -52,13 +55,29 @@ export default function Layout() {
     document.title = t ? `GameSense · ${t.label}` : 'GameSense'
   }, [loc.pathname])
 
+  // The map fills the screen down to the tab bar, so it needs the bar's real height:
+  // it changes with the home-indicator inset and with the text size.
+  const tabbar = useRef<HTMLElement>(null)
+  useEffect(() => {
+    const el = tabbar.current
+    if (!el) return
+    const measure = () => document.documentElement.style.setProperty('--tabbar-h', `${el.offsetHeight}px`)
+    measure()
+    const watch = new ResizeObserver(measure)
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [])
+
   function logout() {
+    if (!confirmLeave()) return
     setToken(null)
     nav('/login')
   }
+  const onMap = loc.pathname === '/map'
+  const newerBuild = useNewerBuild()
 
   return (
-    <div style={{ maxWidth: loc.pathname === '/map' ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
+    <div className={onMap ? 'layout layout--map' : 'layout'} style={{ maxWidth: onMap ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
       <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="appbar">
         <div style={{ fontWeight: 600, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
@@ -96,11 +115,21 @@ export default function Layout() {
       {/* Padding lives in theme.css — an inline padding here overrides the
           media-query rule that clears the bottom tab bar, hiding content under it. */}
       <main className="page" id="main-content" tabIndex={-1}>
-        <Outlet />
+        {newerBuild && (
+          <div className="update-ready" role="status">
+            <span>A new version of GameSense is ready.</span>
+            <button type="button" onClick={() => location.reload()}>Reload</button>
+          </div>
+        )}
+        {/* A page that breaks is replaced by a message; the tab bar stays, and
+            moving to another tab clears it. */}
+        <PageBoundary resetKey={loc.pathname}>
+          <Outlet />
+        </PageBoundary>
       </main>
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
-      <nav className="tabbar" aria-label="Main navigation">
+      <nav className="tabbar" aria-label="Main navigation" ref={tabbar}>
         {TABS.map(({ to, label, Ico, end }) => (
           <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'active' : '')}>
             {({ isActive }) => (

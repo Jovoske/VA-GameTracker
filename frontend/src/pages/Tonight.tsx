@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ageLabel, api, apiCached } from '../api'
+import {
+  type Failure,
+  type Got,
+  ageLabel,
+  fromEarlierNight,
+  getFresh,
+  nightOf,
+  noAnswer,
+  noAnswerWords,
+  peek,
+} from '../api'
+import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
@@ -63,6 +74,7 @@ type Forecast = {
   alerts?: { camera: string; status: string; detail: string }[]
   exposure?: { excluded_nights: number; note: string }
   nights_of_data: number
+  freshness?: Freshness | null
 }
 
 type Alert = { type: string; severity: string; title: string; text: string }
@@ -84,77 +96,218 @@ const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Ma
 const impactColor = (impact: string) =>
   impact.startsWith('+') ? 'var(--go)' : impact === '•' ? 'var(--text-dim)' : 'var(--marginal)'
 
+const PICK_KEY = 'gs_species_filter'
+// A plan left on screen through the evening asks again this often, and its age
+// label moves on every minute (audit I-24).
+const REFRESH_EVERY_MS = 15 * 60_000
+// "The numbers" don't change by the minute and cost the server the most (G-19).
+const OVERVIEW_EVERY_MS = 10 * 60_000
+
+const planPath = (sel: string[]) => `/forecast/tonight${sel.length ? `?species=${encodeURIComponent(sel.join(','))}` : ''}`
+
+function readPick(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(PICK_KEY) || '[]')
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+function savePick(sel: string[]) {
+  try { localStorage.setItem(PICK_KEY, JSON.stringify(sel)) } catch { /* private mode */ }
+}
+const huntable = (all: SpeciesOpt[]) => all.filter((s) => s.huntable && s.detections > 0)
+const samePick = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x))
+
 export default function Tonight() {
-  const [d, setD] = useState<Overview | null>(null)
-  const [f, setF] = useState<Forecast | null>(null)
-  const [alerts, setAlerts] = useState<Alert[]>([])
+  // Which animals the verdict is ranked for. Empty = every species left on in
+  // Settings. Kept in localStorage because it is a standing preference.
+  const [picked, setPicked] = useState<string[]>(readPick)
+  const pickedRef = useRef(picked)
+  pickedRef.current = picked
+  // The pick the plan on screen answers. The chips can be ahead of it while a new
+  // question is out; only an answer moves this, and only this is saved, so a tap
+  // that never got an answer (no signal, the hunter left) can't strand the next
+  // launch on a pick with no saved plan (audit A-15).
+  const confirmed = useRef(picked)
+
+  // The saved plan is painted first, with its real age, and the network replaces
+  // it when it answers. On one bar of signal that is the plan in a second instead
+  // of a spinner for minutes (audit A-05, D-03).
+  const [plan, setPlan] = useState<Got<Forecast> | null>(() => peek<Forecast>(planPath(picked)))
+  const [d, setD] = useState<Overview | null>(() => peek<Overview>('/analytics/overview')?.data ?? null)
+  const [alerts, setAlerts] = useState<Alert[]>(() => peek<Alert[]>('/alerts')?.data ?? [])
+  const [species, setSpecies] = useState<SpeciesOpt[]>(() => huntable(peek<SpeciesOpt[]>('/species')?.data ?? []))
   const [err, setErr] = useState('')
-  const requestId = useRef(0)
-  const [planAt, setPlanAt] = useState<string | null>(null)
+  const [notice, setNotice] = useState('')
+  const [checking, setChecking] = useState(true)
   // True while a species chip has changed the question but the answer has not
   // caught up yet.
   const [settling, setSettling] = useState(false)
+  const [, setTick] = useState(0)
 
-  // Which animals the verdict is ranked for. Empty = every species left on in
-  // Settings. Kept in localStorage because it is a standing preference.
-  const [species, setSpecies] = useState<SpeciesOpt[]>([])
-  const [picked, setPicked] = useState<string[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem('gs_species_filter') || '[]')
-    } catch {
-      return []
-    }
-  })
+  const planRef = useRef(plan)
+  planRef.current = plan
+  const planCtl = useRef<AbortController | null>(null)
+  const restCtl = useRef<AbortController | null>(null)
+  const lastLoad = useRef(0)
 
-  function load(sel: string[] = picked, settle = false) {
-    const request = ++requestId.current
-    setErr('')
-    const q = sel.length ? `?species=${encodeURIComponent(sel.join(','))}` : ''
-    if (settle) setSettling(true)
-    // Paint from the last good plan first; refresh underneath. No signal in the
-    // valley still gets a verdict, labelled with its age.
-    apiCached<Forecast>(`/forecast/tonight${q}`)
-      .then(({ data, at }) => {
-        if (request !== requestId.current) return
-        setF(data)
-        setPlanAt(at)
+  /** Ask for the plan. A newer question cancels the one before it. A question
+   *  the chips asked that can't be answered goes back to the plan on screen. */
+  function loadPlan(sel: string[]) {
+    planCtl.current?.abort()
+    const ctl = new AbortController()
+    planCtl.current = ctl
+    setChecking(true)
+    getFresh<Forecast>(planPath(sel), { signal: ctl.signal, save: true })
+      .then((got) => {
+        if (ctl.signal.aborted) return
+        setPlan(got)
+        keepPick(sel)
+        setErr('')
       })
-      .catch((e) => {
-        if (request !== requestId.current) return
+      .catch((e: Failure) => {
+        if (ctl.signal.aborted) return
+        if (!samePick(sel, confirmed.current)) {
+          setPicked(confirmed.current)
+          const why = noAnswer(e)
+          setNotice(`${why ? noAnswerWords(why) : `Couldn’t switch. ${e.message}`} Still showing the plan you had.`)
+          if (planRef.current) return
+        }
         setErr(e.message)
-        if (settle) setF(null)
       })
-      .finally(() => { if (request === requestId.current) setSettling(false) })
-    api<Overview>('/analytics/overview').then(setD).catch(() => setD(null))
-    api<Alert[]>('/alerts').then(setAlerts).catch(() => {})
+      .finally(() => {
+        if (planCtl.current !== ctl) return
+        setChecking(false)
+        setSettling(false)
+      })
+  }
+
+  /** Everything around the plan. None of it depends on the chips (G-19). */
+  function loadRest() {
+    restCtl.current?.abort()
+    const ctl = new AbortController()
+    restCtl.current = ctl
+    const opts = { signal: ctl.signal }
+    const had = peek<Overview>('/analytics/overview')
+    if (!had || Date.now() - Date.parse(had.at) > OVERVIEW_EVERY_MS) {
+      getFresh<Overview>('/analytics/overview', opts).then((got) => setD(got.data)).catch(() => {})
+    }
+    // Last night's alerts are not tonight's: an old copy is dropped, not shown.
+    getFresh<Alert[]>('/alerts', opts)
+      .then((got) => setAlerts(got.stale && fromEarlierNight(got.at) ? [] : got.data))
+      .catch(() => {})
     // Refetched with the plan, so a species switched on in Settings shows up here
-    // on the way back without a reload.
-    api<SpeciesOpt[]>('/species')
-      .then((all) => setSpecies(all.filter((s) => s.huntable && s.detections > 0)))
+    // on the way back without a reload. Saved, so the chips are there with no signal.
+    getFresh<SpeciesOpt[]>('/species', { ...opts, save: true })
+      .then((got) => {
+        const offered = huntable(got.data)
+        setSpecies(offered)
+        if (got.stale) return
+        // A saved pick of an animal no longer offered (turned off or hidden in
+        // Settings) filtered the plan invisibly, with no chip lit (A-16, I-07).
+        // Drop it; with nothing left that is "Anything".
+        const ids = new Set(offered.map((s) => s.id))
+        const kept = pickedRef.current.filter((id) => ids.has(id))
+        if (kept.length === pickedRef.current.length) return
+        // The old pick is no question to go back to, so this one stands at once.
+        setPicked(kept)
+        keepPick(kept)
+        const hit = peek<Forecast>(planPath(kept))
+        if (hit) setPlan(hit)
+        loadPlan(kept)
+      })
       .catch(() => {})
   }
+
+  function load() {
+    lastLoad.current = Date.now()
+    loadPlan(pickedRef.current)
+    loadRest()
+  }
+  const loadRef = useRef(load)
+  loadRef.current = load
+
   useEffect(() => {
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadRef.current()
+    const tick = window.setInterval(() => {
+      setTick((n) => n + 1)
+      if (document.visibilityState === 'visible' && Date.now() - lastLoad.current > REFRESH_EVERY_MS) loadRef.current()
+    }, 60_000)
+    // Leaving the page drops what it was still asking for: on a thin link the next
+    // tab should not queue behind this one (K-08).
+    return () => {
+      window.clearInterval(tick)
+      planCtl.current?.abort()
+      restCtl.current?.abort()
+    }
   }, [])
   useRefetchOnReturn(() => load())
 
-  function toggleSpecies(id: string) {
-    const next = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]
-    setPicked(next)
-    localStorage.setItem('gs_species_filter', JSON.stringify(next))
-    load(next, true)
-  }
-  function pickAll() {
-    setPicked([])
-    localStorage.setItem('gs_species_filter', '[]')
-    load([], true)
+  /** The plan on screen now answers `sel`: that is the pick to keep. */
+  function keepPick(sel: string[]) {
+    confirmed.current = sel
+    savePick(sel)
   }
 
+  /** A chip changes the question. The answer saved for it, if any, shows at once;
+   *  with nothing saved and no signal, the chips go back and the plan stays (A-15). */
+  function switchTo(next: string[]) {
+    setPicked(next)
+    setNotice('')
+    const hit = peek<Forecast>(planPath(next))
+    if (hit) {
+      setPlan(hit)
+      keepPick(next)
+    }
+    setSettling(!hit)
+    loadPlan(next)
+  }
+  function toggleSpecies(id: string) {
+    switchTo(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id])
+  }
+  function pickAll() {
+    switchTo([])
+  }
+
+  const f = plan?.data ?? null
   const verdictIn = useReveal(!!f)
   const grown = useReveal(!!d)
 
-  if (err && !f) return <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
+  /* Which animals the ground is ranked for. Chips list only species left on in
+     Settings that the cameras have actually recorded. Also on the "could not load"
+     screen: the plan saved for another pick ("Anything") is one tap away. */
+  const chips = species.length > 0 && (
+    <div className="tn-after" role="group" aria-label="I'm after">
+      <div className="tn-after-label" aria-hidden="true">I'm after</div>
+      <div className="tn-chips">
+        <button className="tn-chip" aria-pressed={picked.length === 0} onClick={pickAll}>
+          Anything
+        </button>
+        {species.map((s) => (
+          <button
+            key={s.id}
+            className="tn-chip"
+            aria-pressed={picked.includes(s.id)}
+            onClick={() => toggleSpecies(s.id)}
+            title={`${s.detections} sightings`}
+          >
+            {s.common_name}
+          </button>
+        ))}
+        <Link to="/settings" className="tn-chip-edit">Edit list</Link>
+      </div>
+    </div>
+  )
+  const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>
+
+  if (!f && err) return (
+    <div className="tonight">
+      <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
+      {noticeLine}
+      {chips}
+    </div>
+  )
   if (!f) return <div className="status-panel" role="status">Working out tonight…</div>
 
   const c = f.conditions
@@ -166,44 +319,27 @@ export default function Tonight() {
   const bw = d?.best_window ?? { start_hour: 0, end_hour: 0, share_pct: 0 }
   const inWindow = (hr: number) =>
     bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour
-  const stale = planAt ? Date.now() - new Date(planAt).getTime() > 12 * 3600e3 : false
+  // Made before this morning's 06:00: that was an earlier night's plan.
+  const old = fromEarlierNight(plan!.at)
+  const oldWords = nightOf(plan!.at) === nightOf(Date.now() - 86_400_000) ? 'last night' : 'an earlier night'
   const hasNumbers = !!(f.where && f.where.length > 0) || !!f.calibration?.statement || !!d
 
   return (
     <div className="tonight">
       <h1 className="page-title">Tonight</h1>
-      {err && <div className="status-panel" role="alert">Could not refresh. Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
+      {err && <div className="status-panel" role="alert">Could not refresh: {err} Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
+      {noticeLine}
+      {chips}
 
-      {/* Which animals the ground is ranked for. Chips list only species left on
-          in Settings that the cameras have actually recorded. */}
-      {species.length > 0 && (
-        <div className="tn-after" role="group" aria-label="I'm after">
-          <div className="tn-after-label" aria-hidden="true">I'm after</div>
-          <div className="tn-chips">
-            <button className="tn-chip" aria-pressed={picked.length === 0} onClick={pickAll}>
-              Anything
-            </button>
-            {species.map((s) => (
-              <button
-                key={s.id}
-                className="tn-chip"
-                aria-pressed={picked.includes(s.id)}
-                onClick={() => toggleSpecies(s.id)}
-                title={`${s.detections} sightings`}
-              >
-                {s.common_name}
-              </button>
-            ))}
-            <Link to="/settings" className="tn-chip-edit">Edit list</Link>
-          </div>
-        </div>
-      )}
-
-      {planAt && (
-        <p className="tn-fresh" data-stale={stale}>
-          Plan from {ageLabel(planAt)}{stale ? ', may be out of date' : ''}
-        </p>
-      )}
+      {/* How old the plan on screen really is. A saved copy says why it is on
+          screen ("No signal."), and one from an earlier night says so. */}
+      <p className="tn-fresh" data-stale={old || plan!.stale} role={plan!.stale ? 'status' : undefined}>
+        {plan!.stale && <>{noAnswerWords(plan!.why)} </>}
+        Plan from {ageLabel(plan!.at)}{old ? `, made for ${oldWords}. It may be out of date.` : '.'}
+        {checking && !plan!.stale && ageLabel(plan!.at) !== 'just now' && ' Checking for a newer one…'}
+        {plan!.stale && !checking && <button className="tn-fresh-retry" onClick={() => load()}>Try again</button>}
+      </p>
+      <PhotoFreshness freshness={f.freshness} />
 
       {/* ── The decision ───────────────────────────── */}
       <section

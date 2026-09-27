@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.forecasting.exposure import night_key_start, visits_by_night
 from app.models import Camera, CameraNight
-from app.forecasting.exposure import visits_by_night
 
 LOOKBACK_NIGHTS = 30
 QUIET_RUN = 4       # nights of silence before a return is notable
@@ -48,7 +48,8 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
         ).all()
     }
 
-    cameras = {c.id: c.name for c in db.scalars(select(Camera).where(Camera.active.is_(True))).all()}
+    active = db.scalars(select(Camera).where(Camera.active.is_(True))).all()
+    cameras = {c.id: c.name for c in active}
     if not cameras:
         return {"kind": "none", "camera": None, "text": "No cameras set up yet."}
 
@@ -65,7 +66,10 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
                             "came through.",
                 }
 
-    visits = visits_by_night(db)
+    # Only the nights compared, read from the start of the one before them: a visit
+    # already under way at 06:00 on the first stays on its own night. Unbounded,
+    # this read every photo ever taken on every load of Tonight.
+    visits = visits_by_night(db, start=night_key_start(window_start))
     per_night: dict[tuple, int] = {}
     species_seen: dict[tuple, set] = {}
     for (night, cam_id, species_id), row in visits.items():
@@ -79,7 +83,8 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
         history = [
             per_night.get((cam_id, last_night - timedelta(days=d)), 0)
             for d in range(1, LOOKBACK_NIGHTS + 1)
-            if exposure.get((cam_id, last_night - timedelta(days=d))) in ("CONFIRMED", "PRESUMED_UP")
+            if exposure.get((cam_id, last_night - timedelta(days=d)))
+            in ("CONFIRMED", "PRESUMED_UP")
         ]
         if len(history) < 5:
             continue  # too little to call anything a change

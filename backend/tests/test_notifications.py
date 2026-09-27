@@ -37,35 +37,44 @@ def _rows(*items):
 # ── composition ────────────────────────────────────────────────────────────────
 
 
-def test_group_by_species_counts_frames_not_animals():
+def test_group_by_species_counts_visits_not_frames_or_animals():
     img = uuid.uuid4()
     rows = _rows(
-        ("wild_boar", "Wild boar", img, T0, "PL19"),
-        ("wild_boar", "Wild boar", img, T0, "PL19"),  # second animal, same frame
-        ("wild_boar", "Wild boar", uuid.uuid4(), T0 - timedelta(minutes=5), "PL19"),
-        ("red_deer", "Red deer", uuid.uuid4(), T0 - timedelta(hours=1), "MP14"),
+        ("wild_boar", "Wild Boar", img, T0, "PL19"),
+        ("wild_boar", "Wild Boar", img, T0, "PL19"),  # second animal, same frame
+        ("wild_boar", "Wild Boar", uuid.uuid4(), T0 - timedelta(minutes=5), "PL19"),
+        ("red_deer", "Red Deer", uuid.uuid4(), T0 - timedelta(hours=1), "MP14"),
+        ("roe_deer", "Roe Deer", uuid.uuid4(), T0 - timedelta(hours=1), "MP14"),
     )
     d = group_by_species(rows)
-    assert set(d) == {"wild_boar", "red_deer"}
+    assert set(d) == {"wild_boar", "red_deer", "roe_deer"}
     assert len(d["wild_boar"].images) == 2
     assert d["wild_boar"].latest_at == T0
     assert d["wild_boar"].latest_image_id == img
-    assert d["wild_boar"].cameras == {"PL19": 2}
+    # Two frames five minutes apart are one boar arriving once.
+    assert d["wild_boar"].cameras == {"PL19": 1} and d["wild_boar"].visits == 1
+    # Named as every other screen writes it, not as stored.
+    assert [d[s].name for s in ("wild_boar", "red_deer", "roe_deer")] == [
+        "Wild boar", "Red deer", "Roe deer",
+    ]
 
 
 def test_compose_one_camera_names_it_in_the_title():
     d = SpeciesDigest("wild_boar", "Wild boar")
-    d.add(uuid.uuid4(), T0 - timedelta(minutes=9), "PL19")
+    # A burst, then the same sounder back an hour later: two visits, not three photos.
+    d.add(uuid.uuid4(), T0 - timedelta(hours=1), "PL19")
+    d.add(uuid.uuid4(), T0 - timedelta(minutes=59), "PL19")
     d.add(uuid.uuid4(), T0, "PL19")
     title, body = compose(d, MADRID)
     assert title == "Wild boar at PL19"
-    assert body == "2 photos, last one 22:14."
+    assert body == "2 visits, last one 22:14."
 
 
-def test_compose_single_photo_is_singular():
+def test_compose_single_visit_is_singular_however_many_frames():
     d = SpeciesDigest("fox", "Fox")
-    d.add(uuid.uuid4(), T0, "MP14-waterhole")
-    assert compose(d, MADRID) == ("Fox at MP14-waterhole", "1 photo at 22:14.")
+    for s in (0, 1, 2):
+        d.add(uuid.uuid4(), T0 - timedelta(seconds=s), "MP14-waterhole")
+    assert compose(d, MADRID) == ("Fox at MP14-waterhole", "1 visit at 22:14.")
 
 
 def test_compose_many_cameras_lists_them_busiest_first():
@@ -75,7 +84,7 @@ def test_compose_many_cameras_lists_them_busiest_first():
     d.add(uuid.uuid4(), T0, "MP14")
     title, body = compose(d, MADRID)
     assert title == "Red deer on 2 cameras"
-    assert body == "3 photos at MP14 and PL15B, last one 22:14."
+    assert body == "3 visits at MP14 and PL15B, last one 22:14."
 
 
 def test_sighting_url_opens_the_species_gallery_on_the_photo():
@@ -88,8 +97,8 @@ def test_compose_summary_when_a_run_has_many_species():
     ds = []
     for i, (sid, name) in enumerate([("a", "Badger"), ("b", "Fox"), ("c", "Wild boar")]):
         d = SpeciesDigest(sid, name)
-        for _ in range(i + 1):
-            d.add(uuid.uuid4(), T0 - timedelta(minutes=i), "PL19")
+        for k in range(i + 1):
+            d.add(uuid.uuid4(), T0 - timedelta(minutes=i) - timedelta(hours=k), "PL19")
         ds.append(d)
     title, body = compose_summary(ds, MADRID)
     assert title == "6 new sightings, 3 animals"
@@ -201,7 +210,8 @@ def test_only_people_who_asked_for_that_animal_are_told(db_session, monkeypatch)
     n = notes[0]
     assert n.user_id == users["boar"].id
     assert n.title == "Wild boar at PL19"
-    assert n.body.startswith("2 photos, last one ")
+    # Two frames five minutes apart: one visit.
+    assert n.body.startswith("1 visit at ")
     assert n.species_id == "wild_boar"
     assert n.image_id == img.id
     assert n.push_status == "sent"

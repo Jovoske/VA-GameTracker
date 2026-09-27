@@ -1,12 +1,13 @@
 """Tests for "what changed since yesterday"."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from app.forecasting.changes import whats_changed
-from app.forecasting.exposure import recompute_camera_nights
+from app.forecasting import changes
+from app.forecasting.changes import LOOKBACK_NIGHTS, whats_changed
+from app.forecasting.exposure import night_key_start, recompute_camera_nights, visits_by_night
 from app.models import Camera, Detection, Estate, Image, Species
 
 from .conftest import requires_db
@@ -22,14 +23,15 @@ def cam(db_session):
     db_session.flush()
     c = Camera(estate_id=estate.id, name="Puente", active=True)
     db_session.add(c)
-    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True, huntable=True))
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", is_priority=True,
+                           huntable=True))
     db_session.flush()
     return c
 
 
 def _night_at(night: date, hour: int = 21) -> datetime:
     """A UTC instant that falls inside the given night (evening-keyed)."""
-    return datetime(night.year, night.month, night.day, hour, tzinfo=timezone.utc)
+    return datetime(night.year, night.month, night.day, hour, tzinfo=UTC)
 
 
 def _add(db, cam, night: date, *, animals: int, processed=True):
@@ -117,3 +119,43 @@ def test_too_little_history_makes_no_claim(db_session, cam):
 
     got = whats_changed(db_session, today=TODAY)
     assert got["kind"] == "none"
+
+
+@requires_db
+def test_it_reads_the_nights_it_compares_not_the_whole_archive(db_session, cam, monkeypatch):
+    """Tonight asks this on every load: it must not grow with years of photos.
+
+    It reads from the start of the night before the ones it compares, so a visit
+    already under way at 06:00 stays on the night it began, as it would unbounded.
+    """
+    first_kept = LAST_NIGHT - timedelta(days=LOOKBACK_NIGHTS - 1)
+    for d in range(0, 12):
+        _add(db_session, cam, LAST_NIGHT - timedelta(days=d), animals=2)
+    _add(db_session, cam, LAST_NIGHT - timedelta(days=200), animals=5)  # years back, in effect
+    # A boar from 05:50 to 06:10 local: it began on the night before the first kept one.
+    dawn = datetime(first_kept.year, first_kept.month, first_kept.day, 3, 50, tzinfo=UTC)
+    for at in (dawn, dawn + timedelta(minutes=20)):
+        img = Image(camera_id=cam.id, captured_at=at, is_empty_frame=False, processed_at=at)
+        db_session.add(img)
+        db_session.flush()
+        db_session.add(Detection(image_id=img.id, species_id="wild_boar", group_size=1))
+    db_session.commit()
+    recompute_camera_nights(db_session)
+
+    asked = {}
+
+    def spy(db, **kw):
+        asked.update(kw)
+        return visits_by_night(db, **kw)
+
+    monkeypatch.setattr(changes, "visits_by_night", spy)
+    whats_changed(db_session, today=TODAY)
+    window_start = LAST_NIGHT - timedelta(days=LOOKBACK_NIGHTS)
+    assert asked == {"start": night_key_start(window_start)}
+
+    bounded = visits_by_night(db_session, start=asked["start"])
+    everything = visits_by_night(db_session)
+    kept = {k: v for k, v in everything.items() if k[0] > window_start}
+    assert {k: v for k, v in bounded.items() if k[0] > window_start} == kept
+    assert (first_kept, cam.id, "wild_boar") not in kept, "the 05:50 boar is on the night before"
+    assert min(k[0] for k in bounded) == window_start

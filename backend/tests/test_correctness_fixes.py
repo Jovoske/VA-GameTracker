@@ -173,7 +173,7 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
     from app.core.db import get_db
     from app.core.security import create_access_token
     from app.main import app
-    from app.models import Camera, Estate, Image
+    from app.models import Camera, Estate, Image, User
 
     photo = tmp_path / "frame.jpg"
     photo.write_bytes(b"\xff\xd8\xff\xd9")
@@ -181,6 +181,8 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
     estate = Estate(name="E", timezone="Europe/Madrid", lat=39.0, lon=-1.3)
     db_session.add(estate)
     db_session.flush()
+    user = User(estate_id=estate.id, email="viewer@e.local", password_hash="x", role="viewer")
+    db_session.add(user)
     cam = Camera(estate_id=estate.id, name="Ridge", spypoint_id="c1")
     db_session.add(cam)
     db_session.flush()
@@ -199,7 +201,10 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
         assert client.get(url).status_code == 401, "an unauthenticated photo fetch must be refused"
         assert client.get(f"{url}?token=not-a-jwt").status_code == 401
 
-        token = create_access_token(str(uuid.uuid4()))
+        # A well-signed token for a login that doesn't exist (removed) is refused too.
+        removed = create_access_token(str(uuid.uuid4()))
+        assert client.get(f"{url}?token={removed}").status_code == 401
+        token = create_access_token(str(user.id))
         assert client.get(f"{url}?token={token}").status_code == 200
         assert client.get(url, headers={"Authorization": f"Bearer {token}"}).status_code == 200
     finally:
@@ -225,13 +230,15 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
     from app.core.db import get_db
     from app.core.security import create_access_token
     from app.main import app
-    from app.models import Camera, Estate, Image
+    from app.models import Camera, Estate, Image, User
 
     photo = tmp_path / "frame.jpg"
     photo.write_bytes(b"\xff\xd8\xff\xd9")
     estate = Estate(name="E", timezone="Europe/Madrid", lat=39.0, lon=-1.3)
     db_session.add(estate)
     db_session.flush()
+    user = User(estate_id=estate.id, email="viewer@e.local", password_hash="x", role="viewer")
+    db_session.add(user)
     cam = Camera(estate_id=estate.id, name="Ridge", spypoint_id="c1")
     db_session.add(cam)
     db_session.flush()
@@ -246,7 +253,7 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
     app.dependency_overrides[get_db] = lambda: db_session
     try:
         client = TestClient(app)
-        token = create_access_token(str(uuid.uuid4()))
+        token = create_access_token(str(user.id))
         plain = client.get(f"/api/images/{img.id}/file?token={token}")
         assert "attachment" not in plain.headers.get("content-disposition", "")
         saved = client.get(f"/api/images/{img.id}/file?token={token}&download=1")

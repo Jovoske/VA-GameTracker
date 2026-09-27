@@ -15,7 +15,7 @@ const insights = {outlook:[{date:'2026-09-08',moon_phase:'Waxing',moon_illum:42,
  let failGallery=false, failCameras=false, emptyCameras=false, failStands=true, failForecast=true;
  await page.route('**/api/**',async route=>{
   const u=new URL(route.request().url());
-  if(u.pathname.endsWith('/file')) return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640"><rect width="960" height="640" fill="#394b3b"/><text x="80" y="330" fill="white" font-size="36">Trail-camera test photo</text></svg>'});
+  if(u.pathname.endsWith('/file')||u.pathname.endsWith('/thumb')) return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640"><rect width="960" height="640" fill="#394b3b"/><text x="80" y="330" fill="white" font-size="36">Trail-camera test photo</text></svg>'});
   if ((failStands && u.pathname==='/api/stands') || (failForecast && u.pathname==='/api/forecast/tonight')) return route.fulfill({status:503,json:{detail:'Test connection failure'}});
   if (u.pathname==='/api/forecast/tonight') return route.fulfill({json:{verdict:'NO_DATA',conditions:{},alternates:[],nights_of_data:0}});
   if (u.pathname==='/api/analytics/overview') return route.fulfill({status:503,json:{detail:'Analytics unavailable'}});
