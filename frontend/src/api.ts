@@ -13,6 +13,47 @@ export function setToken(token: string | null): void {
   }
 }
 
+/** Who the stored token belongs to (its `sub`), without asking the server. */
+export function tokenSubject(): string | null {
+  try {
+    const part = getToken()?.split('.')[1]
+    if (!part) return null
+    const sub = (JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: unknown }).sub
+    return typeof sub === 'string' ? sub : null
+  } catch {
+    return null
+  }
+}
+
+/** Sit reports waiting for signal. Written by sits.ts; named here so sign-out can clear it. */
+export const SIT_QUEUE_KEY = 'gs_sit_queue'
+
+/**
+ * Sign out, and take this person's unsent sit reports and saved sits with them.
+ *
+ * A phone gets passed round a hunting party. Left behind, the next person to sign
+ * in would find the last one's sits on screen, and an admin's login would be
+ * allowed to send the last one's reports as their own. An expired sign-in (a 401)
+ * keeps them: that is the same hunter signing in again.
+ */
+export function signOut(): void {
+  setToken(null)
+  meCache = null
+  meKnown = null
+  for (const path of [...memory.keys()]) if (path.startsWith('/sits')) memory.delete(path)
+  try {
+    localStorage.removeItem(SIT_QUEUE_KEY)
+    for (const key of Object.keys(localStorage)) if (key.startsWith(SAVED + '/sits')) localStorage.removeItem(key)
+  } catch {
+    // Blocked storage: nothing was saved there either.
+  }
+  if ('caches' in window) {
+    caches.open(WORKER_API_CACHE)
+      .then(async (c) => Promise.all((await c.keys()).filter((r) => new URL(r.url).pathname.startsWith('/api/sits')).map((r) => c.delete(r))))
+      .catch(() => {})
+  }
+}
+
 /** Authenticated URL for a photo.
  *
  * `/api/images/{id}/file` used to be open to anyone holding the UUID. Trail cameras
@@ -295,7 +336,7 @@ export async function getFresh<T>(
   }
 }
 
-export { fromEarlierNight, nightOf } from './night'
+export { fromEarlierNight, nightBefore, nightOf } from './night'
 
 export function ageLabel(iso: string): string {
   const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))

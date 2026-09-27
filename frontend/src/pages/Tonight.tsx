@@ -12,6 +12,7 @@ import {
   peek,
 } from '../api'
 import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
+import SitPrompts from '../components/SitPrompts'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
@@ -301,14 +302,21 @@ export default function Tonight() {
   )
   const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>
 
+  // Your sit, before the plan: "Back to sit" after the phone closed the app mid-sit,
+  // and "What happened last night?" in the morning. With no plan saved and no
+  // signal, the way back into the seat must still be there. Same place in every
+  // state below, so the plan arriving doesn't start it over.
+  const top = <><h1 className="page-title">Tonight</h1><SitPrompts page="tonight" /></>
+
   if (!f && err) return (
     <div className="tonight">
+      {top}
       <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
       {noticeLine}
       {chips}
     </div>
   )
-  if (!f) return <div className="status-panel" role="status">Working out tonight…</div>
+  if (!f) return <div className="tonight">{top}<div className="status-panel" role="status">Working out tonight…</div></div>
 
   const c = f.conditions
   const r = f.recommended
@@ -326,7 +334,7 @@ export default function Tonight() {
 
   return (
     <div className="tonight">
-      <h1 className="page-title">Tonight</h1>
+      {top}
       {err && <div className="status-panel" role="alert">Could not refresh: {err} Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
       {noticeLine}
       {chips}

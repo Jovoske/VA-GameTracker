@@ -4,6 +4,7 @@
 .stand-entry-top .stand-state { display: block; }
 .stand-wind-line { font-size: 14px; font-weight: 500; line-height: 1.5; margin: 12px 0 14px; }
 .stand-entry > .map-button--primary { width: 100%; }
+.stand-reserve-later { width: 100%; margin-top: 10px; }
 .stand-entry .map-actions { margin-top: 0; }
 .stand-entry .map-actions .map-button--primary { flex: 1; }
 .stand-outcome, .stand-wind { margin: 12px 0 0; }
@@ -13,6 +14,11 @@
 .stand-outcome[open] summary::before, .stand-wind[open] summary::before { content: '▾'; }
 .stand-outcome-buttons { margin-top: 6px; }
 .stand-outcome-buttons .map-button { min-height: 52px; }
+.stand-outcome-buttons .map-button[aria-pressed='true'] { border-color: var(--sand); color: var(--sand); }
+/* A report or END SIT still on the phone, waiting for signal. */
+.stand-unsent { margin: 10px 0 0; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+/* Another hunter's dawn sit, still on: the evening is free, but somebody is there. */
+.stand-now { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
 .stand-wind p { margin: 6px 0 10px; }
 .stand-wind-when { display: block; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
 .stand-wind a { color: var(--sand); font-size: 13px; }

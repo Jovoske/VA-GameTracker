@@ -75,6 +75,9 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
             "happened_at", "created_at",
         }
         assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
+        assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(images)
+        assert "reported_at" in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
     finally:
         eng.dispose()
 
@@ -134,6 +137,9 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "photos_listed_to" in _columns(eng, "cameras")
         assert "download_attempts" in _columns(eng, "images")
         assert _columns(eng, "client_errors")
+        assert "ai_failed_at" in _columns(eng, "images")
+        assert "reported_at" in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live")
     finally:
         eng.dispose()
 
@@ -723,6 +729,8 @@ def test_ai_checking_upgrade_puts_old_misreads_right_and_goes_down_and_up_again(
             # 0001 builds today's ORM; restore the 0021 shape first.
             for col in ("ai_attempts", "ai_error", "ai_failed_at", "detector_conf"):
                 c.execute(text(f"ALTER TABLE images DROP COLUMN {col}"))
+            c.execute(text("DROP INDEX uq_sits_stand_night_live"))  # 0023, after this one
+            c.execute(text("ALTER TABLE sits DROP COLUMN reported_at"))
             estate_id = c.execute(text(
                 "INSERT INTO estates (id,name,timezone) "
                 "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
@@ -795,5 +803,101 @@ def test_ai_checking_upgrade_puts_old_misreads_right_and_goes_down_and_up_again(
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(
             _columns(eng, "images"))
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_sit_reports_upgrade_down_and_up_again(fresh_db):
+    """0023 on a real 0022 database: two live reservations of one stand on one night
+    (possible before the lock) become one, keeping the sit somebody used and saying in
+    the other's notes what it was; the unique index then refuses a second one; going
+    back down keeps every row."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0022_ai_checking")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0022 shape first.
+            c.execute(text("DROP INDEX uq_sits_stand_night_live"))
+            c.execute(text("ALTER TABLE sits DROP COLUMN reported_at"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            alice, bob = (c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,:m,'h','member') RETURNING id"
+            ), {"e": estate_id, "m": m}).scalar_one() for m in ("alice@x.local", "bob@x.local"))
+            ridge, oak, pine = (c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,:n) "
+                "RETURNING id"
+            ), {"e": estate_id, "n": n}).scalar_one() for n in ("Ridge", "Oak", "Pine"))
+
+            def sit(stand, user, night, outcome="unreported", started=False, mins=0, notes=None):
+                return c.execute(text(
+                    "INSERT INTO sits (id,stand_id,user_id,night,claimed_at,started_at,"
+                    "outcome,notes) VALUES (gen_random_uuid(),:s,:u,:n,"
+                    "now() - make_interval(mins => :m),"
+                    "CASE WHEN :st THEN now() ELSE NULL END,:o,:notes) RETURNING id"
+                ), {"s": stand, "u": user, "n": night, "o": outcome, "st": started,
+                    "m": mins, "notes": notes}).scalar_one()
+
+            # Ridge, one night: Alice reserved first, Bob sat it and reported.
+            first = sit(ridge, alice, "2026-09-20", mins=30)
+            used = sit(ridge, bob, "2026-09-20", outcome="seen", started=True, mins=10)
+            dropped = sit(ridge, alice, "2026-09-20", outcome="cancelled", mins=40)
+            # Oak: neither reported; the started one is kept, the other's note stays.
+            idle = sit(oak, alice, "2026-09-21", mins=30, notes="Bring the chair")
+            sat = sit(oak, bob, "2026-09-21", started=True, mins=5)
+            alone = sit(pine, alice, "2026-09-20")
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            rows = {r[0]: r[1:] for r in c.execute(text(
+                "SELECT id, outcome, notes, reported_at FROM sits")).all()}
+            assert len(rows) == 6
+            assert rows[used][:2] == ("seen", None)
+            assert rows[sat][:2] == ("unreported", None)
+            assert rows[alone][:2] == ("unreported", None)
+            assert rows[dropped][0] == "cancelled" and rows[dropped][1] is None
+            assert rows[first][0] == "cancelled"
+            assert rows[first][1] == (
+                "Cancelled by the upgrade: a second reservation of this stand that night. "
+                "Nothing was reported."
+            )
+            assert rows[idle][0] == "cancelled"
+            assert rows[idle][1].startswith("Bring the chair\nCancelled by the upgrade")
+            assert all(r[2] is None for r in rows.values()), "old sits let the next report in"
+            # One live reservation per stand and night from now on; cancelled ones are history.
+            with pytest.raises(IntegrityError), c.begin_nested():
+                c.execute(text(
+                    "INSERT INTO sits (id,stand_id,night,outcome) "
+                    "VALUES (gen_random_uuid(),:s,'2026-09-20','unreported')"), {"s": ridge})
+            c.execute(text(
+                "INSERT INTO sits (id,stand_id,night,outcome) "
+                "VALUES (gen_random_uuid(),:s,'2026-09-20','cancelled')"), {"s": ridge})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0022_ai_checking")
+        assert "reported_at" not in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live") is None
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 7
+            assert c.execute(text("SELECT outcome FROM sits WHERE id=:s"),
+                             {"s": first}).scalar_one() == "cancelled"
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0022_ai_checking")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "reported_at" in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
     finally:
         eng.dispose()

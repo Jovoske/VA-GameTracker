@@ -515,6 +515,11 @@ class Sit(Base):
     `outcome` is never silently 'nothing': a sit nobody reported on is UNREPORTED.
     Conflating "I saw nothing" with "I didn't say" would poison the only ground
     truth this system will ever have.
+
+    The outcome only goes up (shot > shootable_no_shot > seen > nothing): a glove
+    brushing SAW ANIMALS after a shot must not turn the shot into a sighting. Only
+    the hunter's own "What happened?" correction lowers it. `ended_at` is set by END
+    SIT, never by a report: seeing animals at 20:15 does not end the sit.
     """
 
     __tablename__ = "sits"
@@ -526,6 +531,9 @@ class Sit(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str] = mapped_column(String, nullable=False, default="unreported")
+    # The phone's time of the report the server kept. A tap saved with no signal can
+    # arrive an hour late; anything older than this is ignored.
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     species_seen: Mapped[str | None] = mapped_column(String)
     # What the app told them about the wind, kept verbatim so the advice can later
     # be scored against what actually happened instead of quietly rewritten.
@@ -539,6 +547,13 @@ class Sit(Base):
         ),
         Index("ix_sits_night", "night"),
         Index("ix_sits_stand_night", "stand_id", "night"),
+        # One live reservation per stand and night. The per-night lock in
+        # routes_stands.claim_stand is the real guard (it also keeps fire lanes
+        # apart); this is the backstop.
+        Index(
+            "uq_sits_stand_night_live", "stand_id", "night",
+            unique=True, postgresql_where=text("outcome <> 'cancelled'"),
+        ),
     )
 
 
