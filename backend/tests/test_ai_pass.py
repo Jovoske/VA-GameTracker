@@ -725,7 +725,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
     monkeypatch.setattr(httpx, "get", down)
     frames = [_frame(db_session, cam, NIGHT + timedelta(minutes=i)) for i in range(5)]
     snaps = [enrich.enrich_image(db_session, f) for f in frames]
-    assert calls == [weather.TIMEOUT_SECONDS]  # once, not once per photo
+    assert calls == [weather.TIMEOUT]  # once, not once per photo
     assert {s.source for s in snaps} == {"unavailable"}
 
     class Answer:

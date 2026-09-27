@@ -41,8 +41,10 @@ class FakeIMAP:
 
     error = imaplib.IMAP4.error
 
-    def __init__(self, messages: dict[int, bytes], uidvalidity=42, fail_fetch=False):
+    def __init__(self, messages: dict[int, bytes], uidvalidity=42, fail_fetch=False,
+                 internal_dates: dict[int, str] | None = None):
         self.messages = messages
+        self.internal_dates = internal_dates or {}
         self.uidvalidity = uidvalidity
         self.fail_fetch = fail_fetch
         self.seen: list[int] = []
@@ -74,7 +76,9 @@ class FakeIMAP:
                 raise imaplib.IMAP4.abort("connection dropped")
             uid = int(args[0])
             raw = self.messages[uid]
-            return "OK", [(f"1 (UID {uid} BODY[] {{{len(raw)}}}".encode(), raw), b")"]
+            stamp = self.internal_dates.get(uid)
+            meta = f' INTERNALDATE "{stamp}"' if stamp else ""
+            return "OK", [(f"1 (UID {uid}{meta} BODY[] {{{len(raw)}}}".encode(), raw), b")"]
         if command == "STORE":
             self.seen.append(int(args[0]))
             return "OK", [b""]
@@ -261,3 +265,23 @@ def test_watch_once_reports_failure_as_exit_code(tmp_path):
         assert receiver.watch(settings, spool, receiver.State(tmp_path), once=True) == 1
     finally:
         spool.close()
+
+
+def test_the_mail_servers_receipt_time_is_the_receipt(tmp_path):
+    """The Date header is the camera's own clock, fast or slow with its photos; the
+    server's INTERNALDATE is what the importer checks the camera's clock against."""
+    fake = FakeIMAP({7: make_message(attachments=[("PICT_20260916_1103.jpg", JPEG, "jpeg")],
+                                     date="Wed, 16 Sep 2026 11:04:10 +0200")},  # an hour fast
+                    internal_dates={7: "16-Sep-2026 10:05:02 +0200"})
+    run(tmp_path, fake)
+    [package] = ready_packages(tmp_path)
+    metadata = json.loads((package / "metadata.json").read_text())
+    assert metadata["received_at"] == "2026-09-16T08:05:02+00:00"
+    assert metadata["mail_sent_at"] == "2026-09-16T09:04:10+00:00"
+    assert metadata["received_by"] == "mail_server"
+
+
+def test_without_an_internaldate_the_date_header_stands(tmp_path):
+    run(tmp_path, FakeIMAP({7: make_message(attachments=[("a.jpg", JPEG, "jpeg")])}))
+    [package] = ready_packages(tmp_path)
+    assert json.loads((package / "metadata.json").read_text())["received_by"] == "camera_date"

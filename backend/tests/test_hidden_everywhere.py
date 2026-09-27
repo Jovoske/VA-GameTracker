@@ -403,4 +403,12 @@ def test_hidden_and_marked_photos_move_no_stand_hint(db_session, estate_with_fox
 
     assert suggest_approach_arcs(db_session, stand)["suggestions"] == []
     exit_ = dark_exit(db_session, stand)
-    assert (exit_["hour"], exit_["share_pct"]) == (23, 0.0)
+    # The first hour after a normal sit (3 h after tonight's sunset) is empty of boar;
+    # the foxes that walked it are hidden.
+    from app.forecasting.inference import SIT_ENDS_AFTER_SUNSET
+    from app.forecasting.model import _sunset
+
+    first = _sunset(current_night()) + SIT_ENDS_AFTER_SUNSET
+    quarter = datetime.fromtimestamp(round(first.timestamp() / 900) * 900, tz=UTC)
+    assert exit_["share_pct"] == 0.0
+    assert exit_["time"] == quarter.astimezone(ZoneInfo("Europe/Madrid")).strftime("%H:%M")

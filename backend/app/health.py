@@ -78,6 +78,12 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
             detail = f"No photos since {_day(last)}" if last else "No photos yet"
         else:
             detail = "Sends photos only, no check-ins"
+        ahead = getattr(cam, "clock_ahead_min", None)
+        if ahead:
+            # Put right on import (ftp_import._timestamp), but the camera should be told.
+            hours = round(ahead / 60)
+            detail += (f". Its clock is {hours} h fast (missed the clock change?): photo "
+                       "times are put right, but set the camera's clock")
     elif offline:
         status = "offline"
         detail = "No check-in" + (f" for {round(hours)}h" if hours is not None else " yet")

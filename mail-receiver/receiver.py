@@ -261,6 +261,25 @@ def jpeg_attachments(message: Message, *, max_bytes: int) -> list[tuple[str | No
     return found
 
 
+_INTERNALDATE = re.compile(rb'INTERNALDATE "([^"]+)"')
+
+
+def internal_date(meta: bytes | None) -> datetime | None:
+    """The mail server's own receipt time (IMAP INTERNALDATE) from a FETCH answer.
+
+    The Date header is written by the camera, by its own clock: a camera that missed
+    the clock change stamps its photos and its mail an hour ahead alike, and nothing
+    downstream could tell. The server's clock can (audit E-14)."""
+    match = _INTERNALDATE.search(meta or b"")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1).decode("ascii").strip(),
+                                 "%d-%b-%Y %H:%M:%S %z").astimezone(UTC)
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
 def message_received_at(message: Message, now: datetime) -> datetime:
     """The camera's send time from the Date header, else the poll time."""
     for header in ("Date",):
@@ -350,14 +369,16 @@ class Mailbox:
         # "n:*" always matches the highest UID even when it is below n; filter it out.
         return sorted(uid for uid in (int(x) for x in raw.split()) if uid > last_uid)
 
-    def fetch(self, uid: int) -> bytes:
-        typ, data = self.client.uid("FETCH", str(uid), "(BODY.PEEK[])")
+    def fetch(self, uid: int) -> tuple[bytes, datetime | None]:
+        """The message, and when the mail server received it (None if it didn't say)."""
+        typ, data = self.client.uid("FETCH", str(uid), "(INTERNALDATE BODY.PEEK[])")
         if typ != "OK":
             raise imaplib.IMAP4.error(f"UID FETCH {uid} failed: {data!r}")
         for item in data:
             if isinstance(item, tuple) and len(item) >= 2:
                 if isinstance(item[1], bytes | bytearray):
-                    return bytes(item[1])
+                    meta = item[0] if isinstance(item[0], bytes | bytearray) else b""
+                    return bytes(item[1]), internal_date(bytes(meta))
         raise imaplib.IMAP4.error(f"UID FETCH {uid} returned no body")
 
     def mark_seen(self, uid: int) -> None:
@@ -385,7 +406,7 @@ def process_once(
         uids = box.uids_after(state.last_uid)[: settings.max_messages_per_poll]
         for uid in uids:
             counts["messages"] += 1
-            raw = box.fetch(uid)  # transient failure propagates; state not advanced
+            raw, server_received = box.fetch(uid)  # transient failure propagates
             try:
                 message = email.message_from_bytes(raw, policy=email.policy.default)
                 if not sender_matches(message, settings.from_filter):
@@ -406,7 +427,10 @@ def process_once(
                 counts["skipped"] += 1
                 state.advance(uid)
                 continue
-            received = message_received_at(message, now())
+            sent = message_received_at(message, now())
+            # The server's receipt when it gave one: the importer checks the camera's
+            # clock against it. The camera's own Date header otherwise.
+            received = server_received or sent
             for index, (name, data) in enumerate(attachments, start=1):
                 filename = sanitize_filename(name, f"MAIL{uid}_{index}.jpg")
                 extra = {
@@ -414,6 +438,8 @@ def process_once(
                     "mail_part": index,
                     "mail_subject": str(message.get("Subject", ""))[:200],
                     "mail_from": str(message.get("From", ""))[:200],
+                    "mail_sent_at": sent.isoformat(),
+                    "received_by": "mail_server" if server_received else "camera_date",
                 }
                 package = spool.publish(filename, data, received, extra)  # disk failure propagates
                 counts["published"] += 1

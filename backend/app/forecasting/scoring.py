@@ -127,8 +127,8 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
                 target_date=target,
                 species_id=entry.get("species_id"),
                 probability=float(entry.get("probability") or 0.0),
-                best_window_start=time(hour=int(w.get("start_hour", 0))),
-                best_window_end=time(hour=int(w.get("end_hour", 0))),
+                best_window_start=_clock_time(w.get("start"), w.get("start_hour")),
+                best_window_end=_clock_time(w.get("end"), w.get("end_hour")),
                 factors={
                     "verdict": entry.get("verdict"),
                     "nights_present": entry.get("nights_present"),
@@ -144,6 +144,15 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
     db.commit()
     log.info("forecast.persisted", written=written, target=str(target))
     return run
+
+
+def _clock_time(hhmm: str | None, hour) -> time:
+    """"20:45" as a time; a plan from before best hours followed sunset has only the hour."""
+    try:
+        h, m = (int(x) for x in str(hhmm).split(":"))
+        return time(hour=h, minute=m)
+    except (TypeError, ValueError):
+        return time(hour=int(hour or 0))
 
 
 def night_window(night: date, claimed_at: datetime | None = None) -> tuple[datetime, datetime]:

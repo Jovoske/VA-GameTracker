@@ -24,10 +24,16 @@ export type Camera = {
   alerts: boolean; alerts_enabled: boolean
 }
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
-export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string }
+// `at_local`: the moment it is judged for (45 min after sunset, or `now` once dark).
+export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string; at_local?: string; now?: boolean }
 export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }
 export type MapData = {
-  conditions: { wind_dir_deg: number | null; wind_speed_kmh: number | null }
+  conditions: {
+    wind_dir_deg: number | null; wind_speed_kmh: number | null
+    // What the wind bar, the stands and the shading are judged for, and tonight's sunset.
+    wind_at_local?: string; wind_now?: boolean; sunset_local?: string | null
+    forecast_fetched_at?: string | null; forecast_stale?: boolean
+  }
   airflow: { source: string; wind_dir_deg: number | null; wind_speed_kmh: number | null; text?: string; confidence?: string }
   zones: Zone[]; stands: MapStand[]
   safe_ground: { status: string; cells: { lat: number; lon: number; safe: boolean }[]; note?: string }

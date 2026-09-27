@@ -192,7 +192,7 @@ const server=http.createServer((req,res)=>{
   assert.ok(!kept.some(k=>k.startsWith('gs_cache:/forecast/tonight')),'the saved plan that broke Tonight is dropped');
   assert.ok(kept.includes('gs_cache:/stands')&&kept.includes('gs_cache:/sits'),'Stands’ saved copies are not Tonight’s to drop');
   await page.waitForTimeout(500);
-  assert.ok(reports.some(r=>r.kind==='render'&&r.route==='/'&&/start_hour/.test(r.message)&&r.at),'a page that throws is reported, with when');
+  assert.ok(reports.some(r=>r.kind==='render'&&r.route==='/'&&/start/.test(r.message)&&r.at),'a page that throws is reported, with when');
   set({});await page.getByRole('link',{name:'Go to Tonight'}).click();await page.locator('.tn-verdict').waitFor();
   assert.equal(await page.locator('.crashed').count(),0,'“Go to Tonight” on Tonight tries it again');
   await ctx.close();

@@ -144,6 +144,11 @@ class Camera(Base):
     # stay. Its own column, not `active`: a login that still lists a camera in a
     # drawer would switch that straight back on.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Suntek (FTP or email): how far ahead of the server's receipt the camera's clock
+    # ran on its last photo that came in straight away, in minutes, when a whole-hour
+    # error was put right (a camera that missed the clock change); 0 once one arrives
+    # on time. NULL until the check has seen a photo.
+    clock_ahead_min: Mapped[int | None] = mapped_column(Integer)
     # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
     # pages back to it (less an overlap) rather than reading only the newest page.
     photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -553,6 +558,9 @@ class Sit(Base):
     # be scored against what actually happened instead of quietly rewritten.
     wind_status: Mapped[str | None] = mapped_column(String)
     wind_text: Mapped[str | None] = mapped_column(Text)
+    # The moment that verdict was judged for: the sit time when it was reserved
+    # (45 min after sunset), or the reservation itself after dark.
+    wind_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (
         CheckConstraint(

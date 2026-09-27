@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getFresh, peek } from '../api'
+import { type Got, ageLabel, fromEarlierNight, getFresh, peek } from '../api'
+import type { MapData } from '../map/geometry'
 import { flushSits, onSitSync, pendingFor, rank, saveSit } from '../sits'
 
 /**
@@ -23,16 +24,32 @@ type Sit = {
   ended_at: string | null
   wind_status: string | null
   wind_text: string | null
+  claimed_at?: string | null
+  // The moment the saved verdict was judged for (the sit time when it was reserved).
+  wind_at?: string | null
 }
 
-// Short wind headline. The saved sentence from the reservation goes underneath.
+// Tonight's verdict for the stand, from the same place the map and Stands take it,
+// for the sit time: 45 min after sunset, or now once that has passed.
+type StandWind = { status: string; text: string; at_local?: string; now?: boolean; sunset_local?: string | null }
+
+// Short wind headline. The sentence goes underneath.
 const WIND_HEAD: Record<string, string> = {
   clean: 'Wind is right',
   scent_carries: 'Wind is wrong',
   too_light: 'Wind too light to call',
   no_wind_data: 'No wind forecast',
   no_geometry: 'Wind not set up for this stand',
+  no_bedding: 'No bedding drawn',
+  no_position: 'Stand not on the map',
 }
+
+// Wind is asked for again this often while the seat is open.
+const WIND_EVERY_MS = 15 * 60_000
+
+// The estate's clock, whatever the phone's is set to: Tonight's hours are Spain time.
+const estateClock = (d: Date | string) =>
+  new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
 
 // What the flash says is still on record when a lower tap changes nothing.
 const KEPT: Record<string, string> = {
@@ -63,6 +80,16 @@ const footButton: React.CSSProperties = {
   letterSpacing: '.05em',
   cursor: 'pointer',
 }
+
+/** This stand's wind and tonight's sunset from the map's answer, if the phone has one. */
+function fromMap(standId: string): Got<StandWind> | null {
+  const got = peek<MapData>('/map/tonight')
+  const wind = got?.data?.stands?.find((s) => s.id === standId)?.wind
+  return got && wind ? { ...got, data: { ...wind, sunset_local: got.data.conditions?.sunset_local } } : null
+}
+
+const newest = <T,>(a: Got<T> | null, b: Got<T> | null) =>
+  !a ? b : !b ? a : Date.parse(b.at) > Date.parse(a.at) ? b : a
 
 /** This sit as the phone saved it (Stands keeps /sits, Tonight the sit you're on),
  *  to paint before asking. */
@@ -124,6 +151,33 @@ export default function SitMode() {
       if (flashTimer.current) window.clearTimeout(flashTimer.current)
     }
   }, [sitId])
+
+  // Tonight's wind for this stand, asked again every quarter hour, so the seat says
+  // what the map says now rather than what it said at the reservation. The copy the
+  // phone has shows with no signal, with its age; one from an earlier night never does.
+  const standId = sit?.stand_id
+  const [live, setLive] = useState<Got<StandWind> | null>(null)
+  useEffect(() => {
+    if (!standId) return
+    const path = `/stands/${standId}/wind`
+    // What Stands or the map just loaded for this stand paints first: the same verdict.
+    const had = newest(peek<StandWind>(path), fromMap(standId))
+    setLive(had && !fromEarlierNight(had.at) ? had : null)
+    let ctl = new AbortController()
+    const ask = () => {
+      ctl.abort()
+      ctl = new AbortController()
+      getFresh<StandWind>(path, { save: true, timeoutMs: 20_000, signal: ctl.signal })
+        .then((got) => { if (!fromEarlierNight(got.at)) setLive(got) })
+        .catch(() => {})
+    }
+    ask()
+    const t = window.setInterval(() => { if (document.visibilityState === 'visible') ask() }, WIND_EVERY_MS)
+    return () => {
+      ctl.abort()
+      window.clearInterval(t)
+    }
+  }, [standId])
 
   // Keep the screen on: a sit is hours long and re-waking a phone in the dark
   // with gloves on is exactly the friction this screen exists to remove. The
@@ -219,7 +273,16 @@ export default function SitMode() {
     record('seen', 'Saved: saw animals')
   }
 
-  const windHead = sit?.wind_status ? WIND_HEAD[sit.wind_status] : null
+  // The live verdict when the phone has one from tonight; else the one saved when the
+  // stand was reserved, said as such.
+  const wind = live?.data ?? null
+  const windHead = wind ? WIND_HEAD[wind.status] : sit?.wind_status ? WIND_HEAD[sit.wind_status] : null
+  const windText = wind ? wind.text : sit?.wind_text
+  const windWhen = wind
+    ? `${wind.now ? 'now' : `for ${wind.at_local}`}${live?.stale ? `, checked ${ageLabel(live.at)}` : ''}`
+    : sit?.wind_text
+      ? `when you reserved${sit.claimed_at ? ` at ${estateClock(sit.claimed_at)}` : ''}${sit.wind_at ? `, for ${estateClock(sit.wind_at)}` : ''}`
+      : null
 
   return (
     <div
@@ -239,13 +302,25 @@ export default function SitMode() {
         <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>
           {sit?.stand ?? 'Your sit'}
         </div>
-        <div style={{ fontSize: 34, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-          {clock.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+          <span style={{ fontSize: 34, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+            {estateClock(clock)}
+          </span>
+          {wind?.sunset_local && (
+            <span style={{ fontSize: 15, opacity: 0.85, fontVariantNumeric: 'tabular-nums' }}>
+              Sunset {wind.sunset_local}
+            </span>
+          )}
         </div>
-        {(windHead || sit?.wind_text) && (
+        {(windHead || windText) && (
           <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.4 }}>
-            {windHead && <div style={{ fontWeight: 600 }}>{windHead}</div>}
-            {sit?.wind_text && <div style={{ opacity: 0.8 }}>{sit.wind_text}</div>}
+            {windHead && (
+              <div style={{ fontWeight: 600 }}>
+                {windHead}
+                {windWhen && <span style={{ fontWeight: 400, opacity: 0.8 }}> · {windWhen}</span>}
+              </div>
+            )}
+            {windText && <div style={{ opacity: 0.8 }}>{windText}</div>}
           </div>
         )}
         {/* Both lines keep their space whether or not they have anything to say.

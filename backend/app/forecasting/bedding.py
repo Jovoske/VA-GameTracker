@@ -87,20 +87,20 @@ def scent_hits_zone(
     lat: float, lon: float, zone: Zone, scent_bearing: float, *,
     max_range: float = SCENT_RANGE_M, half_deg: float = SCENT_CONE_DEG / 2.0,
 ) -> tuple[bool, float]:
-    """Does scent from (lat, lon) drift into this zone? Returns (hit, distance_m).
+    """Does scent from (lat, lon) drift into this zone? Returns (hit, distance_m):
+    on a hit, how far to the nearest bedding the plume reaches; otherwise how far to
+    the bedding at all.
 
-    Being inside the polygon counts as a hit at any wind — you are in their bedroom.
+    Tested against the outline, not its middle, so scent blowing into the near end
+    of a long strip is a hit (audit B-03). Being inside the polygon counts as a hit
+    at any wind — you are in their bedroom.
     """
-    pt = _zone_point(zone)
-    if pt is None:
+    if not geo.ring(zone.polygon):
         return (False, float("inf"))
-    dist = geo.distance_to_polygon_m(zone.polygon, lat, lon)
-    if dist == 0.0:
-        return (True, 0.0)
-    if dist > max_range:
-        return (False, dist)
-    to_zone = geo.bearing(lat, lon, pt[0], pt[1])
-    return (geo.angular_distance(to_zone, scent_bearing) <= half_deg, dist)
+    reach = geo.cone_reaches_polygon(zone.polygon, lat, lon, scent_bearing, half_deg, max_range)
+    if reach is not None:
+        return (True, reach)
+    return (False, geo.distance_to_polygon_m(zone.polygon, lat, lon))
 
 
 def approach_bearings(db: Session, lat: float | None, lon: float | None) -> list[dict]:
@@ -153,7 +153,7 @@ def stand_wind_report(
             "text": "No bedding drawn yet — draw where they lie up and this turns into advice.",
         }
     if wind_dir_deg is None or wind_speed_kmh is None:
-        return {"status": "no_wind_data", "text": "No wind forecast for tonight — check it yourself."}
+        return {"status": "no_wind_data", "text": "No wind forecast tonight. Check it yourself."}
 
     reg = thermal.regime(
         db, lat=lat, lon=lon, when=when or datetime.now(timezone.utc),
@@ -215,6 +215,10 @@ def stand_wind_report(
 
     if hits:
         first = hits[0]
+        # A seat drawn inside the bedding is in it whatever the wind: "0 m away" read
+        # like a measuring error.
+        where = (f"into {first['zone']}, the bedding your seat is in"
+                 if first["distance_m"] == 0 else None)
         return {
             "status": "scent_carries",
             "source": source,
@@ -226,11 +230,12 @@ def stand_wind_report(
             "slope": reg.get("slope"),
             "hit_zones": hits,
             "text": (
-                f"{lead}, carrying your scent into {first['zone']} "
-                f"{first['distance_m']} m away.{caveat}"
+                f"{lead}, carrying your scent "
+                + (where or f"into {first['zone']} {first['distance_m']} m away")
+                + f".{caveat}"
                 if source != "synoptic"
-                else f"{lead} — your scent runs {compass(scent_bearing)} into "
-                     f"{first['zone']}, {first['distance_m']} m away."
+                else f"{lead} — your scent runs {compass(scent_bearing)} "
+                     + (where or f"into {first['zone']}, {first['distance_m']} m away") + "."
             ),
         }
     nearest = min(
@@ -269,7 +274,7 @@ def safe_ground(
     if not zones:
         return {"status": "no_bedding", "cells": [], "note": "Draw bedding to see this."}
     if wind_dir_deg is None or wind_speed_kmh is None:
-        return {"status": "no_wind_data", "cells": [], "note": "No wind forecast for tonight."}
+        return {"status": "no_wind_data", "cells": [], "note": "No wind forecast tonight."}
 
     # Under a real wind every cell shares one scent bearing. Under drainage they do
     # not: air follows the fall line, which differs across the estate, so each cell
@@ -307,7 +312,9 @@ def safe_ground(
 
     uniform_bearing = (float(probe["wind_dir_deg"]) + 180.0) % 360.0
     # Same plume shape the stand verdicts use, so the shading and the markers can
-    # never tell different stories about the same evening.
+    # never tell different stories about the same evening (audit B-14). Under a real
+    # wind that is one shape for every square; under drainage each square's own
+    # slope sets its speed, as it would for a stand placed there.
     geom = scent_geometry(float(probe["wind_speed_kmh"]), mode, probe.get("confidence"))
     cells = []
     for i in range(steps):
@@ -321,18 +328,28 @@ def safe_ground(
             if near > geom["range_m"] * 1.5:
                 continue  # too far away to be a decision about this bedding
 
+            cell_geom = geom
             if tgrid is not None:
                 # Drainage: scent follows this cell's own fall line, not one bearing
-                # for the whole estate. Cells with no slope get no verdict rather
-                # than a borrowed one.
+                # for the whole estate. Cells too flat for a stand to get a verdict
+                # get none either, rather than a borrowed one.
                 sl = slope_at(tgrid, lat, lon)
-                if sl is None or sl.get("downhill_deg") is None:
+                if (sl is None or sl.get("downhill_deg") is None
+                        or sl["slope_pct"] < thermal.MIN_SLOPE_PCT):
                     continue
-                cell_bearing = float(sl["downhill_deg"])
+                downhill = float(sl["downhill_deg"])
+                # Scent drains downhill after dark, and drifts uphill by day.
+                cell_bearing = downhill if mode == "katabatic" else (downhill + 180.0) % 360.0
+                cell_geom = scent_geometry(thermal._speed_estimate(sl["slope_pct"]), mode,
+                                           probe.get("confidence"))
             else:
                 cell_bearing = uniform_bearing
 
-            hit = any(scent_hits_zone(lat, lon, z, cell_bearing)[0] for z in zones)
+            hit = any(
+                scent_hits_zone(lat, lon, z, cell_bearing, max_range=cell_geom["range_m"],
+                                half_deg=cell_geom["half_deg"])[0]
+                for z in zones
+            )
             cells.append({"lat": round(lat, 6), "lon": round(lon, 6),
                           "safe": not hit, "nearest_m": round(near),
                           "bearing": round(cell_bearing)})

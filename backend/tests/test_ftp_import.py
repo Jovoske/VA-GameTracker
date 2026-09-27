@@ -454,3 +454,60 @@ def test_a_failure_note_that_cannot_be_written_does_not_stop_the_watcher(
 
 def test_spool_counts_without_a_spool(tmp_path):
     assert ftp.spool_counts(tmp_path / "nowhere") is None
+
+
+# ── E-14 / H-17: a Suntek clock that missed the 25 Oct clock change ──────────
+
+AFTER_CHANGE = {"received_at": "2026-10-26T19:05:00+00:00"}  # 20:05 CET
+
+
+def test_a_camera_an_hour_fast_after_the_clock_change_is_put_right(tmp_path):
+    """Still on summer time, it names a 20:03 photo 21:03; read as Madrid time that is
+    after it arrived, which no photo can be."""
+    result = ftp.read_package(package(tmp_path, name="PICT_20261026_2103.jpg",
+                                      manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert result.captured_at == datetime(2026, 10, 26, 19, 3, tzinfo=UTC)
+    assert result.clock_ahead_min == 60
+    assert any("1 h ahead" in note for note in result.timestamp_notes)
+
+
+def test_a_right_clock_says_so_and_a_backlog_says_nothing(tmp_path):
+    right = ftp.read_package(package(tmp_path, name="PICT_20261026_2003.jpg",
+                                     manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert right.captured_at == datetime(2026, 10, 26, 19, 3, tzinfo=UTC)
+    assert right.clock_ahead_min == 0
+    backlog = ftp.read_package(package(tmp_path, name="PICT_20261024_2003.jpg",
+                                       manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert backlog.clock_ahead_min is None
+
+
+def test_a_clock_fast_by_part_of_an_hour_is_not_trusted(tmp_path):
+    result = ftp.read_package(package(tmp_path, name="PICT_20261026_2035.jpg",
+                                      manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert result.timestamp_source == "received_at_fallback"
+    assert result.captured_at == datetime(2026, 10, 26, 19, 5, tzinfo=UTC)
+    assert any("implausible" in note for note in result.timestamp_notes)
+    assert result.clock_ahead_min is None
+
+
+@requires_db
+def test_the_camera_card_says_its_clock_is_fast(tmp_path, db_session):
+    from sqlalchemy.orm import sessionmaker
+
+    from app.health import camera_health
+    from app.models import Camera, Image
+
+    camera = seed_camera(db_session)
+    package(tmp_path, name="PICT_20261026_2103.jpg", manifest=AFTER_CHANGE)
+    ftp.run_once(tmp_path, camera, timezone_name="Europe/Madrid",
+                 session_factory=sessionmaker(bind=db_session.get_bind()),
+                 media_root=tmp_path / "media", enrich=False)
+    db_session.expire_all()
+    row = db_session.get(Camera, camera)
+    assert row.clock_ahead_min == 60
+    from sqlalchemy import select
+
+    assert db_session.scalar(select(Image.captured_at)) == datetime(2026, 10, 26, 19, 3,
+                                                                     tzinfo=UTC)
+    now = datetime(2026, 10, 26, 20, 0, tzinfo=UTC)
+    assert "clock is 1 h fast" in camera_health(row, now)["detail"]

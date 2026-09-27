@@ -3,6 +3,8 @@
 .stand-entry-top h2 { margin: 0 0 5px; }
 .stand-entry-top .stand-state { display: block; }
 .stand-wind-line { font-size: 14px; font-weight: 500; line-height: 1.5; margin: 12px 0 14px; }
+/* The time the wind line is judged for. */
+.stand-wind-for { display: block; font-size: 12px; font-weight: 400; color: var(--text-dim); }
 .stand-entry > .map-button--primary { width: 100%; }
 .stand-reserve-later { width: 100%; margin-top: 10px; }
 .stand-entry .map-actions { margin-top: 0; }
