@@ -946,10 +946,14 @@ def test_the_update_checks_the_new_version_before_it_changes_anything():
     migration and the restart, and a version that doesn't load is rolled back."""
     script = (BACKEND.parent / "deploy" / "update.ps1").read_text()
     check = script.index('serve.py" check')
-    for later in ("vite.cmd", "pg_dump", "alembic.exe", "Restart-Service GameSenseAPI"):
+    # The steps themselves, not the helper functions defined above them.
+    for later in ("vite.js", "Find-PgTool 'pg_dump'", "alembic.exe\" upgrade",
+                  "\nRestart-GameSense\n"):
         assert check < script.index(later), later
-    after = script[check:script.index("vite.cmd")]
-    assert "git reset --hard $before" in after and "exit 1" in after
+    after = script[check:script.index("vite.js")]
+    assert "Fail 'check'" in after
+    fail = script[script.index("function Fail("):]
+    assert "git reset --hard $good" in fail[:fail.index("exit 1")]
 
 
 def test_new_secret_keeps_the_saved_camera_logins_readable(tmp_path, server_secrets):

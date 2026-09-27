@@ -1,67 +1,141 @@
 # Deployment — how code reaches the server
 
 GameSense runs natively (no Docker) on **Db01**, a Windows Server 2022 VM.
-Deploying is just **`git push`**: the server pulls from `main` and applies the
-change itself, within 10 minutes.
+Deploying is **`git push` to `main`**: GitHub runs the tests, and the server puts a
+commit live within 10 minutes of it passing them. A commit that fails them never
+reaches the server.
 
 ## The loop
 
 ```
-laptop  --git push-->  github.com/Jovoske/VA-GameTracker  --git pull-->  Db01
+laptop --git push main--> GitHub --CI: tests--> `deploy` branch --(<=10 min)--> Db01
 ```
 
-`deploy/update.ps1` runs on Db01 every 10 minutes as the `GameSense-Update`
-scheduled task (SYSTEM). Each run:
+**The test gate.** `.github/workflows/ci.yml` runs on every push and pull request:
 
-1. Stands down while a pipeline run holds its lock (`pipeline.py busy` exits 3),
-   so an update never interrupts a photo import. It asks again just before
-   restarting `GameSenseAPI` and waits up to 10 minutes for a job to finish.
-2. Fetches `origin/main`. **Exits silently when there is nothing new** — the
-   normal case.
-3. `git reset --hard origin/main`. The server is deploy-only and never carries
-   local edits.
-4. `pip install` only if `backend/requirements.txt` changed.
-5. `serve.py check`, before anything else changes: the new version has to load, or
-   the code is **rolled back** and nothing is deployed (the reason is in
-   `update-check.log`). It also notes in `update.log` what the new version will do
-   about the secrets published with GameSense as it starts (a published or short
-   `JWT_SECRET` is replaced; an admin on the published password is named). Neither
-   stops it starting.
-6. `npm install` + `vite build` only if anything under `frontend/` changed, then
-   mirrors `frontend/dist` to `C:\GameSense\web` (served by FastAPI).
-7. **`pg_dump -Fc` to `C:\GameSense\backups`**, keeping the last 7. Connection
-   details are parsed from the same `DATABASE_URL` the app uses, so the backup
-   cannot dump a different database than the one about to change. **If the dump
-   cannot be taken, the update refuses to migrate** and rolls the code back — a
-   deploy that stops is visible and recoverable, a half-applied migration with no
-   backup is neither.
-8. `alembic upgrade head`. If migrations fail it **rolls the code back** and does
-   not restart, rather than running new code against an old schema. The *schema*
-   is restored by hand from the dump — deliberately manual, because an automatic
-   restore destroys rows written since the backup.
-9. Restarts `GameSenseAPI` and checks `/api/health`.
+- the backend tests against a real PostgreSQL (the repo's own PostGIS + pgvector
+  image, `docker/postgres`) with `GAMESENSE_REQUIRE_DB=1`, so a missing database
+  fails instead of skipping;
+- ruff: errors anywhere, and no new finding in any backend file the change touches
+  (`backend/scripts/ruff_ratchet.py`: the old findings stay until someone is in that
+  file anyway);
+- the frontend build (`tsc` + `vite build`);
+- every UI script in `frontend/tests` against a started stack (API with demo data
+  from `backend/scripts/demo_data.py`, Vite in front of it), with Playwright's
+  Chromium (`frontend/tests/run.sh`).
+
+When all of it passes on a push to `main`, the last job moves the **`deploy` branch**
+to that commit, only ever forward. The server deploys `deploy`. Until CI has run
+once and made that branch, the server deploys `main` as it always did, so nothing
+stops when this lands first. A commit can be put live by hand, past the tests, with
+`git push origin <commit>:deploy`; don't, unless CI itself is what's broken. If
+`main`'s branch protection refuses the Actions bot, allow it to push `deploy`.
+
+**On the server.** `deploy/update.ps1` runs every 10 minutes as the
+`GameSense-Update` scheduled task (SYSTEM), at any hour: there is no evening pause
+(the owner's decision). A deploy restarts the API for a few seconds, and an open app
+rides that out (plan item 1). Each run:
+
+1. Stands down while a job runs (`pipeline.py busy` exits 3): a photo fetch, the AI
+   pass, the plan, the score, the stag/hind pass, a notify run.
+2. Asks GitHub whether a `deploy` branch exists and fetches it (or `main` when there
+   is none). If GitHub doesn't answer, it waits for the next run: it never falls
+   back to `main` because the line was down. **Exits quietly when nothing is new** —
+   the normal case — after writing `deploy-status.json` (below).
+3. Takes **every job's lock** (`pipeline.py hold`, audit H-09) and keeps it until the
+   new version answers, so no job starts on new code with the old schema, or has
+   its rows moved by a data migration halfway through. A job that waited for a lock
+   meanwhile (the plan, the score, a queued Check) starts again on the new code
+   rather than finish on a mix of the two. The Check button says "The server is
+   installing an update. New photos come in when it finishes." and fetches then.
+4. `git reset --hard <commit>`. The server is deploy-only and never carries local
+   edits.
+5. `pip install` if `backend/requirements.txt` changed (and the camera receiver's, if
+   that moved). **Tried twice**, a minute apart (H-04).
+6. `serve.py check`: the new version has to load. It also notes in `update.log` what
+   the new version will do about the secrets published with GameSense as it starts.
+7. `npm install` + `vite build` into `frontend\dist` if anything under `frontend/`
+   changed. **Tried twice.** Nothing is live yet: `C:\GameSense\web` still holds the
+   old screens (H-05).
+8. **A `pg_dump -Fc` to `C:\GameSense\backups`, when a migration is waiting**
+   (`alembic current` isn't at the new head). The newest 10 are kept; they are only
+   taken before a schema change, so they go back a long way. If the dump cannot be
+   taken the deploy stops before the database is touched: a deploy that stops is
+   visible and recoverable, a half-applied migration with no backup is neither.
+9. `alembic upgrade head`. PostgreSQL runs a deploy's migrations in one transaction,
+   so one that fails leaves the database as it was.
+10. The new screens go live: `C:\GameSense\web` is copied to
+    `C:\GameSense\web-previous`, then `frontend\dist` over it.
+11. Restarts `GameSenseAPI` (and `GameSenseFTPImport`, `GameSenseFTP`,
+    `GameSenseMail` when installed).
+12. **`/api/health` must answer "ok" from the new commit within 90 seconds.** It
+    answers only when the API can reach its database, and it names the commit the
+    running process started from, so an old process that never went away is not
+    taken for the new one (H-07).
+
+**When a step fails**, everything it changed goes back: the code (`git reset --hard`
+to the last good commit), the packages (pip install of the old requirements), the
+screens (`web-previous`), and, if the API was restarted, it is restarted on the old
+version and checked again (K-09). The schema stays where the migration took it:
+migrations only ever add, so the old code runs on it. To undo a migration, restore
+the dump by hand (below): an automatic restore would destroy rows written since.
+
+A commit counts as deployed only once step 12 passes: it is then written to
+`C:\GameSense\data\deployed.sha`, and every run deploys what moved since *that*, not
+since whatever is checked out. So a failed step is tried again on the next run, 3
+times, then every 6 hours or as soon as a newer commit arrives; the old script
+skipped a failed pip install or build for good.
 
 Progress goes to `C:\GameSense\logs\update.log`; per-step output to
 `update-git.log`, `update-pip.log`, `update-check.log`, `update-npm.log`,
 `update-dump.log`, `update-alembic.log`.
 
-The script lives in the repo, so it updates itself on the next pull. The run that
-pulls a change to it still runs the old copy (PowerShell reads a script whole before
-it starts), so a new step first works on the deploy after the one that brought it.
+**What Settings shows.** Each run writes `C:\GameSense\data\deploy-status.json`
+(beside the job locks), and Settings → App version reads it (`app/ops.py`): the
+change that runs and since when, whether only tested changes go in, how many newer
+changes wait for their tests, and, in red, an update that didn't go in, why, what was
+put back and when it is tried again, or that the update task hasn't looked for 30
+minutes. The old "Check for updates" asked GitHub for release tags, which stopped at
+v0.17.0, and said "Up to date" whatever the server ran (D-22); it is gone.
+
+The script lives in the repo, so it updates itself. The run that pulls a change to
+it still runs the old copy (PowerShell reads a script whole before it starts), so a
+new step first works on the deploy after the one that brought it. The first run of
+this version takes whatever is checked out as deployed.
+
+### Health checks
+
+| | Answers 200 when | Otherwise |
+|---|---|---|
+| `GET /api/health` | the database answers `SELECT 1`; the body names the version and commit | 503, `"status": "down"` |
+| `GET /api/ready` | as above, and the schema is at the code's newest migration; Redis too where a Celery broker is set up (`REDIS_URL`, the Docker stack) | 503, with the check that failed |
+
+The native server runs no Celery and has no Redis, so `/api/ready` doesn't ask about
+it there: it used to read "degraded" for ever.
 
 ## Scheduled jobs
 
-There is no Celery in the native build — every recurring job is a scheduled task
-driving `backend/pipeline.py`.
+There is no Celery in the native build — every recurring job is a scheduled task.
+`deploy/register-tasks.ps1` registers all of them (idempotent: a task that exists is
+brought back to what the script says):
 
-| Task | When | Mode | Does |
+| Task | When | Runs | Does |
 |---|---|---|---|
-| `GameSense-Update` | every 10 min | — | `deploy/update.ps1`, the loop above |
-| `GameSense-Sync` | every 15 min | `sync` | SPYPOINT and UBox Pro pull + local AI (up to 300 photos, newest first) + exposure recompute |
-| `GameSense-Sex` | hourly | `sex` | cloud vision stag/hind pass (costs API credit) |
-| `GameSense-Plan` | 17:00 daily | `plan` | record tonight's claims **before** the night |
-| `GameSense-Score` | 11:00 daily | `score` | grade the claims of every finished night not graded yet (last 14 days) |
-| `GameSense-Notify` | every 15 min | `notify` | alerts that waited for a sit or quiet hours, as one message; tonight's plan push about 2 h before sunset |
+| `GameSense-Update` | every 10 min | `deploy/update.ps1` | the loop above |
+| `GameSense-Sync` | every 15 min | `pipeline.py sync` | SPYPOINT and UBox Pro pull + local AI (up to 300 photos, newest first) + exposure recompute |
+| `GameSense-Notify` | every 15 min | `pipeline.py notify` | alerts that waited for a sit or quiet hours, as one message; tonight's plan push about 2 h before sunset |
+| `GameSense-Sex` | hourly | `pipeline.py sex` | cloud vision stag/hind pass (costs API credit) |
+| `GameSense-Plan` | 17:00 daily | `pipeline.py plan` | record tonight's claims **before** the night |
+| `GameSense-Score` | 11:00 daily | `pipeline.py score` | grade the claims of every finished night not graded yet (last 14 days) |
+| `GameSense-Backup` | 03:00 daily | `deploy/backup.ps1` | the database and the photos to the backup disk (below) |
+| `GameSense-RestoreCheck` | Sundays 04:30 | `deploy/restore-check.ps1` | restore the newest backup into a scratch database and check it (below) |
+
+**Their output is kept.** Task Scheduler throws a task's output away, so each task
+runs through `cmd.exe` with its errors appended to
+`C:\GameSense\logs\tasks-stderr.log`: a job that dies before it can write its own
+log (an import that fails) still leaves the reason. `pipeline.py` writes everything
+it logs to `pipeline.log` itself; `update.ps1`, `backup.ps1` and `restore-check.ps1`
+keep their own logs in the same folder, rolled over at 5 MB.
 
 Sighting notifications are sent by the dispatcher at the end of every
 classification pass, so the `sync` task carries them. `notify` is for what can't
@@ -84,13 +158,17 @@ forever, and the app is back to making claims nobody checks. Order matters:
 `plan` must run before dark or it is not a forecast, and `score` must run after
 the night's photos have synced and been classified.
 
-Register them (idempotent: `plan`, `score` and `notify`; also preflights the backup path):
+Register them (also checks the backup tools and preflights a `pg_dump`):
 
 ```powershell
 Invoke-Command -ComputerName Db01 {
     powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\register-tasks.ps1
 }
 ```
+
+The two services (`GameSensePG`, PostgreSQL on port 5433; `GameSenseAPI`, `serve.py`
+under NSSM) are checked by `deploy/register-services.ps1`, which on a rebuilt server
+also creates a missing one with `-Apply` (it never changes one that exists).
 
 ### The pipeline lock
 
@@ -154,10 +232,82 @@ Invoke-Command -ComputerName Db01 { Get-Content C:\GameSense\logs\pipeline.log -
 |---|---|
 | `C:\GameSense\app` | git clone of this repo (the deployed code) |
 | `C:\GameSense\app\backend\.env` | secrets — gitignored, **never** overwritten by a pull |
-| `C:\GameSense\web` | built SPA, served by FastAPI |
-| `C:\GameSense\data\media` | permanent photo archive |
-| `C:\GameSense\tools` | git, node, nssm, cloudflared, backup script |
+| `C:\GameSense\web` | built SPA, served by FastAPI (`FRONTEND_DIST`) |
+| `C:\GameSense\web-previous` | the screens before the last deploy, put back if it fails |
+| `C:\GameSense\data\media` | permanent photo archive (`MEDIA_ROOT`) |
+| `C:\GameSense\data` | also the job locks, `deployed.sha`, `deploy-status.json`, `backup-status.json`, `restore-check.json` |
+| `C:\GameSense\backups` | the dumps taken before a migration |
+| `D:\GameSense-Backup` | the nightly backup (`BACKUP_DIR`) |
+| `C:\GameSense\logs` | every log |
+| `C:\GameSense\tools` | git, node, nssm, cloudflared |
 | `C:\GameSense\venv` | Python environment |
+
+## Backups, and proving they restore
+
+`deploy/backup.ps1` runs at 03:00 (`GameSense-Backup`) and copies to `BACKUP_DIR` in
+`backend\.env`, else `D:\GameSense-Backup` — a disk other than the one the database
+and the photos are on, or it is no backup of them (audit H-10):
+
+- `db\gamesense-<date>.dump`: `pg_dump -Fc`, read back with `pg_restore --list` to
+  be sure it is a backup. The newest 14 are kept.
+- `media\`: the photos, new and changed files only. A photo gone from the server
+  stays in the backup. This matters most: once SPYPOINT drops its cloud copy (after
+  about 30 days) the server holds the only one. Thumbnails are left out (they are
+  made again).
+- `config\backend.env`: without its `JWT_SECRET` / `CREDENTIALS_KEY` the camera
+  passwords saved in a restored database can't be read. It holds secrets: keep the
+  backup folder no more open than `C:\GameSense`.
+
+It writes `C:\GameSense\data\backup-status.json`, and Settings → System shows it:
+"Last backup 5 h ago", or in red when it failed, when the last good one is more than
+36 hours old, or when there has never been one. It also says how many photos the
+server and the backup hold; a backup with fewer counts as failed.
+
+`deploy/restore-check.ps1` runs on Sundays at 04:30 (`GameSense-RestoreCheck`). It
+restores the newest dump into a scratch database (`gamesense_restorecheck`) on the
+same server, compares it with the live one table by table, looks for 50 of its photos
+in the backup's photo folder (`python -m app.backup_check`), and drops the scratch
+database. The live database is only read. Settings → System shows "Restore test:
+passed 2 d ago", or why it failed.
+
+Run either by hand:
+
+```powershell
+Invoke-Command -ComputerName Db01 { powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\backup.ps1 }
+Invoke-Command -ComputerName Db01 { powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\restore-check.ps1 }
+```
+
+**A real restore** (the disk failed, or a migration went wrong):
+
+1. Stop the jobs and the API: `Disable-ScheduledTask -TaskName 'GameSense-*'`,
+   `Stop-Service GameSenseAPI`.
+2. Photos: copy `D:\GameSense-Backup\media` to where `MEDIA_ROOT` says (or point
+   `MEDIA_ROOT` at a new folder, below).
+3. Settings: `backend\.env` from `D:\GameSense-Backup\config\backend.env` if the
+   server's own is gone.
+4. Database: with the service `GameSensePG` running,
+   `dropdb -p 5433 -U gamesense gamesense`, `createdb -p 5433 -U gamesense gamesense`,
+   `pg_restore -p 5433 -U gamesense -d gamesense --no-owner <the dump>` (a dump from
+   `C:\GameSense\backups` for a migration that went wrong: the one named
+   `...-before-<commit>`).
+5. `alembic upgrade head` from `backend\`, `Start-Service GameSenseAPI`, check
+   `http://db01:8090/api/ready`, then `Enable-ScheduledTask -TaskName 'GameSense-*'`.
+
+## Photos on another disk
+
+Photo paths are stored relative to `MEDIA_ROOT` (`<estate>/<camera>/2026-09-01/x.jpg`),
+so moving the photos is a change to `MEDIA_ROOT` in `backend\.env` and a restart
+(H-21). Photos stored before this with an absolute path (`C:\GameSense\data\media\...`)
+are still found where they say and, once moved, under the new `MEDIA_ROOT` from the
+estate's folder on, so nothing has to be rewritten in the database.
+
+## Disk space
+
+The photos, the database and the pre-migration dumps share `C:`. Settings → System
+says "Space for photos: 12 GB free. Getting full" in amber under 20 GB, and in red
+under 5 GB, where the photo fetch stops downloading (the photos wait on the cameras'
+clouds and come in once there is room) so the database keeps room to work (H-18). A
+deploy notes a warning under 10 GB free and doesn't start under 2 GB.
 
 ## Gotchas
 
@@ -171,6 +321,12 @@ Invoke-Command -ComputerName Db01 { Get-Content C:\GameSense\logs\pipeline.log -
   Server that must not be disturbed.
 - Node and git are local to `C:\GameSense\tools`, not on the system PATH; the
   update script adds them itself.
+- **`.env` is read like pydantic reads it** (python-dotenv, H-15): quotes around a
+  value and a trailing `# note` are not part of it, for the API, the pipeline,
+  alembic and the importer alike. A value set in the service's own environment wins.
+- The deploy scripts are for Windows PowerShell 5.1 (no `??`, `?.`, `&&`). CI parses
+  them with PowerShell 7 (`backend/tests/test_safe_deploys.py`); a harness that runs
+  `update.ps1` end to end against a fake server lives outside the repo.
 
 ## Manual control
 
@@ -181,6 +337,12 @@ Invoke-Command -ComputerName Db01 { schtasks /Run /TN 'GameSense-Update' }
 # watch what it did
 Invoke-Command -ComputerName Db01 { Get-Content C:\GameSense\logs\update.log -Tail 20 }
 
+# what it runs, and what the last update did (Settings -> App version shows the same)
+Invoke-Command -ComputerName Db01 { Get-Content C:\GameSense\data\deploy-status.json }
+
 # pause automatic deploys (e.g. while debugging on the server)
 Invoke-Command -ComputerName Db01 { Disable-ScheduledTask -TaskName 'GameSense-Update' }
+
+# try a commit that gave up again now (it otherwise waits 6 hours or a newer commit)
+Invoke-Command -ComputerName Db01 { Remove-Item C:\GameSense\data\deploy-status.json; schtasks /Run /TN 'GameSense-Update' }
 ```

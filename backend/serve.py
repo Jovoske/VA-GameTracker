@@ -24,14 +24,12 @@ ENV_FILE = Path(__file__).with_name(".env")
 
 
 def load_env(path: Path = ENV_FILE) -> None:
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        os.environ.setdefault(key.strip(), val.strip())
+    """.env into os.environ, read as pydantic-settings, alembic and the FTP importer
+    read it: quotes around a value and a trailing "# note" are not part of it. A
+    value already in the environment wins (audit H-15)."""
+    from dotenv import load_dotenv
+
+    load_dotenv(path, override=False, encoding="utf-8")
 
 
 def uvicorn_options() -> dict:

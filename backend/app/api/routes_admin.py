@@ -1,27 +1,36 @@
-"""Admin — version, Git update check, and system status (deliverable 10).
+"""Admin — the version and how the server's self-update is doing, and system status.
 
-The update *check* runs anywhere (GitHub API). Auto-applying an update (git pull +
-migrate + restart) is deployment-specific and belongs to the host/server per
-docs/08-git-update.md, so here we surface the version delta + the exact command.
+The server updates itself (deploy/update.ps1, every 10 minutes, only commits that
+passed the tests once CI is live), so "App version" says what that last did: which
+commit runs, since when, what waits for its tests, and an update that didn't go in
+and why. It used to ask GitHub for release tags, which stopped at v0.17.0 while the
+app moved on by pushes, so it said "Up to date" whatever the server ran, and also
+when GitHub refused to answer (audit D-22). System also says how the nightly backup
+and the weekly restore rehearsal went, and how much room is left for photos (H-10,
+H-18). All of it comes from files the server's own tasks write (app.ops).
 """
 import os
-import re
-import shutil
 from typing import Annotated
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import jobs, ops
 from app.api.deps import get_current_admin
 from app.core.db import get_db
 from app.models import Camera, Detection, Image, User
-from app.version import __version__
+from app.version import COMMIT, __version__
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-_REPO = "Jovoske/VA-GameTracker"
+
+# A deploy holds every job's lock while it swaps the code (pipeline.py hold).
+DEPLOYING = "The server is installing an update. Try again in a few minutes."
+
+
+def _deploying(name: str) -> bool:
+    h = jobs.holder(name)
+    return h is not None and h.owner == "deploy"
 
 
 @router.post("/sex-pass")
@@ -33,6 +42,8 @@ def sex_pass(_: Annotated[User, Depends(get_current_admin)]) -> dict:
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(400, "Add ANTHROPIC_API_KEY to .env first")
+    if _deploying("sexpass"):
+        return {"status": "busy", "note": DEPLOYING}
     if jobs.holder("sexpass") is not None:
         return {"status": "busy", "note": "Already labelling. Labels appear over a few minutes."}
     if not jobs.spawn("sex"):
@@ -54,33 +65,16 @@ def retry_failed_photos(
 
 @router.get("/version")
 def version(_: User = Depends(get_current_admin)) -> dict:
-    return {"version": __version__}
+    """The version, the commit this process runs, and the self-update's last word
+    (None where no self-update runs, as on a laptop)."""
+    return {"version": __version__, "commit": COMMIT, "deploy": ops.deploy()}
 
 
 @router.get("/version/check")
 def version_check(_: User = Depends(get_current_admin)) -> dict:
-    current = f"v{__version__}"
-    try:
-        tags = httpx.get(f"https://api.github.com/repos/{_REPO}/tags", timeout=15).json()
-        names = [t["name"] for t in tags if isinstance(t, dict) and "name" in t]
-        semver = [n for n in names if re.match(r"^v\d+\.\d+\.\d+$", n)]  # excludes v1-legacy
-        latest = max(semver, key=lambda v: tuple(int(x) for x in v[1:].split("."))) if semver else None
-    except Exception as e:
-        return {"current": current, "latest": None, "error": str(e)}
-    cur_t = tuple(int(x) for x in __version__.split("."))
-    lat_t = (
-        tuple(int(x) for x in latest[1:].split("."))
-        if latest and re.match(r"^v\d+\.\d+\.\d+$", latest)
-        else None
-    )
-    return {
-        "current": current,
-        "latest": latest,
-        "update_available": bool(lat_t and lat_t > cur_t),
-        # The server pulls from GitHub itself (deploy/update.ps1, every 10 min), so an
-        # update needs nothing on the host — it only has to be pushed.
-        "update_command": "Push to main. The server picks it up within 10 minutes.",
-    }
+    """What an app copy from before the self-update status asks; it shows `error`."""
+    return {"current": f"v{__version__}", "latest": None, "update_available": False,
+            "error": "Reload the app: updates now show under App version by themselves."}
 
 
 def _suntek_spool() -> dict | None:
@@ -98,24 +92,6 @@ def _suntek_spool() -> dict | None:
         return None
 
 
-# Below this much free space where the photos are kept, Settings says so. A UBox HD
-# frame is about 0.4 MB and a busy camera sends hundreds a day, and the disk is the
-# database's too: a full one stops both, with nothing on screen until it has.
-LOW_DISK_BYTES = 2 * 1024**3
-
-
-def _disk() -> dict | None:
-    """Free space on the disk the photos are kept on; None when it can't be read."""
-    from app.core.config import settings
-
-    try:
-        use = shutil.disk_usage(settings.media_root)
-    except OSError:
-        return None
-    return {"free_gb": round(use.free / 1024**3, 1), "total_gb": round(use.total / 1024**3, 1),
-            "low": use.free < LOW_DISK_BYTES}
-
-
 @router.get("/status")
 def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) -> dict:
     from app.ingestion.fetch import latest_run
@@ -131,7 +107,9 @@ def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) 
             {"status": last.status, "at": last.finished_at or last.started_at} if last else None
         ),
         "suntek": _suntek_spool(),
-        "disk": _disk(),
+        "disk": ops.disk(),
+        "backup": ops.backup(),
+        "restore_check": ops.restore_check(),
         "ai": _ai_status(db),
         "sex_pass": _sex_status(db),
     }
@@ -167,7 +145,7 @@ def _sex_status(db: Session) -> dict:
     note = jobs.read_note(db, STATUS)
     return {
         "enabled": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        "running": jobs.holder("sexpass") is not None,
+        "running": jobs.holder("sexpass") is not None and not _deploying("sexpass"),
         "waiting": waiting(db),
         "last_run_at": note.get("last_run_at"),
         "labelled": note.get("labelled"),

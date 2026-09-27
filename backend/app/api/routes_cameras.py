@@ -44,6 +44,7 @@ BUSY_WITH = {
     "plan": "writing tonight’s plan",
     "score": "checking last night’s plan against the cameras",
     "scan": "checking photos for animals",
+    "deploy": "installing an update",
 }
 
 

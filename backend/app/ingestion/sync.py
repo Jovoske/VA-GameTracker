@@ -31,7 +31,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import geo, jobs
+from app import geo, jobs, media
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
@@ -194,7 +194,7 @@ def _store_file(estate_id, camera: Camera, image: Image, data: bytes) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    image.original_path = path
+    image.original_path = media.stored(path)
     image.file_hash = hashlib.sha256(data).hexdigest()
 
 

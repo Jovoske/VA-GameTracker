@@ -29,7 +29,7 @@ from PIL import Image as PillowImage
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import jobs, media
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
@@ -175,7 +175,8 @@ def _ingest_photo(
         os.replace(temporary, path)
         image = Image(
             camera_id=camera.id, ubox_event_id=event.event_id,
-            captured_at=event.captured_at, original_path=str(path), cdn_url=event.image_url,
+            captured_at=event.captured_at, original_path=media.stored(path),
+            cdn_url=event.image_url,
             file_hash=digest, width=width, height=height,
         )
         db.add(image)
@@ -214,7 +215,7 @@ def _cleanup_uncommitted(db, paths) -> None:
     """A failed commit may have succeeded remotely; check before removing a file."""
     for path in paths:
         try:
-            exists = db.scalar(select(Image.id).where(Image.original_path == str(path)))
+            exists = db.scalar(select(Image.id).where(media.same_file(Image.original_path, path)))
             if not exists:
                 path.unlink(missing_ok=True)
         except Exception:

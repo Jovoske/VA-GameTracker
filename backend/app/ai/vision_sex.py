@@ -111,7 +111,9 @@ def _b64_crop(image_path: str, bbox: list[float] | None) -> str:
     """Padded JPEG crop (extra headroom for antlers), base64-encoded."""
     from PIL import Image as PILImage
 
-    img = PILImage.open(image_path).convert("RGB")
+    from app.media import resolve
+
+    img = PILImage.open(resolve(image_path)).convert("RGB")
     if bbox:
         x1, y1, x2, y2 = bbox
         w, h = x2 - x1, y2 - y1

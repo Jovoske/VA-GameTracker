@@ -159,7 +159,9 @@ def test_failed_download_is_retried_on_the_next_fetch(db_session, spypoint):
     db_session.refresh(lost)
     assert second["total"] == 1
     assert lost.original_path and lost.file_hash
-    with open(lost.original_path, "rb") as f:
+    from app.media import resolve
+
+    with open(resolve(lost.original_path), "rb") as f:
         assert f.read() == b"jpeg:https://cdn/sp-1-1.jpg"
     assert db_session.scalar(select(func.count(Image.id))) == 3  # no duplicate rows
 
