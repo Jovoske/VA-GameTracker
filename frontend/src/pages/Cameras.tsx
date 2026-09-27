@@ -231,6 +231,8 @@ function toPhoto(cam: string, im: Img): LightboxPhoto {
     camera: cam,
     label: im.is_empty_frame ? 'No animal' : classLabel(im) || 'Unknown animal',
     notes_count: im.notes_count,
+    // Where a hunter finds what the detector missed: a note keeps it (PhotoNotes).
+    empty: im.is_empty_frame === true,
   }
 }
 
@@ -503,7 +505,14 @@ export default function Cameras() {
 
       {zoom && <PhotoLightbox photos={zoom.photos} start={zoom.idx} backLabel="Back to cameras" onClose={() => setZoom(null)}
         onNotesChange={(id, n) => setImages((prev) => Object.fromEntries(Object.entries(prev).map(([cam, imgs]) =>
-          [cam, imgs.map((im) => (im.id === id ? { ...im, notes_count: n } : im))])))} />}
+          [cam, imgs.map((im) => (im.id === id ? { ...im, notes_count: n } : im))])))}
+        onKept={(id) => {
+          // Kept as an animal photo, as its Keep button would: the tile and the count follow.
+          const camId = Object.keys(images).find((cam) => images[cam].some((im) => im.id === id))
+          setImages((prev) => Object.fromEntries(Object.entries(prev).map(([cam, imgs]) =>
+            [cam, imgs.map((im) => (im.id === id ? { ...im, is_empty_frame: false, reviewed: true } : im))])))
+          if (camId) setCameras((cs) => cs.map((c) => (c.id === camId ? { ...c, empty_count: Math.max(0, c.empty_count - 1) } : c)))
+        }} />}
     </div>
   )
 }

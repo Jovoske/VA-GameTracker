@@ -448,7 +448,7 @@
 .cam-sheet-alerts { margin: 14px 0 4px; }
 .cam-sheet-alerts .switch-row { border-top-color: color-mix(in srgb, var(--border) 55%, transparent); }
 .cam-sheet-alerts-off { margin: 2px 0 8px; font-size: 13px; line-height: 1.45; color: var(--marginal); }
-.cam-sheet-alerts-off a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; display: inline-block; padding: 10px 0; }
+.cam-sheet-alerts-off a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; display: inline-flex; align-items: center; min-height: 44px; }
 /* The camera's "Worth a look" strip bleeds to the sheet's edges like its photo strip. */
 .cam-sheet-wal .wal-row { margin: 0 -16px; padding: 0 16px 4px; scroll-padding: 0 16px; }
 .cam-sheet-wal.wal { margin-bottom: 14px; }

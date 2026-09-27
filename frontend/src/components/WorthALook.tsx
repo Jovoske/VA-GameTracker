@@ -1,7 +1,8 @@
 import { BinocularsIcon } from '@phosphor-icons/react/dist/csr/Binoculars'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { api, thumbUrl, whenLabel } from '../api'
+import { api, thumbUrl } from '../api'
+import { useRefetchOnReturn } from '../hooks'
 import { noteSnippet, type Highlight } from '../notes'
 import PhotoLightbox from './PhotoLightbox'
 
@@ -9,16 +10,18 @@ type Failure = Error & { offline?: boolean; timeout?: boolean }
 
 /**
  * "Worth a look": the photos the team marked, the most recently marked first, each
- * with the newest thing said about it. On Photos it covers every camera; on a
- * camera's sheet, that camera. Nothing shows until something has been marked.
+ * with the newest thing said about it, and who said it and when. On Photos it
+ * covers every camera; on a camera's sheet, that camera. Nothing shows until
+ * something has been marked.
  *
  * Tapping one opens the photo viewer over the strip, where the notes can be read in
  * full and added to. The strip asks again once the viewer closes if anything
- * changed there, and whenever `refreshKey` changes (a note added from the grid).
+ * changed there, whenever `refreshKey` changes (a note added from the grid), and
+ * on coming back to the app, when a teammate may have marked something meanwhile.
  */
 export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, limit = 20, onChange, className }: {
   cameraId?: string
-  refreshKey?: number
+  refreshKey?: string | number
   backLabel: string
   limit?: number
   /** A note was added or removed in the viewer opened from here. */
@@ -28,6 +31,8 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
   const [items, setItems] = useState<Highlight[] | null>(null)
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
   const changed = useRef(false)
   const request = useRef(0)
 
@@ -48,6 +53,7 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
   // Not while the viewer is open: its photos would change under the finger.
   useEffect(() => { if (zoom == null) load() }, [load, refreshKey]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => { request.current++ }, [])
+  useRefetchOnReturn(() => { if (zoomRef.current == null) load() }, 120_000)
 
   // A failed refresh keeps the strip already shown; only a first load that fails says so.
   if (err && !items) return <p className={`wal-msg${className ? ` ${className}` : ''}`} role="alert">{err} <button type="button" className="wal-retry" onClick={load}>Try again</button></p>
@@ -60,14 +66,21 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
       </h2>
       <ul className="wal-row">
         {items.map((h, i) => {
-          const said = noteSnippet(h.notes)
+          // What was said leads, then who said it and when (the note's time, not the
+          // photo's); what is in it sits on the photo, and on Photos the camera last.
+          const { said, who } = noteSnippet(h.notes)
           return (
             <li key={h.image_id}>
               <button type="button" className="wal-tile" onClick={() => setZoom(i)}
-                aria-label={`${h.label}${cameraId ? '' : ` at ${h.camera}`}, ${whenLabel(h.captured_at)}. ${said}. Open photo.`}>
-                <img src={thumbUrl(h.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
-                <span className="wal-note" aria-hidden="true">{said}</span>
-                <span className="wal-meta" aria-hidden="true">{h.label}{cameraId ? '' : ` · ${h.camera}`} · {whenLabel(h.captured_at)}</span>
+                aria-label={`${h.label}${cameraId ? '' : ` at ${h.camera}`}. ${said ? `“${said}”, ` : 'Marked, '}${who}. Open photo.`}>
+                <span className="wal-img">
+                  <img src={thumbUrl(h.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
+                  <NoteMark count={h.notes_count} />
+                  <span className="wal-tag" aria-hidden="true">{h.label}</span>
+                </span>
+                <span className={`wal-note${said ? '' : ' wal-note--bare'}`} aria-hidden="true">{said ?? 'Marked, no note'}</span>
+                <span className="wal-who" aria-hidden="true">{who}</span>
+                {!cameraId && <span className="wal-meta" aria-hidden="true">{h.camera}</span>}
               </button>
             </li>
           )

@@ -105,7 +105,12 @@ export default function Photos() {
   }, [query])
 
   useEffect(load, [load])
-  useRefetchOnReturn(load, 120_000)
+  // Not with a photo open: the list would change under it (and under a note being
+  // written, which is often when someone steps out to copy a message). The strip
+  // above asks again by itself.
+  const viewing = useRef(false)
+  viewing.current = zoom != null || single != null
+  useRefetchOnReturn(() => { if (!viewing.current) load() }, 120_000)
 
   // Open the photo a notification pointed at: in the list when it is on the first
   // page, otherwise asked for by itself (a push tapped the next morning can be

@@ -9,6 +9,8 @@ that one person and for nobody else.
 """
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -255,8 +257,12 @@ def test_highlights_are_the_marked_photos_newest_mark_first(client, db_session, 
     unmarked = _photo(db_session, charca, now - timedelta(hours=1))
     rabbit = _photo(db_session, charca, now - timedelta(hours=1), species=("lagomorph",))
     empty = _photo(db_session, charca, now - timedelta(hours=1), species=(), empty=True)
-    for img in (new_photo, rabbit, empty):
-        assert _note(client, member, img, "look").status_code == 201
+    assert _note(client, member, new_photo, "look").status_code == 201
+    # Notes from before these were hidden: the rabbit's species was hidden later, the
+    # other photo was marked "nothing in it" later. Neither shows.
+    db_session.add_all([PhotoNote(image_id=rabbit.id, text="look"),
+                        PhotoNote(image_id=empty.id, text="look")])
+    db_session.commit()
     # The old photo is marked last, so it leads: the strip is ordered by the mark.
     assert _note(client, member, old_photo, "big one").status_code == 201
 
@@ -342,6 +348,136 @@ def test_tell_the_team_reaches_everyone_else_with_alerts_on(client, db_session, 
     assert told[luis.id].body == "Pedro marked a photo"
     assert told[luis.id].title == "Worth a look: Red deer at Feeder"
     assert off.id not in told and never.id not in told
+
+
+@requires_db
+def test_a_note_only_goes_on_a_photo_the_team_can_see(client, db_session, estate, pushes):
+    _, pedro = _user(db_session, estate, "member", "pedro@x.es", alerts=True)
+    _, ana = _user(db_session, estate, "admin", "ana@x.es", alerts=True)
+    cam = _camera(db_session, estate, "Barranco Norte")
+    empty = _photo(db_session, cam, species=(), empty=True)
+    rabbit = _photo(db_session, cam, species=("lagomorph",), empty=True)
+    both = _photo(db_session, cam, species=("lagomorph", "wild_boar"))
+
+    # "Nothing in it": refused in words, and nobody is told about a photo they can't open.
+    r = _note(client, pedro, empty, "Deer in the back, detector missed it", tell=True)
+    assert r.status_code == 409 and "nothing in it" in r.json()["detail"]
+    assert db_session.query(PhotoNote).count() == 0
+    assert db_session.query(Notification).count() == 0
+    # Nothing but hidden animals: no flag on the photo brings it back, so keep can't either.
+    r = client.post(f"/api/images/{rabbit.id}/notes", headers=pedro,
+                    json={"text": "x", "keep": True})
+    assert r.status_code == 409 and "hidden" in r.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(Image, rabbit.id).is_empty_frame is True  # and left as it was
+    # A hidden animal beside one that shows is an ordinary photo.
+    assert _note(client, pedro, both, "boar behind the rabbit").status_code == 201
+
+    # The hunter says there is an animal: the photo is kept, like its Keep button does,
+    # and the note, the strip and the push all lead somewhere that opens.
+    r = client.post(f"/api/images/{empty.id}/notes", headers=pedro,
+                    json={"text": "Deer in the back, detector missed it", "tell_team": True,
+                          "keep": True})
+    assert r.status_code == 201, r.text
+    assert r.json()["kept"] is True and r.json()["told"] == 1
+    db_session.expire_all()
+    img = db_session.get(Image, empty.id)
+    assert img.is_empty_frame is False and img.reviewed is True
+    told = db_session.query(Notification).filter_by(image_id=empty.id).one()
+    assert told.user_id == (db_session.query(User).filter_by(email="ana@x.es").one().id)
+    assert told.title == "Worth a look: Animal at Barranco Norte"
+    assert client.get(f"/api/photos/{empty.id}", headers=ana).status_code == 200
+    items = client.get("/api/photos/highlights", headers=ana).json()["items"]
+    assert str(empty.id) in {i["image_id"] for i in items}
+    # Keep on a photo that shows anyway changes nothing.
+    r = client.post(f"/api/images/{both.id}/notes", headers=pedro, json={"keep": True})
+    assert r.status_code == 201 and r.json()["kept"] is False
+
+
+@requires_db
+def test_the_same_note_saved_twice_is_one_note_and_one_alert(client, db_session, estate, pushes):
+    pedro, pedro_h = _user(db_session, estate, "member", "pedro@x.es", alerts=True)
+    ana, ana_h = _user(db_session, estate, "member", "ana@x.es", alerts=True)
+    cam = _camera(db_session, estate)
+    img = _photo(db_session, cam)
+    other = _photo(db_session, cam, datetime.now(UTC) - timedelta(hours=1))
+    note_id = str(uuid.uuid4())
+
+    def save(headers, image, text, tell=True):
+        return client.post(f"/api/images/{image.id}/notes", headers=headers,
+                           json={"id": note_id, "text": text, "tell_team": tell})
+
+    first = save(pedro_h, img, "Big boar")
+    assert first.status_code == 201 and first.json()["told"] == 1
+    assert first.json()["note"]["id"] == note_id and first.json()["again"] is False
+    # The phone heard nothing back and the hunter pressed Save again, a word changed.
+    again = save(pedro_h, img, "Big boar, third night")
+    assert again.status_code == 201, again.text
+    assert again.json()["again"] is True and again.json()["told"] == 1
+    assert [n["text"] for n in again.json()["notes"]] == ["Big boar, third night"]
+    assert db_session.query(PhotoNote).count() == 1
+    assert db_session.query(Notification).count() == 1
+    assert [u for u, _ in pushes.calls] == [ana.id]
+    # Without Tell the team the second time, what was told stays told.
+    assert save(pedro_h, img, "Big boar, third night", tell=False).json()["told"] == 1
+
+    # Told the second time only: told then, once.
+    late = str(uuid.uuid4())
+    r = client.post(f"/api/images/{other.id}/notes", headers=pedro_h,
+                    json={"id": late, "text": "sow", "tell_team": False})
+    assert r.json()["told"] == 0
+    r = client.post(f"/api/images/{other.id}/notes", headers=pedro_h,
+                    json={"id": late, "text": "sow", "tell_team": True})
+    assert r.json()["told"] == 1
+    assert db_session.query(Notification).filter_by(image_id=other.id).count() == 1
+
+    # An id is one note: not somebody else's, and not on another photo.
+    assert save(ana_h, img, "mine now").status_code == 409
+    assert save(pedro_h, other, "moved").status_code == 409
+    db_session.expire_all()
+    assert db_session.get(PhotoNote, uuid.UUID(note_id)).text == "Big boar, third night"
+    assert db_session.query(PhotoNote).count() == 2
+
+
+@requires_db
+def test_two_saves_at_once_are_still_one_note(db_session, estate, monkeypatch):
+    """The retry can reach the server while the first save is still being written."""
+    from fastapi import BackgroundTasks
+
+    from app.api import routes_notes
+
+    pedro, _ = _user(db_session, estate, "member", "pedro@x.es", alerts=True)
+    _user(db_session, estate, "member", "ana@x.es", alerts=True)
+    img = _photo(db_session, _camera(db_session, estate))
+    note_id = uuid.uuid4()
+    real, inside = routes_notes.tell_team, threading.Event()
+
+    def slow_tell(*a, **kw):
+        out = real(*a, **kw)
+        inside.set()
+        time.sleep(0.5)  # the first save holds its row, not yet committed
+        return out
+
+    monkeypatch.setattr(routes_notes, "tell_team", slow_tell)
+    open_session = sessionmaker(bind=db_session.get_bind())
+    got = {}
+
+    def save(key):
+        with open_session() as s:
+            body = routes_notes.NoteBody(id=note_id, text="Big boar", tell_team=True)
+            got[key] = routes_notes.add_note(img.id, body, s.get(User, pedro.id), s,
+                                             BackgroundTasks())
+
+    first = threading.Thread(target=save, args=("first",))
+    first.start()
+    assert inside.wait(5)
+    save("second")  # waits on the first one's row, then finds it saved
+    first.join(5)
+    assert got["first"]["again"] is False and got["second"]["again"] is True
+    assert got["first"]["told"] == got["second"]["told"] == 1
+    db_session.expire_all()
+    assert db_session.query(PhotoNote).count() == 1
+    assert db_session.query(Notification).count() == 1
 
 
 @requires_db

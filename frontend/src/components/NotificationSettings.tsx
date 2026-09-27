@@ -63,6 +63,14 @@ const row = {
  * on once; each phone or tablet is then added from that device. Alerts off
  * silences all of them.
  */
+/** The line over the camera switches, true to them: how many are on, and what muting does. */
+function camerasHint(cameras: { alerts: boolean }[]): string {
+  const on = cameras.filter((c) => c.alerts).length
+  if (on === cameras.length) return 'Every camera is on. Mute a busy one, like a feeder, and you hear nothing from it. Only for you.'
+  if (on === 0) return 'Every camera is muted, so you hear nothing from any of them. Only for you: the team still hears.'
+  return `${on} of ${cameras.length} cameras on. A muted one sends you nothing; the team still hears from it. Only for you.`
+}
+
 export default function NotificationSettings() {
   const [s, setS] = useState<Settings | null>(null)
   const [loadErr, setLoadErr] = useState('')
@@ -258,9 +266,7 @@ export default function NotificationSettings() {
               <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
                 Cameras
               </div>
-              <p className="settings-hint">
-                Every camera is on. Mute a busy one, like a feeder, and you hear nothing from it. Only for you.
-              </p>
+              <p className="settings-hint">{camerasHint(s.cameras)}</p>
               {s.cameras.map((c) => (
                 <CameraAlertRow
                   key={c.id}

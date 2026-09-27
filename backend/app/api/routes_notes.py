@@ -12,10 +12,12 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.api.routes_map import latest_photos
+from app.api.visibility import ONLY_HIDDEN_SPECIES
 from app.core.db import get_db
 from app.models import Camera, Image, PhotoNote, User
 from app.notes import (
@@ -26,6 +28,7 @@ from app.notes import (
     notes_for,
     serialize,
     tell_team,
+    told_about,
 )
 
 router = APIRouter(tags=["notes"])
@@ -64,6 +67,34 @@ class NoteBody(BaseModel):
     # Optional: a mark with nothing said is still "Worth a look".
     text: str | None = None
     tell_team: bool = False
+    # The phone names the note. Saving it again after hearing nothing back (a weak
+    # signal) is then the same note, not a second one and not a second alert.
+    id: uuid.UUID | None = None
+    # The detector said "nothing in it" and the hunter says there is: keep the photo
+    # as an animal photo, as its Keep button does, so the team can see what was marked.
+    keep: bool = False
+
+
+EMPTY_FRAME = "This photo is marked “nothing in it”. Keep it as an animal photo first."
+HIDDEN_ONLY = "Only animals hidden from the app are in this photo, so the team can’t see it."
+
+
+def _markable(db: Session, image: Image, keep: bool) -> bool:
+    """Refuse a note on a photo the team would never see; True when `keep` un-flagged it.
+
+    A note sends the team to the photo (the strips, a push), so it goes only on one
+    the app shows: never one of nothing but hidden animals, and not one marked
+    "nothing in it" unless the hunter says to keep it.
+    """
+    if db.scalar(select(Image.id).where(Image.id == image.id, ONLY_HIDDEN_SPECIES)) is not None:
+        raise HTTPException(409, HIDDEN_ONLY)
+    if not image.is_empty_frame:
+        return False
+    if not keep:
+        raise HTTPException(409, EMPTY_FRAME)
+    image.is_empty_frame = False
+    image.reviewed = True  # sticky, like the Keep button: the auto-scan leaves it be
+    return True
 
 
 @router.post("/images/{image_id}/notes", status_code=201)
@@ -74,7 +105,8 @@ def add_note(
 
     With tell_team, everyone else who has alerts on gets one push (unless they muted
     this camera); `told` is how many people that is. The push goes out after this
-    answers, so a slow phone never holds up the save.
+    answers, so a slow phone never holds up the save. A second save with the same
+    `id` is the same note: its words are updated, and the team is told once.
     """
     if not can_write(user):
         raise HTTPException(403, "Viewers can see notes but not add them.")
@@ -84,24 +116,39 @@ def add_note(
         # Said in words, not as a validation list the phone can't show.
         raise HTTPException(422, str(e)) from None
     image, camera = _photo(db, image_id, user)
-    note = PhotoNote(image_id=image.id, user_id=user.id, text=text)
-    db.add(note)
-    db.flush()
-    told = []
-    if body.tell_team:
+    kept = _markable(db, image, body.keep)
+    note_id = body.id or uuid.uuid4()
+    # ON CONFLICT waits for a first save still in flight, so two copies can't both land.
+    fresh = db.execute(
+        pg_insert(PhotoNote)
+        .values(id=note_id, image_id=image.id, user_id=user.id, text=text)
+        .on_conflict_do_nothing(index_elements=[PhotoNote.id])
+        .returning(PhotoNote.id)
+    ).first() is not None
+    note = db.get(PhotoNote, note_id)
+    if note is None or note.user_id != user.id or note.image_id != image.id:
+        db.rollback()
+        raise HTTPException(409, "That note couldn’t be saved. Close it and try again.")
+    if not fresh:
+        note.text = text  # the words on the last try are the ones meant
+    told = told_about(db, note)
+    new_told = []
+    if body.tell_team and not told:
         shown = latest_photos(db, [image.id]).get(image.id)
-        told = tell_team(
+        new_told = told = tell_team(
             db, note, user, image, camera,
             label=shown["label"] if shown else "Animal",
             species_id=shown["species_id"] if shown else None,
         )
     db.commit()
-    if told:
-        background.add_task(deliver_in_background, [n.id for n in told])
+    if new_told:
+        background.add_task(deliver_in_background, [n.id for n in new_told])
     return {
         "note": serialize(note, user, user),
         **_notes(db, image.id, user),
         "told": len(told),
+        "kept": kept,
+        "again": not fresh,
     }
 
 

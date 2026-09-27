@@ -103,6 +103,21 @@ def compose(label: str, camera: str, author: User, text: str | None) -> tuple[st
     return f"Worth a look: {label} at {camera}", body
 
 
+def told_about(db: Session, note: PhotoNote) -> list[Notification]:
+    """The team alerts this note already made, if any.
+
+    tell_team stamps them with the note's own time, which is how a note saved twice
+    (the phone heard nothing back and tried again) is told about once.
+    """
+    return list(db.scalars(
+        select(Notification).where(
+            Notification.kind == "team_note",
+            Notification.image_id == note.image_id,
+            Notification.created_at == note.created_at,
+        )
+    ).all())
+
+
 def tell_team(
     db: Session, note: PhotoNote, author: User, image: Image, camera: Camera, label: str,
     species_id: str | None = None, now: datetime | None = None,
@@ -112,9 +127,10 @@ def tell_team(
     Everyone on the estate with alerts switched on hears it, whichever animals they
     picked: a teammate pointing at a photo is not a species alert. Not the author,
     and not anyone who muted this camera. Nothing is pushed here (see deliver): a
-    phone that doesn't answer must not hold up the person saving the note.
+    phone that doesn't answer must not hold up the person saving the note. The
+    records carry the note's time (see told_about).
     """
-    now = now or datetime.now(UTC)
+    now = now or note.created_at or datetime.now(UTC)
     title, body = compose(label, camera.name, author, note.text)
     prefs = db.execute(
         select(NotificationPref.user_id, NotificationPref.muted_camera_ids)

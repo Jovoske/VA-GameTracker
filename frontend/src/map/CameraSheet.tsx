@@ -112,10 +112,12 @@ function PhotoStrip({ camera, notesTick, onNotes }: { camera: Camera; notesTick:
     <ul className="cam-strip-row" aria-label={`Latest photos from ${camera.name}`}>
       {tiles.slice(0, STRIP).map(({ at, frames }) => {
         const p = photos[at]
+        // A note on any frame of the burst: often the second shows the animal best.
+        const notes = photos.slice(at, at + frames).reduce((n, x) => n + (x.notes_count || 0), 0)
         return <li key={p.image_id}>
           <button type="button" className="cam-strip-tile" aria-label={`${p.label}, ${whenLabel(p.captured_at)}${frames > 1 ? `, ${frames} frames` : ''}. Open photo.`} onClick={() => setZoom(at)}>
             <img src={thumbUrl(p.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
-            <NoteMark count={p.notes_count} />
+            <NoteMark count={notes} />
             <span aria-hidden="true">{whenLabel(p.captured_at)}{frames > 1 && <b>×{frames}</b>}</span>
           </button>
         </li>
@@ -160,7 +162,8 @@ export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
       {night.note && <span className="cam-sheet-night-note">{night.note}</span>}
     </p>
     <PhotoStrip camera={camera} notesTick={stripTick} onNotes={() => setNotesTick(t => t + 1)} />
-    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={notesTick} backLabel={`Back to ${camera.name}`}
+    {/* Asked again with the photo strip: a note changed there, or the camera has a newer photo. */}
+    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={`${notesTick}:${camera.latest?.image_id ?? ''}`} backLabel={`Back to ${camera.name}`}
       onChange={() => setStripTick(t => t + 1)} />
     <Link className="map-button map-button--primary map-button--big" to={`/photos?camera=${encodeURIComponent(camera.id)}`}>See all photos</Link>
     <div className="cam-sheet-alerts">
