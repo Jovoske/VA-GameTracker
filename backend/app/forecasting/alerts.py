@@ -1,7 +1,9 @@
-"""Alerts — notable events worth surfacing: opportunity nights, recent target-species
-sightings, and pattern breaks (a usually-active camera gone quiet).
+"""Alerts — notable events worth surfacing: recent sightings of the animals that
+matter, a flat battery, and a usually-busy camera gone quiet.
 
-This is the in-app feed on Tonight, recomputed on every read. Push to phones lives in
+This is the in-app feed on Tonight, recomputed on every read, so it is kept cheap:
+it never works out the plan again (the plan and its "Cameras not sending" card come
+from the forecast, which Tonight already has). Push to phones lives in
 app.notifications: it announces new sightings per species as they are classified,
 filtered by what each person asked to hear about.
 """
@@ -12,10 +14,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.forecasting.model import forecast_tonight
-from app.models import Camera, Detection, Image, Species
+from app.forecasting.exposure import current_night, night_key_start
+from app.forecasting.model import sentence_case
+from app.models import Camera, CameraNight, Species
 
-PRIORITY = {"wild_boar", "red_deer", "roe_deer", "fallow_deer", "fox", "mouflon", "ibex", "badger"}
+# A camera with at least this many visits in the last month is "usually busy", and
+# this many watched nights in a row without one is worth a look.
+QUIET_USUAL_VISITS = 15
+QUIET_NIGHTS = 3
+QUIET_LOOKBACK = 30
 
 
 def _ago(dt: datetime | None, now: datetime) -> str:
@@ -35,115 +42,88 @@ def _dur(dt: datetime, now: datetime) -> str:
 
 
 def compute_alerts(db: Session) -> list[dict]:
+    from app.forecasting.visits import visit_rows
+
     now = datetime.now(timezone.utc)
     alerts: list[dict] = []
+    # A retired camera is in a drawer: nothing it did or didn't see is news.
+    cams = db.scalars(select(Camera).where(Camera.retired_at.is_(None))).all()
+    cam_ids = [c.id for c in cams]
 
-    # 1. Opportunity tonight (from the forecast)
-    fc = forecast_tonight(db)
-    rec = fc.get("recommended")
-    if fc.get("verdict") == "GO" and rec and rec["probability"] >= 0.7:
-        w = rec["best_window"]
-        alerts.append({
-            "type": "opportunity", "severity": "high", "title": "Strong night ahead",
-            "text": f"{rec['species']} at {rec['camera']}. "
-                    f"Best hours {w['start_hour']:02d}:00 to {w['end_hour']:02d}:00.",
-        })
-
-    # 2. Recent priority-species sightings (last 48h)
-    since = now - timedelta(hours=48)
+    # 1. Recent sightings of the animals marked as the ones that matter (last 48h),
+    # in visits: a boar that sat in front of the camera for twenty minutes came once.
+    # Hidden species and photos marked "nothing in it" are not sightings.
+    v = visit_rows(start=now - timedelta(hours=48), camera_ids=cam_ids)
     rows = db.execute(
-        select(Species.common_name, func.count(Detection.id), func.max(Image.captured_at))
-        .select_from(Detection)
-        .join(Image, Image.id == Detection.image_id)
-        .join(Species, Species.id == Detection.species_id)
-        .where(Detection.species_id.in_(PRIORITY), Image.captured_at > since)
+        select(Species.common_name, func.count(), func.max(v.c.last_at))
+        .select_from(v)
+        .join(Species, Species.id == v.c.species_id)
+        .where(Species.is_priority.is_(True), Species.hidden.is_(False))
         .group_by(Species.common_name)
-        .order_by(func.count(Detection.id).desc())
+        .order_by(func.count().desc(), Species.common_name)
     ).all()
     for name, cnt, last in rows[:4]:
         alerts.append({
-            "type": "sighting", "severity": "info", "title": name,
+            "type": "sighting", "severity": "info", "title": sentence_case(name),
             "text": f"Seen {int(cnt)} time{'s' if cnt != 1 else ''} in the last 2 days, "
                     f"last one {_ago(last, now)}.",
         })
 
-    # 3. Camera health — a camera that can't send photos is a fault, never a "pattern".
+    # 2. Camera faults the plan's own "Cameras not sending" card can't say: a flat
+    # battery on a camera still sending. A camera that is offline, out of credits,
+    # silent or whose photos are not coming in is on that card already, with its
+    # reason, and a login that stopped is named in the line above the plan (with the
+    # way to Settings), so none of them is listed here a second or third time (J-12).
     from app.health import camera_health
     from app.ingestion.logins import camera_logins
 
-    cams = db.scalars(select(Camera)).all()
     login_states = camera_logins(db, cams, now)
-    health = {c.id: camera_health(c, now, login_states.get(c.id)) for c in cams}
-    # A login that stopped is one alert naming its cameras, not one "offline" per
-    # camera: the fix is in Settings, not a trip round the batteries. Fetching that
-    # has stopped altogether (no login error) is one alert for the estate.
-    stopped: dict[tuple, dict] = {}
     for c in cams:
-        h = health[c.id]
-        if h["status"] == "not_syncing":
-            login = h.get("login") or {}
-            if not login.get("error"):
-                key = ("stopped",)
-            else:
-                key = (login.get("label") or "A camera login", login["error"],
-                       bool(login.get("camera")))
-            stopped.setdefault(key, []).append(c.name)
-    for key, cameras in stopped.items():
-        names = ", ".join(cameras)
-        if key == ("stopped",):
-            title = "Photos not coming in"
-            text = (f"No photo fetch has worked for over 2 hours, so photos from {names} "
-                    "are not coming in. The server's scheduled fetch may have stopped.")
-        elif key[2]:
-            title = f"{names}: photos not coming in"
-            text = f"The last fetch couldn't list the photos from {names}. {key[1]}"
-        else:
-            title = f"{key[0]}: photos not coming in"
-            text = (f"{key[1]} Photos from {names} wait until it's fixed: "
-                    "Settings, Camera logins says how.")
-        alerts.append({"type": "camera", "severity": "warn", "title": title, "text": text})
-    for c in cams:
-        h = health[c.id]
-        if h["status"] == "quiet":
-            alerts.append({
-                "type": "camera", "severity": "warn",
-                "title": f"{c.name}: no photos for over a week",
-                "text": f"{h['detail']}. It sends photos only, so a quiet spell and a flat "
-                        "battery look the same. Check it on your next visit.",
-            })
-        elif h["status"] == "out_of_credits":
-            reset_on = f"{c.cycle_end.day} {c.cycle_end.strftime('%b')}" if c.cycle_end else "next cycle"
-            reset = f" Resets {reset_on}."
-            alerts.append({
-                "type": "camera", "severity": "warn", "title": f"{c.name} out of photo credits",
-                "text": f"Used up its monthly photos ({c.photo_count} of {c.photo_limit}) "
-                        f"and has stopped sending.{reset}",
-            })
-        elif h["status"] == "offline":
-            alerts.append({
-                "type": "camera", "severity": "warn", "title": f"{c.name} offline",
-                "text": f"{h['detail']}. Check battery and signal on your next visit.",
-            })
-        elif h["status"] == "low_battery":
+        if camera_health(c, now, login_states.get(c.id))["status"] == "low_battery":
             alerts.append({
                 "type": "camera", "severity": "warn", "title": f"{c.name} battery low",
                 "text": f"{c.battery_pct}% left. Bring batteries on your next visit.",
             })
 
-    # 4. Pattern break — a HEALTHY camera gone quiet (only then is silence meaningful)
-    cam_rows = db.execute(
-        select(Camera.id, Camera.name, func.count(Detection.id), func.max(Image.captured_at))
-        .select_from(Detection)
-        .join(Image, Image.id == Detection.image_id)
-        .join(Camera, Camera.id == Image.camera_id)
-        .group_by(Camera.id, Camera.name)
+    # 3. Pattern break: a usually-busy camera whose last few WATCHED nights had no
+    # visit. Only a night the camera was demonstrably watching counts as quiet, so a
+    # flat battery or a backlog of unchecked photos is never "the animals left".
+    tonight = current_night(now)
+    since = tonight - timedelta(days=QUIET_LOOKBACK)
+    watched: dict = {}
+    for cam_id, night in db.execute(
+        select(CameraNight.camera_id, CameraNight.night).where(
+            CameraNight.camera_id.in_(cam_ids), CameraNight.night >= since,
+            CameraNight.night < tonight,
+            CameraNight.exposure_state.in_(("CONFIRMED", "PRESUMED_UP")),
+        )
+    ).all():
+        watched.setdefault(cam_id, set()).add(night)
+    recent = visit_rows(start=night_key_start(since - timedelta(days=1)),
+                        end=night_key_start(tonight), camera_ids=cam_ids)
+    busy = db.execute(
+        select(recent.c.camera_id, recent.c.night, func.count())
+        .where(recent.c.night >= since)
+        .group_by(recent.c.camera_id, recent.c.night)
     ).all()
-    for cid, name, cnt, last in cam_rows:
-        producing = health.get(cid, {}).get("producing", True)
-        if producing and int(cnt) >= 15 and last and last < now - timedelta(days=3):
+    per_camera: dict = {}
+    for cam_id, night, n in busy:
+        per_camera.setdefault(cam_id, {})[night] = int(n)
+    for c in cams:
+        nights = per_camera.get(c.id, {})
+        if not c.active or sum(nights.values()) < QUIET_USUAL_VISITS:
+            continue
+        run = 0
+        for night in sorted(watched.get(c.id, set()), reverse=True):
+            if nights.get(night):
+                break
+            run += 1
+        if run >= QUIET_NIGHTS:
+            last = max(nights)
             alerts.append({
-                "type": "quiet", "severity": "warn", "title": f"{name} quiet",
-                "text": f"Nothing for {_dur(last, now)}. This camera usually sees more.",
+                "type": "quiet", "severity": "warn", "title": f"{c.name} quiet",
+                "text": f"Nothing on its last {run} watched nights, since the night of "
+                        f"{last.day} {last.strftime('%b')}. This camera usually sees more.",
             })
 
     return alerts

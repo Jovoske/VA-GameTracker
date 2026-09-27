@@ -78,6 +78,7 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(images)
         assert "reported_at" in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
+        assert _columns(eng, "cameras")["retired_at"] == "timestamp with time zone"
     finally:
         eng.dispose()
 
@@ -140,6 +141,7 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "ai_failed_at" in _columns(eng, "images")
         assert "reported_at" in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live")
+        assert "retired_at" in _columns(eng, "cameras")
     finally:
         eng.dispose()
 
@@ -899,5 +901,63 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "reported_at" in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_retired_upgrade_down_and_up_again(fresh_db):
+    """0024 on a real 0023 database: every camera arrives not retired, its photos and
+    nights untouched; going down drops only the column; up again is a no-op."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0023_sit_reports")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0023 shape first.
+            c.execute(text("ALTER TABLE cameras DROP COLUMN retired_at"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            cams = [c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,active,name_is_custom,import_failures) "
+                "VALUES (gen_random_uuid(),:e,:n,:a,false,'{}') RETURNING id"
+            ), {"e": estate_id, "n": n, "a": a}).scalar_one()
+                for n, a in (("PL07", True), ("PL19", False))]
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),false)"), {"c": cams[0]})
+            c.execute(text(
+                "INSERT INTO camera_nights (id,camera_id,night,exposure_state,frames,"
+                "empty_frames) VALUES (gen_random_uuid(),:c,'2026-09-20','CONFIRMED',1,0)"),
+                {"c": cams[0]})
+
+        command.upgrade(cfg, "head")
+        with eng.connect() as c:
+            rows = c.execute(text(
+                "SELECT name, active, retired_at FROM cameras ORDER BY name")).all()
+            assert [tuple(r) for r in rows] == [("PL07", True, None), ("PL19", False, None)]
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM camera_nights")).scalar_one() == 1
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        with eng.begin() as c:
+            c.execute(text("UPDATE cameras SET retired_at = now() WHERE name = 'PL07'"))
+        command.downgrade(cfg, "0023_sit_reports")
+        assert "retired_at" not in _columns(eng, "cameras")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 2
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0023_sit_reports")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "retired_at" in _columns(eng, "cameras")
     finally:
         eng.dispose()

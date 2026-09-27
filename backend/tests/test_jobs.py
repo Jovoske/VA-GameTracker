@@ -396,7 +396,7 @@ def test_a_missed_plan_is_written_by_the_fetch_before_dark_and_never_after(
     from app.forecasting import model
 
     monkeypatch.setattr(model, "forecast_tonight", lambda db: {"where": [
-        {"camera": "Puente", "species_id": None, "probability": 0.3,
+        {"camera": "Puente", "camera_id": str(camera.id), "species_id": None, "probability": 0.3,
          "best_window": {"start_hour": 19, "end_hour": 22}},
     ]})
     madrid = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)  # sunset ~17:25 UTC (19:25 CEST)
@@ -426,7 +426,7 @@ def test_the_plan_catch_up_has_a_window_every_evening_of_the_year(db_session, ca
     from app.forecasting import model
 
     monkeypatch.setattr(model, "forecast_tonight", lambda db: {"where": [
-        {"camera": "Puente", "species_id": None, "probability": 0.3,
+        {"camera": "Puente", "camera_id": str(camera.id), "species_id": None, "probability": 0.3,
          "best_window": {"start_hour": 17, "end_hour": 20}}]})
     madrid = ZoneInfo("Europe/Madrid")
     day = date(2026, 1, 3)
@@ -461,7 +461,8 @@ def test_a_plan_run_leaves_a_night_the_fetch_already_claimed_alone(
     from app.forecasting import model
     from app.forecasting.scoring import local_today, persist_tonight
 
-    forecast = {"where": [{"camera": "Puente", "species_id": None, "probability": 0.3,
+    forecast = {"where": [{"camera": "Puente", "camera_id": str(camera.id), "species_id": None,
+                           "probability": 0.3,
                            "best_window": {"start_hour": 19, "end_hour": 22}}]}
     monkeypatch.setattr(model, "forecast_tonight", lambda db: forecast)
     persist_tonight(db_session, forecast, target=local_today())  # the catch-up's

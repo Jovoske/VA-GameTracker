@@ -59,7 +59,7 @@ def test_it_is_never_blank(db_session, cam):
     db_session.commit()
     recompute_camera_nights(db_session)
 
-    got = whats_changed(db_session, today=TODAY)
+    got = whats_changed(db_session, tonight=TODAY)
     assert got["text"], "must always say something"
     assert got["kind"] == "none"
     assert "Nothing changed" in got["text"]
@@ -75,7 +75,7 @@ def test_a_return_after_quiet_nights_is_reported(db_session, cam):
     db_session.commit()
     recompute_camera_nights(db_session)
 
-    got = whats_changed(db_session, today=TODAY)
+    got = whats_changed(db_session, tonight=TODAY)
     assert got["kind"] == "return"
     assert got["camera"] == "Puente"
     assert "quiet nights" in got["text"]
@@ -90,7 +90,7 @@ def test_a_camera_that_sent_nothing_outranks_animal_changes(db_session, cam):
     db_session.commit()
     recompute_camera_nights(db_session)
 
-    got = whats_changed(db_session, today=TODAY)
+    got = whats_changed(db_session, tonight=TODAY)
     assert got["kind"] == "camera_down"
     assert "unknown" in got["text"].lower()
 
@@ -105,9 +105,11 @@ def test_a_blind_night_is_not_reported_as_animals_leaving(db_session, cam):
     db_session.commit()
     recompute_camera_nights(db_session)
 
-    got = whats_changed(db_session, today=TODAY)
+    got = whats_changed(db_session, tonight=TODAY)
     assert got["kind"] != "gone_quiet", "an unprocessed night must not read as absence"
-    assert got["kind"] == "camera_down"
+    # Nor as a camera that sent nothing: it sent photos the AI hasn't been through yet.
+    assert got["kind"] == "checking"
+    assert got["text"] == "Last night's photos from Puente are still being checked."
 
 
 @requires_db
@@ -117,7 +119,7 @@ def test_too_little_history_makes_no_claim(db_session, cam):
     db_session.commit()
     recompute_camera_nights(db_session)
 
-    got = whats_changed(db_session, today=TODAY)
+    got = whats_changed(db_session, tonight=TODAY)
     assert got["kind"] == "none"
 
 
@@ -149,7 +151,7 @@ def test_it_reads_the_nights_it_compares_not_the_whole_archive(db_session, cam, 
         return visits_by_night(db, **kw)
 
     monkeypatch.setattr(changes, "visits_by_night", spy)
-    whats_changed(db_session, today=TODAY)
+    whats_changed(db_session, tonight=TODAY)
     window_start = LAST_NIGHT - timedelta(days=LOOKBACK_NIGHTS)
     assert asked == {"start": night_key_start(window_start)}
 

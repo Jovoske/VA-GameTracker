@@ -100,5 +100,6 @@
 .cam-details-list > div { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .cam-details-list dt { color: var(--text-dim); }
 .cam-details-list dd { margin: 0; color: var(--text); text-align: right; }
+.cam-retire { margin-top: 10px; }
 /* The team-notes marker sits top-left here: top-right is the review mode's hide button. */
 .cam-thumb-wrap .note-mark { top: 3px; right: auto; left: 3px; }

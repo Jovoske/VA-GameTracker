@@ -11,7 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, distinct, func, select, update
+from sqlalchemy import delete, distinct, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
@@ -77,6 +77,10 @@ def list_animals(
         .join(Detection, DetectionIndividual.detection_id == Detection.id)
         .join(Image, Detection.image_id == Image.id)
         .join(Camera, Image.camera_id == Camera.id)
+        # A hidden species (rabbits) is out of the app, its animals too; and a photo
+        # marked "nothing in it" is not a sighting of anybody.
+        .where(or_(Individual.species_id.is_(None), Species.hidden.is_(False)),
+               Image.is_empty_frame.isnot(True))
         .group_by(Individual.id, Species.common_name)
         .order_by(func.count(DetectionIndividual.detection_id).desc())
     ).all()

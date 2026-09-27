@@ -340,7 +340,7 @@ def test_overview_counts_every_visible_photo_once_by_hour_and_camera(client, peo
     assert d["totals"]["empty"] == 1
     assert sum(h["count"] for h in d["by_hour"]) == 4
     assert {h["hour"]: h["count"] for h in d["by_hour"] if h["count"]} == {22: 3, 0: 1}
-    assert d["by_camera"] == [
+    assert [{k: c[k] for k in ("name", "sightings")} for c in d["by_camera"]] == [
         {"name": "Charca", "sightings": 3}, {"name": "Solana", "sightings": 1},
     ]
     assert d["totals"]["cameras"] == 2

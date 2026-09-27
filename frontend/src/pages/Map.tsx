@@ -1,5 +1,7 @@
 import { FrameCornersIcon } from '@phosphor-icons/react/dist/csr/FrameCorners'
+import { MinusIcon } from '@phosphor-icons/react/dist/csr/Minus'
 import { NavigationArrowIcon } from '@phosphor-icons/react/dist/csr/NavigationArrow'
+import { PlusIcon } from '@phosphor-icons/react/dist/csr/Plus'
 import { RulerIcon } from '@phosphor-icons/react/dist/csr/Ruler'
 import { StackIcon } from '@phosphor-icons/react/dist/csr/Stack'
 import maplibregl from 'maplibre-gl'
@@ -657,6 +659,10 @@ export default function MapPage() {
             </svg>
           </MapFab>
           <MapFab label="Fit the estate" disabled={!data || !ready} onClick={() => { if (map.current && data) fitEstate(map.current, data, cameras, 300, fitPadding()) }}><FrameCornersIcon size={22} /></MapFab>
+          {/* Zoom with a glove on: pinching through a glove, or with one hand on a
+              rifle, doesn't work. */}
+          <MapFab label="Zoom in" disabled={!ready} onClick={() => map.current?.zoomIn({ duration: 250 })}><PlusIcon size={22} weight="bold" /></MapFab>
+          <MapFab label="Zoom out" disabled={!ready} onClick={() => map.current?.zoomOut({ duration: 250 })}><MinusIcon size={22} weight="bold" /></MapFab>
         </div>}
         {!editing && <div className="map-fabs map-fabs--left">
           {me.message && <div className="map-pill map-pill--side" role="status"><span>{me.message}</span><button type="button" aria-label="Dismiss" onClick={me.clearMessage}>OK</button></div>}

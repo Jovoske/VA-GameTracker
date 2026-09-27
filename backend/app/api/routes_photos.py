@@ -33,12 +33,14 @@ def _csv(value: str | None) -> list[str]:
 @router.get("/filters")
 def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """The chips: every animal that is not hidden and every camera, with photo counts."""
+    # A photo marked "nothing in it" keeps its sighting row but is not counted.
     sp_rows = db.execute(
-        select(Species.id, Species.common_name, func.count(func.distinct(Detection.image_id)))
+        select(Species.id, Species.common_name, func.count(func.distinct(Image.id)))
         .outerjoin(Detection, Detection.species_id == Species.id)
+        .outerjoin(Image, (Image.id == Detection.image_id) & Image.is_empty_frame.isnot(True))
         .where(Species.hidden.is_(False))
         .group_by(Species.id, Species.common_name)
-        .order_by(func.count(func.distinct(Detection.image_id)).desc(), Species.common_name)
+        .order_by(func.count(func.distinct(Image.id)).desc(), Species.common_name)
     ).all()
     # A camera no login fetches any more keeps its chip while it has photos: its
     # history is still worth filtering to.

@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.forecasting.exposure import VISIT_GAP
@@ -196,7 +197,7 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
             Detection.created_at > since,
             Detection.created_at <= newest,
             Detection.species_id.isnot(None),
-            Species.hidden.is_(False),
+            VISIBLE_SIGHTING,
             Image.captured_at > lookback,
         )
         .order_by(Image.captured_at)

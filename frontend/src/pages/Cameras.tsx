@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, plainWords, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, plainWords, thumbUrl, whoAmI } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import SwitchRow from '../components/SwitchRow'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import './cameras.css'
@@ -48,6 +49,8 @@ type Camera = {
   sd_used_mb: number | null
   sd_total_mb: number | null
   health: Health | null
+  // When an admin retired it (taken down): out of the plan and the numbers.
+  retired_at?: string | null
 }
 type Img = {
   id: string
@@ -129,6 +132,8 @@ function healthWords(c: Camera): { label: string; color: string; ok: boolean } {
       return { label: 'Photos not coming in', color: 'var(--skip)', ok: false }
     case 'disconnected':
       return { label: 'Not connected', color: 'var(--text-dim)', ok: false }
+    case 'retired':
+      return { label: 'Retired', color: 'var(--text-dim)', ok: false }
     // A Suntek sends photos only: a week without one is worth a look, nothing more.
     case 'quiet':
       return {
@@ -164,6 +169,9 @@ function HealthNote({ c }: { c: Camera }) {
         <Link to="/settings#accounts">Camera logins</Link>
       </p>
     )
+  }
+  if (h?.status === 'retired') {
+    return <p className="cam-health-note">Left out of tonight's plan, the alerts and Insights. Its photos stay.</p>
   }
   if (h?.status === 'disconnected') {
     return <p className="cam-health-note">No camera login here fetches it now. Its photos so far stay.</p>
@@ -316,6 +324,46 @@ function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value
   )
 }
 
+/** Admins: a camera taken down is retired, so the plan stops ranking it on what it
+ *  saw before it went in a drawer. Its photos stay; it can come back any time. */
+function RetireCamera({ camera, onSaved }: { camera: Camera; onSaved: (retiredAt: string | null) => void }) {
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const retired = !!camera.retired_at
+
+  async function change(next: boolean) {
+    if (saving) return
+    setSaving(true)
+    setError('')
+    try {
+      const r = await api<{ retired_at: string | null }>(`/cameras/${camera.id}/retired`, {
+        method: 'PATCH', body: JSON.stringify({ retired: next }),
+      })
+      onSaved(r.retired_at)
+    } catch (e) {
+      setError(`Could not save that. ${(e as Error).message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="cam-retire">
+      <SwitchRow
+        label="Retire camera"
+        note={retired
+          ? 'Switch off to bring it back into tonight’s plan.'
+          : 'Taken it down? Retire it so tonight’s plan stops ranking it on what it saw before.'}
+        on={retired}
+        disabled={saving}
+        words={['Retired', 'In use']}
+        onChange={(next) => void change(next)}
+      />
+      {error && <p className="cam-health-note cam-health-note--warn" role="alert">{error}</p>}
+    </div>
+  )
+}
+
 function toPhoto(cam: string, im: Img): LightboxPhoto {
   return {
     id: im.id,
@@ -372,6 +420,9 @@ export default function Cameras() {
   const [flagging, setFlagging] = useState<Set<string>>(new Set())
   // The strip a moment before it changes shape. See toggleHidden.
   const [swapping, setSwapping] = useState<string | null>(null)
+  // Only an admin can retire a camera.
+  const [admin, setAdmin] = useState(() => peekMe()?.role === 'admin')
+  useEffect(() => { whoAmI().then((me) => setAdmin(me.role === 'admin')).catch(() => {}) }, [])
 
   // Leaving the page drops the lists it was still asking for, so the next tab on a
   // thin link isn't queued behind them.
@@ -639,6 +690,7 @@ export default function Cameras() {
                   <div><dt>Photos</dt><dd>{animalPhotos} with animals{c.empty_count > 0 ? `, ${c.empty_count} empty` : ''}</dd></div>
                   {c.model ? <div><dt>Model</dt><dd>{c.model}</dd></div> : null}
                 </dl>
+                {admin && <RetireCamera camera={c} onSaved={(retiredAt) => { setCameras((cs) => cs.map((x) => (x.id === c.id ? { ...x, retired_at: retiredAt } : x))); void loadCameras() }} />}
               </details>
             </div>
           )

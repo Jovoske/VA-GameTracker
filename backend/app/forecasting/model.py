@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, cast, extract, func, select
+from sqlalchemy import Integer, and_, case, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,18 +19,14 @@ from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
 from app.enrichment.weather import weather_at
 from app.forecasting.changes import whats_changed
-from app.forecasting.exposure import excluded_nights
+from app.forecasting.exposure import current_night, local_hour, night_key_start
 from app.forecasting.scoring import calibration
 from app.forecasting.wind import assess
-from app.models import Camera, Detection, Image, Species, Stand
+from app.models import Camera, CameraNight, Image, Species, Stand
 
 log = get_logger(__name__)
 
 _TZ = settings.estate_timezone
-
-
-def _local_hour(col):
-    return cast(extract("hour", func.timezone(_TZ, col)), Integer)
 
 
 # Hours a person can realistically sit an evening stand. Searching all 24 returned
@@ -82,72 +78,131 @@ def _is_nocturnal(window: dict) -> bool:
     return h >= 20 or h <= 5
 
 
-def _camera_forecast(
-    db: Session, cam: Camera, now: datetime, *, producing: bool = True,
-    species_ids: list[str] | None = None,
-) -> dict | None:
-    """Best huntable species at this camera tonight.
+# How far back the plan reads: the season is the evidence. Older than a year is
+# another camera position, another crop, another herd.
+HISTORY_NIGHTS = 365
+# "Recent" is the last seven nights that are over, never the one under way.
+RECENT_NIGHTS = 7
+# Fewer watched nights than this among the last seven, and the week says nothing
+# either way: no nudge up, and no penalty for a silence nobody was watching.
+MIN_RECENT_WATCHED = 4
+# A camera with no photo at all for longer than this is not ranked: a camera in a
+# drawer used to top Tonight for weeks on what it saw in August.
+SILENT_DAYS = 7
+# The nights a camera can be judged on (exposure.py): it was demonstrably watching.
+WATCHED = ("CONFIRMED", "PRESUMED_UP")
 
-    `species_ids` narrows it to what the hunter is actually after: asking for boar
-    should rank the ground by boar, not by whatever happens to be commonest there.
-    """
-    q = (
-        select(
-            Detection.species_id,
-            Species.common_name,
-            func.count(Detection.id),
-            func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at)))),
+
+def _evidence(
+    db: Session, cams: list[Camera], species_ids: list[str] | None, tonight
+) -> dict:
+    """What the ranking reads, for every camera at once: the nights each camera was
+    watching, the nights it can't vouch for, and its visits per species, night and
+    hour. A visit is an arrival (visits.py), so a boar loitering for thirty frames
+    counts once; hidden species and photos marked "nothing in it" never count."""
+    from app.forecasting.visits import visit_rows
+
+    first = tonight - timedelta(days=HISTORY_NIGHTS)
+    cam_ids = [c.id for c in cams]
+    ev: dict = {
+        c.id: {"watched": set(), "left_out": {}, "species": {}, "newest": None} for c in cams
+    }
+    if not cam_ids:
+        return ev
+    for cam_id, night, state in db.execute(
+        select(CameraNight.camera_id, CameraNight.night, CameraNight.exposure_state).where(
+            CameraNight.camera_id.in_(cam_ids),
+            CameraNight.night >= first, CameraNight.night < tonight,
         )
-        .join(Image, Image.id == Detection.image_id)
-        .join(Species, Species.id == Detection.species_id)
-        .where(Image.camera_id == cam.id, Species.huntable.is_(True))
-    )
+    ).all():
+        if state in WATCHED:
+            ev[cam_id]["watched"].add(night)
+        else:
+            ev[cam_id]["left_out"][night] = state
+
+    # Frames up to 06:00 this morning: tonight's night is not over, so it is neither
+    # a night seen nor one missed.
+    wanted = select(Species.id).where(Species.huntable.is_(True), Species.hidden.is_(False))
     if species_ids:
-        q = q.where(Detection.species_id.in_(species_ids))
+        wanted = wanted.where(Species.id.in_(species_ids))
+    v = visit_rows(start=night_key_start(first - timedelta(days=1)),
+                   end=night_key_start(tonight), camera_ids=cam_ids,
+                   species_ids=list(db.scalars(wanted).all()))
+    hour = local_hour(v.c.first_at).label("h")
     rows = db.execute(
-        q.group_by(Detection.species_id, Species.common_name)
-        .order_by(func.count(Detection.id).desc())
-    ).all()
-    if not rows:
-        return None
-
-    species_id, sp_name, count, nights_present = rows[0][0], rows[0][1], int(rows[0][2]), int(rows[0][3])
-    runner_up = rows[1][1] if len(rows) > 1 else None
-    # Denominator is the nights THIS camera was actually watching — not the whole estate's
-    # date range — so a recently-installed or briefly-active camera isn't scored near zero.
-    active_nights = db.scalar(
-        select(func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at)))))
-        .where(Image.camera_id == cam.id)
-    ) or nights_present or 1
-    presence = min(1.0, nights_present / active_nights)
-
-    recent_nights = db.scalar(
-        select(func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at)))))
-        .select_from(Detection)
-        .join(Image, Image.id == Detection.image_id)
-        .where(
-            Image.camera_id == cam.id,
-            Detection.species_id == species_id,
-            Image.captured_at > now - timedelta(days=7),
+        select(
+            v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, hour,
+            func.count().label("visits"), cast(func.sum(v.c.frames), Integer).label("frames"),
         )
-    ) or 0
+        .where(v.c.night >= first)
+        .group_by(v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, hour)
+    ).tuples().all()
+    for cam_id, species_id, name, night, h, visits, frames in rows:
+        sp = ev[cam_id]["species"].get(species_id)
+        if sp is None:
+            sp = ev[cam_id]["species"][species_id] = {
+                "name": name, "nights": {}, "by_hour": {}, "frames": {}}
+        nights, by_hour = sp["nights"], sp["by_hour"]
+        nights[night] = nights.get(night, 0) + visits
+        sp["frames"][night] = sp["frames"].get(night, 0) + frames
+        by_hour[h] = by_hour.get(h, 0) + visits
 
-    hour_expr = _local_hour(Image.captured_at).label("h")
-    hour_rows = db.execute(
-        select(hour_expr, func.count())
-        .select_from(Detection)
-        .join(Image, Image.id == Detection.image_id)
-        .where(Image.camera_id == cam.id, Detection.species_id == species_id)
-        .group_by(hour_expr)
-    ).all()
-    by_hour = {int(h): int(c) for h, c in hour_rows}
-    window = _best_window(by_hour)
+    for cam_id, newest in db.execute(
+        select(Image.camera_id, func.max(Image.captured_at))
+        .where(Image.camera_id.in_(cam_ids), Image.captured_at <= datetime.now(timezone.utc))
+        .group_by(Image.camera_id)
+    ).all():
+        ev[cam_id]["newest"] = newest
+    return ev
 
-    # Probability tonight: base presence rate, nudged by recent activity — but only when the
-    # camera is actually producing. A camera that's out of credits / offline has no fresh
-    # photos, so we must NOT read that silence as absence; keep it on historical presence.
+
+def _camera_forecast(
+    cam: Camera, ev: dict, tonight, *, producing: bool = True,
+) -> dict | None:
+    """Best huntable species at this camera tonight, from its evidence (_evidence).
+
+    Presence is the share of the nights this camera was demonstrably watching on
+    which the species came: never a night keyed by calendar date (a visit either side
+    of midnight is one night, not two), never a night whose photos the AI hasn't
+    checked, and never the night still under way.
+    """
+    watched = ev["watched"]
+    best = None
+    for species_id, sp in ev["species"].items():
+        seen = {n for n, visits in sp["nights"].items() if visits and n in watched}
+        visits = sum(sp["nights"][n] for n in seen)
+        key = (len(seen), visits)
+        if best is None or key > best[0]:
+            best = (key, species_id, sp, seen)
+    if best is None or not best[3]:
+        return None
+    (_, visits), species_id, sp, seen = best
+    others = sorted(
+        (
+            (len({n for n, c in o["nights"].items() if c and n in watched}), o["name"])
+            for sid, o in ev["species"].items() if sid != species_id
+        ),
+        reverse=True,
+    )
+    runner_up = sentence_case(others[0][1]) if others and others[0][0] else None
+
+    active_nights = len(watched)
+    presence = min(1.0, len(seen) / active_nights) if active_nights else 0.0
+    recent_keys = {tonight - timedelta(days=d) for d in range(1, RECENT_NIGHTS + 1)}
+    recent_watched = len(recent_keys & watched)
+    recent_nights = len(recent_keys & seen)
+    recent_unchecked = sum(
+        1 for n in recent_keys if ev["left_out"].get(n) == "UNPROCESSED"
+    )
+
+    window = _best_window(sp["by_hour"])
+
+    # Probability tonight: base presence rate, nudged by the last week, but only when
+    # the camera is producing and enough of that week was watched. A camera that's
+    # out of credits or offline has no fresh photos, and a week the AI hasn't checked
+    # yet has none either: neither silence is an absence of game.
     prob = presence
-    if producing:
+    if producing and recent_watched >= MIN_RECENT_WATCHED:
         if recent_nights >= 4:
             prob = min(0.97, prob + 0.1)
         elif recent_nights == 0:
@@ -155,13 +210,24 @@ def _camera_forecast(
 
     return {
         "camera": cam.name, "camera_id": str(cam.id),
-        "species": sp_name, "species_id": species_id, "runner_up": runner_up,
+        "species": sentence_case(sp["name"]), "species_id": species_id,
+        "runner_up": runner_up,
         "probability": round(prob, 2), "presence": round(presence, 2),
-        "nights_present": nights_present, "recent_nights": recent_nights,
+        "nights_present": len(seen), "recent_nights": recent_nights,
+        "recent_watched": recent_watched, "recent_unchecked": recent_unchecked,
         "active_nights": active_nights, "producing": producing,
+        "judgeable": active_nights >= MIN_NIGHTS_TO_JUDGE,
+        "visits": visits, "photos": sum(sp["frames"].get(n, 0) for n in seen),
         "best_window": window,
         "nocturnal": _is_nocturnal(window),
     }
+
+
+def _rank_key(f: dict) -> tuple:
+    """Cameras that can be judged first, then by their odds. A camera added a few
+    nights ago with boar on all three is "Not enough to say", and must not push a
+    proven Best-odds spot off the headline."""
+    return (f["judgeable"], f["probability"], f["active_nights"])
 
 
 def sentence_case(name: str) -> str:
@@ -195,44 +261,88 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
     return sentence_case(common_name) if common_name else (species_id or "Animal")
 
 
+# class_label's plain species, when the sex and group pass said nothing about it:
+# every other class of red deer and wild boar tells more.
+PLAIN_CLASSES = ("Red deer", "Wild boar")
+
+
+def class_label_sql(species_id, sex, group_type):
+    """SQL for class_label's split of red deer and wild boar ("Stag", "Sow + piglets"),
+    NULL for every other species (which is its name). Mirrors class_label, so a visit
+    can be counted per class in the database: keep the two in step."""
+    return case(
+        (and_(species_id == "red_deer", group_type == "hind_with_calf"), "Hind + calf"),
+        (and_(species_id == "red_deer", sex == "male"), "Stag"),
+        (and_(species_id == "red_deer", sex == "female"), "Hind"),
+        (and_(species_id == "red_deer", group_type == "herd"), "Red deer (herd)"),
+        (species_id == "red_deer", "Red deer"),
+        (and_(species_id == "wild_boar", group_type == "sow_with_piglets"), "Sow + piglets"),
+        (and_(species_id == "wild_boar", sex == "male"), "Boar"),
+        (and_(species_id == "wild_boar", sex == "female"), "Sow"),
+        (and_(species_id == "wild_boar", group_type == "sounder"), "Sounder"),
+        (species_id == "wild_boar", "Wild boar"),
+        else_=None,
+    )
+
+
+def _classes(rows: list[dict], camera_id: str, species_ids=None, nights=None,
+             limit: int | None = 4) -> list[dict]:
+    """The commonest classes at a camera, by visits, photos alongside.
+
+    Only visits on `nights` (the nights the camera was watching, which is what its
+    visits are counted over), so the classes of one animal add up to its visits.
+    """
+    agg: dict[str, dict] = {}
+    for r in rows:
+        if str(r["camera_id"]) != camera_id or (species_ids and r["species_id"] not in species_ids):
+            continue
+        if nights is not None and r["night"] not in nights:
+            continue
+        c = agg.setdefault(r["label"], {"label": r["label"], "visits": 0, "photos": 0})
+        c["visits"] += r["visits"]
+        c["photos"] += r["photos"]
+    return sorted(agg.values(), key=lambda c: (-c["visits"], -c["photos"], c["label"]))[:limit]
+
+
 def _expectations(
-    db: Session, forecasts: list[dict], species_ids: list[str] | None = None
-) -> list[dict]:
-    """Per forecasted camera: which classes (stag/hind/sow+piglets/…) to expect there."""
+    db: Session, forecasts: list[dict], species_ids: list[str] | None, tonight,
+    watched: dict[str, set],
+) -> tuple[list[dict], list[dict]]:
+    """Per ranked camera: which classes (stag/hind/sow+piglets/…) to expect there.
+
+    Counted in visits, the unit a hunter reads: a sow and her piglets loitering for
+    forty frames are one visit, not "×40". Each visit is of one class
+    (visits.class_visits) and only the nights the camera was watching count, so the
+    classes of an animal add up to its visits. The class rows come back too, so the
+    top card can list only the animal it names."""
+    from app.forecasting.visits import class_visits
+
+    if not forecasts:
+        return [], []
+    wanted = select(Species.id).where(Species.huntable.is_(True), Species.hidden.is_(False))
+    if species_ids:
+        # Asked for boar, be shown boar: listing every class at the stand would bury
+        # the thing the hunter came for.
+        wanted = wanted.where(Species.id.in_(species_ids))
+    first = tonight - timedelta(days=HISTORY_NIGHTS)
+    rows = class_visits(
+        db, start=night_key_start(first - timedelta(days=1)), end=night_key_start(tonight),
+        camera_ids=[uuid.UUID(f["camera_id"]) for f in forecasts],
+        species_ids=list(db.scalars(wanted).all()),
+    )
     out = []
     for f in forecasts:
-        q = (
-            select(
-                Detection.species_id, Species.common_name, Detection.sex,
-                Detection.group_type, func.count(Detection.id),
-            )
-            .join(Image, Image.id == Detection.image_id)
-            .join(Species, Species.id == Detection.species_id)
-            .where(Image.camera_id == f["camera_id"], Species.huntable.is_(True))
-        )
-        if species_ids:
-            # Asked for boar, be shown boar: listing every class at the stand would
-            # bury the thing the hunter came for.
-            q = q.where(Detection.species_id.in_(species_ids))
-        rows = db.execute(
-            q.group_by(
-                Detection.species_id, Species.common_name, Detection.sex, Detection.group_type
-            )
-        ).all()
-        agg: dict[str, int] = {}
-        for sp, cn, sex, gt, c in rows:
-            agg[class_label(sp, cn, sex, gt)] = agg.get(class_label(sp, cn, sex, gt), 0) + int(c)
-        classes = sorted(agg.items(), key=lambda kv: -kv[1])[:4]
         out.append({
             "camera": f["camera"], "camera_id": f["camera_id"],
             "species_id": f["species_id"],  # needed to score the claim later
             "verdict": _verdict(f["probability"], f["active_nights"]),
             "probability": f["probability"],
             "nights_present": f["nights_present"], "active_nights": f["active_nights"],
+            "visits": f["visits"], "photos": f["photos"],
             "best_window": f["best_window"],
-            "classes": [{"label": lbl, "count": n} for lbl, n in classes],
+            "classes": _classes(rows, f["camera_id"], nights=watched.get(f["camera_id"])),
         })
-    return out
+    return out, rows
 
 
 def _tonight_conditions(now: datetime) -> dict:
@@ -260,6 +370,7 @@ def _tonight_conditions(now: datetime) -> dict:
 
 def _factors(top: dict, cond: dict) -> list[dict]:
     out = []
+    unwatched = RECENT_NIGHTS - top["recent_watched"]
     if not top.get("producing", True):
         out.append({
             "text": (
@@ -268,13 +379,26 @@ def _factors(top: dict, cond: dict) -> list[dict]:
             ),
             "impact": "•",
         })
-    elif top["recent_nights"] > 0:
-        out.append({
-            "text": f"{top['species']} seen {top['recent_nights']} of the last 7 nights here",
-            "impact": "+++" if top["recent_nights"] >= 4 else "++",
-        })
+    elif top["recent_watched"] < MIN_RECENT_WATCHED:
+        # Not a quiet week: a week nobody could see. It neither helps nor counts against.
+        if top.get("recent_unchecked"):
+            text = (f"Photos from {top['recent_unchecked']} of the last 7 nights are still "
+                    "being checked. Going on its history.")
+        else:
+            text = (f"Only {top['recent_watched']} of the last 7 nights watched here. "
+                    "Going on its history.")
+        out.append({"text": text, "impact": "•"})
     else:
-        out.append({"text": f"No {top['species']} here in the last 7 nights", "impact": "--"})
+        gap = f" ({unwatched} not watched)" if unwatched else ""
+        if top["recent_nights"] > 0:
+            out.append({
+                "text": (f"{top['species']} seen {top['recent_nights']} of the last 7 nights "
+                         f"here{gap}"),
+                "impact": "+++" if top["recent_nights"] >= 4 else "++",
+            })
+        else:
+            out.append({"text": f"No {top['species'].lower()} here in the last 7 nights{gap}",
+                        "impact": "--"})
     # Moon/weather are handled by the data-driven tonight drivers (condition_reasons),
     # so they're not hardcoded here — keeps the "why" consistent with the learned patterns.
     w = top["best_window"]
@@ -283,6 +407,33 @@ def _factors(top: dict, cond: dict) -> list[dict]:
         "impact": "++",
     })
     return out
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _left_out_note(top: dict, ev: dict) -> tuple[int, str]:
+    """The nights at the recommended camera not counted, and why, in words.
+
+    The whole point of the exposure table is that these are left out rather than
+    silently averaged in as "no animals", and an exclusion nobody is told about is
+    indistinguishable from the bug it replaced. It used to be an estate-wide count
+    over all time, next to a camera it said nothing about."""
+    states = list(ev["left_out"].values())
+    unchecked = states.count("UNPROCESSED")
+    blind = len(states) - unchecked
+    total = unchecked + blind
+    if not total:
+        return 0, ""
+    why = []
+    if unchecked:
+        why.append(f"{unchecked} with photos not checked yet" if blind
+                   else "photos not checked yet")
+    if blind:
+        why.append(f"{blind} the camera may not have been watching" if unchecked
+                   else "the camera may not have been watching")
+    return total, f"{_plural(total, 'night')} at {top['camera']} left out: {', '.join(why)}."
 
 
 def _freshness(db: Session, now: datetime) -> dict | None:
@@ -304,37 +455,63 @@ def _freshness(db: Session, now: datetime) -> dict | None:
 
 def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     now = datetime.now(timezone.utc)
-    total_nights = db.scalar(
-        select(func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at)))))
-    ) or 1
+    tonight = current_night(now)
 
     # A camera that isn't producing data (dead battery / no check-in / out of photo credits)
     # must not have its silence scored as "no animals". We keep it in the ranking on its
     # HISTORICAL presence (skipping the recent-activity penalty) and also surface it as an
     # alert — so a strong spot whose camera is merely capped isn't hidden or downgraded.
-    # A camera whose login was removed is not ranked at all: nothing it "saw" lately
-    # can reach us, and nobody is going to fix it (health.py, disconnected).
+    # Not for ever, though: with no photo at all for over SILENT_DAYS it is left out
+    # of the ranking (and so out of the claims scored), and said so. A camera whose
+    # login was removed, or one an admin retired, is not ranked at all.
     from app.health import camera_health
     from app.ingestion.logins import camera_logins
 
     cams = db.scalars(
-        select(Camera).where(Camera.active.is_(True)).order_by(Camera.name)
+        select(Camera)
+        .where(Camera.active.is_(True), Camera.retired_at.is_(None))
+        .order_by(Camera.name)
     ).all()
     login_states = camera_logins(db, cams, now)
     health = {c.id: camera_health(c, now, login_states.get(c.id)) for c in cams}
     fresh = _freshness(db, now)
-    alerts = [
-        {"camera": c.name, "status": health[c.id]["status"], "detail": health[c.id]["detail"]}
-        for c in cams if not health[c.id]["producing"]
-    ]
+    ev = _evidence(db, cams, species_ids, tonight)
+
+    alerts, ranked = [], []
+    for c in cams:
+        newest = ev[c.id]["newest"]
+        silent = newest is None or now - newest > timedelta(days=SILENT_DAYS)
+        h = health[c.id]
+        if silent and newest is not None:
+            days = (now - newest).days
+            alerts.append({
+                "camera": c.name, "camera_id": str(c.id), "status": h["status"],
+                "detail": (h["detail"] + ". " if not h["producing"] else "")
+                + f"No photos for {days} days, so it is left out of tonight's ranking",
+                "ranked": False,
+            })
+            continue
+        if not h["producing"]:
+            alerts.append({"camera": c.name, "camera_id": str(c.id), "status": h["status"],
+                           "detail": h["detail"], "ranked": not silent})
+        if not silent:
+            ranked.append(c)
     forecasts = [
         f for f in (
-            _camera_forecast(db, c, now, producing=health[c.id]["producing"],
-                             species_ids=species_ids)
-            for c in cams
+            _camera_forecast(c, ev[c.id], tonight, producing=health[c.id]["producing"])
+            for c in ranked
         ) if f
     ]
-    forecasts.sort(key=lambda f: f["probability"], reverse=True)
+    # The learned weather/moon "drivers" used to be multiplied into this number.
+    # They were removed after a null simulation run against the real _driver() code:
+    # on counts generated to be independent of every covariate, it still found at
+    # least one "driver" in 97.8-99.8% of runs, at a median reported effect of
+    # 46-108% against an advertised MIN_EFFECT floor of 15. Those coefficients were
+    # moving the headline verdict. Tonight's conditions are still shown as facts;
+    # they no longer silently move the ranking.
+    forecasts.sort(key=_rank_key, reverse=True)
+    # Nights at least one ranked camera was watching: what the plan stands on.
+    nights_of_data = len(set().union(*(ev[c.id]["watched"] for c in ranked)))
 
     cond = _tonight_conditions(now)
     if not forecasts:
@@ -347,26 +524,22 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
             )
         # NO_DATA, not SKIP: we have nothing to say about the ground, which is not the
         # same as telling somebody their evening isn't worth having.
-        return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": total_nights,
+        return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": nights_of_data,
                 "conditions": cond, "alternates": [], "alerts": alerts, "freshness": fresh}
 
-    # The learned weather/moon "drivers" used to be multiplied into this number.
-    # They were removed after a null simulation run against the real _driver() code:
-    # on counts generated to be independent of every covariate, it still found at
-    # least one "driver" in 97.8-99.8% of runs, at a median reported effect of
-    # 46-108% against an advertised MIN_EFFECT floor of 15. Those coefficients were
-    # moving the headline verdict. Tonight's conditions are still shown as facts;
-    # they no longer silently move the ranking.
-    forecasts.sort(key=lambda f: f["probability"], reverse=True)
-
     top = forecasts[0]
-    where = _expectations(db, forecasts, species_ids)
-    top_classes = where[0]["classes"] if where else []
+    watched = {str(c.id): ev[c.id]["watched"] for c in ranked}
+    where, class_rows = _expectations(db, forecasts, species_ids, tonight, watched)
+    # The top card names one animal, so it lists that animal's classes only, all of
+    # them, adding up to its visits; the mixed list stays in the per-camera fold
+    # (audit I-20).
+    top_classes = _classes(class_rows, top["camera_id"], {top["species_id"]},
+                           watched[top["camera_id"]], limit=None)
 
     # One line of news beats a wall of unchanged numbers. A hunter who opened the app
     # yesterday needs to know what moved, not to re-read what didn't.
     try:
-        changed = whats_changed(db)
+        changed = whats_changed(db, tonight=tonight)
     except Exception as e:  # never let the extra line break the verdict
         log.warning("changed.failed", error=str(e))
         changed = {"kind": "none", "camera": None, "text": ""}
@@ -392,24 +565,11 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         log.warning("calibration.failed", error=str(e))
         track_record = {"available": False, "n_evaluated": 0}
 
-    # Nights deliberately not counted — camera down, out of credits, or frames the
-    # classifier has not reached. The whole point of the exposure table is that these
-    # are excluded rather than silently averaged in as "no animals", and an exclusion
-    # nobody is told about is indistinguishable from the bug it replaced.
-    try:
-        skipped = excluded_nights(db)
-    except Exception as e:
-        log.warning("exposure.count_failed", error=str(e))
-        skipped = 0
+    skipped, note = _left_out_note(top, ev[uuid.UUID(top["camera_id"])])
 
     return {
-        "exposure": {
-            "excluded_nights": skipped,
-            "note": (
-                f"{skipped} night{'s' if skipped != 1 else ''} left out because the "
-                "camera was not watching."
-            ) if skipped else "",
-        },
+        "exposure": {"excluded_nights": skipped, "note": note},
+        # Only when no camera can be judged is the headline "Not enough to say".
         "verdict": _verdict(top["probability"], top["active_nights"]),
         "changed": changed,
         "calibration": track_record,
@@ -419,11 +579,13 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
             "is_advice": wind_verdict.is_advice,
         },
         "recommended": {
-            "camera": top["camera"], "species": top["species"], "runner_up": top["runner_up"],
+            "camera": top["camera"], "camera_id": top["camera_id"],
+            "species": top["species"], "runner_up": top["runner_up"],
             "probability": top["probability"], "best_window": top["best_window"],
             "expect": top_classes[0]["label"] if top_classes else top["species"],
             "classes": top_classes,
             "nights_present": top["nights_present"], "active_nights": top["active_nights"],
+            "visits": top["visits"], "photos": top["photos"],
             "reason": (
                 f"{top['species']} seen {top['nights_present']} of "
                 f"{top['active_nights']} nights at this camera."
@@ -440,12 +602,12 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         "factors": _factors(top, cond),
         "where": where,
         "alternates": [
-            {"camera": f["camera"], "species": f["species"],
+            {"camera": f["camera"], "camera_id": f["camera_id"], "species": f["species"],
              "verdict": _verdict(f["probability"], f["active_nights"]),
              "nights_present": f["nights_present"], "active_nights": f["active_nights"]}
             for f in forecasts[1:3]
         ],
         "alerts": alerts,
-        "nights_of_data": total_nights,
+        "nights_of_data": nights_of_data,
         "freshness": fresh,
     }
