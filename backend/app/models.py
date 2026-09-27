@@ -609,3 +609,29 @@ class Notification(Base):
     )
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (Index("ix_notifications_user_created", "user_id", "created_at"),)
+
+
+class ClientError(Base):
+    """A crash or blank screen on someone's phone, as the app reported it.
+
+    Hunters never see a stack trace and rarely say "it went black" until days
+    later, so the app posts what broke to /api/client-errors and admins read the
+    last few in Settings. Kept short (the newest 200) because this is a smoke
+    alarm, not a log archive: the full stream also goes to the server log.
+    Removing a person keeps what their phone reported, with no name on it.
+    """
+
+    __tablename__ = "client_errors"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # error / rejection / render / chunk: where in the app it was caught.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    stack: Mapped[str | None] = mapped_column(Text)
+    route: Mapped[str | None] = mapped_column(String(200))
+    build: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    __table_args__ = (Index("ix_client_errors_created_at", "created_at"),)

@@ -39,7 +39,6 @@ def _best_window(by_hour: dict[int, int]) -> dict:
 
 @router.get("/overview")
 def overview(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    sightings = db.scalar(select(func.count(Image.id)).where(_ANIMAL)) or 0
     empties = db.scalar(select(func.count(Image.id)).where(Image.is_empty_frame.is_(True))) or 0
     oldest = db.scalar(select(func.min(Image.captured_at)))
     newest = db.scalar(select(func.max(Image.captured_at)))
@@ -47,19 +46,30 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
         select(func.count(func.distinct(func.date(func.timezone(_TZ, Image.captured_at)))))
     ) or 0
 
+    # One pass over the animal photos, grouped by camera and local hour, then summed
+    # here. The visibility test is the expensive part (an EXISTS per photo), and the
+    # total, the hours and the cameras used to run it three times over (audit G-19).
     h = _local_hour().label("h")
-    hour_rows = db.execute(select(h, func.count()).where(_ANIMAL).group_by(h)).all()
-    by_hour = {int(hr): int(c) for hr, c in hour_rows}
-    hours = [{"hour": i, "count": by_hour.get(i, 0)} for i in range(24)]
-
-    cam_rows = db.execute(
-        select(Camera.name, func.count(Image.id))
-        .join(Image, Image.camera_id == Camera.id)
+    rows = db.execute(
+        select(Camera.name, h, func.count(Image.id))
+        .select_from(Image)
+        .outerjoin(Camera, Camera.id == Image.camera_id)
         .where(_ANIMAL)
-        .group_by(Camera.name)
-        .order_by(func.count(Image.id).desc())
+        .group_by(Camera.name, h)
     ).all()
-    by_camera = [{"name": n, "sightings": int(c)} for n, c in cam_rows]
+    sightings = 0
+    by_hour: dict[int, int] = {}
+    per_camera: dict[str, int] = {}
+    for name, hr, c in rows:
+        sightings += int(c)
+        by_hour[int(hr)] = by_hour.get(int(hr), 0) + int(c)
+        if name is not None:
+            per_camera[name] = per_camera.get(name, 0) + int(c)
+    hours = [{"hour": i, "count": by_hour.get(i, 0)} for i in range(24)]
+    by_camera = [
+        {"name": n, "sightings": c}
+        for n, c in sorted(per_camera.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
     sp_rows = db.execute(
         select(Species.common_name, func.count(Detection.id))
