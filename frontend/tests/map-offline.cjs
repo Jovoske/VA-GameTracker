@@ -18,11 +18,16 @@
 // Env: API_URL (required), EMAIL / MEMBER_EMAIL / PASSWORD (devstack logins),
 // PLAYWRIGHT_MODULE, PW_CHANNEL (as the other tests), DIST (default ../dist),
 // UX_SCREENSHOTS (a folder for screenshots).
-// The worker's own requests are taken offline like the page's only with this set
+// The worker's own requests are routed like the page's only with this set
 // (Chromium, Playwright 1.4x-1.5x). A route on the page's requests goes round the
 // worker, so the stubbed pictures are routed only while there is signal: with none,
 // the worker alone answers, as on a phone in the valley.
+// Going offline doesn't stop the worker's own requests: a picture it hasn't saved
+// still went out to the network, and where the real IGN answers (CI) the map had it.
+// So the picture servers don't resolve in this browser at all; with signal the route
+// answers their pictures before any lookup.
 process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS='1';
+const NO_PICTURE_SERVERS='--host-resolver-rules='+['www.ign.es','server.arcgisonline.com','ovc.catastro.meh.es'].map(h=>`MAP ${h} ~NOTFOUND`).join(', ');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert=require('node:assert/strict'),fs=require('node:fs'),http=require('node:http'),path=require('node:path'),zlib=require('node:zlib');
 const dist=process.env.DIST||path.join(__dirname,'..','dist');
@@ -73,7 +78,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const base=`http://127.0.0.1:${server.address().port}`;
  const channel=process.env.PW_CHANNEL??'msedge';
- const browser=await chromium.launch({headless:true,...(channel?{channel}:{}),args:['--enable-unsafe-swiftshader','--use-gl=swiftshader']});
+ const browser=await chromium.launch({headless:true,...(channel?{channel}:{}),args:['--enable-unsafe-swiftshader','--use-gl=swiftshader',NO_PICTURE_SERVERS]});
  const admin=await login(process.env.EMAIL||'admin@gamesense.local');
  const member=await login(process.env.MEMBER_EMAIL||'member@gamesense.local');
  await call(admin,'/estate/box',{method:'DELETE'});
