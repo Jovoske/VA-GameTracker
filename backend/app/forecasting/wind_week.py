@@ -14,9 +14,10 @@ Sat". The hours are behind a fold.
 - **Right** is the verdict "clean": the scent goes away from where they lie up (or
   from the stand's approach arcs). Too light to call is not right; nor is a stand
   that can't be judged, which says why instead.
-- **Tonight** lists its right hours still to come (the hour under way counts).
-  Another evening is listed when it has at least two right hours in a row, a sit's
-  worth; its hours are on the strip.
+- **Tonight** lists its right hours still to come (the hour under way counts): the
+  runs a sit fits in first, the longest of them, then a single hour if there is
+  room, two at most, in time order. Another evening is listed when it has at least
+  two right hours in a row, a sit's worth. Every hour is on the strip.
 - **Cached hourly.** 56 verdicts a stand is real work, so an answer is kept for the
   rest of the hour, and made again sooner only when something it rests on changes:
   a stand moved or its arcs set, bedding drawn, the hill shape loaded, a newer
@@ -45,6 +46,8 @@ LAST_HOUR = 24
 EVENINGS = 7
 # A later evening counts as a right one with this many right hours in a row.
 MIN_RUN = 2
+# Tonight's line names this many runs of right hours at most; the rest are on the strip.
+NAMED = 2
 RIGHT = "clean"
 # The stand itself can't be judged, whatever the wind: said once, not every hour.
 UNJUDGED = ("no_position", "no_bedding", "no_geometry")
@@ -92,6 +95,15 @@ def _runs(hours: list[dict]) -> list[list[int]]:
             runs.append([h["hour"]])
         last = h["hour"]
     return runs
+
+
+def _named(runs: list[list[int]]) -> list[list[int]]:
+    """The runs tonight's line names: those a sit fits in (MIN_RUN hours or more),
+    longest first, then single hours if there is room; in time order. Naming the
+    first two used to drop the evening's real window behind two stray hours: right
+    at 17, 19 and 21–23 read "tonight 17 h and 19 h" (review R6FE-2)."""
+    ranked = sorted(runs, key=lambda r: (len(r) < MIN_RUN, -len(r), r[0]))
+    return sorted(ranked[:NAMED], key=lambda r: r[0])
 
 
 def _fingerprint(db: Session, stand_id) -> str:
@@ -150,7 +162,7 @@ def _judge(
 
     out = []
     for s in stands:
-        rows, statuses = [], set()
+        rows, statuses, tonight_right = [], set(), None
         for n in nights:
             evening = []
             for label, at in hours_of[n]:
@@ -176,16 +188,13 @@ def _judge(
             rows.append({"night": n.isoformat(), "hours": evening,
                          "right": [_span(r) for r in runs],
                          "right_evening": any(len(r) >= MIN_RUN for r in runs)})
+            if n == tonight:
+                tonight_right = " and ".join(_span(r) for r in _named(runs)) or None
         stand_status = next(
             (u for u in UNJUDGED if u in statuses and statuses <= {u, "no_wind_data"}), "ok")
         has_forecast = statuses != {"no_wind_data"}
-        tonight_right = None
-        days = []
-        for ev, row in zip(evenings, rows, strict=True):
-            if ev["tonight"]:
-                tonight_right = " and ".join(row["right"][:2]) or None
-            elif row["right_evening"]:
-                days.append(ev["day"])
+        days = [ev["day"] for ev, row in zip(evenings, rows, strict=True)
+                if not ev["tonight"] and row["right_evening"]]
         out.append({
             "stand_id": str(s.id), "stand": s.name, "status": stand_status,
             "line": _line(s.name, stand_status, tonight_right, days, has_forecast),

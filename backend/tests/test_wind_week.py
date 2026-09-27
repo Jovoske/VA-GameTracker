@@ -209,6 +209,41 @@ def test_the_line_names_tonights_hours_and_the_right_evenings(db_session, place,
 
 
 @requires_db
+def test_tonights_line_names_the_sit_window_not_the_first_stray_hours(
+    db_session, place, monkeypatch
+):
+    """Right at 17, 19 and 21–23: the line used to name the first two runs, "tonight
+    17 h and 19 h", and a hunter read the whole sit as wrong wind (review R6FE-2).
+    The runs a sit fits in come first, the longest of them; a single hour only if
+    there is room; in time order. Every run stays on the strip."""
+    night = date(2026, 9, 24)
+    nights = [night + timedelta(days=d) for d in range(9)]
+    now = _at(night, 16).astimezone(UTC)
+    _use(monkeypatch, _forecast({_at(night, h) for h in (17, 19, 21, 22, 23)}, nights))
+    s = wind_week.week(db_session, now=now)["stands"][0]
+    assert s["evenings"][0]["right"] == ["17 h", "19 h", "21–23 h"]
+    assert s["right_tonight"] == "17 h and 21–23 h"
+    assert s["line"] == "Right wind for Charca: tonight 17 h and 21–23 h"
+    # Two sits' worth and a stray hour: the two runs, the longer never dropped.
+    wind_week._CACHE.clear()
+    _use(monkeypatch, _forecast({_at(night, h) for h in (17, 19, 20, 22, 23, 24)}, nights))
+    s = wind_week.week(db_session, now=now)["stands"][0]
+    assert s["right_tonight"] == "19–20 h and 22–24 h"
+    # Three runs of two or more: the two longest, in time order.
+    wind_week._CACHE.clear()
+    _use(monkeypatch, _forecast({_at(night, h) for h in (17, 18, 20, 21, 22, 23, 24)} - {
+        _at(night, 22)}, nights))
+    s = wind_week.week(db_session, now=now)["stands"][0]
+    assert s["evenings"][0]["right"] == ["17–18 h", "20–21 h", "23–24 h"]
+    assert s["right_tonight"] == "17–18 h and 20–21 h"
+    # Only stray hours: the first two of them.
+    wind_week._CACHE.clear()
+    _use(monkeypatch, _forecast({_at(night, h) for h in (18, 20, 22)}, nights))
+    s = wind_week.week(db_session, now=now)["stands"][0]
+    assert s["right_tonight"] == "18 h and 20 h"
+
+
+@requires_db
 def test_hours_gone_are_left_out_of_tonight(db_session, place, monkeypatch):
     night = date(2026, 9, 24)
     nights = [night + timedelta(days=d) for d in range(9)]

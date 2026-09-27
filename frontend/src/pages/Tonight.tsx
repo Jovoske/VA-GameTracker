@@ -167,6 +167,9 @@ function TonightWeek({ standId }: { standId: string }) {
       <span className="tn-line-k">This week</span>
       <span className="tn-line-v">
         {row ? <WindWeekLine stand={row} className="tn-week-line" /> : <span className="tn-week-wait" role="status">{wk.wait}</span>}
+        {/* A copy kept with no signal says how old it is, as the plan above does; its
+            line only offers tonight's hours not yet over (WindWeekLine). */}
+        {row && wk.got?.stale && <span className="tn-line-when tn-week-age">{noAnswerWords(wk.got.why)} Checked {ageLabel(wk.got.at)}.</span>}
         <details className="tn-week-hours">
           <summary>Hour by hour</summary>
           {row && wk.week ? <WindWeekStrip week={wk.week} stand={row} /> : <p className="ww-note">{wk.wait}</p>}

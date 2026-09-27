@@ -16,7 +16,7 @@ import {
   whoAmI,
 } from '../api'
 import SitPrompts from '../components/SitPrompts'
-import { WindWeekLine, WindWeekStrip, useWindWeek } from '../components/WindWeek'
+import { WindWeekLine, WindWeekStrip, judgedWind, useWindWeek, weekSaysWhy } from '../components/WindWeek'
 import { useRefetchOnReturn } from '../hooks'
 import { isCall, windColor, windFor, type WindReport } from '../map/geometry'
 import { flushSits, isOn, onSitSync, saveSit, withPending } from '../sits'
@@ -224,7 +224,9 @@ export default function Stands() {
       const ask = !!sit?.ended_at && sit.outcome === 'unreported'
       const week = wk.week?.stands.find((x) => x.stand_id === s.id)
       const wind = week?.tonight as WindReport | undefined
-      const windLine = wind ? WIND_LINE[wind.status] ?? null : null
+      // A stand that can't be judged, or a week with no forecast, says why once, in the
+      // week's line: "Not on the map yet." over "Loma isn't on the map yet, so…" said it twice.
+      const windLine = wind && week && !(weekSaysWhy(week) && !judgedWind(wind.status)) ? WIND_LINE[wind.status] ?? null : null
       // A copy kept with no signal says how old it is.
       const windAge = wk.got?.stale ? `from ${ageLabel(wk.got.at)}` : ''
       // In your dawn sit, Back to sit comes first; reserving the evening is the lesser thing.

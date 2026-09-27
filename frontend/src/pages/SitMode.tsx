@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { type Got, ageLabel, fromEarlierNight, getFresh, nightOf, peek } from '../api'
+import type { WindWeek } from '../components/WindWeek'
 import { isCall, type MapData } from '../map/geometry'
 import { flushSits, onSitSync, pendingFor, rank, saveSit } from '../sits'
 
@@ -96,16 +97,28 @@ const footButton: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-/** This stand's wind and tonight's sunset from /map/tonight as Stands keeps it in
- *  memory, if the phone has it. */
+const newest = <T,>(a: Got<T> | null, b: Got<T> | null) =>
+  !a ? b : !b ? a : Date.parse(b.at) > Date.parse(a.at) ? b : a
+
+/** This stand's wind and tonight's sunset from the map's copy, if the phone has one. */
 function fromMap(standId: string): Got<StandWind> | null {
   const got = peek<MapData>('/map/tonight')
   const wind = got?.data?.stands?.find((s) => s.id === standId)?.wind
   return got && wind ? { ...got, data: { ...wind, sunset_local: got.data.conditions?.sunset_local } } : null
 }
 
-const newest = <T,>(a: Got<T> | null, b: Got<T> | null) =>
-  !a ? b : !b ? a : Date.parse(b.at) > Date.parse(a.at) ? b : a
+/** This stand's wind tonight and tonight's sunset from the week's wind, as Stands
+ *  (every stand) or Tonight (this one) last loaded it: the verdict Stands just showed
+ *  under Start sit. Stands reads its wind from there, not from the map (R6FE-3). */
+function fromWeek(standId: string): Got<StandWind> | null {
+  let best: Got<StandWind> | null = null
+  for (const path of ['/forecast/wind-week', `/forecast/wind-week?stand=${encodeURIComponent(standId)}`]) {
+    const got = peek<WindWeek>(path)
+    const wind = got?.data?.stands?.find((s) => s.stand_id === standId)?.tonight
+    if (got && wind) best = newest(best, { ...got, data: { ...wind, sunset_local: got.data.sunset_local } })
+  }
+  return best
+}
 
 /** This sit as the phone saved it (Stands keeps /sits, Tonight the sit you're on),
  *  to paint before asking. */
@@ -179,9 +192,10 @@ export default function SitMode() {
   useEffect(() => {
     if (!standId || !sitId) return
     const path = `/stands/${standId}/wind?sit=${sitId}`
-    // What Stands just loaded for this stand paints first: the same verdict. Not for a
-    // dawn sit after 06:00: that copy is for the coming evening.
-    const had = newest(peek<StandWind>(path), pastNight ? null : fromMap(standId))
+    // The newest verdict the phone has for this stand paints first: the one Stands just
+    // showed (the week's wind), the map's, or this seat's own from before. Not Stands'
+    // or the map's for a dawn sit after 06:00: those are for the coming evening.
+    const had = newest(peek<StandWind>(path), pastNight ? null : newest(fromWeek(standId), fromMap(standId)))
     setLive(had && !fromEarlierNight(had.at) ? had : null)
     let ctl = new AbortController()
     const ask = () => {
