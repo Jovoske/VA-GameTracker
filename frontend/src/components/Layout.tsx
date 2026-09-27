@@ -10,6 +10,7 @@ import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { signOut } from '../api'
 import { confirmLeave } from '../map/draftGuard'
+import { checkThisDevice, listenForNewSubscriptions } from '../push'
 import { useNewerBuild } from '../serviceWorker'
 import { confirmSignOut } from '../sits'
 import { PageBoundary } from './ErrorBoundary'
@@ -55,6 +56,14 @@ export default function Layout() {
     const t = TABS.find((x) => (x.end ? loc.pathname === '/' : loc.pathname.startsWith(x.to)))
     document.title = t ? `GameSense · ${t.label}` : 'GameSense'
   }, [loc.pathname])
+
+  // Alerts keep coming: this phone's subscription is sent again every time the app
+  // opens, which puts back a server copy lost to anything (audit D-04), and again
+  // whenever the browser replaces it.
+  useEffect(() => {
+    void checkThisDevice()
+    return listenForNewSubscriptions()
+  }, [])
 
   // The map fills the screen down to the tab bar, so it needs the bar's real height:
   // it changes with the home-indicator inset and with the text size.
