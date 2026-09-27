@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, getFresh, peek, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
@@ -267,6 +267,8 @@ export default function Cameras() {
     return () => clearTimeout(t)
   }, [sync])
   const [err, setErr] = useState('')
+  // The list on screen is what this session saw earlier, because the network didn't answer.
+  const [savedCopy, setSavedCopy] = useState<Got<Camera[]> | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionErr, setActionErr] = useState('')
   const [zoom, setZoom] = useState<Zoom | null>(null)
@@ -292,8 +294,10 @@ export default function Cameras() {
   async function loadCameras() {
     setLoading(true)
     try {
-      const { data: cams } = await getFresh<Camera[]>('/cameras', { signal: signal() })
+      const got = await getFresh<Camera[]>('/cameras', { signal: signal() })
+      const cams = got.data
       setCameras(cams)
+      setSavedCopy(got.stale ? got : null)
       setErr('')
       await Promise.all(cams.map((c) => loadImages(c.id, !!showHidden[c.id])))
     } catch (e) {
@@ -403,6 +407,12 @@ export default function Cameras() {
       {err && (
         <div className="card cam-error">
           Cameras did not load. {err}
+          <button className="text-action" onClick={loadCameras}>Try again</button>
+        </div>
+      )}
+      {savedCopy && !err && (
+        <div className="status-panel" role="status">
+          {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
           <button className="text-action" onClick={loadCameras}>Try again</button>
         </div>
       )}

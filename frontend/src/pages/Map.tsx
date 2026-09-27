@@ -6,7 +6,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useBlocker, useSearchParams } from 'react-router-dom'
-import { api, thumbUrl } from '../api'
+import { api, peekMe, thumbUrl, whoAmI } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 import { isView, type View } from '../map/activity'
 import { ActivityBar, ActivityCard } from '../map/ActivityPanel'
@@ -66,7 +66,9 @@ export default function MapPage() {
   const [snap, setSnap] = useState<Snap>('half')
   const [data, setData] = useState<MapData | null>(null)
   const [cameras, setCameras] = useState<Camera[]>([])
-  const [admin, setAdmin] = useState(false)
+  // Who you are, as the phone knows it, then the shared /auth/me answer (it has a
+  // time limit and a saved copy; its own call here had neither).
+  const [admin, setAdmin] = useState(() => peekMe()?.role === 'admin')
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const [notice, setNotice] = useState('')
@@ -135,7 +137,7 @@ export default function MapPage() {
       setErr(x.offline ? 'No signal, so the map didn’t load.' : x.timeout ? 'No answer from the server, so the map didn’t load.' : `Couldn’t load the map. ${x.message}`)
     } finally { if (request === requestId.current) setLoading(false) }
   }, [])
-  useEffect(() => { load(); api<{ role: string }>('/auth/me').then(u => setAdmin(u.role === 'admin')).catch(() => {}) }, [load])
+  useEffect(() => { load(); whoAmI().then(u => setAdmin(u.role === 'admin')).catch(() => {}) }, [load])
   useRefetchOnReturn(() => { if (!editRef.current && !busyRef.current) load() }, 120_000)
 
   function setPrefs(next: MapPrefs) { setPrefsState(next); writePrefs(next) }

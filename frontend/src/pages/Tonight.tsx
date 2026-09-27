@@ -115,6 +115,7 @@ function savePick(sel: string[]) {
   try { localStorage.setItem(PICK_KEY, JSON.stringify(sel)) } catch { /* private mode */ }
 }
 const huntable = (all: SpeciesOpt[]) => all.filter((s) => s.huntable && s.detections > 0)
+const samePick = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x))
 
 export default function Tonight() {
   // Which animals the verdict is ranked for. Empty = every species left on in
@@ -122,6 +123,11 @@ export default function Tonight() {
   const [picked, setPicked] = useState<string[]>(readPick)
   const pickedRef = useRef(picked)
   pickedRef.current = picked
+  // The pick the plan on screen answers. The chips can be ahead of it while a new
+  // question is out; only an answer moves this, and only this is saved, so a tap
+  // that never got an answer (no signal, the hunter left) can't strand the next
+  // launch on a pick with no saved plan (audit A-15).
+  const confirmed = useRef(picked)
 
   // The saved plan is painted first, with its real age, and the network replaces
   // it when it answers. On one bar of signal that is the plan in a second instead
@@ -138,13 +144,15 @@ export default function Tonight() {
   const [settling, setSettling] = useState(false)
   const [, setTick] = useState(0)
 
+  const planRef = useRef(plan)
+  planRef.current = plan
   const planCtl = useRef<AbortController | null>(null)
   const restCtl = useRef<AbortController | null>(null)
   const lastLoad = useRef(0)
 
-  /** Ask for the plan. A newer question cancels the one before it. `onFail` may
-   *  take a failure over (a species switch that can't be answered goes back). */
-  function loadPlan(sel: string[], onFail?: (e: unknown) => boolean) {
+  /** Ask for the plan. A newer question cancels the one before it. A question
+   *  the chips asked that can't be answered goes back to the plan on screen. */
+  function loadPlan(sel: string[]) {
     planCtl.current?.abort()
     const ctl = new AbortController()
     planCtl.current = ctl
@@ -153,11 +161,17 @@ export default function Tonight() {
       .then((got) => {
         if (ctl.signal.aborted) return
         setPlan(got)
+        keepPick(sel)
         setErr('')
       })
       .catch((e: Failure) => {
         if (ctl.signal.aborted) return
-        if (onFail?.(e)) return
+        if (!samePick(sel, confirmed.current)) {
+          setPicked(confirmed.current)
+          const why = noAnswer(e)
+          setNotice(`${why ? noAnswerWords(why) : `Couldn’t switch. ${e.message}`} Still showing the plan you had.`)
+          if (planRef.current) return
+        }
         setErr(e.message)
       })
       .finally(() => {
@@ -194,8 +208,9 @@ export default function Tonight() {
         const ids = new Set(offered.map((s) => s.id))
         const kept = pickedRef.current.filter((id) => ids.has(id))
         if (kept.length === pickedRef.current.length) return
+        // The old pick is no question to go back to, so this one stands at once.
         setPicked(kept)
-        savePick(kept)
+        keepPick(kept)
         const hit = peek<Forecast>(planPath(kept))
         if (hit) setPlan(hit)
         loadPlan(kept)
@@ -227,24 +242,24 @@ export default function Tonight() {
   }, [])
   useRefetchOnReturn(() => load())
 
+  /** The plan on screen now answers `sel`: that is the pick to keep. */
+  function keepPick(sel: string[]) {
+    confirmed.current = sel
+    savePick(sel)
+  }
+
   /** A chip changes the question. The answer saved for it, if any, shows at once;
    *  with nothing saved and no signal, the chips go back and the plan stays (A-15). */
   function switchTo(next: string[]) {
-    const before = pickedRef.current
     setPicked(next)
-    savePick(next)
     setNotice('')
     const hit = peek<Forecast>(planPath(next))
-    if (hit) setPlan(hit)
+    if (hit) {
+      setPlan(hit)
+      keepPick(next)
+    }
     setSettling(!hit)
-    loadPlan(next, (e) => {
-      if (hit) return false
-      setPicked(before)
-      savePick(before)
-      const why = noAnswer(e)
-      setNotice(`${why ? noAnswerWords(why) : `Couldn’t switch. ${(e as Error).message}`} Still showing the plan you had.`)
-      return true
-    })
+    loadPlan(next)
   }
   function toggleSpecies(id: string) {
     switchTo(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id])
@@ -257,7 +272,40 @@ export default function Tonight() {
   const verdictIn = useReveal(!!f)
   const grown = useReveal(!!d)
 
-  if (!f && err) return <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
+  /* Which animals the ground is ranked for. Chips list only species left on in
+     Settings that the cameras have actually recorded. Also on the "could not load"
+     screen: the plan saved for another pick ("Anything") is one tap away. */
+  const chips = species.length > 0 && (
+    <div className="tn-after" role="group" aria-label="I'm after">
+      <div className="tn-after-label" aria-hidden="true">I'm after</div>
+      <div className="tn-chips">
+        <button className="tn-chip" aria-pressed={picked.length === 0} onClick={pickAll}>
+          Anything
+        </button>
+        {species.map((s) => (
+          <button
+            key={s.id}
+            className="tn-chip"
+            aria-pressed={picked.includes(s.id)}
+            onClick={() => toggleSpecies(s.id)}
+            title={`${s.detections} sightings`}
+          >
+            {s.common_name}
+          </button>
+        ))}
+        <Link to="/settings" className="tn-chip-edit">Edit list</Link>
+      </div>
+    </div>
+  )
+  const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>
+
+  if (!f && err) return (
+    <div className="tonight">
+      <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
+      {noticeLine}
+      {chips}
+    </div>
+  )
   if (!f) return <div className="status-panel" role="status">Working out tonight…</div>
 
   const c = f.conditions
@@ -278,32 +326,8 @@ export default function Tonight() {
     <div className="tonight">
       <h1 className="page-title">Tonight</h1>
       {err && <div className="status-panel" role="alert">Could not refresh: {err} Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
-      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>}
-
-      {/* Which animals the ground is ranked for. Chips list only species left on
-          in Settings that the cameras have actually recorded. */}
-      {species.length > 0 && (
-        <div className="tn-after" role="group" aria-label="I'm after">
-          <div className="tn-after-label" aria-hidden="true">I'm after</div>
-          <div className="tn-chips">
-            <button className="tn-chip" aria-pressed={picked.length === 0} onClick={pickAll}>
-              Anything
-            </button>
-            {species.map((s) => (
-              <button
-                key={s.id}
-                className="tn-chip"
-                aria-pressed={picked.includes(s.id)}
-                onClick={() => toggleSpecies(s.id)}
-                title={`${s.detections} sightings`}
-              >
-                {s.common_name}
-              </button>
-            ))}
-            <Link to="/settings" className="tn-chip-edit">Edit list</Link>
-          </div>
-        </div>
-      )}
+      {noticeLine}
+      {chips}
 
       {/* How old the plan on screen really is. A saved copy says why it is on
           screen ("No signal."), and one from an earlier night says so. */}

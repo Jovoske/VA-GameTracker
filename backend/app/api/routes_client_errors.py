@@ -16,14 +16,14 @@ import threading
 import time
 import uuid
 from collections import deque
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, field_validator
-from sqlalchemy import delete, select
+from pydantic import BaseModel, ValidationError, field_validator
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin
@@ -42,6 +42,10 @@ WINDOW_S = 600
 PER_PERSON = 10  # reports per person per window
 ANONYMOUS = 20  # reports per window from everyone not signed in, together
 MAX_BODY = 16_000  # bytes; a report is a message and a stack, never more
+# A report that waited on the phone for signal says when it happened. A phone
+# whose clock is far out is not believed: the report keeps its arrival time.
+OLDEST_CLAIM = timedelta(days=30)
+CLOCK_SLACK = timedelta(minutes=10)
 
 _hits: dict[str, deque[float]] = {}
 _lock = threading.Lock()
@@ -83,6 +87,8 @@ class ClientErrorIn(BaseModel):
     stack: str | None = None
     route: str | None = None
     build: str | None = None
+    # When it happened, by the phone's clock. Anything unreadable is dropped, not refused.
+    at: datetime | None = None
 
     _message = field_validator("message", mode="before")(_cut(500))
     _stack = field_validator("stack", mode="before")(_cut(4000))
@@ -93,6 +99,45 @@ class ClientErrorIn(BaseModel):
     @classmethod
     def _kind(cls, v):
         return v if v in KINDS else "error"
+
+    @field_validator("at", mode="before")
+    @classmethod
+    def _at(cls, v):
+        if not isinstance(v, str):
+            return None
+        try:
+            t = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+        return t if t.tzinfo else None
+
+
+async def _report_body(request: Request) -> ClientErrorIn:
+    """The report, read with a cap before anything is parsed.
+
+    Declared as a body parameter, FastAPI would read and parse the whole body before
+    the handler could look at its size, and a chunked upload has no length to look
+    at. This endpoint is open to anyone, so the stream is cut off at MAX_BODY.
+    """
+    declared = request.headers.get("content-length") or ""
+    if declared.isdigit() and int(declared) > MAX_BODY:
+        raise HTTPException(413, "Report too large")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > MAX_BODY:
+            raise HTTPException(413, "Report too large")
+    try:
+        return ClientErrorIn.model_validate_json(bytes(raw))
+    except ValidationError as e:
+        raise HTTPException(422, "That isn't a crash report.") from e
+
+
+def happened_at(claimed: datetime | None, now: datetime) -> datetime | None:
+    """The phone's own time for the crash, when it is believable."""
+    if claimed is None or claimed < now - OLDEST_CLAIM or claimed > now + CLOCK_SLACK:
+        return None
+    return min(claimed, now)
 
 
 _optional_bearer = HTTPBearer(auto_error=False)
@@ -124,22 +169,22 @@ def device_of(user_agent: str | None) -> str:
 
 @router.post("/client-errors", status_code=202)
 def report(
-    body: ClientErrorIn,
+    body: Annotated[ClientErrorIn, Depends(_report_body)],
     request: Request,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_optional_bearer)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    if int(request.headers.get("content-length") or 0) > MAX_BODY:
-        raise HTTPException(413, "Report too large")
     user = _reporter(creds, db)
     key = f"user:{user.id}" if user else "anonymous"
     if not _allow(key, PER_PERSON if user else ANONYMOUS):
         raise HTTPException(429, "Too many reports. Later ones are dropped.")
 
     ua = (request.headers.get("user-agent") or "")[:300] or None
+    when = happened_at(body.at, datetime.now(UTC))
     log.warning(
         "client_error",
         kind=body.kind,
+        happened_at=when.isoformat() if when else None,
         message=body.message,
         route=body.route,
         build=body.build,
@@ -153,6 +198,7 @@ def report(
     db.add(ClientError(
         user_id=user.id, kind=body.kind, message=body.message or "(no message)",
         stack=body.stack, route=body.route, build=body.build, user_agent=ua,
+        happened_at=when,
     ))
     db.flush()
     db.execute(delete(ClientError).where(ClientError.id.in_(
@@ -169,17 +215,25 @@ def recent(
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
 ) -> list[dict]:
-    """The newest reports, for the admin's Settings screen."""
+    """The newest reports, for the admin's Settings screen. `at` is when it happened
+    on the phone; `reported_at` when it reached the server, later if it waited for
+    signal."""
+    when = func.coalesce(ClientError.happened_at, ClientError.created_at)
     rows = db.execute(
         select(ClientError, User)
         .outerjoin(User, User.id == ClientError.user_id)
-        .order_by(ClientError.created_at.desc(), ClientError.id)
+        .order_by(when.desc(), ClientError.id)
         .limit(limit)
     ).all()
+
+    def iso(t: datetime | None) -> str | None:
+        return t.isoformat() if isinstance(t, datetime) else None
+
     return [
         {
             "id": str(e.id),
-            "at": e.created_at.isoformat() if isinstance(e.created_at, datetime) else None,
+            "at": iso(e.happened_at or e.created_at),
+            "reported_at": iso(e.created_at),
             "kind": e.kind,
             "message": e.message,
             "stack": e.stack,

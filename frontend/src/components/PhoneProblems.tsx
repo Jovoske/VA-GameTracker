@@ -9,7 +9,9 @@ import SettingsSection from './SettingsSection'
  */
 type Report = {
   id: string
+  // When it happened on the phone; reported_at is when it reached the server.
   at: string | null
+  reported_at: string | null
   kind: string
   message: string
   stack: string | null
@@ -32,6 +34,9 @@ const KIND: Record<string, string> = {
   error: 'Error',
   rejection: 'Error',
 }
+
+// Waited on the phone for signal: worth saying when it finally arrived.
+const late = (r: Report) => !!(r.at && r.reported_at && Date.parse(r.reported_at) - Date.parse(r.at) > 10 * 60_000)
 
 export default function PhoneProblems() {
   const [rows, setRows] = useState<Report[] | null>(null)
@@ -62,9 +67,10 @@ export default function PhoneProblems() {
             {r.who} · {r.device}{r.route ? ` · ${pageOf(r.route)}` : ''}
           </div>
           <div className="phone-problem-msg">{r.message}</div>
-          {(r.stack || r.build) && (
+          {(r.stack || r.build || late(r)) && (
             <details className="phone-problem-more">
               <summary>Details</summary>
+              {late(r) && <div>Sent {whenLabel(r.reported_at!)}, when the phone had signal</div>}
               {r.build && <div>Build {r.build}</div>}
               {r.stack && <pre>{r.stack}</pre>}
             </details>

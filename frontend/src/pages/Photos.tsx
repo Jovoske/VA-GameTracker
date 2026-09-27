@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, getFresh, peek, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
@@ -58,6 +58,10 @@ const dayOf = (iso: string) => {
 }
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
+/** Newest first, as the server orders the feed: by when the photo was taken, then id. */
+const feedOrder = (a: Photo, b: Photo) =>
+  Date.parse(b.captured_at) - Date.parse(a.captured_at) || (b.image_id < a.image_id ? -1 : b.image_id > a.image_id ? 1 : 0)
+
 export default function Photos() {
   const [params, setParams] = useSearchParams()
   const [filters, setFilters] = useState<Filters | null>(null)
@@ -74,6 +78,8 @@ export default function Photos() {
   const [nextBefore, setNextBefore] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const [err, setErr] = useState('')
+  // The feed on screen is what this session saw earlier, because the network didn't answer.
+  const [savedCopy, setSavedCopy] = useState<Got<Page> | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
   // A photo a link named that isn't in the loaded pages: opened on its own.
   const [single, setSingle] = useState<Photo | null>(null)
@@ -85,6 +91,8 @@ export default function Photos() {
   const sentinel = useRef<HTMLDivElement>(null)
   const photosRef = useRef(photos)
   photosRef.current = photos
+  const nextBeforeRef = useRef(nextBefore)
+  nextBeforeRef.current = nextBefore
   // What the page is still asking for; leaving the page drops it (audit K-08).
   const ctl = useRef<AbortController | null>(null)
   const signal = () => {
@@ -108,10 +116,11 @@ export default function Photos() {
     const hit = peek<Page>(query())
     if (hit) { setPhotos(hit.data.items); setNextBefore(hit.data.next_before) }
     getFresh<Page>(query(), { signal: signal() })
-      .then(({ data: page }) => {
+      .then((got) => {
         if (id !== request.current) return
-        setPhotos(page.items)
-        setNextBefore(page.next_before)
+        setPhotos(got.data.items)
+        setNextBefore(got.data.next_before)
+        setSavedCopy(got.stale ? got : null)
       })
       .catch((e) => { if (id === request.current && (e as Error).name !== 'AbortError') setErr(e.message) })
   }, [query])
@@ -145,13 +154,18 @@ export default function Photos() {
   viewing.current = zoom != null || single != null
 
   /**
-   * Back in the app: put only the newer photos on top.
+   * Back in the app: put the photos that came in since into the list.
    *
    * This used to start the list over from the newest 60, which threw away every
    * page scrolled through and, with a photo open, pulled the list out from under
    * the viewer (a black screen, audit C-02 and I-01). Now the pages already loaded
    * stay, and only when more than a page of new photos came in (the hunter was away
    * a long time) does it start over from the newest.
+   *
+   * Merged by when each photo was taken, not only put on top: the cameras deliver
+   * at different delays (SPYPOINT's sync, UBox, an FTP upload), so a photo that
+   * arrives late can be older than the newest one already on screen. Anything down
+   * to the oldest photo loaded belongs in the list; older ones come with "Show older".
    */
   const loadNewer = useCallback(() => {
     const top = photosRef.current?.[0]
@@ -159,8 +173,11 @@ export default function Photos() {
     const id = request.current
     loadFilters()
     getFresh<Page>(query(), { signal: signal() })
-      .then(({ data: page, stale }) => {
-        if (id !== request.current || stale || viewing.current) return
+      .then((got) => {
+        if (id !== request.current || viewing.current) return
+        setSavedCopy(got.stale ? got : null)
+        if (got.stale) return
+        const page = got.data
         const since = Date.parse(top.captured_at)
         const oldest = page.items[page.items.length - 1]
         if (page.items.length >= PAGE && oldest && Date.parse(oldest.captured_at) > since) {
@@ -169,10 +186,11 @@ export default function Photos() {
           return
         }
         setPhotos((prev) => {
-          if (!prev) return page.items
+          if (!prev?.length) return page.items
           const have = new Set(prev.map((p) => p.image_id))
-          const fresh = page.items.filter((p) => !have.has(p.image_id) && Date.parse(p.captured_at) >= since)
-          return fresh.length ? [...fresh, ...prev] : prev
+          const floor = Date.parse(prev[prev.length - 1].captured_at)
+          const fresh = page.items.filter((p) => !have.has(p.image_id) && (!nextBeforeRef.current || Date.parse(p.captured_at) >= floor))
+          return fresh.length ? [...prev, ...fresh].sort(feedOrder) : prev
         })
       })
       .catch(() => {})
@@ -211,7 +229,11 @@ export default function Photos() {
     api<Page>(query(nextBefore), { signal: signal(), timeoutMs: 20_000 })
       .then((page) => {
         if (id !== request.current) return
-        setPhotos((prev) => [...(prev ?? []), ...page.items])
+        // Never twice: a late photo merged on return may sit on a page boundary.
+        setPhotos((prev) => {
+          const have = new Set((prev ?? []).map((p) => p.image_id))
+          return [...(prev ?? []), ...page.items.filter((p) => !have.has(p.image_id))]
+        })
         setNextBefore(page.next_before)
       })
       .catch((e) => { if (id === request.current) setErr(e.message) })
@@ -280,6 +302,12 @@ export default function Photos() {
       </div>
 
       {err && <div className="status-panel" role="alert">Could not load photos: {err}<button className="text-action" onClick={load}>Retry</button></div>}
+      {savedCopy && !err && (
+        <div className="status-panel" role="status">
+          {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
+          <button className="text-action" onClick={load}>Try again</button>
+        </div>
+      )}
       {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
       {photos && photos.length === 0 && (
         <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>

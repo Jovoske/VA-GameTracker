@@ -198,25 +198,64 @@ function writeSaved(path: string, got: Got<unknown>): void {
 const newer = <T,>(a: Got<T> | null, b: Got<T> | null) =>
   !a ? b : !b ? a : Date.parse(b.at) > Date.parse(a.at) ? b : a
 
-/** Throw every saved answer away: one of them may be what broke the page, and a
- *  page that crashes on its saved copy would otherwise crash before it could ask
- *  for a new one. Called when a page breaks (ErrorBoundary). */
-export function forgetSaved(): void {
-  memory.clear()
+/** The service worker's store of API answers (API_CACHE in public/sw.js). */
+const WORKER_API_CACHE = 'gamesense-api-v2'
+
+/** Which saved answers each page read, so a page that breaks drops only its own. */
+const readOn = new Map<string, Set<string>>()
+function noteRead(path: string): void {
+  const page = location.pathname
+  let paths = readOn.get(page)
+  if (!paths) readOn.set(page, (paths = new Set()))
+  paths.add(path)
+}
+
+/**
+ * Throw away the saved answers the page at `page` read: one of them may be what
+ * broke it, and a page that crashes on its saved copy would otherwise crash again
+ * before it could ask for a new one. Called when a page breaks (ErrorBoundary).
+ * Only that page's: a bug on Photos must not cost the plan saved for tonight.
+ * The service worker's copy goes too, or it would hand the same answer back.
+ */
+export function forgetSaved(page: string = location.pathname): void {
+  const paths = [...(readOn.get(page) ?? [])]
+  readOn.delete(page)
+  if (!paths.length) return
+  paths.forEach((p) => memory.delete(p))
   try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const k = localStorage.key(i)
-      if (k?.startsWith(SAVED)) localStorage.removeItem(k)
-    }
+    paths.forEach((p) => localStorage.removeItem(SAVED + p))
   } catch {
     // Storage blocked: nothing was saved there either.
+  }
+  if ('caches' in window) {
+    caches.open(WORKER_API_CACHE)
+      .then((c) => Promise.all(paths.map((p) => c.delete(`/api${p}`))))
+      .catch(() => {})
   }
 }
 
 /** The newest answer the phone already has for `path`, to paint before asking again. */
 export function peek<T>(path: string): Got<T> | null {
+  noteRead(path)
   const got = newer(memory.get(path) as Got<T> | undefined ?? null, readSaved<T>(path))
   return got && { ...got, stale: false, why: undefined }
+}
+
+/**
+ * The service worker's own copy, read by the page. The worker only answers from
+ * it when the network fails outright; on a link that hangs, the page gives up
+ * first (its timeout) and the worker never gets the chance (audit J-06). A page
+ * with nothing saved of its own then still has something to show.
+ */
+async function workerCopy<T>(path: string): Promise<Got<T> | null> {
+  try {
+    if (!('caches' in window)) return null
+    const hit = await caches.match(`/api${path}`, { cacheName: WORKER_API_CACHE })
+    const at = hit?.headers.get('X-GameSense-Cached-At')
+    return hit && at ? { data: (await hit.json()) as T, at, stale: true } : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -231,6 +270,7 @@ export async function getFresh<T>(
   path: string,
   opts: { signal?: AbortSignal; timeoutMs?: number; save?: boolean } = {},
 ): Promise<Got<T>> {
+  noteRead(path)
   try {
     const { data, headers } = await request<T>(path, { signal: opts.signal, timeoutMs: opts.timeoutMs ?? GET_TIMEOUT_MS })
     if (headers.get('X-GameSense-Stale')) {
@@ -248,33 +288,14 @@ export async function getFresh<T>(
     return got
   } catch (e) {
     const why = noAnswer(e)
-    const mine = why ? peek<T>(path) : null
-    if (mine) return { ...mine, stale: true, why: why! }
+    if (!why) throw e
+    const mine = newer(peek<T>(path), await workerCopy<T>(path))
+    if (mine) return { ...mine, stale: true, why }
     throw e
   }
 }
 
-/**
- * The night a moment belongs to, as the server counts them: the estate's own clock,
- * with anything before 06:00 still part of the evening before. "2026-10-03" is the
- * night of 3 to 4 October. A plan or a reservation from another night is not
- * tonight's, however recent it looks.
- */
-const ESTATE_TZ = 'Europe/Madrid'
-const estateClock = new Intl.DateTimeFormat('en-GB', {
-  timeZone: ESTATE_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-})
-export function nightOf(when: string | number | Date): string {
-  const p = Object.fromEntries(estateClock.formatToParts(new Date(when)).map((x) => [x.type, x.value]))
-  // Six hours back on the wall clock (not the UTC one), as the server does.
-  const wall = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) - 6 * 3600e3
-  return new Date(wall).toISOString().slice(0, 10)
-}
-
-/** Made before this morning's 06:00: it belongs to an earlier night than tonight. */
-export function fromEarlierNight(iso: string): boolean {
-  return nightOf(iso) < nightOf(Date.now())
-}
+export { fromEarlierNight, nightOf } from './night'
 
 export function ageLabel(iso: string): string {
   const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))
@@ -297,6 +318,7 @@ export function whenLabel(iso: string): string {
 
 export type Me = { id: string; email: string; role: 'admin' | 'member' | 'viewer' }
 let meCache: { token: string | null; at: number; p: Promise<Me> } | null = null
+let meKnown: { token: string | null; me: Me } | null = null
 
 /** Who is signed in, asked once per sign-in (and again after a failure or an hour).
  *
@@ -310,6 +332,7 @@ export function whoAmI(): Promise<Me> {
   const entry = { token, at: Date.now(), p: null as unknown as Promise<Me> }
   entry.p = api<Me>('/auth/me', { timeoutMs: 20_000 }).then(
     (me) => {
+      meKnown = { token, me }
       try { localStorage.setItem(ME_KEY, JSON.stringify({ token, me })) } catch { /* private mode */ }
       return me
     },
@@ -322,6 +345,14 @@ export function whoAmI(): Promise<Me> {
   )
   meCache = entry
   return entry.p
+}
+
+/** Who is signed in, as far as the phone already knows, without asking: the page
+ *  paints "Yours tonight" at once instead of after /auth/me answers, which on one
+ *  bar can be the full 20 s. whoAmI() then confirms or corrects it. */
+export function peekMe(): Me | null {
+  const token = getToken()
+  return meKnown && meKnown.token === token ? meKnown.me : savedMe(token)
 }
 
 function savedMe(token: string | null): Me | null {

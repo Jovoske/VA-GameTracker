@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api, getFresh } from '../api'
+import { api, getFresh, peek } from '../api'
 
 /**
  * Sit Mode: the screen that works in a high seat at midnight.
@@ -81,10 +81,13 @@ const footButton: React.CSSProperties = {
   cursor: 'pointer',
 }
 
+/** This sit as the phone saved it (Stands keeps /sits), to paint before asking. */
+const savedSit = (sitId: string | undefined) => peek<Sit[]>('/sits')?.data.find((s) => s.id === sitId) ?? null
+
 export default function SitMode() {
   const { sitId } = useParams()
   const nav = useNavigate()
-  const [sit, setSit] = useState<Sit | null>(null)
+  const [sit, setSit] = useState<Sit | null>(() => savedSit(sitId))
   const [clock, setClock] = useState(new Date())
   const [pending, setPending] = useState(0)
   const [flash, setFlash] = useState('')
@@ -96,11 +99,14 @@ export default function SitMode() {
   const holdFired = useRef(false)
 
   useEffect(() => {
-    // The copy saved on the phone when there is no signal: the stand and the wind
-    // it was reserved on still show in the seat.
-    getFresh<Sit[]>('/sits', { save: true, timeoutMs: 20_000 })
+    // The copy saved on the phone paints first, so the stand and the wind it was
+    // reserved on show in the seat at once, with no signal too; the network then
+    // replaces it. Nothing saved and no answer: the seat still works, unnamed.
+    setSit(savedSit(sitId))
+    const ctl = new AbortController()
+    getFresh<Sit[]>('/sits', { save: true, timeoutMs: 20_000, signal: ctl.signal })
       .then((got) => setSit(got.data.find((s) => s.id === sitId) ?? null))
-      .catch(() => setSit(null))
+      .catch(() => {})
     const t = setInterval(() => setClock(new Date()), 1000)
 
     // Keep the screen on: a sit is hours long and re-waking a phone in the dark
@@ -110,6 +116,7 @@ export default function SitMode() {
     nav0.wakeLock?.request('screen').then((l: any) => (lock = l)).catch(() => {})
 
     return () => {
+      ctl.abort()
       clearInterval(t)
       if (flashTimer.current) window.clearTimeout(flashTimer.current)
       try {

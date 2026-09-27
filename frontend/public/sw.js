@@ -8,8 +8,10 @@
 //     so each deploy installs a new worker, and that worker stores the whole app at
 //     install: the page, every script and style, the map included. The first visit
 //     after "Add to Home Screen" is therefore enough for the next one to open with
-//     no signal (audit K-03). Old builds are pruned on activate, keeping the one
-//     before so an app left open across a deploy can still open the map (D-20).
+//     no signal (audit K-03). The page and the files it names must all arrive or
+//     the new worker doesn't take over; the map and the fonts are best effort. Old
+//     builds are pruned on activate, keeping the one before so an app left open
+//     across a deploy can still open the map (D-20).
 //   * /assets/* are content-hashed and never change: served from the store first.
 //     On a weak link that is the difference between the plan in a second and a
 //     black screen for a minute (D-09, J-06).
@@ -36,18 +38,35 @@ const NAV_WAIT_MS = 3000
 const CACHEABLE_API = ['/api/forecast/tonight', '/api/stands', '/api/sits', '/api/alerts']
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches
-      .open(SHELL_CACHE)
-      .then((c) =>
-        // The shell has to be whole or the worker isn't worth installing. The rest
-        // is stored one by one, so one file that won't come on a thin link doesn't
-        // cost all the others; anything missed is stored when it is first used.
-        c.addAll(SHELL).then(() => Promise.all(ASSETS.map((u) => c.add(u).catch(() => {})))),
-      )
-      .then(() => self.skipWaiting()),
-  )
+  e.waitUntil(storeBuild().then(() => self.skipWaiting()))
 })
+
+// The app's own files that the stored page names: its script, its styles and any
+// chunk it preloads. Read from the stored index.html itself, so they always match it.
+const namedBy = (html) => [...new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]))]
+
+async function storeBuild() {
+  const c = await caches.open(SHELL_CACHE)
+  let entry
+  try {
+    // The page and the files it can't open without have to be whole, or this worker
+    // isn't worth installing: one that took over with an index.html naming a script
+    // it never stored would open on nothing with no signal, where the worker before
+    // it could open (a deploy, then a weak signal while the phone picked it up).
+    // Failing here keeps that worker in charge, and the browser tries this build
+    // again on its next update check.
+    await c.addAll(SHELL)
+    const page = await c.match('/index.html')
+    entry = namedBy(page ? await page.text() : '')
+    await c.addAll(entry)
+  } catch (err) {
+    await caches.delete(SHELL_CACHE)
+    throw err
+  }
+  // The rest (the map, the fonts) one by one, so one file that won't come on a thin
+  // link doesn't cost all the others; anything missed is stored when it is first used.
+  await Promise.all(ASSETS.filter((u) => !entry.includes(u)).map((u) => c.add(u).catch(() => {})))
+}
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(

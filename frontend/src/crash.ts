@@ -14,7 +14,8 @@ import { getToken } from './api'
  */
 
 export type CrashKind = 'error' | 'rejection' | 'render' | 'chunk'
-type Report = { kind: CrashKind; message: string; stack: string | null; route: string; build: string }
+// `at` is when it happened: a report that waits on the phone for signal arrives later.
+type Report = { kind: CrashKind; message: string; stack: string | null; route: string; build: string; at: string }
 
 const OUTBOX = 'gs_crash_outbox'
 const OUTBOX_MAX = 10
@@ -54,7 +55,7 @@ export function reportCrash(kind: CrashKind, err: unknown, stack?: string): void
   seen.add(key)
   sent += 1
   const trace = stack ?? (typeof e?.stack === 'string' ? e.stack : '')
-  send({ kind, message, stack: trace.slice(0, 4000) || null, route: location.pathname, build: __GS_BUILD__ })
+  send({ kind, message, stack: trace.slice(0, 4000) || null, route: location.pathname, build: __GS_BUILD__, at: new Date().toISOString() })
 }
 
 function send(report: Report): void {
@@ -95,9 +96,10 @@ let pending: Promise<ReloadResult> | null = null
 /** A reload for the app's own files is on its way: nothing to show or report. */
 export const isReloading = () => reloading
 
-/** What came of asking for a reload: done, refused because one was just tried, or
- *  refused because the server can't be reached (the phone has no signal). */
-export type ReloadResult = 'reloading' | 'recent' | 'no-signal'
+/** What came of asking for a reload: done, refused because one was just tried,
+ *  refused because the phone has no signal, or because the server (or its tunnel)
+ *  is down while the phone has signal. */
+export type ReloadResult = 'reloading' | 'recent' | 'no-signal' | 'server'
 
 /**
  * Reload once to pick up the files of the build the server has now.
@@ -121,7 +123,8 @@ export function reloadOnce(): Promise<ReloadResult> {
     const timer = window.setTimeout(() => ctl.abort(), 5000)
     try {
       const r = await fetch('/api/health', { cache: 'no-store', signal: ctl.signal })
-      if (!r.ok) return 'no-signal'
+      // A 5xx or Cloudflare's 530 is an answer: the phone has signal, the server is out.
+      if (!r.ok) return 'server'
     } catch {
       return 'no-signal'
     } finally {

@@ -127,11 +127,32 @@ def test_long_fields_are_cut_to_fit_and_an_unknown_kind_is_an_error(client, peop
 
 
 @requires_db
-def test_an_oversized_body_is_refused(client, people):
+def test_an_oversized_body_is_refused_before_it_is_read_whole(client, people, db_session):
     body = json.dumps(_report(stack="x" * 20_000))
     r = client.post("/api/client-errors", content=body,
                     headers={**_auth(people["member"]), "Content-Type": "application/json"})
     assert r.status_code == 413
+
+    # No length to go by: a chunked upload is cut off as it streams in.
+    streamed = []
+
+    def chunks():
+        for _ in range(64):
+            streamed.append(1)
+            yield b"x" * 1024
+
+    r = client.post("/api/client-errors", content=chunks(),
+                    headers={**_auth(people["member"]), "Content-Type": "application/json"})
+    assert r.status_code == 413
+    assert db_session.query(ClientError).count() == 0
+
+
+@requires_db
+def test_a_body_that_is_not_a_report_is_refused_in_words(client, people):
+    for body in (b"not json", b'{"kind": "error"}', b"[]"):
+        r = client.post("/api/client-errors", content=body,
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 422 and r.json()["detail"] == "That isn't a crash report."
 
 
 @requires_db
@@ -173,6 +194,43 @@ def test_a_removed_persons_reports_stay_without_a_name(client, people, db_sessio
     db_session.commit()
     rows = client.get("/api/client-errors", headers=_auth(people["admin"])).json()
     assert [r["who"] for r in rows] == ["Removed person"]
+
+
+@requires_db
+def test_a_report_that_waited_for_signal_says_when_it_happened(client, people):
+    """A crash in the valley is posted hours later, when the phone finds signal. The
+    list says when it happened (and sorts by that), not when it arrived; a phone
+    whose clock is far out, or that sends nonsense, keeps the arrival time."""
+    now = datetime.now(UTC)
+    member = _auth(people["member"])
+    waited = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    for over in ({"message": "in the valley", "at": waited},
+                 {"message": "just now"},
+                 {"message": "clock in 2001", "at": "2001-01-01T00:00:00Z"},
+                 {"message": "clock a day ahead", "at": (now + timedelta(days=1)).isoformat()},
+                 {"message": "no zone", "at": "2026-09-27T21:40:00"},
+                 {"message": "nonsense", "at": "yesterday"}):
+        r = client.post("/api/client-errors", json=_report(**over), headers=member)
+        assert r.status_code == 202
+    rows = client.get("/api/client-errors", headers=_auth(people["admin"])).json()
+    assert rows[-1]["message"] == "in the valley"
+    by = {r["message"]: r for r in rows}
+    valley = by["in the valley"]
+    happened = datetime.fromisoformat(valley["at"])
+    assert abs(happened - (now - timedelta(hours=3))) < timedelta(seconds=1)
+    assert datetime.fromisoformat(valley["reported_at"]) >= now - timedelta(minutes=1)
+    for m in ("just now", "clock in 2001", "clock a day ahead", "no zone", "nonsense"):
+        assert by[m]["at"] == by[m]["reported_at"], m
+
+
+def test_the_phones_time_is_believed_only_when_it_is_believable():
+    now = datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+    happened_at = routes_client_errors.happened_at
+    assert happened_at(now - timedelta(days=2), now) == now - timedelta(days=2)
+    assert happened_at(now + timedelta(minutes=5), now) == now  # a few minutes fast
+    assert happened_at(now + timedelta(hours=1), now) is None
+    assert happened_at(now - timedelta(days=31), now) is None
+    assert happened_at(None, now) is None
 
 
 def test_device_names():

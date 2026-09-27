@@ -5,7 +5,8 @@ Revises: 0019_camera_alerts_photo_notes
 Create Date: 2026-09-27
 
 The app posts a crash or a blank screen to /api/client-errors and admins read the
-newest few in Settings. One small table, newest 200 rows kept by the endpoint
+newest few in Settings, with when it happened on the phone (happened_at) as well as
+when it arrived. One small table, newest 200 rows kept by the endpoint
 itself. A no-op on fresh installs, where 0001's create_all() builds it from the
 current models.
 """
@@ -32,6 +33,7 @@ def upgrade() -> None:
             sa.Column("route", sa.String(length=200), nullable=True),
             sa.Column("build", sa.String(length=64), nullable=True),
             sa.Column("user_agent", sa.String(length=300), nullable=True),
+            sa.Column("happened_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column(
                 "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"),
                 nullable=False,

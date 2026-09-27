@@ -12,6 +12,7 @@ import {
   noAnswer,
   noAnswerWords,
   peek,
+  peekMe,
   whoAmI,
 } from '../api'
 import { useRefetchOnReturn } from '../hooks'
@@ -46,7 +47,11 @@ export default function Stands() {
   const [standsGot, setStandsGot] = useState<Got<Stand[]> | null>(() => peek<Stand[]>('/stands'))
   const [sitsGot, setSitsGot] = useState<Got<Sit[]> | null>(() => peek<Sit[]>('/sits'))
   const [winds, setWinds] = useState<Record<string, WindReport>>({})
-  const [me, setMe] = useState<Me | null>(null)
+  // Who you are, as the phone last knew it, so your own stand reads "Yours
+  // tonight" at once; /auth/me confirms it when it answers.
+  const [me, setMe] = useState<Me | null>(peekMe)
+  // True until this load's stands and sits have both answered (or given up).
+  const [checking, setChecking] = useState(true)
   const [err, setErr] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
@@ -61,16 +66,18 @@ export default function Stands() {
     ctl.current = c
     const opts = { signal: c.signal, save: true }
     setErr('')
+    setChecking(true)
     // Each on its own: who you are, the wind or the reservations failing must not
     // take the list of stands down with them.
     getFresh<MapData>('/map/tonight', { signal: c.signal })
       .then((got) => { if (!got.stale) setWinds(Object.fromEntries(got.data.stands.map((s) => [s.id, s.wind]))) })
       .catch(() => {})
     whoAmI().then(setMe).catch(() => {})
-    getFresh<Sit[]>('/sits', opts).then(setSitsGot).catch(() => {})
-    getFresh<Stand[]>('/stands', opts)
+    const sitsDone = getFresh<Sit[]>('/sits', opts).then(setSitsGot).catch(() => {})
+    const standsDone = getFresh<Stand[]>('/stands', opts)
       .then(setStandsGot)
       .catch((e: Failure) => { if (!c.signal.aborted) setErr(`Couldn’t load stands. ${e.message}`) })
+    Promise.all([sitsDone, standsDone]).then(() => { if (ctl.current === c) setChecking(false) })
   }
   useEffect(() => {
     load()
@@ -89,15 +96,19 @@ export default function Stands() {
   useRefetchOnReturn(() => { if (!saving.current) load() })
 
   // A saved copy from an earlier night knows the stands but not tonight's
-  // reservations: those are dropped rather than shown as tonight's.
+  // reservations: those are dropped rather than shown as tonight's, whether the
+  // copy is on screen because there is no signal or because the network hasn't
+  // answered yet (the page paints its saved copy first).
   const tonightKey = nightOf(Date.now())
   const standsOld = !!standsGot && fromEarlierNight(standsGot.at)
   const stands = standsGot && standsGot.data.map((s) => (standsOld ? { ...s, claimed_tonight: false, claimed_by: null } : s))
   // /sits lists tonight's by default; each says its night, so a saved copy from an
   // earlier one drops out here.
   const sits = (sitsGot?.data ?? []).filter((s) => s.outcome !== 'cancelled' && (!s.night || s.night === tonightKey))
+  const reservationsUnknown = standsOld
   const staleGot = [standsGot, sitsGot].find((g) => g?.stale)
-  const reservationsUnknown = !!staleGot && (standsOld || !sitsGot || fromEarlierNight(sitsGot.at))
+  // The copy on screen while the network is asked: how old it is, as Tonight says.
+  const waitingOn = !staleGot && checking && standsGot && ageLabel(standsGot.at) !== 'just now' ? standsGot : null
 
   useEffect(() => {
     if (!stands || focused.current || !params.get('stand')) return
@@ -124,6 +135,8 @@ export default function Stands() {
   const stateOf = (sit: Sit | undefined, mine: boolean, taken: boolean, active: boolean) => {
     // An earlier night's copy can't say who has what tonight; "Free tonight" would be a guess.
     if (!mine && reservationsUnknown) return 'Tonight not known yet'
+    // Until the phone knows who you are, a reserved stand may well be yours.
+    if (!mine && taken && !me) return 'Reserved tonight'
     if (!mine) return taken ? 'Taken by another hunter' : 'Free tonight'
     if (!active) return `Reported: ${outcomeLabel(sit?.outcome ?? '').toLowerCase()}`
     return sit?.started_at ? 'Your sit is on' : 'Yours tonight'
@@ -134,6 +147,9 @@ export default function Stands() {
     {staleGot && <p className="stand-fresh" role="status">
       {noAnswerWords(staleGot.why)} Stands from {ageLabel(staleGot.at)}.{reservationsUnknown ? ' Tonight’s reservations will show when the signal is back.' : ' Reservations may have changed since.'}
       <button onClick={load} disabled={!!busy}>Try again</button>
+    </p>}
+    {waitingOn && <p className="stand-fresh stand-fresh--checking" role="status">
+      Stands from {ageLabel(waitingOn.at)}. Checking…{reservationsUnknown && ' Tonight’s reservations aren’t known yet.'}
     </p>}
     {err && <div className="map-message map-message--error" role="alert">{err}<button onClick={load} disabled={!!busy}>Try again</button></div>}
     {notice && <div className="map-message" role="status">{notice}</div>}
@@ -155,7 +171,7 @@ export default function Stands() {
       return <article key={s.id} id={`stand-${s.id}`} className={`stand-entry${params.get('stand') === s.id ? ' stand-entry--selected' : ''}`}>
         <div className="stand-entry-top"><div><h2>{s.name}</h2><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{stateOf(sit, mine, taken, active)}</span></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Place on map ↗' : 'Map ↗'}</Link></div>
         {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}</p>}
-        {!taken && <button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : 'Reserve'}</button>}
+        {!taken && !reservationsUnknown && <button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : 'Reserve'}</button>}
         {mine && sit && active && <>
           <div className="map-actions"><button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => sit.started_at ? Promise.resolve() : api(`/sits/${sit.id}/start`, { method: 'POST', timeoutMs: WRITE_TIMEOUT_MS }), '', `/sit/${sit.id}`, true)}>{busy === s.id ? 'Saving…' : sit.started_at ? 'Back to sit' : 'Start sit'}</button>{!sit.started_at && <button className="map-link" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: 'cancelled' }), timeoutMs: WRITE_TIMEOUT_MS }), 'Reservation cancelled.')}>Cancel</button>}</div>
           <details className="stand-outcome"><summary>What happened?</summary><div className="stand-outcome-buttons">{OUTCOMES.map(([value, label]) => <button key={value} className="map-button" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: value }), timeoutMs: WRITE_TIMEOUT_MS }), 'Sit report saved.')}>{label}</button>)}</div></details>

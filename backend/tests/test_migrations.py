@@ -72,7 +72,7 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert _index(eng, "photo_notes", "ix_photo_notes_created_at") == ["created_at"]
         assert set(_columns(eng, "client_errors")) == {
             "id", "user_id", "kind", "message", "stack", "route", "build", "user_agent",
-            "created_at",
+            "happened_at", "created_at",
         }
         assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
     finally:
@@ -568,8 +568,8 @@ def test_client_errors_upgrade_down_and_up_again(fresh_db):
             assert c.execute(text("SELECT count(*) FROM users")).scalar_one() == 1
             assert c.execute(text("SELECT count(*) FROM client_errors")).scalar_one() == 0
             c.execute(text(
-                "INSERT INTO client_errors (id,user_id,kind,message,route) "
-                "VALUES (gen_random_uuid(),:u,'chunk',:m,'/map')"
+                "INSERT INTO client_errors (id,user_id,kind,message,route,happened_at) "
+                "VALUES (gen_random_uuid(),:u,'chunk',:m,'/map',now() - interval '3 hours')"
             ), {"u": user_id, "m": "Failed to fetch dynamically imported module"})
             with pytest.raises(DBAPIError), c.begin_nested():
                 c.execute(text("INSERT INTO client_errors (id,kind,message) "

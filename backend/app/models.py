@@ -631,6 +631,9 @@ class ClientError(Base):
     route: Mapped[str | None] = mapped_column(String(200))
     build: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(300))
+    # When it happened by the phone's clock; a report that waited for signal
+    # arrives (created_at) later. Null when the phone didn't say or its clock is off.
+    happened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -49,14 +49,21 @@ set; `backend/app/frontend.py` sends the right cache headers) and:
   the map included, so the next launch opens with no signal at all.
 - **No signal, one bar, or the server/tunnel down** (a 5xx or Cloudflare 52x/530) all
   look the same to the hunter: the stored app opens within about 3 s, and Tonight,
-  Stands and Sit mode show the last saved copy with its real age, for example
-  "No signal. Plan from 14 h ago." A plan from an earlier night says so.
-- **Deploys.** Each build is a new service worker. A phone with the app open is told
+  Stands and Sit mode show the last saved copy at once with its real age, for example
+  "No signal. Plan from 14 h ago." or, while the network is still being asked,
+  "Stands from 1 d ago. Checking…". A plan from an earlier night says so, and Stands
+  never shows an earlier night's reservations as tonight's ("Tonight not known yet",
+  no Reserve). Photos and Cameras say when they show what the phone saw earlier.
+- **Deploys.** Each build is a new service worker. It takes over only once it has
+  stored the page and every file the page names; on a signal too weak for that the
+  old one stays and the phone tries again later. A phone with the app open is told
   "A new version of GameSense is ready" with a Reload button; until then it keeps the
   previous build's files, so it can still open the map. Without a service worker, a
   page whose file was deleted reloads once by itself.
 - **Nothing goes blank.** A page that breaks shows "Something broke. Reload" with the
-  tab bar still there. Every crash, and every page that didn't load, is reported to
-  the server log and listed for admins under Settings → Problems on phones.
+  tab bar still there, and drops only its own saved copies (a bug on Photos never
+  costs the plan saved for tonight). Every crash, and every page that didn't load, is
+  reported to the server log and listed for admins under Settings → Problems on
+  phones, with when it happened on the phone (a report waits there for signal).
 
 Set `GS_BUILD` when building to choose the build id; otherwise it is the build time.
