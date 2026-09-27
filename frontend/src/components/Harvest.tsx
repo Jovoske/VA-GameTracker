@@ -391,7 +391,9 @@ export default function HarvestPrompt() {
     }
   }
 
-  const asks = got?.data ?? []
+  // Only a list is a list: this card sits on top of Tonight and Stands, and an odd
+  // answer (a proxy's page, an older server) must not take either page down with it.
+  const asks = Array.isArray(got?.data) ? got.data : []
   const cards: Done[] = [
     ...Object.values(done),
     ...asks.filter((a) => !done[a.sit_id]).map((ask) => ({ ask, words: '' })),

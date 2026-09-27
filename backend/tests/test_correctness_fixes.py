@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select, text
@@ -192,7 +192,7 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
         captured_at=datetime(2025, 10, 4, 20, 0, tzinfo=timezone.utc),  # 22:00 in Madrid
         original_path=str(photo),
         # Checked by the AI: one it hasn't looked at yet is the admin's alone.
-        processed_at=datetime(2025, 10, 4, 20, 5, tzinfo=timezone.utc),
+        processed_at=datetime(2025, 10, 4, 20, 5, tzinfo=UTC),
     )
     db_session.add(img)
     db_session.commit()
@@ -257,7 +257,7 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
         captured_at=datetime(2025, 10, 4, 20, 0, tzinfo=timezone.utc),  # 22:00 in Madrid
         original_path=str(photo),
         # Checked by the AI: one it hasn't looked at yet is the admin's alone.
-        processed_at=datetime(2025, 10, 4, 20, 5, tzinfo=timezone.utc),
+        processed_at=datetime(2025, 10, 4, 20, 5, tzinfo=UTC),
     )
     db_session.add(img)
     db_session.commit()
