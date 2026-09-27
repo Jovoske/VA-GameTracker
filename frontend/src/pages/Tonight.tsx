@@ -13,6 +13,7 @@ import {
 } from '../api'
 import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import SitPrompts from '../components/SitPrompts'
+import { isCall } from '../map/geometry'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
@@ -29,7 +30,12 @@ type Overview = {
 type ClassCount = { label: string; visits?: number; photos?: number; count?: number }
 type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
 type Changed = { kind: string; camera: string | null; text: string }
-type Wind = { status: string; text: string; is_advice: boolean }
+// One verdict for a stand, as the map, Stands and Sit mode give it, for the sit time
+// (`at_local`: 45 min after sunset, or `now` once that has passed).
+type Wind = { status: string; text: string; is_advice: boolean; at_local?: string; now?: boolean; stand?: string | null }
+// Clock times on the estate's clock ("20:45"); the hours are what an older plan carries.
+// None when the animals were never seen at an hour somebody can sit.
+type Window = { start_hour: number; end_hour: number; start?: string; end?: string } | null
 // How each verdict turned out: "When it said Best odds, animals came 7 of 9 nights."
 type Calibration = { available: boolean; n_evaluated: number; statement?: string; lines?: string[]; beats_baseline?: boolean | null }
 type Forecast = {
@@ -44,7 +50,7 @@ type Forecast = {
     species: string
     runner_up: string | null
     probability: number
-    best_window: { start_hour: number; end_hour: number }
+    best_window: Window
     expect?: string
     classes?: ClassCount[]
     nights_present: number
@@ -58,6 +64,10 @@ type Forecast = {
     darkness_minutes: number | null
     wind_dir_deg: number | null
     wind_speed_kmh: number | null
+    sunset_local?: string | null
+    // When Open-Meteo made the forecast, and whether it is an old copy (no answer since).
+    forecast_fetched_at?: string | null
+    forecast_stale?: boolean
   }
   factors?: { text: string; impact: string }[]
   where?: {
@@ -69,7 +79,7 @@ type Forecast = {
     probability: number
     nights_present: number
     active_nights: number
-    best_window: { start_hour: number; end_hour: number }
+    best_window: Window
     classes: ClassCount[]
   }[]
   alternates: {
@@ -92,7 +102,11 @@ type Alert = { type: string; severity: string; title: string; text: string }
 type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detections: number }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
-const hours = (w: { start_hour: number; end_hour: number }) => `${hh(w.start_hour)} to ${hh(w.end_hour)}`
+const hours = (w: Window) => w ? `${w.start ?? hh(w.start_hour)} to ${w.end ?? hh(w.end_hour)}` : 'Not seen when you can sit'
+/** Which stand and when the wind line is for: "Puente, for 20:41" or "Puente, now".
+ *  Only a call has a time: "isn't on the map yet" is not a verdict for 20:41. */
+const windFor = (w: Wind) => [w.stand, isCall(w.status) && (w.now ? 'now' : w.at_local && `for ${w.at_local}`)].filter(Boolean).join(', ')
+const estateTime = (iso: string) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
 const visitsOf = (cl: ClassCount) => cl.visits ?? cl.count ?? 0
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
@@ -379,10 +393,12 @@ export default function Tonight() {
         </div>
 
         {!r && f.reason && <p className="tn-reason">{f.reason}</p>}
+        {!r && c.sunset_local && <div className="tn-sunset">Sunset {c.sunset_local}</div>}
 
         {r && (
           <>
-            <div className="tn-hours"><small>Best hours</small>{hours(r.best_window)}</div>
+            <div className="tn-hours" data-none={!r.best_window || undefined}><small>Best hours</small>{hours(r.best_window)}</div>
+            {c.sunset_local && <div className="tn-sunset">Sunset {c.sunset_local}</div>}
             <div className="tn-species">{r.species}</div>
             <div className="tn-reason">{r.reason}</div>
             <div className="tn-caveat">{r.caveat}</div>
@@ -396,6 +412,10 @@ export default function Tonight() {
                   data-soft={!f.wind.is_advice}
                 >
                   {f.wind.text}
+                  {windFor(f.wind) && <span className="tn-line-when">{windFor(f.wind)}</span>}
+                  {c.forecast_stale && c.forecast_fetched_at && (
+                    <span className="tn-line-when">No newer forecast: this one is from {estateTime(c.forecast_fetched_at)}.</span>
+                  )}
                 </span>
               </div>
             )}

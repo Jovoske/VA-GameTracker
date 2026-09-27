@@ -714,7 +714,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
 
     from app.enrichment import enrich, weather
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(weather, "_DAY_CACHE", {})
     calls = []
 
@@ -725,7 +725,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
     monkeypatch.setattr(httpx, "get", down)
     frames = [_frame(db_session, cam, NIGHT + timedelta(minutes=i)) for i in range(5)]
     snaps = [enrich.enrich_image(db_session, f) for f in frames]
-    assert calls == [weather.TIMEOUT_SECONDS]  # once, not once per photo
+    assert calls == [weather.TIMEOUT]  # once, not once per photo
     assert {s.source for s in snaps} == {"unavailable"}
 
     class Answer:
@@ -736,7 +736,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
             hours = [f"2026-09-20T{h:02d}:00" for h in range(24)]
             return {"hourly": {"time": hours, "temperature_2m": [14.0] * 24}}
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Answer())
     again = enrich.enrich_image(db_session, frames[0])
     assert again.id == snaps[0].id and again.temp_c == 14.0 and again.source != "unavailable"
@@ -752,7 +752,7 @@ def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch
     from app.ingestion.fetch import check_and_recount
     from app.models import EnvSnapshot
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(weather, "_DAY_CACHE", {})
     recent = datetime.now(UTC) - timedelta(hours=20)
 
@@ -766,7 +766,7 @@ def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch
     enrich.enrich_image(db_session, old)
     db_session.commit()
     # Still down: the fetch ends as before, nothing filled in, asked once.
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     assert check_and_recount(db_session)[0]["weather_refilled"] == 0
 
     class Answer:
@@ -778,7 +778,7 @@ def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch
             return {"hourly": {"time": [f"{day}T{h:02d}:00" for h in range(24)],
                                "temperature_2m": [14.0] * 24}}
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Answer())
     assert check_and_recount(db_session)[0]["weather_refilled"] == 3
     db_session.expire_all()

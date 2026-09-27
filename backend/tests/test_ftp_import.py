@@ -454,3 +454,176 @@ def test_a_failure_note_that_cannot_be_written_does_not_stop_the_watcher(
 
 def test_spool_counts_without_a_spool(tmp_path):
     assert ftp.spool_counts(tmp_path / "nowhere") is None
+
+
+# ── E-14 / H-17: a Suntek clock that missed the 25 Oct clock change ──────────
+
+AFTER_CHANGE = {"received_at": "2026-10-26T19:05:00+00:00"}  # 20:05 CET
+
+
+def test_a_camera_an_hour_fast_after_the_clock_change_is_put_right(tmp_path):
+    """Still on summer time, it names a 20:03 photo 21:03; read as Madrid time that is
+    after it arrived, which no photo can be."""
+    result = ftp.read_package(package(tmp_path, name="PICT_20261026_2103.jpg",
+                                      manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert result.captured_at == datetime(2026, 10, 26, 19, 3, tzinfo=UTC)
+    assert result.clock_ahead_min == 60
+    assert any("1 h ahead" in note for note in result.timestamp_notes)
+
+
+def test_a_right_clock_says_so_and_a_backlog_says_nothing(tmp_path):
+    right = ftp.read_package(package(tmp_path, name="PICT_20261026_2003.jpg",
+                                     manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert right.captured_at == datetime(2026, 10, 26, 19, 3, tzinfo=UTC)
+    assert right.clock_ahead_min == 0
+    backlog = ftp.read_package(package(tmp_path, name="PICT_20261024_2003.jpg",
+                                       manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert backlog.clock_ahead_min is None
+
+
+def test_a_clock_fast_by_part_of_an_hour_is_not_trusted(tmp_path):
+    result = ftp.read_package(package(tmp_path, name="PICT_20261026_2035.jpg",
+                                      manifest=AFTER_CHANGE), "Europe/Madrid")
+    assert result.timestamp_source == "received_at_fallback"
+    assert result.captured_at == datetime(2026, 10, 26, 19, 5, tzinfo=UTC)
+    assert any("implausible" in note for note in result.timestamp_notes)
+    assert result.clock_ahead_min is None
+
+
+@requires_db
+def test_the_camera_card_says_its_clock_is_fast(tmp_path, db_session):
+    from sqlalchemy.orm import sessionmaker
+
+    from app.health import camera_health
+    from app.models import Camera, Image
+
+    camera = seed_camera(db_session)
+    package(tmp_path, name="PICT_20261026_2103.jpg", manifest=AFTER_CHANGE)
+    ftp.run_once(tmp_path, camera, timezone_name="Europe/Madrid",
+                 session_factory=sessionmaker(bind=db_session.get_bind()),
+                 media_root=tmp_path / "media", enrich=False)
+    db_session.expire_all()
+    row = db_session.get(Camera, camera)
+    assert row.clock_ahead_min == 60
+    from sqlalchemy import select
+
+    assert db_session.scalar(select(Image.captured_at)) == datetime(2026, 10, 26, 19, 3,
+                                                                     tzinfo=UTC)
+    now = datetime(2026, 10, 26, 20, 0, tzinfo=UTC)
+    assert "clock is 1 h fast" in camera_health(row, now)["detail"]
+
+
+def test_a_photo_stamped_after_it_arrived_does_not_vouch_for_the_clock(tmp_path):
+    """R4BE-7: an hour-fast clock with an upload 55 min late reads 5 min after its
+    receipt, and was taken for a right clock."""
+    late = ftp.read_package(package(tmp_path, name="PICT_20261026_1905.jpg",
+                                    manifest={"received_at": "2026-10-26T18:00:00+00:00"}),
+                            "Europe/Madrid")
+    assert late.captured_at == datetime(2026, 10, 26, 18, 5, tzinfo=UTC)  # as stamped
+    assert late.clock_ahead_min is None
+
+
+@requires_db
+def test_a_fast_camera_stays_fast_until_photos_come_in_on_time(tmp_path, db_session):
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.health import camera_health
+    from app.models import Camera, Image
+
+    camera = seed_camera(db_session)
+    sent = []
+
+    def send(name, received):
+        sent.append(name)  # a different photo each time, not a duplicate
+        package(tmp_path, name=name, manifest={"received_at": received},
+                data=jpeg(size=(24 + len(sent), 12)))
+        ftp.run_once(tmp_path, camera, timezone_name="Europe/Madrid",
+                     session_factory=sessionmaker(bind=db_session.get_bind()),
+                     media_root=tmp_path / "media", enrich=False)
+        db_session.expire_all()
+        return db_session.get(Camera, camera)
+
+    assert send("PICT_20261026_2103.jpg", "2026-10-26T19:05:00+00:00").clock_ahead_min == 60
+    # Still an hour fast, and this upload 55 min late: stamped 19:05, received 19:00 CET.
+    row = send("PICT_20261026_1905.jpg", "2026-10-26T18:00:00+00:00")
+    assert row.clock_ahead_min == 60
+    stored = db_session.scalar(select(Image.captured_at).where(
+        Image.received_at == datetime(2026, 10, 26, 18, 0, tzinfo=UTC)))
+    assert stored == datetime(2026, 10, 26, 17, 5, tzinfo=UTC)  # 18:05 CET, put right
+    # The clock is set right: the warning goes after three photos on time, not one.
+    now = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+    for i, minute in enumerate(("10", "20", "30"), start=1):
+        row = send(f"PICT_20261027_12{minute}.jpg", f"2026-10-27T11:{int(minute) + 2}:00+00:00")
+        if i < 3:
+            assert row.clock_ahead_min == 60
+            assert "clock is 1 h fast" in camera_health(row, now)["detail"]
+    assert row.clock_ahead_min == 0 and "fast" not in camera_health(row, now)["detail"]
+    # A fast photo again sets it at once.
+    assert send("PICT_20261027_1440.jpg", "2026-10-27T12:42:00+00:00").clock_ahead_min == 60
+
+
+@requires_db
+def test_a_clock_set_right_but_a_minute_fast_is_called_right(tmp_path, db_session):
+    """A camera found an hour fast, then set by hand from a phone a minute fast: its
+    photos arrive stamped half a minute after their receipt. They are a right clock,
+    never an hour-fast one with a late upload, so they aren't moved back an hour and
+    the warning goes after three."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models import Camera, Image
+
+    camera = seed_camera(db_session)
+    sent = []
+
+    def send(name, received):
+        sent.append(name)
+        package(tmp_path, name=name, manifest={"received_at": received},
+                data=jpeg(size=(24 + len(sent), 12)))
+        ftp.run_once(tmp_path, camera, timezone_name="Europe/Madrid",
+                     session_factory=sessionmaker(bind=db_session.get_bind()),
+                     media_root=tmp_path / "media", enrich=False)
+        db_session.expire_all()
+        return db_session.get(Camera, camera)
+
+    assert send("PICT_20261026_2103.jpg", "2026-10-26T19:05:00+00:00").clock_ahead_min == 60
+    for minute in ("01", "11", "21"):
+        # Taken 13:00:30 by the server's clock, stamped 13:01 on a clock a minute fast.
+        row = send(f"PICT_20261027_13{minute}.jpg",
+                   f"2026-10-27T12:{int(minute) - 1:02d}:30+00:00")
+    assert row.clock_ahead_min == 0
+    stored = db_session.scalars(select(Image.captured_at).where(
+        Image.received_at >= datetime(2026, 10, 27, tzinfo=UTC))).all()
+    assert sorted(stored) == [datetime(2026, 10, 27, 12, m, tzinfo=UTC) for m in (1, 11, 21)]
+
+
+@requires_db
+def test_the_cameras_page_says_how_long_photos_take_to_arrive(db_session):
+    """H-17: a clock an hour slow can't be told from a slow upload at import; the
+    Cameras page says photos take an hour to arrive, which is how it shows."""
+    from datetime import timedelta
+
+    from app.api.routes_cameras import UPLOAD_MIN_PHOTOS, list_cameras
+    from app.models import Camera, Estate, Image, User
+
+    estate = Estate(name="E", timezone="Europe/Madrid")
+    db_session.add(estate)
+    db_session.flush()
+    user = User(estate_id=estate.id, email="a@x.es", password_hash="x", role="admin")
+    slow = Camera(estate_id=estate.id, name="Suntek", active=True)
+    other = Camera(estate_id=estate.id, name="SPYPOINT", active=True)
+    db_session.add_all([user, slow, other])
+    db_session.flush()
+    start = datetime(2026, 10, 1, 20, 0, tzinfo=UTC)
+    for i in range(UPLOAD_MIN_PHOTOS + 2):
+        taken = start + timedelta(hours=i)
+        db_session.add(Image(camera_id=slow.id, captured_at=taken,
+                             received_at=taken + timedelta(minutes=61 + i % 3)))
+        db_session.add(Image(camera_id=other.id, captured_at=taken))  # no receipt time
+    # Filed at its receipt time (no camera time at all): says nothing.
+    db_session.add(Image(camera_id=slow.id, captured_at=start, received_at=start))
+    db_session.commit()
+    listed = {c["name"]: c for c in list_cameras(user=user, db=db_session)}
+    assert listed["Suntek"]["upload_delay_min"] == 62
+    assert listed["SPYPOINT"]["upload_delay_min"] is None

@@ -540,6 +540,12 @@ export default function MapPage() {
   const speed = air?.wind_speed_kmh
   // Nothing loaded is not the same as calm air: never state a verdict without the forecast.
   const windWord = !data ? (loading ? 'Checking…' : 'Wind not loaded') : from != null ? `From the ${direction(from)}` : speed == null ? 'No wind forecast' : 'Too light to call'
+  // Everything on the map is judged for the sit, 45 min after sunset, or now once dark.
+  const cond = data?.conditions
+  const windAt = !cond ? '' : cond.wind_now ? 'now' : cond.wind_at_local ? `at ${cond.wind_at_local}` : ''
+  const windLabel = air?.source === 'katabatic' ? `Calm${windAt ? ` ${windAt}` : ''}. Cold air sliding downhill`
+    : air?.source === 'anabatic' ? `Calm${windAt ? ` ${windAt}` : ''}. Air drifting uphill`
+      : `Wind ${windAt || 'tonight'}`
   const unplaced: Unplaced[] = [
     ...(data?.stands ?? []).filter(s => !validLngLat(s.lon, s.lat)).map(s => ({ kind: 'stand' as const, id: s.id, name: s.name })),
     ...cameras.filter(c => !validLngLat(c.lon, c.lat)).map(c => ({ kind: 'camera' as const, id: c.id, name: c.name })),
@@ -603,7 +609,7 @@ export default function MapPage() {
     {view === 'cameras' && <button type="button" className="map-windbar" aria-expanded={windOpen} aria-controls="map-wind-more" onClick={() => setWindOpen(v => !v)}>
       <span className="wind-direction" aria-hidden="true"><svg viewBox="0 0 40 40" style={{ transform: from == null ? undefined : `rotate(${downwind(from) - bearing}deg)` }}><circle cx="20" cy="20" r="18" />{from != null && <path d="M20 29V11m-6 6 6-6 6 6" />}</svg></span>
       <span className="map-wind-reading">
-        <span>{air?.source === 'katabatic' ? 'Calm evening. Cold air sliding downhill' : air?.source === 'anabatic' ? 'Calm and sunny. Air drifting uphill' : 'Wind tonight'}</span>
+        <span>{windLabel}</span>
         <strong>{windWord}</strong>
         {from != null && <em>Scent goes {direction(downwind(from))}</em>}
       </span>
@@ -618,6 +624,10 @@ export default function MapPage() {
         {windOpen && view === 'cameras' && <div id="map-wind-more" className="map-wind-more">
           {!data && <p>{loading ? 'Getting tonight’s wind…' : 'The wind comes with the map. It shows once the map loads.'}</p>}
           {air?.text && <p>{air.text}</p>}
+          {cond && (cond.wind_now
+            ? <p>Judged for now{cond.sunset_local && cond.sunset && Date.parse(cond.sunset) <= Date.now() ? ` (sunset was ${cond.sunset_local})` : ''}.</p>
+            : cond.wind_at_local && <p>Judged for {cond.wind_at_local}, 45 min after sunset{cond.sunset_local ? ` (${cond.sunset_local})` : ''}, when the evening air has settled. Stands and scent-safe ground too.</p>)}
+          {cond?.forecast_stale && cond.forecast_fetched_at && <p>No newer forecast could be had: this one is from {new Date(cond.forecast_fetched_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })}.</p>}
           <p>Arrows show where scent goes from each stand. Tap a stand to see how far it carries.</p>
           <p className="map-caveat">An indication only. Wind near the ground swirls.</p>
         </div>}

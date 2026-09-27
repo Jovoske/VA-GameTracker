@@ -144,6 +144,14 @@ class Camera(Base):
     # stay. Its own column, not `active`: a login that still lists a camera in a
     # drawer would switch that straight back on.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Suntek (FTP or email): how far ahead of the server's receipt the camera's clock
+    # ran on its last photo that came in straight away, in minutes, when a whole-hour
+    # error was put right (a camera that missed the clock change); 0 once photos
+    # arrive on time again. NULL until the check has seen a photo.
+    clock_ahead_min: Mapped[int | None] = mapped_column(Integer)
+    # Photos in a row that came in on time since the clock was last found fast: it is
+    # called right again only after a few (ftp_import.ON_TIME_TO_CLEAR).
+    clock_ok_photos: Mapped[int | None] = mapped_column(Integer)
     # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
     # pages back to it (less an overlap) rather than reading only the newest page.
     photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -276,6 +284,10 @@ class Image(Base):
     spypoint_photo_id: Mapped[str | None] = mapped_column(String, unique=True)
     ubox_event_id: Mapped[str | None] = mapped_column(String, unique=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # When the server got it (FTP and email: the receiver's or the mail server's
+    # clock). The Cameras page reads how long photos take to arrive from it, which is
+    # how a camera clock running slow shows (audit H-17). NULL for the other sources.
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     original_path: Mapped[str | None] = mapped_column(String)
     # The small WebP the grids and the map show, made on first request (routes_images).
     thumbnail_path: Mapped[str | None] = mapped_column(String)
@@ -553,6 +565,9 @@ class Sit(Base):
     # be scored against what actually happened instead of quietly rewritten.
     wind_status: Mapped[str | None] = mapped_column(String)
     wind_text: Mapped[str | None] = mapped_column(Text)
+    # The moment that verdict was judged for: the sit time when it was reserved
+    # (45 min after sunset), or the reservation itself after dark.
+    wind_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
     __table_args__ = (
         CheckConstraint(

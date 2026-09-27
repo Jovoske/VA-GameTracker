@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_admin, get_current_user
 from app.core.config import settings
 from app.core.db import get_db
+from app.forecasting.conditions import sun_times
 from app.forecasting.inference import dark_exit, suggest_approach_arcs
-from app.forecasting.wind import assess, shooting_arcs_conflict
+from app.forecasting.wind import shooting_arcs_conflict
 from app.models import Camera, Estate, Sit, Stand, User
 
 router = APIRouter(tags=["stands"])
@@ -248,6 +249,11 @@ def _sit_out(s: Sit, stand_name: str | None = None) -> dict:
         "species_seen": s.species_seen,
         "wind_status": s.wind_status,
         "wind_text": s.wind_text,
+        # The moment that verdict was for (the sit time when it was reserved).
+        "wind_at": s.wind_at,
+        # The sit's sunset and the sunrise after it, so Sit mode can show them with
+        # no signal and nothing else loaded (sunset_local, sunrise_local).
+        **sun_times(s.night),
     }
 
 
@@ -398,6 +404,43 @@ def _lock_night(db: Session, night: date) -> None:
     )
 
 
+def _stand_wind(db: Session, stand: Stand, night: date | None = None) -> dict:
+    """Tonight's wind verdict for a stand (conditions.wind_verdict), with tonight's
+    sunset and sunrise. The forecast is fetched with no database connection held
+    (K-04). `night`: a dawn sit's, once that night is over, for the air now."""
+    from app.forecasting.conditions import release, wind_verdict
+    from app.forecasting.model import _tonight_conditions
+
+    now = datetime.now(UTC)
+    release(db)
+    try:
+        cond = _tonight_conditions(now) if night is None else _tonight_conditions(now, night=night)
+    except Exception:
+        cond = {}
+    return {**wind_verdict(db, stand, cond, now=now),
+            "sunset_local": cond.get("sunset_local"), "sunrise_local": cond.get("sunrise_local")}
+
+
+@router.get("/stands/{stand_id}/wind")
+def stand_wind(stand_id: uuid.UUID, _: CurrentUser, db: DB, sit: uuid.UUID | None = None) -> dict:
+    """Tonight's wind for one stand, as the map, Stands and Tonight give it: what Sit
+    mode refreshes its wind line from, so the seat never tells a different story.
+
+    `sit` is the sit Sit mode is showing. A dawn sit still on after 06:00 belongs to
+    a night that is over, and is judged for now, not for the coming evening."""
+    stand = db.get(Stand, stand_id)
+    if stand is None:
+        raise HTTPException(404, "That stand isn't on the app.")
+    night = None
+    if sit is not None:
+        now = datetime.now(UTC)
+        # On now (_live) at this stand, and of a night already over: a dawn sit.
+        mine = db.scalar(select(Sit).where(Sit.id == sit, Sit.stand_id == stand.id, _live(now)))
+        if mine is not None and mine.night < tonight(now):
+            night = mine.night
+    return _stand_wind(db, stand, night)
+
+
 @router.post("/sits", status_code=201)
 def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
     """Claim a stand for tonight.
@@ -418,19 +461,9 @@ def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
     if stand is None:
         raise HTTPException(404, "That stand isn't on the app.")
 
-    # Record what the app told them about the wind, so the advice can be scored later.
-    from app.forecasting.model import _tonight_conditions
-
-    try:
-        cond = _tonight_conditions(datetime.now(UTC))
-    except Exception:
-        cond = {}
-    verdict = assess(
-        stand_name=stand.name,
-        wind_dir_deg=cond.get("wind_dir_deg"),
-        wind_speed_kmh=cond.get("wind_speed_kmh"),
-        approach_dirs_deg=stand.approach_dirs_deg,
-    )
+    # Record what the app told them about the wind, so the advice can be scored
+    # later: the verdict every other screen gives this stand, for the sit time.
+    verdict = _stand_wind(db, stand)
 
     night = tonight()
     _lock_night(db, night)
@@ -447,8 +480,9 @@ def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
         user_id=user.id,
         night=night,
         outcome="unreported",
-        wind_status=verdict.status,
-        wind_text=verdict.text,
+        wind_status=verdict["status"],
+        wind_text=verdict["text"],
+        wind_at=datetime.fromisoformat(verdict["at"]),
     )
     db.add(sit)
     try:

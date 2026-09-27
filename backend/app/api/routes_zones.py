@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -124,31 +125,39 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
     to reach the zones, the stands and the shaded ground, and fetching them
     separately invites a map that disagrees with itself mid-render.
     """
+    from app.forecasting.conditions import release, sit_time, wind_verdict
     from app.forecasting.model import _tonight_conditions
 
+    now = datetime.now(timezone.utc)
+    # The forecast with no database connection held while Open-Meteo answers (K-04).
+    release(db)
     try:
-        cond = _tonight_conditions(datetime.now(timezone.utc))
+        cond = _tonight_conditions(now)
     except Exception as e:
         log.warning("map.conditions_failed", error=str(e))
         cond = {}
     wdir, wspd = cond.get("wind_dir_deg"), cond.get("wind_speed_kmh")
     cloud = cond.get("cloud_cover_pct")
-    now = datetime.now(timezone.utc)
+    # Everything on the map is judged for the sit: 45 minutes after tonight's
+    # sunset, or now once that has passed, until 06:00. At lunch the map used to
+    # show the midday upslope air under the evening's forecast, the opposite of the
+    # sit (B-04); from 06:00 to sunrise, the dawn air (R4BE-1).
+    try:
+        at, at_now = datetime.fromisoformat(cond["wind_at"]), bool(cond.get("wind_now"))
+    except (KeyError, TypeError, ValueError):
+        at, at_now = sit_time(now)
 
     zones = [_zone_out(z) for z in db.scalars(select(Zone).order_by(Zone.name)).all()]
 
     stands = []
     for s in db.scalars(select(Stand).order_by(Stand.name)).all():
-        report = bedding.stand_wind_report(
-            db, stand_name=s.name, lat=s.lat, lon=s.lon,
-            wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud, when=now,
-        )
         stands.append({
             "id": str(s.id),
             "name": s.name,
             "lat": s.lat,
             "lon": s.lon,
-            "wind": report,
+            # The same verdict Tonight, a reservation and Sit mode give this stand.
+            "wind": wind_verdict(db, s, cond, now=now),
             # Derived from the drawn bedding, so it is available even when nobody
             # has entered arcs by hand.
             "approaches": bedding.approach_bearings(db, s.lat, s.lon),
@@ -160,7 +169,7 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
     from app.forecasting import thermal
 
     reg = thermal.regime(
-        db, lat=_s.estate_lat, lon=_s.estate_lon, when=now,
+        db, lat=_s.estate_lat, lon=_s.estate_lon, when=at,
         wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud,
     )
     return {
@@ -169,6 +178,15 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
             "wind_speed_kmh": wspd,
             "cloud_cover_pct": cloud,
             "moon_illum": cond.get("moon_illum"),
+            "sunset_local": cond.get("sunset_local"),
+            # The instant, so the page says "sunset was" only once it has been.
+            "sunset": cond.get("sunset"),
+            # The moment the wind bar, the stands and the shading are for.
+            "wind_at": at.isoformat(),
+            "wind_at_local": at.astimezone(ZoneInfo(_s.estate_timezone)).strftime("%H:%M"),
+            "wind_now": at_now,
+            "forecast_fetched_at": cond.get("forecast_fetched_at"),
+            "forecast_stale": bool(cond.get("forecast_stale")),
         },
         "airflow": {
             "source": reg["source"],
@@ -181,7 +199,7 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
         "zones": zones,
         "stands": stands,
         "safe_ground": bedding.safe_ground(
-            db, wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud, when=now
+            db, wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud, when=at
         ),
         "routes": bedding.routes(db),
         "scent_range_m": bedding.SCENT_RANGE_M,

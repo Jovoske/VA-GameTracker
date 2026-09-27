@@ -93,19 +93,124 @@ def contains(polygon: dict, lat: float, lon: float) -> bool:
     return inside
 
 
-def distance_to_polygon_m(polygon: dict, lat: float, lon: float) -> float:
-    """Metres to the nearest vertex, or 0 inside.
+def _local(lat0: float, lon0: float, lat: float, lon: float) -> tuple[float, float]:
+    """(east, north) metres from (lat0, lon0), on a flat patch of ground around it.
 
-    Nearest *vertex* rather than nearest edge: for hand-drawn bedding outlines with
-    vertices every few tens of metres the difference is well inside the error of the
-    drawing itself, and it keeps this dependency-free.
+    Plenty at estate scale: over a few km the error is centimetres, well inside
+    how well a hand-drawn outline or a placed stand is known.
+    """
+    north = math.radians(lat - lat0) * EARTH_R_M
+    east = math.radians(lon - lon0) * EARTH_R_M * math.cos(math.radians(lat0))
+    return east, north
+
+
+def _edges(polygon: dict, lat: float, lon: float) -> list[tuple[tuple, tuple]]:
+    """The outline's edges in local metres around (lat, lon), closing the ring."""
+    pts = [_local(lat, lon, p[0], p[1]) for p in ring(polygon)]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    if len(pts) == 1:
+        return [(pts[0], pts[0])]
+    return [(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+
+
+def _nearest_on_segment(a: tuple, b: tuple) -> tuple[float, float]:
+    """The point of segment ab nearest the origin."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0 else max(0.0, min(1.0, -(a[0] * dx + a[1] * dy) / length2))
+    return a[0] + t * dx, a[1] + t * dy
+
+
+def distance_to_polygon_m(polygon: dict, lat: float, lon: float) -> float:
+    """Metres to the nearest point of the outline (any edge, not just a corner), or
+    0 inside.
+
+    It used to be the nearest corner: bedding drawn with a handful of taps has long
+    edges, and a stand 200 m off the middle of one read as 632 m away (audit B-03).
     """
     if contains(polygon, lat, lon):
         return 0.0
-    pts = ring(polygon)
-    if not pts:
+    edges = _edges(polygon, lat, lon)
+    if not edges:
         return float("inf")
-    return min(distance_m(lat, lon, p[0], p[1]) for p in pts)
+    return min(math.hypot(*_nearest_on_segment(a, b)) for a, b in edges)
+
+
+def _bearing_of(p: tuple) -> float:
+    return (math.degrees(math.atan2(p[0], p[1])) + 360.0) % 360.0
+
+
+def _in_cone(p: tuple, bearing_deg: float, half_deg: float, range_m: float) -> bool:
+    d = math.hypot(*p)
+    if d > range_m + 1e-6:
+        return False
+    return d < 1e-9 or angular_distance(_bearing_of(p), bearing_deg) <= half_deg + 1e-9
+
+
+def _cross_ray(a: tuple, b: tuple, bearing_deg: float, range_m: float) -> tuple | None:
+    """Where segment ab crosses the ray from the origin along a bearing, within range."""
+    ux, uy = math.sin(math.radians(bearing_deg)), math.cos(math.radians(bearing_deg))
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    det = dx * uy - dy * ux
+    if abs(det) < 1e-12:
+        return None  # parallel: its ends are tested on their own
+    # a + s*d = t*u  ->  solve for s (along the edge) and t (along the ray)
+    s = (a[1] * ux - a[0] * uy) / det
+    t = (dx * a[1] - dy * a[0]) / det
+    if 0.0 <= s <= 1.0 and 0.0 <= t <= range_m:
+        return a[0] + s * dx, a[1] + s * dy
+    return None
+
+
+def _cross_arc(a: tuple, b: tuple, range_m: float) -> list[tuple]:
+    """Where segment ab crosses the circle of radius range_m round the origin."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    qa = dx * dx + dy * dy
+    if qa == 0:
+        return []
+    qb = 2 * (a[0] * dx + a[1] * dy)
+    qc = a[0] * a[0] + a[1] * a[1] - range_m * range_m
+    disc = qb * qb - 4 * qa * qc
+    if disc < 0:
+        return []
+    root = math.sqrt(disc)
+    return [(a[0] + s * dx, a[1] + s * dy)
+            for s in ((-qb - root) / (2 * qa), (-qb + root) / (2 * qa)) if 0.0 <= s <= 1.0]
+
+
+def cone_reaches_polygon(
+    polygon: dict, lat: float, lon: float, bearing_deg: float, half_deg: float, range_m: float,
+) -> float | None:
+    """Metres to the nearest part of the outline inside a cone from (lat, lon), or
+    None when the cone misses it. 0 when the point is inside.
+
+    The cone is a sector: `range_m` long, `half_deg` either side of `bearing_deg`.
+    Tested against the outline itself, not its middle: aiming at the centroid said
+    "clean" for scent blowing straight into the near end of a long strip of bedding
+    (audit B-03). Exact for any outline: the part of an edge inside the sector starts
+    and ends at the edge's own ends, where it crosses the sector's sides, or on its
+    arc, and the nearest point of it is one of those or the foot of the
+    perpendicular from the stand.
+    """
+    if contains(polygon, lat, lon):
+        return 0.0
+    half_deg = min(half_deg, 90.0)
+    best: float | None = None
+    for a, b in _edges(polygon, lat, lon):
+        found = [p for p in (a, b, _nearest_on_segment(a, b))
+                 if _in_cone(p, bearing_deg, half_deg, range_m)]
+        for side in (bearing_deg - half_deg, bearing_deg + half_deg):
+            hit = _cross_ray(a, b, side, range_m)
+            if hit is not None:
+                found.append(hit)
+        found += [p for p in _cross_arc(a, b, range_m)
+                  if _in_cone(p, bearing_deg, half_deg, range_m)]
+        for p in found:
+            d = math.hypot(*p)
+            if best is None or d < best:
+                best = d
+    return best
 
 
 def bounds(polygons: list[dict]) -> tuple[float, float, float, float] | None:

@@ -10,7 +10,7 @@ from app.api.visibility import VISIBLE_ANIMAL, VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.db import get_db
 from app.enrichment.astro import moon_phase, solar
-from app.forecasting.exposure import night_expr
+from app.forecasting.exposure import current_night, night_expr
 from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -93,7 +93,9 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
 
     now = datetime.now(timezone.utc)
     phase, illum = moon_phase(now)
-    s = solar(settings.estate_lat, settings.estate_lon, now.date())
+    # Tonight's sun is the night key's (the estate's evening, until 06:00), never the
+    # UTC calendar day's.
+    s = solar(settings.estate_lat, settings.estate_lon, current_night(now))
 
     return {
         "totals": {

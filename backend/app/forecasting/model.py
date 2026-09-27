@@ -8,7 +8,8 @@ how sure it is and why, and never claims certainty. The factors feed the card's
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, and_, case, cast, func, literal, select
@@ -16,13 +17,18 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.enrichment.astro import moon_phase, solar
-from app.enrichment.weather import weather_at
+from app.enrichment.astro import solar
 from app.forecasting.changes import whats_changed
-from app.forecasting.exposure import current_night, local_hour, night_key_start
+from app.forecasting.conditions import (
+    no_stand_verdict,
+    release,
+    stand_for_camera,
+    tonight_conditions,
+    wind_verdict,
+)
+from app.forecasting.exposure import current_night, night_key_start
 from app.forecasting.scoring import calibration
-from app.forecasting.wind import assess
-from app.models import Camera, CameraNight, Image, Species, Stand
+from app.models import Camera, CameraNight, Image, Species
 
 log = get_logger(__name__)
 
@@ -49,6 +55,109 @@ def _best_window(by_hour: dict[int, int], *, sittable_only: bool = True) -> dict
             "share_pct": round(best_sum / total * 100)}
 
 
+# Best hours follow sunset, not the clock. Sunset in Alatoz moves about three hours
+# between early August and late October (the clock change included), so a season's
+# histogram of clock hours sent hunters out after the animals had arrived (audit
+# G-05, J-08). Each visit is placed by the minutes after its own night's sunset, in
+# SLOT_MIN steps, the recent weeks counting most (half as much every
+# RECENT_HALF_LIFE_NIGHTS), and the best block is put back on the clock with
+# tonight's sunset.
+SLOT_MIN = 15
+WINDOW_SLOTS = 12  # three hours
+RECENT_HALF_LIFE_NIGHTS = 21
+
+
+@lru_cache(maxsize=2048)
+def _sunset(night: date) -> datetime | None:
+    return solar(settings.estate_lat, settings.estate_lon, night).get("sunset")
+
+
+def _after_sunset(night: date, slot: int) -> int | None:
+    """Minutes from that night's sunset to the middle of a SLOT_MIN slot of the
+    estate's clock (slot 0 is 00:00-00:15). Slots before 06:00 are the next morning."""
+    sunset = _sunset(night)
+    if sunset is None:
+        return None
+    minute = slot * SLOT_MIN + SLOT_MIN // 2
+    day = night if minute >= 6 * 60 else night + timedelta(days=1)
+    local = datetime.combine(day, time(minute // 60, minute % 60), tzinfo=ZoneInfo(_TZ))
+    return round((local - sunset).total_seconds() / 60)
+
+
+def _relative(minutes: int) -> str:
+    """"45 min after sunset", "sunset", "1 h 30 min before sunset"."""
+    if abs(minutes) < 5:
+        return "sunset"
+    h, m = divmod(abs(minutes), 60)
+    span = " ".join(x for x in (f"{h} h" if h else "", f"{m} min" if m else "") if x)
+    return f"{span} {'after' if minutes > 0 else 'before'} sunset"
+
+
+def _hhmm(dt: datetime) -> str:
+    return dt.astimezone(ZoneInfo(_TZ)).strftime("%H:%M")
+
+
+def _sunset_window(slots: dict, tonight: date) -> dict | None:
+    """Best three hours tonight, from when the animals came after each night's sunset.
+
+    `slots` is visits per (night, SLOT_MIN slot of the clock). The block is searched
+    in minutes after sunset, weighted to recent weeks, restricted to starts somebody
+    could sit (SITTABLE_HOURS on tonight's clock), and returned as tonight's times,
+    rounded to the quarter hour. `start_hour`/`end_hour` are the clock hours it
+    covers; `after_sunset_min` is where it starts, counted from sunset.
+
+    None when no visit falls in any block somebody could sit: every block ties at
+    nothing, and the middle one read as "Best hours 21:15 to 00:15, from 1 h 15 min
+    after sunset" for animals only ever seen at dawn (R4BE-5).
+    """
+    sunset = _sunset(tonight)
+    hist: dict[int, float] = {}
+    for (night, slot), visits in slots.items():
+        off = _after_sunset(night, slot)
+        if off is None or not visits:
+            continue
+        weight = visits * 0.5 ** (max(0, (tonight - night).days) / RECENT_HALF_LIFE_NIGHTS)
+        b = off // SLOT_MIN
+        hist[b] = hist.get(b, 0.0) + weight
+    if sunset is None:
+        by_hour: dict[int, int] = {}
+        for (_, slot), visits in slots.items():
+            by_hour[slot * SLOT_MIN // 60] = by_hour.get(slot * SLOT_MIN // 60, 0) + visits
+        w = _best_window(by_hour)
+        if not any(by_hour.get((h + d) % 24) for h in SITTABLE_HOURS for d in range(3)):
+            return None
+        return {**w, "start": f"{w['start_hour']:02d}:00", "end": f"{w['end_hour']:02d}:00",
+                "after_sunset_min": None}
+    total = sum(hist.values()) or 1.0
+    # Every quarter hour from 6 h before sunset to 12 h after it that starts at an hour
+    # somebody can sit.
+    blocks = {}
+    for b in range(-6 * 60 // SLOT_MIN, 12 * 60 // SLOT_MIN):
+        start = sunset + timedelta(minutes=b * SLOT_MIN)
+        if start.astimezone(ZoneInfo(_TZ)).hour in SITTABLE_HOURS:
+            blocks[b] = sum(hist.get(b + d, 0.0) for d in range(WINDOW_SLOTS))
+    best_sum = max(blocks.values(), default=0.0)
+    if best_sum <= 0:
+        return None
+    # When the visits fit inside three hours, many starts hold them all: the middle
+    # one puts them in the middle, with time to settle in before the first arrival
+    # and cover after the last, rather than hours ahead of them.
+    ties = [b for b, block in blocks.items() if block >= best_sum - 1e-9 * max(1.0, best_sum)]
+    best_b = ties[len(ties) // 2] if ties else 0
+    start = sunset + timedelta(minutes=best_b * SLOT_MIN)
+    # A quarter hour on the clock reads better than 20:41 and is as true.
+    start = datetime.fromtimestamp(round(start.timestamp() / 900) * 900, tz=UTC)
+    end = start + timedelta(minutes=WINDOW_SLOTS * SLOT_MIN)
+    end_local = end.astimezone(ZoneInfo(_TZ))
+    return {
+        "start": _hhmm(start), "end": _hhmm(end),
+        "start_hour": start.astimezone(ZoneInfo(_TZ)).hour,
+        "end_hour": (end_local.hour + (1 if end_local.minute else 0)) % 24,
+        "share_pct": round(best_sum / total * 100),
+        "after_sunset_min": best_b * SLOT_MIN,
+    }
+
+
 MIN_NIGHTS_TO_JUDGE = 15
 
 
@@ -73,7 +182,9 @@ def _verdict(prob: float, active_nights: int | None = None) -> str:
     return "QUIET"
 
 
-def _is_nocturnal(window: dict) -> bool:
+def _is_nocturnal(window: dict | None) -> bool:
+    if window is None:
+        return False
     h = window["start_hour"]
     return h >= 20 or h <= 5
 
@@ -128,24 +239,30 @@ def _evidence(
     v = visit_rows(start=night_key_start(first - timedelta(days=1)),
                    end=night_key_start(tonight), camera_ids=cam_ids,
                    species_ids=list(db.scalars(wanted).all()))
-    hour = local_hour(v.c.first_at).label("h")
+    # The quarter hour of the estate's clock each visit arrived in: best hours are
+    # worked out from its minutes after that night's sunset (_sunset_window).
+    local = func.timezone(_TZ, v.c.first_at)
+    slot = cast(
+        func.floor((func.extract("hour", local) * 60 + func.extract("minute", local)) / SLOT_MIN),
+        Integer,
+    ).label("slot")
     rows = db.execute(
         select(
-            v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, hour,
+            v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, slot,
             func.count().label("visits"), cast(func.sum(v.c.frames), Integer).label("frames"),
         )
         .where(v.c.night >= first)
-        .group_by(v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, hour)
+        .group_by(v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, slot)
     ).tuples().all()
-    for cam_id, species_id, name, night, h, visits, frames in rows:
+    for cam_id, species_id, name, night, sl, visits, frames in rows:
         sp = ev[cam_id]["species"].get(species_id)
         if sp is None:
             sp = ev[cam_id]["species"][species_id] = {
-                "name": name, "nights": {}, "by_hour": {}, "frames": {}}
-        nights, by_hour = sp["nights"], sp["by_hour"]
+                "name": name, "nights": {}, "slots": {}, "frames": {}}
+        nights, slots = sp["nights"], sp["slots"]
         nights[night] = nights.get(night, 0) + visits
         sp["frames"][night] = sp["frames"].get(night, 0) + frames
-        by_hour[h] = by_hour.get(h, 0) + visits
+        slots[(night, sl)] = slots.get((night, sl), 0) + visits
 
     for cam_id, newest in db.execute(
         select(Image.camera_id, func.max(Image.captured_at))
@@ -195,7 +312,7 @@ def _camera_forecast(
         1 for n in recent_keys if ev["left_out"].get(n) == "UNPROCESSED"
     )
 
-    window = _best_window(sp["by_hour"])
+    window = _sunset_window(sp["slots"], tonight)
 
     # Probability tonight: base presence rate, nudged by the last week, but only when
     # the camera is producing and enough of that week was watched. A camera that's
@@ -370,27 +487,10 @@ def _expectations(
     return out, rows
 
 
-def _tonight_conditions(now: datetime) -> dict:
-    phase, illum = moon_phase(now)
-    s = solar(settings.estate_lat, settings.estate_lon, now.date())
-    wind_dir = wind_speed = temp = pressure = cloud = rain = None
-    try:
-        # `now` is UTC and the service sets no TZ, so .astimezone() was a no-op:
-        # this sampled 22:00 UTC, which is midnight the following day in Madrid.
-        local_22 = now.astimezone(ZoneInfo(_TZ)).replace(
-            hour=22, minute=0, second=0, microsecond=0
-        )
-        w = weather_at(settings.estate_lat, settings.estate_lon, local_22, tz=_TZ)
-        wind_dir, wind_speed, temp = w.get("wind_dir_deg"), w.get("wind_speed_kmh"), w.get("temp_c")
-        pressure, cloud, rain = w.get("pressure_hpa"), w.get("cloud_cover_pct"), w.get("rain_mm")
-    except Exception:
-        pass
-    return {
-        "moon_phase": phase, "moon_illum": illum,
-        "darkness_minutes": s.get("darkness_minutes"),
-        "wind_dir_deg": wind_dir, "wind_speed_kmh": wind_speed, "temp_c": temp,
-        "pressure_hpa": pressure, "cloud_cover_pct": cloud, "rain_mm": rain,
-    }
+def _tonight_conditions(now: datetime, *, night: date | None = None) -> dict:
+    """Tonight's sun, moon and forecast at the sit time (conditions.py). Read through
+    this name, so a test can stand in for the weather. `night`: a dawn sit's."""
+    return tonight_conditions(now, night=night)
 
 
 def _factors(top: dict, cond: dict) -> list[dict]:
@@ -427,8 +527,17 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     # Moon/weather are handled by the data-driven tonight drivers (condition_reasons),
     # so they're not hardcoded here — keeps the "why" consistent with the learned patterns.
     w = top["best_window"]
+    if w is None:
+        out.append({
+            "text": f"{top['species']} only seen here outside the hours you can sit, "
+                    "so there are no best hours to give",
+            "impact": "•",
+        })
+        return out
+    after = w.get("after_sunset_min")
     out.append({
-        "text": f"Best hours {w['start_hour']:02d}:00 to {w['end_hour']:02d}:00",
+        "text": f"Best hours {w['start']} to {w['end']}"
+                + (f", from {_relative(after)}" if after is not None else ""),
         "impact": "++",
     })
     return out
@@ -481,6 +590,10 @@ def _freshness(db: Session, now: datetime) -> dict | None:
 def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     now = datetime.now(timezone.utc)
     tonight = current_night(now)
+    # The forecast first, with no database connection held while Open-Meteo answers
+    # (audit K-04): the sign-in check has already taken one, and gives it back here.
+    release(db)
+    cond = _tonight_conditions(now)
 
     # A camera that isn't producing data (dead battery / no check-in / out of photo credits)
     # must not have its silence scored as "no animals". We keep it in the ranking on its
@@ -538,7 +651,6 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     # Nights at least one ranked camera was watching: what the plan stands on.
     nights_of_data = len(set().union(*(ev[c.id]["watched"] for c in ranked)))
 
-    cond = _tonight_conditions(now)
     if not forecasts:
         if species_ids:
             reason = "No camera has seen the animals you picked yet."
@@ -569,18 +681,11 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         log.warning("changed.failed", error=str(e))
         changed = {"kind": "none", "camera": None, "text": ""}
 
-    # Wind is deterministic geometry against the stand linked to the top camera — not a
-    # fitted coefficient. It states its own competence boundary rather than producing a
-    # confident bearing on a calm night that a single weather grid point cannot see.
-    stand = db.scalar(select(Stand).where(Stand.camera_id == uuid.UUID(top["camera_id"])))
-    alt = forecasts[1]["camera"] if len(forecasts) > 1 else None
-    wind_verdict = assess(
-        stand_name=stand.name if stand else top["camera"],
-        wind_dir_deg=cond.get("wind_dir_deg"),
-        wind_speed_kmh=cond.get("wind_speed_kmh"),
-        approach_dirs_deg=stand.approach_dirs_deg if stand else None,
-        alternative_stand=alt,
-    )
+    # The wind at the stand a hunter would sit for the top camera, judged as every
+    # other screen judges it (conditions.wind_verdict), for the sit time.
+    stand = stand_for_camera(db, uuid.UUID(top["camera_id"]))
+    wind = (wind_verdict(db, stand, cond, now=now) if stand is not None
+            else no_stand_verdict(top["camera"], cond, now=now))
 
     # The honest replacement for the deleted confidence figure: not how much data went
     # in, but how often this model has actually been right when it was checked.
@@ -598,11 +703,7 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         "verdict": _verdict(top["probability"], top["active_nights"]),
         "changed": changed,
         "calibration": track_record,
-        "wind": {
-            "status": wind_verdict.status,
-            "text": wind_verdict.text,
-            "is_advice": wind_verdict.is_advice,
-        },
+        "wind": wind,
         "recommended": {
             "camera": top["camera"], "camera_id": top["camera_id"],
             "species": top["species"], "runner_up": top["runner_up"],

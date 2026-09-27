@@ -17,13 +17,14 @@ import {
 } from '../api'
 import SitPrompts from '../components/SitPrompts'
 import { useRefetchOnReturn } from '../hooks'
-import { windColor, type MapData, type WindReport } from '../map/geometry'
+import { isCall, windColor, windFor, type MapData, type WindReport } from '../map/geometry'
 import { flushSits, isOn, onSitSync, saveSit, withPending } from '../sits'
 import '../map/map.css'
 import './stands.css'
 
 type Stand = { id: string; name: string; lat: number | null; lon: number | null; claimed_tonight: boolean; claimed_by: string | null }
-type Sit = { id: string; stand_id: string; night: string; user_id: string | null; outcome: string; started_at: string | null; ended_at: string | null; wind_text: string | null }
+// `wind_at`: the moment the verdict saved at the reservation was for.
+type Sit = { id: string; stand_id: string; night: string; user_id: string | null; outcome: string; started_at: string | null; ended_at: string | null; wind_status?: string | null; wind_text: string | null; claimed_at?: string | null; wind_at?: string | null }
 const OUTCOMES = [['nothing', 'Saw nothing'], ['seen', 'Saw animals'], ['shootable_no_shot', 'Had a chance, no shot'], ['shot', 'Shot']] as const
 const outcomeLabel = (value: string) => OUTCOMES.find(([key]) => key === value)?.[1] ?? 'Not reported'
 // One short line per stand. The full sentence from the forecast sits behind "Wind details".
@@ -35,6 +36,12 @@ const WIND_LINE: Record<string, string> = {
   no_bedding: 'No bedding drawn yet.',
   no_position: 'Not on the map yet.',
 }
+
+// The estate's clock, whatever the phone's is set to.
+const estateClock = (iso: string) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
+// When a wind line is for: tonight's sit (45 min after sunset), or now once dark.
+// Only a call has a time: "Not on the map yet" is not a verdict for 20:39.
+const windWhen = (w: WindReport) => { const at = windFor(w); return at && at[0].toUpperCase() + at.slice(1) }
 
 // A write that never answers must not leave every button on "Reserving…".
 const WRITE_TIMEOUT_MS = 20_000
@@ -219,7 +226,7 @@ export default function Stands() {
       const reserve = !taken && !reservationsUnknown && canReserve && <button className={`map-button${later ? ' stand-reserve-later' : ' map-button--primary'}`} disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : later ? 'Reserve for tonight' : 'Reserve'}</button>
       return <article key={s.id} id={`stand-${s.id}`} className={`stand-entry${params.get('stand') === s.id ? ' stand-entry--selected' : ''}`}>
         <div className="stand-entry-top"><div><h2>{s.name}</h2><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{stateOf(sit, mine, taken)}</span></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Place on map ↗' : 'Map ↗'}</Link></div>
-        {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}</p>}
+        {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}{windWhen(wind!) && <span className="stand-wind-for">{windWhen(wind!)}</span>}</p>}
         {otherIn(s) && <p className="stand-now">Another hunter is in it now, from a dawn sit.</p>}
         {!later && reserve}
         {mine && sit && <>
@@ -230,7 +237,7 @@ export default function Stands() {
         </>}
         {hasDetails && <details className="stand-wind"><summary>Wind details</summary>
           {wind?.text && <p>{wind.text}</p>}
-          {mine && sit?.wind_text && <p><span className="stand-wind-when">When you reserved</span>{sit.wind_text}</p>}
+          {mine && sit?.wind_text && <p><span className="stand-wind-when">When you reserved{sit.claimed_at ? ` at ${estateClock(sit.claimed_at)}` : ''}{sit.wind_at && isCall(sit.wind_status) ? `, for ${estateClock(sit.wind_at)}` : ''}</span>{sit.wind_text}</p>}
           <Link to={`/map?stand=${s.id}`}>See it on the map →</Link>
         </details>}
       </article>
