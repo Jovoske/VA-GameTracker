@@ -17,8 +17,9 @@ import {
 } from '../api'
 import HarvestPrompt from '../components/Harvest'
 import SitPrompts from '../components/SitPrompts'
+import { WindWeekLine, WindWeekStrip, judgedWind, useWindWeek, weekSaysWhy } from '../components/WindWeek'
 import { useRefetchOnReturn } from '../hooks'
-import { isCall, windColor, windFor, type MapData, type WindReport } from '../map/geometry'
+import { isCall, windColor, windFor, type WindReport } from '../map/geometry'
 import { flushSits, isOn, onSitSync, saveSit, withPending } from '../sits'
 import '../map/map.css'
 import './stands.css'
@@ -58,7 +59,10 @@ export default function Stands() {
   // the stands and your reservation, with its age (audit A-18, I-10).
   const [standsGot, setStandsGot] = useState<Got<Stand[]> | null>(() => peek<Stand[]>('/stands'))
   const [sitsGot, setSitsGot] = useState<Got<Sit[]> | null>(() => peek<Sit[]>('/sits'))
-  const [winds, setWinds] = useState<Record<string, WindReport>>({})
+  // Tonight's wind at each stand and its week, in one call: the verdict at the sit
+  // (as the map and Sit mode give it) and "Right wind for Charca: tonight 19–21 h,
+  // Thu, Sat", with the hours behind the fold (feature 22).
+  const wk = useWindWeek('/forecast/wind-week')
   // Who you are, as the phone last knew it, so your own stand reads "Yours
   // tonight" at once; /auth/me confirms it when it answers.
   const [me, setMe] = useState<Me | null>(peekMe)
@@ -70,6 +74,7 @@ export default function Stands() {
   const saving = useRef(false)
   const [filter, setFilter] = useState('all')
   const focused = useRef(false)
+  const loaded = useRef(false)
   const ctl = useRef<AbortController | null>(null)
   // Re-render when a report waiting on the phone goes out, so "Saved on this phone" clears.
   const [, setSynced] = useState(0)
@@ -82,10 +87,9 @@ export default function Stands() {
     setErr('')
     setChecking(true)
     // Each on its own: who you are, the wind or the reservations failing must not
-    // take the list of stands down with them.
-    getFresh<MapData>('/map/tonight', { signal: c.signal })
-      .then((got) => { if (!got.stale) setWinds(Object.fromEntries(got.data.stands.map((s) => [s.id, s.wind]))) })
-      .catch(() => {})
+    // take the list of stands down with them. The wind asks for itself on opening.
+    if (loaded.current) wk.reload()
+    loaded.current = true
     whoAmI().then(setMe).catch(() => {})
     const sitsDone = getFresh<Sit[]>('/sits', opts).then(setSitsGot).catch(() => {})
     const standsDone = getFresh<Stand[]>('/stands', opts)
@@ -220,15 +224,26 @@ export default function Stands() {
       const on = !!sit && isOn(sit), fresh = !!sit && !sit.started_at && sit.outcome === 'unreported'
       // Ended with nothing said: ask, instead of hiding the question behind a fold.
       const ask = !!sit?.ended_at && sit.outcome === 'unreported'
-      const wind = winds[s.id]
-      const windLine = wind ? WIND_LINE[wind.status] ?? null : null
-      const hasDetails = !!(wind?.text || (mine && sit?.wind_text))
+      const week = wk.week?.stands.find((x) => x.stand_id === s.id)
+      const wind = week?.tonight as WindReport | undefined
+      // A stand that can't be judged, or a week with no forecast, says why once, in the
+      // week's line: "Not on the map yet." over "Loma isn't on the map yet, so…" said it twice.
+      const windLine = wind && week && !(weekSaysWhy(week) && !judgedWind(wind.status)) ? WIND_LINE[wind.status] ?? null : null
+      // A copy kept with no signal says how old it is.
+      const windAge = wk.got?.stale ? `from ${ageLabel(wk.got.at)}` : ''
       // In your dawn sit, Back to sit comes first; reserving the evening is the lesser thing.
       const later = mine && on
       const reserve = !taken && !reservationsUnknown && canReserve && <button className={`map-button${later ? ' stand-reserve-later' : ' map-button--primary'}`} disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : later ? 'Reserve for tonight' : 'Reserve'}</button>
       return <article key={s.id} id={`stand-${s.id}`} className={`stand-entry${params.get('stand') === s.id ? ' stand-entry--selected' : ''}`}>
         <div className="stand-entry-top"><div><h2>{s.name}</h2><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{stateOf(sit, mine, taken)}</span></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Place on map ↗' : 'Map ↗'}</Link></div>
-        {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}{windWhen(wind!) && <span className="stand-wind-for">{windWhen(wind!)}</span>}</p>}
+        {/* Held open from the first paint, so the wind arriving doesn't move Reserve
+            under a thumb (audit I-08). */}
+        <div className="stand-wind-slot">
+          {week ? <>
+            {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}{(windWhen(wind!) || windAge) && <span className="stand-wind-for">{[windWhen(wind!), windAge].filter(Boolean).join(', ')}</span>}</p>}
+            <WindWeekLine stand={week} />
+          </> : <p className="stand-wind-wait">{wk.wait}</p>}
+        </div>
         {otherIn(s) && <p className="stand-now">Another hunter is in it now, from a dawn sit.</p>}
         {!later && reserve}
         {mine && sit && <>
@@ -237,11 +252,12 @@ export default function Stands() {
           {later && reserve}
           <details className="stand-outcome" open={ask || undefined}><summary>What happened?</summary><div className="stand-outcome-buttons">{OUTCOMES.map(([value, label]) => <button key={value} className="map-button" aria-pressed={sit.outcome === value} disabled={!!busy} onClick={() => run(s.id, () => report(sit.id, value), 'Sit report saved.')}>{label}</button>)}</div></details>
         </>}
-        {hasDetails && <details className="stand-wind"><summary>Wind details</summary>
+        <details className="stand-wind"><summary>Wind hour by hour</summary>
+          {wk.week && week ? <WindWeekStrip week={wk.week} stand={week} /> : <p className="ww-note">{wk.wait}</p>}
           {wind?.text && <p>{wind.text}</p>}
           {mine && sit?.wind_text && <p><span className="stand-wind-when">When you reserved{sit.claimed_at ? ` at ${estateClock(sit.claimed_at)}` : ''}{sit.wind_at && isCall(sit.wind_status) ? `, for ${estateClock(sit.wind_at)}` : ''}</span>{sit.wind_text}</p>}
           <Link to={`/map?stand=${s.id}`}>See it on the map →</Link>
-        </details>}
+        </details>
       </article>
     })}
     {!!stands?.length && <p className="stand-footnote">Reservations are for tonight only.</p>}

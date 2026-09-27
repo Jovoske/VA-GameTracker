@@ -157,6 +157,7 @@ button:not(:disabled):active,
 
 .input {
   width: 100%;
+  min-height: 44px;
   padding: 11px 12px;
   background: var(--surface-2);
   color: var(--text);
@@ -169,6 +170,7 @@ button:not(:disabled):active,
 
 .btn {
   width: 100%;
+  min-height: 44px;
   padding: 12px;
   background: var(--go);
   color: var(--on-go);
@@ -237,11 +239,14 @@ main.page { padding: 16px; }
              max(8px, calc(env(safe-area-inset-bottom) - 14px))
              max(8px, env(safe-area-inset-left));
   }
-  .tabbar a {
+  .tabbar a, .tab-more-btn {
     flex: 1;
+    min-width: 0;
+    min-height: 48px;
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
     gap: 2px;
     padding: 5px 0 3px;
     border-radius: var(--r-ctl);
@@ -249,11 +254,11 @@ main.page { padding: 16px; }
     color: var(--text-dim);
     -webkit-tap-highlight-color: transparent;
   }
-  .tabbar a.active { color: var(--go); }
+  .tabbar a.active, .tab-more-btn.active { color: var(--go); }
   /* Tabs get dimmed, not scaled. This is the most-tapped control in the app and
      the switch itself is instant — animating it would only add latency to the
      one thing that should never have any. */
-  .tabbar a:active { opacity: 0.55; }
+  .tabbar a:active, .tab-more-btn:active { opacity: 0.55; transform: none; }
   /* A fixed box so the label baseline never moves between regular and fill. */
   .tabbar .ico { display: flex; align-items: center; justify-content: center; height: 22px; }
   /* clear the bar itself plus whatever the home indicator reserves, with slack —
@@ -481,7 +486,36 @@ main.page { padding: 16px; }
 .skip-link:focus { top: 8px; }
 [role='button']:focus-visible, a:focus-visible, button:focus-visible { outline: 2px solid var(--go); outline-offset: 4px; }
 @media (min-width: 641px) { .appbar { flex-wrap: wrap; } .topnav { order: 3; flex-basis: 100%; overflow-x: auto; } .topnav a { white-space: nowrap; } }
-@media (max-width: 380px) { .tabbar { overflow-x: auto; } .tabbar a { min-width: 48px; } }
+/* A phone on its side (the app turns now, for the photos: audit K-13) is wider than a
+   tablet but only ~390 px tall: the two-row header scrolls away instead of holding a
+   third of the screen. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .appbar { position: static; }
+}
+/* The tablet's links: a glove's height, not the 32 px of their text. */
+.topnav a { display: inline-flex; align-items: center; min-height: 44px; }
+
+/* "More" (Layout): under 380 px, Cameras, Insights and Settings go under one tab, so
+   five tabs fill the bar and none sits off the edge (audit K-11). Its list opens
+   above the bar, on the app's dark surface, one glove-sized row each. */
+.tab-more-wrap { display: none; }
+.tab-more-btn { background: none; border: 0; font: inherit; font-size: 10px; cursor: pointer; }
+.more-menu {
+  position: fixed; right: max(8px, env(safe-area-inset-right)); bottom: calc(var(--tabbar-h, 64px) + 8px);
+  z-index: 41; min-width: 200px; padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card);
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.55);
+}
+.tabbar .more-menu a {
+  flex: none; flex-direction: row; justify-content: flex-start; gap: 12px; min-height: 56px;
+  padding: 0 14px; font-size: 15px; color: var(--text);
+}
+.tabbar .more-menu a.active { color: var(--go); background: var(--surface-2); }
+@media (max-width: 379.98px) {
+  .tabbar a.tab-more { display: none; }
+  .tab-more-wrap { display: flex; flex: 1; min-width: 0; }
+  .tab-more-btn { width: 100%; }
+}
 .pattern-comparison { padding: 18px 0; border-top: 1px solid var(--border); }
 .pattern-comparison h3 { margin: 0 0 8px; font-size: 17px; font-weight: 500; }
 .pattern-comparison p { color: var(--text-dim); font-size: 13px; line-height: 1.6; }
@@ -587,6 +621,6 @@ main.page { padding: 16px; }
 }
 
 /* An animal's name in Settings, which an admin taps to change. */
-.species-name { display: block; min-height: 44px; margin: -10px 0 -6px; padding: 10px 0 4px; background: none; border: 0; font: inherit; text-align: left; text-decoration: underline dotted var(--text-dim); text-underline-offset: 3px; cursor: pointer; }
+.species-name { display: block; min-height: 44px; min-width: 44px; margin: -10px 0 -6px; padding: 10px 0 4px; background: none; border: 0; font: inherit; text-align: left; text-decoration: underline dotted var(--text-dim); text-underline-offset: 3px; cursor: pointer; }
 .species-name-form { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
 .species-name-form .input { font-size: 16px; min-height: 44px; }

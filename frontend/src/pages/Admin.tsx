@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ageLabel, api, changePassword, peekMe, plainWords, signOut, whoAmI } from '../api'
+import { ageLabel, api, changePassword, noAnswer, peekMe, plainWords, signOut, whoAmI } from '../api'
 import { confirmSignOut } from '../sits'
 import HarvestBook from '../components/HarvestBook'
 import NotificationSettings from '../components/NotificationSettings'
@@ -201,18 +201,23 @@ function UboxImportFields({
     </fieldset>
   )
 }
+// Every button here is a glove's height (44 px): Hide, Remove and Edit limits were
+// 27 px, with Hide 10 px from the advice switch (audit D-15, I-16).
 const smallBtn = {
   background: 'var(--surface-2)',
   border: '1px solid var(--border)',
   color: 'var(--text-dim)',
   borderRadius: 'var(--r-ctl)',
-  padding: '5px 10px',
-  fontSize: 12,
+  minHeight: 44,
+  padding: '8px 12px',
+  fontSize: 13,
   cursor: 'pointer',
   flexShrink: 0,
 } as const
-// Glove-sized: the buttons a hunter needs when a login breaks.
-const loginBtn = { ...smallBtn, minHeight: 44, padding: '8px 14px', fontSize: 13, color: 'var(--text)' } as const
+// The buttons a hunter needs when a login breaks: the same size, in full colour.
+const loginBtn = { ...smallBtn, padding: '8px 14px', color: 'var(--text)' } as const
+// The green buttons that aren't full width.
+const goBtn = { width: 'auto', padding: '9px 14px', minHeight: 44 } as const
 
 /**
  * An animal's name in the app, which an admin can change: "Hare" for the hares and
@@ -292,12 +297,17 @@ export default function Admin() {
     try { return localStorage.getItem(NUDGE_KEY) === '1' } catch { return false }
   })
   const [species, setSpecies] = useState<Species[]>([])
+  // Whether the list has come: an empty one is "no animals yet", not "Loading…" (D-13).
+  const [speciesLoaded, setSpeciesLoaded] = useState(false)
   const [speciesErr, setSpeciesErr] = useState('')
   const [savingId, setSavingId] = useState<string | null>(null)
   const [me, setMe] = useState<Me | null>(() => peekMe())
   const [users, setUsers] = useState<UserRow[]>([])
   const [newUser, setNewUser] = useState({ email: '', password: '', role: 'member' })
   const [userMsg, setUserMsg] = useState('')
+  // One add or removal at a time: a second tap on a slow link used to send it twice,
+  // and the second answer said it had failed (audit D-24).
+  const [userBusy, setUserBusy] = useState(false)
   const [accounts, setAccounts] = useState<CamAccount[]>([])
   const [newAcct, setNewAcct] = useState({
     username: '', password: '', label: '', provider: 'spypoint' as CameraProvider,
@@ -314,6 +324,7 @@ export default function Admin() {
   const importPoll = useRef<number | null>(null)
   const [pw, setPw] = useState({ current: '', next: '' })
   const [pwMsg, setPwMsg] = useState('')
+  const [pwBusy, setPwBusy] = useState(false)
   // Only an admin changes the animals, the people and the server's own settings; the
   // server refuses anyone else, so nobody else is offered them (audit D-12, I-15).
   const admin = me?.role === 'admin'
@@ -419,31 +430,44 @@ export default function Admin() {
   // Its own failure, in words: a swallowed one left the list on "Loading…" for good (audit I-10).
   function loadSpecies() {
     setSpeciesErr('')
-    api<Species[]>('/species', { timeoutMs: 20_000 }).then(setSpecies).catch((e) => setSpeciesErr((e as Error).message))
+    api<Species[]>('/species', { timeoutMs: 20_000 })
+      .then((list) => { setSpecies(list); setSpeciesLoaded(true) })
+      .catch((e) => setSpeciesErr((e as Error).message))
   }
 
   async function addUser() {
+    if (userBusy) return
+    setUserBusy(true)
     setUserMsg('')
+    const email = newUser.email.trim()
     try {
-      await api('/users', { method: 'POST', body: JSON.stringify(newUser) })
+      await api('/users', { method: 'POST', body: JSON.stringify({ ...newUser, email }), timeoutMs: 20_000 })
       setNewUser({ email: '', password: '', role: 'member' })
+      setUserMsg(`Added ${email}. They sign in with that email and password.`)
       setUsers(await api<UserRow[]>('/users'))
-      setUserMsg('Added')
     } catch (e) {
-      setUserMsg((e as Error).message)
+      setUserMsg(noAnswer(e) === 'timeout'
+        ? 'No answer from the server. They may have been added: check the list in a moment.'
+        : `${email} wasn’t added. ${(e as Error).message}`)
+    } finally {
+      setUserBusy(false)
     }
   }
 
   async function delUser(u: UserRow) {
+    if (userBusy) return
     if (!window.confirm(`Remove ${u.email}? They can't sign in any more, on any phone. What they recorded stays, and camera logins they added keep fetching photos, under your name.`)) return
+    setUserBusy(true)
     setUserMsg('')
     try {
-      const r = await api<{ note: string; camera_logins_moved: number }>(`/users/${u.id}`, { method: 'DELETE' })
-      setUsers(await api<UserRow[]>('/users'))
+      const r = await api<{ note: string; camera_logins_moved: number }>(`/users/${u.id}`, { method: 'DELETE', timeoutMs: 20_000 })
       setUserMsg(r.note)
+      setUsers(await api<UserRow[]>('/users'))
       if (r.camera_logins_moved) setAccounts(await api<CamAccount[]>('/camera-accounts'))
     } catch (e) {
       setUserMsg((e as Error).message)
+    } finally {
+      setUserBusy(false)
     }
   }
 
@@ -505,14 +529,22 @@ export default function Admin() {
     }
   }
 
+  // One change at a time: a second tap used to report "That is not your current
+  // password" after the first had changed it (audit D-24).
   async function changePw() {
+    if (pwBusy) return
+    setPwBusy(true)
     setPwMsg('')
     try {
       const note = await changePassword(pw.current, pw.next)
       setPw({ current: '', next: '' })
       setPwMsg(note)
     } catch (e) {
-      setPwMsg((e as Error).message)
+      setPwMsg(noAnswer(e) === 'timeout'
+        ? 'No answer from the server. It may have changed: try the new password next time you sign in.'
+        : `Your password wasn’t changed. ${(e as Error).message}`)
+    } finally {
+      setPwBusy(false)
     }
   }
 
@@ -531,8 +563,11 @@ export default function Admin() {
     setSavingId(null)
   }
 
-  // Hidden animals (rabbits) leave the whole app: photos, counts, alerts, advice.
+  // Hidden animals (rabbits) leave the whole app: photos, counts, alerts, advice. Asked
+  // first: it sits beside the advice switch, and a gloved miss hid an animal for
+  // everyone (audit I-16).
   async function hideSpecies(s: Species, hidden: boolean) {
+    if (hidden && !window.confirm(`Hide ${s.common_name} everywhere? Its photos, counts and alerts leave the app for everyone. “Show again”, under the list, brings it back.`)) return
     setSavingId(s.id)
     const before = s
     setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, hidden, huntable: hidden ? false : x.huntable } : x)))
@@ -601,6 +636,10 @@ export default function Admin() {
               Couldn’t load the animals. {speciesErr}
               <button className="text-action" onClick={loadSpecies}>Try again</button>
             </div>
+          ) : speciesLoaded ? (
+            <div data-species="none" style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>
+              No animals yet. They show here once the cameras have caught some.
+            </div>
           ) : (
             <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
           )
@@ -624,7 +663,7 @@ export default function Admin() {
                 </div>
               </div>
               {admin ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
                   <button type="button" style={smallBtn} disabled={savingId === s.id}
                     aria-label={`Hide ${s.common_name} everywhere`} onClick={() => hideSpecies(s, true)}>
                     Hide
@@ -710,7 +749,7 @@ export default function Admin() {
                     onChange={(e) => setReentering({ id: a.id, password: e.target.value })} />
                 </label>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="btn" type="submit" disabled={reenterBusy || !reentering.password} style={{ width: 'auto', padding: '9px 14px', minHeight: 44 }}>
+                  <button className="btn" type="submit" disabled={reenterBusy || !reentering.password} style={goBtn}>
                     {reenterBusy ? `Checking with ${providerName(a.provider)}…` : 'Save password'}
                   </button>
                   <button type="button" style={loginBtn} disabled={reenterBusy} onClick={() => setReentering(null)}>Cancel</button>
@@ -747,7 +786,7 @@ export default function Admin() {
                 <UboxImportFields prefix={`account-${a.id}`} limits={editingLimits} disabled={limitsBusy}
                   onChange={(limits) => setEditingLimits({ id: a.id, ...limits })} />
                 <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                  <button className="btn" type="submit" disabled={limitsBusy} style={{ width: 'auto', padding: '8px 12px' }}>
+                  <button className="btn" type="submit" disabled={limitsBusy} style={goBtn}>
                     {limitsBusy ? 'Saving…' : 'Save limits'}
                   </button>
                   <button type="button" style={smallBtn} disabled={limitsBusy}
@@ -794,7 +833,7 @@ export default function Admin() {
             <UboxImportFields prefix="new-account" limits={newAcct} disabled={acctBusy}
               onChange={(limits) => setNewAcct({ ...newAcct, ...limits })} />
           )}
-          <button className="btn" type="submit" style={{ width: 'auto', padding: '9px 14px' }}
+          <button className="btn" type="submit" style={goBtn}
             disabled={acctBusy || !newAcct.username.trim() || !newAcct.password}>
             {acctBusy ? `Checking with ${providerName(newAcct.provider)}…` : 'Add login'}
           </button>
@@ -817,41 +856,42 @@ export default function Admin() {
               <span style={{ fontSize: 11, color: u.role === 'admin' ? 'var(--sand)' : 'var(--text-dim)', border: '1px solid var(--border)', borderRadius: 'var(--r-ctl)', padding: '1px 7px' }}>
                 {u.role}
               </span>
-              {!u.is_you && <button onClick={() => delUser(u)} style={smallBtn} aria-label={`Remove ${u.email}`}>Remove</button>}
+              {!u.is_you && <button onClick={() => delUser(u)} style={smallBtn} disabled={userBusy} aria-label={`Remove ${u.email}`}>Remove</button>}
             </div>
           ))}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+          <form onSubmit={(e) => { e.preventDefault(); void addUser() }} aria-busy={userBusy}
+            style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
             <input className="input" placeholder="Email" aria-label="Email for the new person" value={newUser.email}
-              onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} autoComplete="off" />
+              disabled={userBusy} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} autoComplete="off" />
             <input className="input" placeholder="Password (at least 8 characters)" aria-label="Password for the new person" value={newUser.password}
-              onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} autoComplete="new-password" />
+              disabled={userBusy} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} autoComplete="new-password" />
             <div style={{ display: 'flex', gap: 8 }}>
-              <select className="input" style={{ width: 130 }} value={newUser.role} aria-label="Role"
-                onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
+              <select className="input" style={{ width: 130, minHeight: 44 }} value={newUser.role} aria-label="Role"
+                disabled={userBusy} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
                 <option value="member">Member</option>
                 <option value="admin">Admin</option>
               </select>
-              <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
-                onClick={addUser} disabled={!newUser.email || newUser.password.length < 8}>
-                Add person
+              <button className="btn" type="submit" style={goBtn}
+                disabled={userBusy || !newUser.email.trim() || newUser.password.length < 8}>
+                {userBusy ? 'Adding…' : 'Add person'}
               </button>
             </div>
-          </div>
+          </form>
           {userMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{userMsg}</div>}
         </SettingsSection>
       )}
 
       <SettingsSection id="password" title="Password">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <form onSubmit={(e) => { e.preventDefault(); void changePw() }} aria-busy={pwBusy}
+          style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <input className="input" placeholder="Current password" aria-label="Current password" type="password" value={pw.current}
-            onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
+            disabled={pwBusy} onChange={(e) => setPw({ ...pw, current: e.target.value })} autoComplete="current-password" />
           <input className="input" placeholder="New password (at least 8 characters)" aria-label="New password" type="password" value={pw.next}
-            onChange={(e) => setPw({ ...pw, next: e.target.value })} autoComplete="new-password" />
-          <button className="btn" style={{ width: 'auto', padding: '9px 14px' }}
-            onClick={changePw} disabled={!pw.current || pw.next.length < 8}>
-            Change password
+            disabled={pwBusy} onChange={(e) => setPw({ ...pw, next: e.target.value })} autoComplete="new-password" />
+          <button className="btn" type="submit" style={goBtn} disabled={pwBusy || !pw.current || pw.next.length < 8}>
+            {pwBusy ? 'Changing…' : 'Change password'}
           </button>
-        </div>
+        </form>
         {pwMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
       </SettingsSection>
 
@@ -859,7 +899,7 @@ export default function Admin() {
         <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
         <button
           className="btn"
-          style={{ width: 'auto', marginTop: 12, padding: '8px 14px' }}
+          style={{ ...goBtn, marginTop: 12 }}
           onClick={checkUpdates}
           disabled={checking}
         >
@@ -978,7 +1018,7 @@ export default function Admin() {
               signOut()
               nav('/login')
             }}
-            style={{ ...smallBtn, padding: '9px 16px', fontSize: 14 }}
+            style={{ ...smallBtn, padding: '9px 16px', fontSize: 14, color: 'var(--text)' }}
           >
             Sign out
           </button>

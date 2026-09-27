@@ -2,11 +2,12 @@ import type { Icon } from '@phosphor-icons/react'
 import { CameraIcon } from '@phosphor-icons/react/dist/csr/Camera'
 import { ChartLineUpIcon } from '@phosphor-icons/react/dist/csr/ChartLineUp'
 import { CrosshairIcon } from '@phosphor-icons/react/dist/csr/Crosshair'
+import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree'
 import { MapTrifoldIcon } from '@phosphor-icons/react/dist/csr/MapTrifold'
 import { MoonStarsIcon } from '@phosphor-icons/react/dist/csr/MoonStars'
 import { ImagesIcon } from '@phosphor-icons/react/dist/csr/Images'
 import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { signOut } from '../api'
 import { useRefetchOnReturn } from '../hooks'
@@ -27,17 +28,22 @@ import { PageBoundary } from './ErrorBoundary'
  * say "you are here" without needing the colour to do all the work.
  *
  * Deep imports rather than the barrel: the package carries about nine thousand
- * icons and this app wants seven of them.
+ * icons and this app wants eight of them.
+ *
+ * `more`: on a screen under 380 px (a small phone, or a large display size) seven
+ * tabs don't fit a thumb, and Settings used to sit off the edge behind a sideways
+ * scroll nobody could see (audit K-11). There these three go under a "More" tab.
  */
-const TABS: { to: string; label: string; Ico: Icon; end?: boolean }[] = [
+const TABS: { to: string; label: string; Ico: Icon; end?: boolean; more?: boolean }[] = [
   { to: '/', label: 'Tonight', Ico: MoonStarsIcon, end: true },
   { to: '/photos', label: 'Photos', Ico: ImagesIcon },
   { to: '/stands', label: 'Stands', Ico: CrosshairIcon },
-  { to: '/cameras', label: 'Cameras', Ico: CameraIcon },
+  { to: '/cameras', label: 'Cameras', Ico: CameraIcon, more: true },
   { to: '/map', label: 'Map', Ico: MapTrifoldIcon },
-  { to: '/insights', label: 'Insights', Ico: ChartLineUpIcon },
-  { to: '/settings', label: 'Settings', Ico: SlidersHorizontalIcon },
+  { to: '/insights', label: 'Insights', Ico: ChartLineUpIcon, more: true },
+  { to: '/settings', label: 'Settings', Ico: SlidersHorizontalIcon, more: true },
 ]
+const onTab = (path: string, t: { to: string; end?: boolean }) => (t.end ? path === t.to : path.startsWith(t.to))
 
 // How long the app can sit in the background before coming back to it checks this
 // phone's alerts again.
@@ -58,9 +64,26 @@ export default function Layout() {
 
   // Browser-tab / app-switcher title follows the page.
   useEffect(() => {
-    const t = TABS.find((x) => (x.end ? loc.pathname === '/' : loc.pathname.startsWith(x.to)))
+    const t = TABS.find((x) => onTab(loc.pathname, x))
     document.title = t ? `GameSense · ${t.label}` : 'GameSense'
   }, [loc.pathname])
+
+  // The "More" tab's list, on a small screen: shut by a choice, a tap elsewhere or Escape.
+  const [more, setMore] = useState(false)
+  const moreRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { setMore(false) }, [loc.pathname])
+  useEffect(() => {
+    if (!more) return
+    const away = (e: PointerEvent) => { if (!moreRef.current?.contains(e.target as Node)) setMore(false) }
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setMore(false) }
+    document.addEventListener('pointerdown', away)
+    document.addEventListener('keydown', esc)
+    return () => {
+      document.removeEventListener('pointerdown', away)
+      document.removeEventListener('keydown', esc)
+    }
+  }, [more])
+  const inMore = TABS.some((t) => t.more && onTab(loc.pathname, t))
 
   // Alerts keep coming: this phone's subscription is sent again every time the app
   // opens, which puts back a server copy lost to anything (audit D-04), and again
@@ -120,7 +143,8 @@ export default function Layout() {
             border: '1px solid var(--border)',
             color: 'var(--text-dim)',
             borderRadius: 'var(--r-ctl)',
-            padding: '6px 10px',
+            padding: '6px 12px',
+            minHeight: 44,
             cursor: 'pointer',
             fontSize: 13,
             whiteSpace: 'nowrap',
@@ -148,8 +172,9 @@ export default function Layout() {
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
       <nav className="tabbar" aria-label="Main navigation" ref={tabbar}>
-        {TABS.map(({ to, label, Ico, end }) => (
-          <NavLink key={to} to={to} end={end} className={({ isActive }) => (isActive ? 'active' : '')}>
+        {TABS.map(({ to, label, Ico, end, more: under }) => (
+          <NavLink key={to} to={to} end={end}
+            className={({ isActive }) => [isActive ? 'active' : '', under ? 'tab-more' : ''].join(' ').trim()}>
             {({ isActive }) => (
               <>
                 <span className="ico">
@@ -160,6 +185,25 @@ export default function Layout() {
             )}
           </NavLink>
         ))}
+        {/* Under 380 px only (theme.css): Cameras, Insights and Settings, one tap away. */}
+        <div className="tab-more-wrap" ref={moreRef}>
+          <button type="button" className={`tab-more-btn${inMore ? ' active' : ''}`} aria-expanded={more}
+            aria-controls="more-menu" onClick={() => setMore((v) => !v)}>
+            <span className="ico"><DotsThreeIcon size={22} weight={inMore ? 'bold' : 'regular'} /></span>
+            More
+          </button>
+          {more && (
+            <div className="more-menu" id="more-menu">
+              {TABS.filter((t) => t.more).map(({ to, label, Ico }) => (
+                <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : '')}>
+                  {({ isActive }) => (
+                    <><Ico size={22} weight={isActive ? 'fill' : 'regular'} aria-hidden="true" />{label}</>
+                  )}
+                </NavLink>
+              ))}
+            </div>
+          )}
+        </div>
       </nav>
     </div>
   )

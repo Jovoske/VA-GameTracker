@@ -494,6 +494,15 @@ export default function Animals() {
                 Merge
               </button>
               <button onClick={confirmSelected} disabled={!!busy} className="an-btn">Confirm</button>
+              {sel.size === 1 && (() => {
+                const one = items.find((a) => sel.has(a.id))
+                return one && (
+                  <button className="an-btn" disabled={!!busy || naming?.id === one.id}
+                    onClick={() => setNaming({ id: one.id, draft: one.label, saving: false, err: '' })}>
+                    Name
+                  </button>
+                )
+              })()}
               <button onClick={() => { setSel(new Set()); setAskName(null) }} className="an-btn an-btn--right">Clear</button>
               {askName && (
                 <div className="an-askname" role="group" aria-label="Which name to keep?">
@@ -556,13 +565,11 @@ export default function Animals() {
                           </div>
                           {naming.err && <p className="an-error" role="alert">{naming.err}</p>}
                         </form>
-                      ) : admin ? (
-                        <button type="button" className="an-animal-name an-animal-name--edit"
-                          onClick={(e) => { e.stopPropagation(); setNaming({ id: a.id, draft: a.label, saving: false, err: '' }) }}
-                          aria-label={`Name ${a.label}`} title="Tap to name">
-                          {a.label}
-                        </button>
                       ) : (
+                        // Plain text: a tap anywhere on the card picks it. The name used
+                        // to be its own button filling the card's lower half, so a gloved
+                        // tap meant to pick it asked for a name (audit C-24): "Name" is in
+                        // the bar above once one animal is picked.
                         <div className="an-animal-name">{a.label}</div>
                       )}
                       <div className="an-animal-meta">

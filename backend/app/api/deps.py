@@ -71,5 +71,5 @@ def get_current_user(
 
 def get_current_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin privileges required")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the estate admin can do that.")
     return user

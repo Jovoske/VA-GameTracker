@@ -468,7 +468,7 @@ export default function Photos() {
       )}
 
       <p style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 18 }}>
-        <Link to="/animals" style={{ color: 'inherit' }}>Animals by species and named animals</Link>
+        <Link to="/animals" style={{ color: 'inherit', display: 'inline-flex', alignItems: 'center', minHeight: 44 }}>Animals by species and named animals</Link>
       </p>
 
       {zoom != null && photos && (

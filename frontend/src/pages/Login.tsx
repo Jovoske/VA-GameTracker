@@ -1,10 +1,13 @@
 import { type FormEvent, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { LAST_EMAIL_KEY, login } from '../api'
+import { Navigate, useNavigate } from 'react-router-dom'
+import { LAST_EMAIL_KEY, getToken, login, safeNext } from '../api'
 
 export default function Login() {
   const nav = useNavigate()
-  const expired = new URLSearchParams(window.location.search).has('expired')
+  const params = new URLSearchParams(window.location.search)
+  const expired = params.has('expired')
+  // The page to go back to: the photo an alert opened, or where the sign-in ran out.
+  const next = safeNext(params.get('next'))
   // Whoever signed in last on this phone, never a guess: the admin's address used to
   // be filled in for every visitor to the public page (audit D-06).
   const [email, setEmail] = useState(() => {
@@ -14,13 +17,19 @@ export default function Login() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
+  // Already signed in (Back from Tonight lands here): straight on, not a sign-in form
+  // that looks like being signed out (audit D-16).
+  if (getToken() && !busy) return <Navigate to={next} replace />
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
+    if (busy) return
     setBusy(true)
     setError('')
     try {
       await login(email, password)
-      nav('/')
+      // Replacing the sign-in page, so Back from there never comes back to it.
+      nav(next, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't sign in")
     } finally {

@@ -540,7 +540,7 @@ export default function NotificationSettings() {
                   <div key={n.id} style={{ ...row, alignItems: 'flex-start' }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
                       {n.url ? (
-                        <Link to={n.url} style={{ fontSize: 14, color: 'var(--text)', textDecoration: 'underline', textUnderlineOffset: 3 }}>{n.title}</Link>
+                        <Link to={n.url} style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, fontSize: 14, color: 'var(--text)', textDecoration: 'underline', textUnderlineOffset: 3 }}>{n.title}</Link>
                       ) : (
                         <div style={{ fontSize: 14 }}>{n.title}</div>
                       )}

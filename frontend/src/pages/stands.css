@@ -2,7 +2,13 @@
 .stand-tonight { font-size: 15px; line-height: 1.5; color: var(--text); margin: 0 0 14px; }
 .stand-entry-top h2 { margin: 0 0 5px; }
 .stand-entry-top .stand-state { display: block; }
-.stand-wind-line { font-size: 14px; font-weight: 500; line-height: 1.5; margin: 12px 0 14px; }
+/* Tonight's wind and the week's line: room kept from the first paint (two lines of
+   wind, two of the week), so Reserve stays where the thumb is going (I-08). */
+.stand-wind-slot { min-height: 84px; margin: 12px 0 14px; }
+/* On a narrow phone the wind line takes two lines of its own. */
+@media (max-width: 379.98px) { .stand-wind-slot { min-height: 104px; } }
+.stand-wind-line { font-size: 14px; font-weight: 500; line-height: 1.5; margin: 0 0 4px; }
+.stand-wind-wait { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
 /* The time the wind line is judged for. */
 .stand-wind-for { display: block; font-size: 12px; font-weight: 400; color: var(--text-dim); }
 .stand-entry > .map-button--primary { width: 100%; }
@@ -23,7 +29,7 @@
 .stand-now { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
 .stand-wind p { margin: 6px 0 10px; }
 .stand-wind-when { display: block; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
-.stand-wind a { color: var(--sand); font-size: 13px; }
+.stand-wind a { display: inline-flex; align-items: center; min-height: 44px; color: var(--sand); font-size: 13px; }
 /* A saved copy on screen (no signal): how old, and what it can't know. */
 .stand-fresh { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 13px; line-height: 1.5; color: var(--v-look); margin: 0 0 14px; }
 .stand-fresh button { min-height: 44px; min-width: 44px; background: none; border: 0; text-decoration: underline; font: inherit; color: var(--sand); padding: 8px; cursor: pointer; }

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import UTC, datetime, timezone
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -166,15 +166,127 @@ def _fetch_day_hourly(lat: float, lng: float, day: str, recent: bool, tz: str) -
                 _FETCHING.pop(key, None)
 
 
+def _split_days(hourly: dict, tz: str) -> dict:
+    """{day: that day's hourly}, from an answer covering several days: each hour goes
+    to its own day on the estate's clock, as a one-day answer has it."""
+    zone = ZoneInfo(tz)
+    days: dict = {}
+    for i, t in enumerate(hourly.get("time") or []):
+        if isinstance(t, int | float) and not isinstance(t, bool):
+            days.setdefault(datetime.fromtimestamp(t, zone).date().isoformat(), []).append(i)
+    return {
+        day: {field: [_nth(arr, i) for i in idx]
+              for field, arr in hourly.items() if isinstance(arr, list)}
+        for day, idx in days.items()
+    }
+
+
+def _nth(arr, i: int):
+    return arr[i] if arr and i < len(arr) else None
+
+
+def forecast_hours(
+    lat: float, lng: float, first: date, days: int, tz: str = "Europe/Madrid"
+) -> dict:
+    """Every forecast hour of `days` days from `first` (the estate's days), for the
+    hour-by-hour wind of the week (forecasting/wind_week.py).
+
+    One Open-Meteo call for the days that need it, not one per day, kept in the same
+    day copies weather_at reads: Tonight's wind at the sit and the hour it falls in
+    on the week's strip come from the same forecast. What can't be had is served as
+    weather_at serves it: the last good copy, marked stale; a day with none has no
+    hours.
+
+    {"hours": {unix seconds: {field: value}}, "fetched_at": when the oldest copy used
+    was fetched (aware) or None, "stale": whether any of it is an old copy kept
+    because Open-Meteo didn't answer}.
+    """
+    lat, lng = round(lat, 4), round(lng, 4)
+    wanted = [(first + timedelta(days=d)).isoformat() for d in range(days)]
+    keys = {d: (lat, lng, d, True, tz) for d in wanted}
+
+    def missing() -> list[str]:
+        return [d for d in wanted
+                if not (_DAY_CACHE.get(keys[d]) and _fresh(_DAY_CACHE[keys[d]], True))]
+
+    lock_key = ("days", lat, lng, wanted[0], days, tz)
+    if missing() and not _paused("forecast", lock_key):
+        lock = _lock_for(lock_key)
+        # Somebody else is fetching the week: serve the copies there are, or wait for
+        # theirs when there are none.
+        have_any = any(keys[d] in _DAY_CACHE for d in wanted)
+        got = (lock.acquire(blocking=False) if have_any
+               else lock.acquire(timeout=TIMEOUT_SECONDS + CONNECT_SECONDS + 1))
+        if got:
+            try:
+                todo = missing()  # fetched while this one waited
+                if todo and not _paused("forecast", lock_key):
+                    _fetch_days(lat, lng, todo, keys, tz, lock_key)
+            finally:
+                lock.release()
+                with _FETCHING_GUARD:
+                    if not lock.locked():
+                        _FETCHING.pop(lock_key, None)
+
+    hours: dict = {}
+    oldest: datetime | None = None
+    stale = False
+    for d in wanted:
+        had = _DAY_CACHE.get(keys[d])
+        if had is None or time.monotonic() - had[1] >= STALE_LIMIT_SECONDS:
+            continue
+        if not _fresh(had, True) and _FAILED & {keys[d], "forecast", lock_key}:
+            stale = True
+        if oldest is None or had[0] < oldest:
+            oldest = had[0]
+        hourly = had[2]
+        for i, t in enumerate(hourly.get("time") or []):
+            if isinstance(t, int | float) and not isinstance(t, bool):
+                hours[int(t)] = {key: _nth(hourly.get(field), i) for key, field in _FIELDS.items()}
+    return {"hours": hours, "fetched_at": oldest, "stale": stale}
+
+
+def _fetch_days(lat: float, lng: float, todo: list[str], keys: dict, tz: str, which) -> None:
+    """One call for the days from todo[0] to todo[-1], each kept as its own day."""
+    params = {
+        "latitude": lat, "longitude": lng, "hourly": HOURLY,
+        "timezone": tz, "start_date": todo[0], "end_date": todo[-1],
+        "timeformat": "unixtime",
+    }
+    try:
+        resp = httpx.get(FORECAST_URL, params=params, timeout=TIMEOUT)
+        resp.raise_for_status()
+        split = _split_days(resp.json().get("hourly", {}), tz)
+    except Exception as e:
+        log.warning("weather.fetch_failed", service="forecast", days=len(todo), error=str(e))
+        # A refusal is about the days asked for (too far ahead), not the service:
+        # Tonight's own forecast goes on being asked for.
+        paused = which if _refused(e) else "forecast"
+        _down_until[paused] = time.monotonic() + PAUSE_AFTER_FAILURE_SECONDS
+        _FAILED.add(paused)
+        return
+    if len(_DAY_CACHE) > 8192:
+        _DAY_CACHE.clear()
+        _FAILED.clear()
+    fetched_at = datetime.now(UTC)
+    for day, hourly in split.items():
+        if day in keys:
+            _DAY_CACHE[keys[day]] = (fetched_at, time.monotonic(), hourly)
+            _FAILED.discard(keys[day])
+    if split:
+        _FAILED.discard("forecast")
+        _FAILED.discard(which)
+
+
 def weather_at(lat: float, lng: float, when: datetime, tz: str = "Europe/Madrid") -> dict:
     """The hour nearest `when`. A forecast answer also says when it was fetched
     (`fetched_at`) and whether it is an old copy served because Open-Meteo didn't
     answer (`stale`)."""
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
+        when = when.replace(tzinfo=UTC)
     local = when.astimezone(ZoneInfo(tz))
     # Archive lags ~5 days; use the forecast endpoint for recent captures.
-    recent = (datetime.now(timezone.utc) - when).days < 5
+    recent = (datetime.now(UTC) - when).days < 5
     hourly, fetched_at, stale = _fetch_day_hourly(
         round(lat, 4), round(lng, 4), local.date().isoformat(), recent, tz
     )
