@@ -73,6 +73,7 @@ function trouble(c: Camera): ReactNode | null {
         : 'Photos not coming in. No photo fetch has worked for over 2 hours.'}{' '}
     <Link className="map-link" to="/settings#accounts">Camera logins</Link>
   </>
+  if (h.status === 'retired') return 'Retired. Left out of tonight’s plan, the alerts and Insights; its photos stay.'
   if (h.status === 'disconnected') return 'Not connected. No camera login here fetches it now; its photos so far stay.'
   if (h.status === 'quiet') return `${h.detail}. It sends photos only, so check it on your next visit.`
   if (h.status === 'offline') return c.last_report_at ? `Not checking in. Last heard ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'

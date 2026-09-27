@@ -307,6 +307,8 @@
   /* The tab links share the header row instead of wrapping onto a second one. */
   .layout--map .appbar { flex-wrap: nowrap; padding-top: max(6px, env(safe-area-inset-top)); padding-bottom: 6px; }
   .layout--map .topnav { order: 0; flex-basis: auto; }
+  /* Five round buttons don't fit down the side of a map this short: a row along the top. */
+  .map-fabs--right { flex-direction: row-reverse; }
 }
 @media (prefers-reduced-motion: reduce) {
   .bsheet, .map-fabs { transition: none; }
