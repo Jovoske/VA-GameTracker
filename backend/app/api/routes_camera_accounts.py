@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -184,7 +184,6 @@ class ImportSettingsBody(BaseModel):
 @router.post("")
 def add_account(
     body: AddAccountBody,
-    background: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -234,33 +233,13 @@ def add_account(
         ) from e
     account_id = str(acct.id)
 
-    # Pull this account's cameras + recent history right away (respects the pipeline lock;
-    # if busy, the 15-min scheduled sync picks the new account up automatically).
-    from app.api.routes_cameras import _pipeline_busy, _run_locked
+    # Pull this account's cameras + recent history right away, as a job of its own
+    # (pipeline.py login) under the pipeline lock. If a run holds it, the 15-min
+    # scheduled sync picks the new account's history up automatically.
+    from app import jobs
+    from app.api.routes_cameras import _pipeline_busy
 
-    started = False
-    if not _pipeline_busy():
-
-        def work(session: Session) -> None:
-            from app.ai.empty_filter import scan_unprocessed
-            from app.ai.species import classify_unclassified
-            from app.forecasting.exposure import recompute_camera_nights
-
-            if body.provider == "ubox":
-                from app.ingestion.ubox_sync import backfill_ubox_account
-
-                backfill_ubox_account(session, account_id)
-            else:
-                from app.ingestion.sync import backfill_account
-
-                backfill_account(session, account_id)
-            scan_unprocessed(session)
-            classify_unclassified(session)
-            recompute_camera_nights(session)
-
-        background.add_task(_run_locked, work)
-        started = True
-
+    started = not _pipeline_busy() and jobs.spawn("login", account_id)
     return {
         "id": account_id,
         "username": acct.username,

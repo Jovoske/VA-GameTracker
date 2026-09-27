@@ -48,6 +48,25 @@ requires_db = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def spawned(monkeypatch, tmp_path):
+    """Background jobs never start for real in a test, and their locks live in a
+    scratch folder: `spawned` lists the jobs the code under test asked for."""
+    from app import jobs
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "models_root", str(tmp_path / "data" / "models"))
+    monkeypatch.setattr(settings, "log_dir", str(tmp_path / "logs"))
+    started: list[tuple] = []
+
+    def spawn(mode, *args):
+        started.append((mode, *args))
+        return True
+
+    monkeypatch.setattr(jobs, "spawn", spawn)
+    return started
+
+
 @pytest.fixture(scope="session")
 def admin_engine():
     eng = create_engine(ADMIN_DSN, isolation_level="AUTOCOMMIT")

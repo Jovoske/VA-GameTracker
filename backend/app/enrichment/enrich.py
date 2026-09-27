@@ -33,7 +33,7 @@ def enrich_image(db: Session, image: Image) -> EnvSnapshot | None:
             EnvSnapshot.observed_at == image.captured_at,
         )
     )
-    if existing:
+    if existing and existing.source != "unavailable":
         return existing
 
     when = image.captured_at
@@ -43,6 +43,17 @@ def enrich_image(db: Session, image: Image) -> EnvSnapshot | None:
     local_date = when.astimezone(ZoneInfo(settings.estate_timezone)).date()
 
     w = weather_at(lat, lng, when, tz=settings.estate_timezone)
+    if existing:
+        # Stored while Open-Meteo was down: fill the weather in now if it answers.
+        if w.get("source", "unavailable") != "unavailable":
+            existing.source = w["source"]
+            for field in ("temp_c", "humidity_pct", "pressure_hpa", "wind_speed_kmh",
+                          "wind_gust_kmh", "rain_mm"):
+                setattr(existing, field, w.get(field))
+            existing.wind_dir_deg = _to_int(w.get("wind_dir_deg"))
+            existing.cloud_cover_pct = _to_int(w.get("cloud_cover_pct"))
+            db.flush()
+        return existing
     phase, illum = moon_phase(when)
     s = solar(lat, lng, local_date)
 

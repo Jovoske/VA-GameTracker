@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     media_root: str = "/data/media"
     models_root: str = "/data/models"
     media_retention_days: int = 30
+    # Where pipeline.py writes pipeline.log. Unset: the logs folder beside the data
+    # folder when there is one (C:\GameSense\logs), else <data>/logs (app.jobs).
+    log_dir: str = ""
 
     # CORS — frontend dev origins
     cors_origins: list[str] = [

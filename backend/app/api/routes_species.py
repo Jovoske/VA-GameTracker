@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.ai.species import GAME
 from app.api.deps import get_current_admin, get_current_user
 from app.core.db import get_db
 from app.forecasting.model import class_label
@@ -31,6 +32,9 @@ def list_species(_: User = Depends(get_current_user), db: Session = Depends(get_
             "huntable": s.huntable,
             "hidden": s.hidden,
             "is_priority": s.is_priority,
+            # Game on this estate (ai.species.GAME): Settings asks once about any
+            # other animal still in the advice from before new ones started off.
+            "game": s.id in GAME,
             "detections": int(counts.get(s.id, 0)),
         }
         for s in rows

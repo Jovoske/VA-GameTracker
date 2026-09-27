@@ -200,6 +200,10 @@ def flag_image(
         # Kept by hand: it shows on the map from now, so it is new to whoever hasn't
         # opened its camera since (routes_map.shown_after).
         image.processed_at = datetime.now(UTC)
+    elif image.processed_at is None:
+        # Decided by a hunter before the detector got to it: the detector never will
+        # now, and without this its night stayed "not checked" for good.
+        image.processed_at = datetime.now(UTC)
     image.is_empty_frame = body.is_empty
     image.reviewed = True
     db.commit()

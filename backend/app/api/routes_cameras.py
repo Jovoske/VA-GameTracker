@@ -1,21 +1,20 @@
 """Camera routes — list (with location), images, sync/backfill/scan, review, map placement."""
-import time
 import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app import jobs
+from app.ai.checking import photo_states
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
 from app.api.visibility import VISIBLE_ANIMAL
-from app.core.config import settings
 from app.core.db import get_db
 from app.health import camera_health
 from app.ingestion.logins import camera_logins
@@ -25,48 +24,29 @@ from app.notes import note_counts
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 
-# ── native-build task runner ─────────────────────────────────
-# The Docker build queued these to Celery; the native build has no broker, so they run
-# as FastAPI background tasks in the api process. The same lock file the scheduled
-# pipeline uses keeps a button press from overlapping the 15-min sync.
-def _lock_path() -> Path:
-    return Path(settings.models_root).parent / "pipeline.lock"
+# ── background jobs ───────────────────────────────────────────
+# The Docker build queued these to Celery; the native build has no broker. The buttons
+# start `pipeline.py` as a process of its own (app.jobs.spawn), under the same lock
+# as the scheduled runs, so the AI models never load into the web server and a press
+# can never overlap the 15-min sync.
+FETCH_REQUEST = "fetch_request"  # app_settings: when the Check button last asked
+# How long a requested check reads as "running" before its process has taken the lock.
+REQUEST_GRACE = timedelta(minutes=2)
 
 
 def _pipeline_busy() -> bool:
-    p = _lock_path()
-    return p.exists() and (time.time() - p.stat().st_mtime) < 3 * 3600
-
-
-def _run_locked(work) -> None:
-    lock = _lock_path()
-    try:
-        lock.write_text(f"api {int(time.time())}")
-        from app.core.db import SessionLocal
-
-        with SessionLocal() as db:
-            work(db)
-    finally:
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+    return jobs.holder("pipeline") is not None
 
 
 def _lock_started() -> datetime | None:
     """When the run holding the pipeline lock began, or None when nothing holds it."""
-    try:
-        return datetime.fromtimestamp(_lock_path().stat().st_mtime, UTC)
-    except FileNotFoundError:
-        return None
+    return jobs.busy_since("pipeline")
 
 
-def _sync_work(db: Session) -> None:
-    # The same run as the scheduled fetch (pipeline.py): both providers, then the AI
-    # pass, with one summary row the Check button reads (app.ingestion.fetch).
-    from app.ingestion.fetch import run_fetch
-
-    run_fetch(db)
+def _start(db: Session, mode: str, *args: str) -> None:
+    """Start a pipeline job, or say in words that it could not be started."""
+    if not jobs.spawn(mode, *args):
+        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
 
 
 @router.get("")
@@ -194,49 +174,40 @@ def mark_seen(
 
 
 @router.post("/sync")
-def trigger_sync(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+def trigger_sync(
+    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
+) -> dict:
     # `since` is what the Check button waits for: a fetch summary started after it
     # is this check's result; an older one is somebody else's.
     if _pipeline_busy():
         return {"status": "busy", "since": _lock_started(),
                 "note": "Already checking. New photos will show shortly."}
     since = datetime.now(UTC)
-    background.add_task(_run_locked, _sync_work)
+    _start(db, "sync")
+    jobs.note(db, FETCH_REQUEST, at=since)
     return {"status": "started", "since": since}
 
 
 @router.post("/backfill")
 def trigger_backfill(
-    background: BackgroundTasks,
-    months: int = Query(13, ge=1, le=24),
-    _: User = Depends(get_current_admin),
+    _: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    months: Annotated[int, Query(ge=1, le=24)] = 13,
 ) -> dict:
     if _pipeline_busy():
         return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
-
-    def work(db: Session) -> None:
-        from app.ingestion.sync import backfill_all
-
-        backfill_all(db, months=months)
-        _sync_work(db)
-
-    background.add_task(_run_locked, work)
+    _start(db, "backfill", str(months))
+    jobs.note(db, FETCH_REQUEST, at=datetime.now(UTC))
     return {"status": "started", "months": months}
 
 
 @router.post("/scan")
-def trigger_scan(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+def trigger_scan(
+    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
+) -> dict:
     if _pipeline_busy():
         return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
-
-    def work(db: Session) -> None:
-        from app.ai.empty_filter import scan_unprocessed
-        from app.ai.species import classify_unclassified
-
-        scan_unprocessed(db)
-        classify_unclassified(db)
-
-    background.add_task(_run_locked, work)
+    _start(db, "scan")
     return {"status": "started"}
 
 
@@ -247,6 +218,13 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
     from app.ingestion.fetch import latest_run
 
     row = latest_run(db)
+    asked = jobs.read_note(db, FETCH_REQUEST).get("at")
+    asked = datetime.fromisoformat(asked) if asked else None
+    if not _pipeline_busy() and asked is not None and datetime.now(UTC) - asked < REQUEST_GRACE and (
+        row is None or row.started_at is None or row.started_at < asked
+    ):
+        # Asked for, and its process is still starting: not yet anyone's result.
+        return {"status": "running", "started_at": asked}
     if _pipeline_busy():
         started = _lock_started()
         details = (row.details or {}) if row is not None else {}
@@ -324,6 +302,7 @@ def camera_images(
             for r in drows
         }
     counts = note_counts(db, ids)
+    states = photo_states(db, ids)
     return [{
         "id": str(i.id),
         "captured_at": i.captured_at,
@@ -336,4 +315,6 @@ def camera_images(
         "reviewed": i.reviewed,
         "animal_conf": i.animal_conf,
         "notes_count": counts.get(i.id, 0),
+        # "waiting" / "failed" while the AI has not finished with it (checking.photo_states).
+        "checking": states.get(i.id),
     } for i in rows]

@@ -100,25 +100,38 @@ def finish(db: Session, row: SyncLog, error: str | None = None) -> None:
     db.commit()
 
 
-def run_fetch(db: Session) -> dict:
-    """The whole routine run: fetch, look for animals, recount the nights."""
-    from app.ai.empty_filter import scan_unprocessed
-    from app.ai.species import classify_unclassified
+def check_and_recount(db: Session) -> tuple[dict, str | None]:
+    """The AI pass over what came in, then the night recount; (results, what went
+    wrong in words or None). Shared by the routine fetch and the one-off imports."""
+    from app.ai.checking import check_photos
     from app.forecasting.exposure import recompute_camera_nights
 
-    row, results = fetch_photos(db)
+    results: dict = {}
     error = None
     try:
-        results["scan"] = scan_unprocessed(db)
-        results["species"] = classify_unclassified(db)
-        # Exposure is the denominator under every statistic in the app, and it only
-        # becomes knowable once the frames are classified: an unprocessed night is not
-        # an observation yet. So it runs here, after the AI pass.
-        results["exposure"] = recompute_camera_nights(db)
+        results["ai"] = check_photos(db)
+        if results["ai"].get("status") == "stopped":
+            error = results["ai"].get("reason")
     except Exception as exc:
         db.rollback()
         log.error("fetch.ai_failed", error=str(exc))
         error = f"Looking for animals failed ({type(exc).__name__})"
+    try:
+        # Exposure is the denominator under every statistic in the app, and it only
+        # becomes knowable once the frames are checked: an unchecked night is not an
+        # observation yet. So it runs here, after the AI pass.
+        results["exposure"] = recompute_camera_nights(db)
+    except Exception as exc:
+        db.rollback()
+        log.error("fetch.exposure_failed", error=str(exc))
+    return results, error
+
+
+def run_fetch(db: Session) -> dict:
+    """The whole routine run: fetch, look for animals, recount the nights."""
+    row, results = fetch_photos(db)
+    checked, error = check_and_recount(db)
+    results.update(checked)
     row = db.get(SyncLog, row.id)
     if row is not None:
         finish(db, row, error)

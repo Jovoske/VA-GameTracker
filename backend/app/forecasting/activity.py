@@ -112,7 +112,9 @@ def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
         ).all()
     }
     start, end = map_night_window(min(nights))[0], map_night_window(max(nights))[1]
-    unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None))
+    # Given up on after failing is not "still checking": it would say so for good.
+    unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None),
+                     Image.ai_failed_at.is_(None))
     night = map_night_expr()
     sent = {
         (r[0], r[1]): (int(r[2]), int(r[3]))

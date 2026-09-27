@@ -90,13 +90,18 @@ def recompute_camera_nights(db: Session, *, camera_id=None) -> dict:
 
 
 def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
+    # Not checked: waiting for the detector or the species model, or given up on after
+    # failing. A model failure used to be stored as "checked, nothing named", so a
+    # broken AI read as nights watched with no animals in them.
+    from app.ai.checking import NOT_CHECKED
+
     night = night_expr()
     rows = db.execute(
         select(
             night.label("night"),
             func.count(Image.id).label("frames"),
             func.count(Image.id).filter(Image.is_empty_frame.is_(True)).label("empty"),
-            func.count(Image.id).filter(Image.processed_at.is_(None)).label("unprocessed"),
+            func.count(Image.id).filter(NOT_CHECKED).label("unprocessed"),
         )
         .where(Image.camera_id == cam.id)
         .group_by(night)
@@ -148,8 +153,8 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
             )
             states[cur] = ("PRESUMED_UP" if presumed else "UNKNOWN", 0, 0)
         elif row.unprocessed:
-            # Frames exist but the detector has not seen them. Counting this as
-            # "no animals" is the backlog artefact; it is not an observation yet.
+            # Frames exist but the AI has not seen them, or could not. Counting this
+            # as "no animals" is the backlog artefact; it is not an observation yet.
             states[cur] = ("UNPROCESSED", int(row.frames), int(row.empty))
         elif out_of_credits:
             # SPYPOINT telemetry says this camera hit its monthly photo limit and

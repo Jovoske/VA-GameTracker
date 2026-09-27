@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.ai.checking import COULD_NOT_CHECK, NOT_CHECKED_YET, photo_states
 from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.db import get_db
@@ -113,7 +114,9 @@ def feed(
 def _items(db: Session, rows) -> list[dict]:
     """Feed items for rows of (id, captured_at, camera_id, name), labelled the way
     every tile is: the photo's surest sighting of a species that is not hidden, or
-    "Animal" when nobody has named it. `notes_count` marks the team's notes on it."""
+    "Animal" when nobody has named it. `checking` is "waiting" or "failed" while the
+    AI has not finished with it, and the label says so. `notes_count` marks the
+    team's notes on it."""
     ids = [r.id for r in rows]
     labels: dict[uuid.UUID, tuple[str, str | None, int | None]] = {}
     if ids:
@@ -135,10 +138,14 @@ def _items(db: Session, rows) -> list[dict]:
                 d.group_size,
             )
     counts = note_counts(db, ids)
+    # A photo nobody has named is "Animal" only once the AI has looked at it.
+    states = photo_states(db, [i for i in ids if i not in labels])
+    unfinished = {"waiting": NOT_CHECKED_YET, "failed": COULD_NOT_CHECK}
 
     items = []
     for r in rows:
-        label, sid, size = labels.get(r.id, ("Animal", None, None))
+        unnamed = unfinished.get(states.get(r.id), "Animal")
+        label, sid, size = labels.get(r.id, (unnamed, None, None))
         items.append({
             "image_id": str(r.id),
             "file_url": f"/api/images/{r.id}/file",
@@ -149,6 +156,7 @@ def _items(db: Session, rows) -> list[dict]:
             "species_id": sid,
             "group_size": size,
             "notes_count": counts.get(r.id, 0),
+            "checking": states.get(r.id),
         })
     return items
 

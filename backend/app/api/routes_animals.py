@@ -7,6 +7,7 @@ clusters, not asserted identities.
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -253,15 +254,51 @@ def delete_animal(
     return {"ok": True}
 
 
+REID_STATUS = "reid_status"  # app_settings: what the last "Look for repeats" came to
+
+
 @router.post("/recompute")
 def recompute_animals(
-    _: User = Depends(get_current_admin), db: Session = Depends(get_db)
+    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
 ) -> dict:
     """Embed any new detections and regenerate candidate individuals.
 
-    Confirmed individuals are preserved; only unconfirmed candidates change. Runs
-    synchronously — fast once embeddings exist (the first pass embeds every crop).
+    Confirmed individuals are preserved; only unconfirmed candidates change. It runs
+    as a job of its own (`pipeline.py reid`, under the pipeline lock, waiting for a
+    running fetch to finish): the first pass embeds every crop, which is minutes of
+    work a phone request cannot wait through. Poll GET /animals/recompute/status.
     """
-    from app.ai.reid import recompute
+    from datetime import UTC, datetime
 
-    return recompute(db)
+    from app import jobs
+
+    if jobs.holder("reid") is not None:
+        return {"status": "busy", "note": "Already looking. This takes a few minutes."}
+    if not jobs.spawn("reid"):
+        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
+    jobs.note(db, REID_STATUS, state="queued", queued_at=datetime.now(UTC))
+    return {"status": "started", "note": "Looking for repeats. This takes a few minutes."}
+
+
+@router.get("/recompute/status")
+def recompute_status(
+    _: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Where the last "Look for repeats" is: queued, waiting (a photo fetch holds the
+    server), running, done (with what it found) or failed."""
+    from app import jobs
+
+    note = jobs.read_note(db, REID_STATUS)
+    state = note.get("state") or "never"
+    marked = jobs.holder("reid") is not None
+    if state in ("queued", "running") and not marked:
+        # Its process is starting, or it died without saying: starting is short.
+        from datetime import UTC, datetime, timedelta
+
+        since = note.get("started_at") or note.get("queued_at")
+        if since and datetime.now(UTC) - datetime.fromisoformat(since) > timedelta(minutes=2):
+            state = "failed"
+    elif state == "queued" and marked and jobs.holder("pipeline") is not None:
+        state = "waiting"
+    return {"state": state, "result": note.get("result"), "error": note.get("error"),
+            "finished_at": note.get("finished_at")}

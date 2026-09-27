@@ -5,6 +5,7 @@ the weather at processing time instead of when the animal was photographed.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -36,22 +37,34 @@ _FIELDS = {
 # the same camera-day makes a single Open-Meteo call instead of one per photo.
 _DAY_CACHE: dict = {}
 
+# Weather is looked up while photos are stored, so a slow Open-Meteo held every new
+# photo back by its timeout, once per photo. A short timeout, and after a failure no
+# calls for a while: those photos are stored without weather, and it is filled in
+# when they are next enriched (enrich.enrich_image redoes an "unavailable" one).
+TIMEOUT_SECONDS = 5
+PAUSE_AFTER_FAILURE_SECONDS = 600
+_down_until = 0.0
+
 
 def _fetch_day_hourly(lat: float, lng: float, day: str, recent: bool, tz: str) -> dict:
+    global _down_until
     key = (lat, lng, day, recent, tz)
     if key in _DAY_CACHE:
         return _DAY_CACHE[key]
+    if time.monotonic() < _down_until:
+        return {}
     url = FORECAST_URL if recent else ARCHIVE_URL
     params = {
         "latitude": lat, "longitude": lng, "hourly": HOURLY,
         "timezone": tz, "start_date": day, "end_date": day,
     }
     try:
-        resp = httpx.get(url, params=params, timeout=20)
+        resp = httpx.get(url, params=params, timeout=TIMEOUT_SECONDS)
         resp.raise_for_status()
         hourly = resp.json().get("hourly", {})
     except Exception as e:
         log.warning("weather.fetch_failed", error=str(e))
+        _down_until = time.monotonic() + PAUSE_AFTER_FAILURE_SECONDS
         return {}  # not cached, so a transient failure is retried later
     if len(_DAY_CACHE) > 8192:
         _DAY_CACHE.clear()

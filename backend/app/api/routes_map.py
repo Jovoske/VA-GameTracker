@@ -135,7 +135,9 @@ def night_frames(db: Session, camera_ids: list, night: date) -> dict:
     if not camera_ids:
         return {}
     start, end = night_window(night)
-    unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None))
+    # Given up on after failing is not "still checking": it would say so for good.
+    unchecked = and_(Image.is_empty_frame.is_(None), Image.original_path.isnot(None),
+                     Image.ai_failed_at.is_(None))
     rows = db.execute(
         select(Image.camera_id, func.count(Image.id), func.count(Image.id).filter(unchecked))
         .where(Image.camera_id.in_(camera_ids), Image.captured_at >= start, Image.captured_at < end)
