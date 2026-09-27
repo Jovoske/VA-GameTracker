@@ -28,12 +28,17 @@ QUIET_LOOKBACK = 30
 def _ago(dt: datetime | None, now: datetime) -> str:
     if dt is None:
         return "unknown"
+    if (now - dt).total_seconds() < 60:
+        return "just now"
     return _dur(dt, now) + " ago"
 
 
 def _dur(dt: datetime, now: datetime) -> str:
-    """Bare duration ("9d", "5h", "32m") for phrases like 'quiet for 9d'."""
-    s = (now - dt).total_seconds()
+    """Bare duration ("9d", "5h", "32m") for phrases like 'quiet for 9d'.
+
+    Never below nothing: a camera whose clock runs ahead (left on summer time after
+    the clocks go back) stamps photos in the future, which read "-40m ago" (G-23)."""
+    s = max(0.0, (now - dt).total_seconds())
     if s < 3600:
         return f"{int(s // 60)}m"
     if s < 86400:
@@ -120,8 +125,10 @@ def compute_alerts(db: Session) -> list[dict]:
             run += 1
         if run >= QUIET_NIGHTS:
             last = max(nights)
+            # `camera` lets Tonight leave it out when its "Changed" line is already
+            # about this camera, rather than say it twice (or the opposite).
             alerts.append({
-                "type": "quiet", "severity": "warn", "title": f"{c.name} quiet",
+                "type": "quiet", "severity": "warn", "title": f"{c.name} quiet", "camera": c.name,
                 "text": f"Nothing on its last {run} watched nights, since the night of "
                         f"{last.day} {last.strftime('%b')}. This camera usually sees more.",
             })

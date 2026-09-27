@@ -13,10 +13,16 @@ the AI models never load into the web server. Modes:
     python pipeline.py plan       # record tonight's claims before the night — daily, ~17:00
     python pipeline.py score      # grade the claims of finished nights — daily, ~11:00
     python pipeline.py reid       # "Look for repeats": embed new sightings, regroup them
+    python pipeline.py notify     # alerts that waited for a sit or quiet hours, and
+                                  # tonight's plan ~2 h before sunset — every 15 min
     python pipeline.py busy       # exit 3 while a run is working (deploy/update.ps1)
 
-Every mode but `sex` shares the "pipeline" lock (app.jobs): they load the CPU models
-or rebuild the exposure table, so they must never run on top of each other. `sync`
+Every mode but `sex` and `notify` shares the "pipeline" lock (app.jobs): they load
+the CPU models or rebuild the exposure table, so they must never run on top of each
+other. `notify` loads no model and takes a few seconds, so it never waits behind an
+hour of photo checking: it has a lock of its own, only so two runs of it don't
+overlap (and a second is not needed: every send is also guarded in the database).
+`sync`
 and the one-offs give way when it is held (the next fetch is 15 minutes off); `plan`,
 `score`, `reid` and a queued `sync` wait for it, and `plan`/`score` exit 1 if it never
 frees, so Task Scheduler shows a failure instead of a silent success. The lock is
@@ -49,7 +55,9 @@ from app.core.logging import configure_logging, get_logger  # noqa: E402
 
 log = get_logger("pipeline")
 
-MODES = ("sync", "backfill", "scan", "login", "sex", "plan", "score", "reid", "busy")
+MODES = ("sync", "backfill", "scan", "login", "sex", "plan", "score", "reid", "notify", "busy")
+# The modes that don't take the "pipeline" lock, and the lock each takes instead.
+OWN_LOCK = {"sex": "sexpass", "notify": "notify"}
 # plan and score wait this long for a running job (inside the tasks' 1 h limit).
 WAIT_SECONDS = int(os.environ.get("PIPELINE_WAIT_SECONDS", str(40 * 60)))
 POLL_SECONDS = 30
@@ -214,6 +222,23 @@ def _run(mode: str, args: list[str], db) -> int:
     return 0
 
 
+def _notify(db) -> int:
+    """What waited for a sit or quiet hours, then tonight's plan if it is due. One
+    failing never stops the other."""
+    from app.notifications.hold import deliver_held
+    from app.notifications.plan import send_daily_plan
+
+    failed = 0
+    for name, step in (("held", deliver_held), ("plan", send_daily_plan)):
+        try:
+            log.info("pipeline.notify", step=name, result=step(db))
+        except Exception:
+            db.rollback()
+            log.exception("pipeline.notify_failed", step=name)
+            failed = 1
+    return failed
+
+
 def _sex(db) -> int:
     from app.ai import vision_sex
 
@@ -232,10 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unknown mode: {mode!r} (use {'|'.join(MODES)})")
         return 2
     if mode == "busy":
-        # The deploy stands down while either lock is held, as it did when the cloud
-        # stag/hind pass shared the pipeline lock: a migration or a code swap must not
-        # land under a running pass.
-        for name in ("pipeline", "sexpass"):
+        # The deploy stands down while any of the locks is held, as it did when the
+        # cloud stag/hind pass shared the pipeline lock: a migration or a code swap
+        # must not land under a running pass (or a notify run, a few seconds long).
+        for name in ("pipeline", *OWN_LOCK.values()):
             h = jobs.holder(name)
             if h is not None:
                 print(f"busy: {h.owner} (pid {h.pid} on {h.host}) since {h.started.isoformat()}")
@@ -244,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     configure_logging(log_file=jobs.log_dir() / "pipeline.log")
-    name = "sexpass" if mode == "sex" else "pipeline"
+    name = OWN_LOCK.get(mode, "pipeline")
     marker = QUEUES.get((mode, tuple(argv[1:])))
     queued = None
     if marker:
@@ -270,7 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     jobs.run_under(lock)
     try:
         with SessionLocal() as db:
-            return _sex(db) if mode == "sex" else _run(mode, argv[1:], db)
+            if mode in OWN_LOCK:
+                return _sex(db) if mode == "sex" else _notify(db)
+            return _run(mode, argv[1:], db)
     except Exception:
         log.exception("pipeline.crashed", mode=mode)
         return 1

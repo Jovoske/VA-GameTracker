@@ -53,10 +53,14 @@ driving `backend/pipeline.py`.
 | `GameSense-Sex` | hourly | `sex` | cloud vision stag/hind pass (costs API credit) |
 | `GameSense-Plan` | 17:00 daily | `plan` | record tonight's claims **before** the night |
 | `GameSense-Score` | 11:00 daily | `score` | grade the claims of every finished night not graded yet (last 14 days) |
+| `GameSense-Notify` | every 15 min | `notify` | alerts that waited for a sit or quiet hours, as one message; tonight's plan push about 2 h before sunset |
 
-Sighting notifications need no task of their own: the dispatcher runs at the end
-of every classification pass, so the `sync` task carries it. See
-[Notifications](17-notifications.md).
+Sighting notifications are sent by the dispatcher at the end of every
+classification pass, so the `sync` task carries them. `notify` is for what can't
+wait for new photos: the message after a sit or someone's quiet hours, and the
+daily plan push, which Task Scheduler can't anchor to sunset (it moves by three
+hours over the season), so the task runs every 15 minutes and sends the plan once
+it is due, once a day. See [Notifications](17-notifications.md).
 
 Two optional NSSM services carry the Suntek 4G camera's photos in over FTP; see the
 [Suntek guide](14-suntek-ftp.md) and `deploy/install-ftp.ps1`:
@@ -72,7 +76,7 @@ forever, and the app is back to making claims nobody checks. Order matters:
 `plan` must run before dark or it is not a forecast, and `score` must run after
 the night's photos have synced and been classified.
 
-Register the two new ones (idempotent, also preflights the backup path):
+Register them (idempotent: `plan`, `score` and `notify`; also preflights the backup path):
 
 ```powershell
 Invoke-Command -ComputerName Db01 {
@@ -82,7 +86,7 @@ Invoke-Command -ComputerName Db01 {
 
 ### The pipeline lock
 
-Every `pipeline.py` mode but `sex` takes one lock, `C:\GameSense\data\pipeline.lock`
+Every `pipeline.py` mode but `sex` and `notify` takes one lock, `C:\GameSense\data\pipeline.lock`
 (`backend/app/jobs.py`), so no two runs ever hold the database and the CPU models at
 once. The lock is created atomically and names its owner (the mode, process id, host
 and start time); the run touches it every minute while it works. A lock whose run
@@ -106,7 +110,10 @@ ever removes its own lock.
 - The cloud stag/hind pass (`sex`) has its own lock (`sexpass.lock`): it needs no
   local model, and it must not hold the photo fetch up for an hour. A deploy still
   waits for it, as it did when the pass shared the pipeline lock (`pipeline.py busy`
-  answers busy for either).
+  answers busy for any of them).
+- `notify` has its own lock too (`notify.lock`), so the plan push is never late
+  behind an hour of photo checking; two `notify` runs never overlap, and each send
+  is also guarded in the database (one plan push per person per night).
 
 The app's buttons (Check for new photos, a new camera login's first import, Look for
 repeats, the stag/hind pass) start `pipeline.py` as a process of its own under the

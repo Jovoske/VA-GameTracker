@@ -630,6 +630,16 @@ class NotificationPref(Base):
     muted_camera_ids: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
+    # Quiet hours on the estate's clock (22:30 to 07:00 runs over midnight); both or
+    # neither. Nothing buzzes inside them: what comes in waits, and arrives as one
+    # message when they end (app.notifications.hold).
+    quiet_start: Mapped[time | None] = mapped_column(Time)
+    quiet_end: Mapped[time | None] = mapped_column(Time)
+    # Opted in to tonight's plan, once a day about two hours before sunset
+    # (app.notifications.plan).
+    plan_push: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -706,8 +716,15 @@ class Notification(Base):
     image_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("images.id", ondelete="SET NULL")
     )
-    # sent / failed / no_subscription — how delivery went, for the settings screen.
+    # How delivery went, for the settings screen: sent, updated (a quiet update of a
+    # banner already on the phone), held (waiting for a sit or quiet hours to end),
+    # in_summary (went out in the one message after them), skipped, failed,
+    # no_subscription.
     push_status: Mapped[str | None] = mapped_column(String)
+    # What a sighting counted ({"visits", "cameras": {name: visits}, "first_at",
+    # "latest_at"}), so a later update or the message after a sit can add them up;
+    # "held" says why it waited, and a plan names its "night".
+    detail: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -82,6 +82,10 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
         assert _columns(eng, "sits")["wind_at"] == "timestamp with time zone"
         assert _columns(eng, "cameras")["clock_ahead_min"] == "integer"
+        prefs = _columns(eng, "notification_prefs")
+        assert prefs["quiet_start"] == "time without time zone"
+        assert prefs["plan_push"] == "boolean"
+        assert _columns(eng, "notifications")["detail"] == "jsonb"
     finally:
         eng.dispose()
 
@@ -149,6 +153,8 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "wind_at" in _columns(eng, "sits")
         assert {"clock_ahead_min", "clock_ok_photos"} <= set(_columns(eng, "cameras"))
         assert "received_at" in _columns(eng, "images")
+        assert {"quiet_start", "quiet_end", "plan_push"} <= set(_columns(eng, "notification_prefs"))
+        assert "detail" in _columns(eng, "notifications")
     finally:
         eng.dispose()
 
@@ -1184,5 +1190,70 @@ def test_camera_location_custom_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert {"location_is_custom", "provider_lat", "provider_lon"} <= set(
             _columns(eng, "cameras"))
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_quiet_alerts_and_plan_push_upgrade_down_and_up_again(fresh_db):
+    """0029 on a real 0027 database: everyone's alert choices and past alerts are
+    kept, nobody has quiet hours or the plan push until they turn them on, and the
+    alerts survive going down and up again."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0027_camera_location_custom")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0027 shape first.
+            for col in ("quiet_start", "quiet_end", "plan_push"):
+                c.execute(text(f"ALTER TABLE notification_prefs DROP COLUMN {col}"))
+            c.execute(text("ALTER TABLE notifications DROP COLUMN detail"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            user = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'ana@x.local','h','member') RETURNING id"
+            ), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO notification_prefs (user_id,enabled,species_ids,muted_camera_ids) "
+                "VALUES (:u,true,'[\"wild_boar\"]'::jsonb,'[]'::jsonb)"), {"u": user})
+            c.execute(text(
+                "INSERT INTO notifications (id,user_id,kind,title,body,push_status,created_at) "
+                "VALUES (gen_random_uuid(),:u,'sighting','Wild boar at PL19','1 visit at 22:14.',"
+                "'sent',now())"), {"u": user})
+
+        command.upgrade(cfg, "0029_quiet_alerts_and_plan_push")
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT enabled, species_ids, quiet_start, quiet_end, plan_push "
+                "FROM notification_prefs")).one()) == (True, ["wild_boar"], None, None, False)
+            assert tuple(c.execute(text(
+                "SELECT title, push_status, detail FROM notifications")).one()) == (
+                "Wild boar at PL19", "sent", None)
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("UPDATE notification_prefs SET quiet_start='23:00', "
+                           "quiet_end='07:00', plan_push=true"))
+            c.execute(text("UPDATE notifications SET detail='{\"visits\": 1}'::jsonb"))
+
+        command.downgrade(cfg, "0027_camera_location_custom")
+        assert "plan_push" not in _columns(eng, "notification_prefs")
+        assert "detail" not in _columns(eng, "notifications")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM notifications")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0027_camera_location_custom")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"quiet_start", "quiet_end", "plan_push"} <= set(
+            _columns(eng, "notification_prefs"))
+        assert "detail" in _columns(eng, "notifications")
     finally:
         eng.dispose()

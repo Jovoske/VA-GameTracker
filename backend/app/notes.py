@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.models import Camera, Image, Notification, NotificationPref, PhotoNote, User
-from app.notifications import push
+from app.notifications import hold, push
 from app.people import name_for
 
 log = get_logger(__name__)
@@ -171,21 +171,27 @@ def tell_team(
 
 
 def deliver(db: Session, notification_ids: list) -> dict:
-    """Push each record to its person's devices and note how it went."""
+    """Push each record to its person's devices and note how it went.
+
+    Someone sitting, or inside their quiet hours, is told after, in one message with
+    everything else that waited (app.notifications.hold)."""
     sent = 0
-    for n in db.scalars(select(Notification).where(Notification.id.in_(notification_ids))).all():
+    now = datetime.now(UTC)
+    rows = db.scalars(select(Notification).where(Notification.id.in_(notification_ids))).all()
+    on = hold.sitting(db, now, {n.user_id for n in rows})
+    for n in rows:
+        why = hold.reason(db.get(NotificationPref, n.user_id), n.user_id, now, on)
+        if why:
+            n.push_status = hold.HELD
+            n.detail = {"held": why}
+            continue
         result = push.send_to_user(db, n.user_id, {
             "title": n.title, "body": n.body, "url": n.url,
             # One banner per photo: a second note on it replaces the first.
-            "tag": f"note-{n.image_id}",
+            "tag": f"note-{n.image_id}", "renotify": True,
             "at": n.created_at.isoformat(),
         })
-        if result["sent"]:
-            n.push_status = "sent"
-        elif result["subscriptions"] == 0:
-            n.push_status = "no_subscription"
-        else:
-            n.push_status = "failed"
+        n.push_status = push.delivery(result)
         sent += result["sent"]
     db.commit()
     log.info("notes.told_team", notifications=len(notification_ids), pushed=sent)
