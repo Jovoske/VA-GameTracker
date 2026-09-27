@@ -415,6 +415,66 @@ def test_a_nearly_full_disk_stops_the_download_and_says_why(db_session, monkeypa
     assert called == ["spypoint", "ubox"] and row.status == "ok"
 
 
+@requires_db
+@pytest.mark.parametrize("provider", ["spypoint", "ubox"])
+def test_a_new_login_and_the_history_pull_wait_for_room_too(
+    db_session, estate, monkeypatch, provider,
+):
+    """A new login's first import and "Get older photos" are the biggest downloads of
+    all: on a nearly full disk they download nothing either, and the Check button and
+    Settings say why (R7BE-5). The photos already in are still checked."""
+    import pipeline
+    from app.ingestion import fetch, sync, ubox_sync
+    from app.models import CameraAccount
+
+    pulled, checked = [], []
+    for module, name in ((sync, "backfill_all"), (sync, "backfill_account"),
+                         (ubox_sync, "backfill_ubox_account")):
+        monkeypatch.setattr(module, name, lambda *a, _n=name, **kw: pulled.append(_n) or {})
+    monkeypatch.setattr(fetch, "check_and_recount",
+                        lambda db: checked.append(True) or ({"ai": {}}, None))
+    monkeypatch.setattr(pipeline, "plan_catch_up", lambda db: None)
+    monkeypatch.setattr(ops, "disk_free", lambda path=None: 2 * 1024**3)
+    login = CameraAccount(estate_id=estate.id, provider=provider, username="guest",
+                          password_enc="x")
+    db_session.add(login)
+    db_session.commit()
+    for mode, args in (("backfill", ["13"]), ("login", [str(login.id)])):
+        assert pipeline._run(mode, args, db_session) == 0
+        row = fetch.latest_run(db_session)
+        assert row.status == "error" and row.images_downloaded == 0
+        assert row.details["stage"] == "done" and row.finished_at is not None
+        assert row.details["problems"] == [{
+            "label": "Server disk",
+            "error": "Nearly full (2.0 GB free). The photos wait on the cameras and come in "
+                     "once there is room."}]
+    assert pulled == [] and checked == [True, True]
+    # With room, they download as before.
+    monkeypatch.setattr(ops, "disk_free", lambda path=None: 50 * 1024**3)
+    pipeline._run("backfill", ["13"], db_session)
+    pipeline._run("login", [str(login.id)], db_session)
+    first = "backfill_ubox_account" if provider == "ubox" else "backfill_account"
+    assert pulled == ["backfill_all", first]
+
+
+def test_a_test_database_is_named_in_any_form_of_dsn():
+    """The laptop DSN in the README has no query string: the test databases must still
+    be databases of their own, not the server's postgres one (R7BE-8)."""
+    from .conftest import alembic_config, dsn_for
+
+    laptop = "postgresql+psycopg://postgres:postgres@localhost:5432/"
+    assert dsn_for("gs_x", laptop + "postgres") == laptop + "gs_x"
+    ci = "postgresql+psycopg://postgres:p%40ss@localhost/{}?sslmode=disable"
+    assert dsn_for("gs_x", ci.format("postgres")) == ci.format("gs_x")
+    from sqlalchemy.engine import make_url
+
+    socket = dsn_for("gs_x", "postgresql+psycopg://postgres@/postgres?host=/tmp&port=55432")
+    url = make_url(socket)
+    assert url.database == "gs_x" and dict(url.query) == {"host": "/tmp", "port": "55432"}
+    # alembic's config reads % as an interpolation: the DSN must come back as it went in.
+    assert alembic_config(socket).get_main_option("sqlalchemy.url") == socket
+
+
 # ── a deploy holds every job off (H-09) ───────────────────────────────────────
 
 
@@ -552,12 +612,12 @@ def restored_db(admin_engine):
     """A second database, for the restored copy (fresh_db is the live one here)."""
     from app.core.db import Base
 
-    from .conftest import ADMIN_DSN
+    from .conftest import dsn_for
 
     name = f"gs_restored_{uuid.uuid4().hex[:10]}"
     with admin_engine.connect() as c:
         c.execute(text(f'CREATE DATABASE "{name}"'))
-    dsn = ADMIN_DSN.replace("/postgres?", f"/{name}?")
+    dsn = dsn_for(name)
     eng = create_engine(dsn)
     Base.metadata.create_all(eng)
     eng.dispose()
@@ -671,14 +731,43 @@ def test_the_update_takes_tested_commits_and_keeps_its_timing():
         assert undo in fail, undo
 
 
-def test_every_task_is_registered_and_keeps_its_errors():
+TASKS = ("GameSense-Update", "GameSense-Sync", "GameSense-Notify", "GameSense-Sex",
+         "GameSense-Plan", "GameSense-Score", "GameSense-Backup", "GameSense-RestoreCheck")
+
+
+def test_every_task_keeps_its_errors_in_a_file_of_its_own():
+    """cmd.exe keeps a `2>>` redirect open, and shut to other writers, until the job
+    ends: with one file for every task, a task starting while another ran never
+    started at all (review R7BE-1). Each writes logs\\task-<job>.err.log, named after
+    what it runs, and update.ps1 and backup.ps1 roll those over."""
+    import re
+
     script = (DEPLOY / "register-tasks.ps1").read_text()
-    for task in ("GameSense-Update", "GameSense-Sync", "GameSense-Notify", "GameSense-Sex",
-                 "GameSense-Plan", "GameSense-Score", "GameSense-Backup",
-                 "GameSense-RestoreCheck"):
+    for task in TASKS:
         assert f"'{task}'" in script, task
     assert "(Every 10) 120" in script  # the update: every 10 minutes, any hour
-    assert "tasks-stderr.log" in script
+    runs = re.findall(r"\((?:Pipeline|Script)-Action '([^']+)'\)", script)
+    jobs_run = [Path(r).stem for r in runs]
+    assert len(jobs_run) == len(TASKS) and len(set(jobs_run)) == len(jobs_run), jobs_run
+    for action in ("function Pipeline-Action", "function Script-Action"):
+        body = script[script.index(action):script.index("\n}", script.index(action))]
+        assert '1>NUL 2>>`"$(Task-Errors' in body, action
+    assert 'function Task-Errors([string]$Job) { return "$logs\\task-$Job.err.log" }' in script
+    assert "tasks-stderr.log" not in script
+    for rolls in ("update.ps1", "backup.ps1"):
+        assert "Limit-TaskLogs $logs" in (DEPLOY / rolls).read_text(), rolls
+
+
+def test_the_jobs_log_no_line_per_http_request():
+    """stderr is what a task's error file keeps: httpx's INFO line for every photo
+    download (a signed address each) buried the reason a job died (R7BE-7)."""
+    import logging
+
+    from app.core.logging import configure_logging
+
+    configure_logging()
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).getEffectiveLevel() == logging.WARNING, name
 
 
 def _pwsh() -> str | None:
@@ -707,3 +796,257 @@ def test_the_deploy_scripts_parse():
         code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
         for newer in ("??", "?.", "&&", "||", "-Parallel", "ConvertFrom-Json -AsHashtable"):
             assert newer not in code, f"{f.name}: {newer} is not in PowerShell 5.1"
+
+
+# ── the deploy scripts, run (with pwsh; Windows-only commands stood in for) ───────
+
+needs_pwsh = pytest.mark.skipif(_pwsh() is None, reason="PowerShell (pwsh) is not installed here")
+
+
+def _ps(tmp_path: Path, body: str, timeout: int = 120):
+    """Run `body` as a PowerShell script; (exit code, output)."""
+    import subprocess
+
+    script = tmp_path / f"run-{uuid.uuid4().hex[:6]}.ps1"
+    script.write_text(body, encoding="utf-8")
+    run = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(script)],
+                         capture_output=True, text=True, timeout=timeout)
+    return run.returncode, run.stdout + run.stderr
+
+
+def _shim(path: Path, target: str, env: str = "") -> None:
+    """A stand-in for a Windows tool: `target` with the arguments' \\ turned into /
+    (the scripts build Windows paths, which reach a native tool as they are)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/bash\n" + env +
+                    'args=(); for a in "$@"; do args+=("${a//\\\\//}"); done\n'
+                    f'exec {target} "${{args[@]}}"\n')
+    path.chmod(0o755)
+
+
+def _server(tmp_path: Path, **env: str) -> Path:
+    """A fake C:\\GameSense: its .env, a data folder, and the photo folder."""
+    root = tmp_path / "GameSense"
+    backend = root / "app" / "backend"
+    backend.mkdir(parents=True)
+    (root / "data" / "models").mkdir(parents=True)
+    values = {"DATABASE_URL": "postgresql+psycopg://gs:pw@localhost:5432/gamesense",
+              "MODELS_ROOT": str(root / "data" / "models"),
+              "MEDIA_ROOT": str(root / "data" / "media"),
+              "BACKUP_DIR": str(tmp_path / "D" / "GameSense-Backup"), **env}
+    (backend / ".env").write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+    return root
+
+
+@needs_pwsh
+def test_every_task_is_registered_with_its_own_error_file_and_its_start(tmp_path):
+    """register-tasks.ps1 run for real, Task Scheduler stood in for: eight tasks, no
+    two writing the same error file, none running twice at once, the update every 10
+    minutes from midnight (the owner's timing) and the others a minute or two apart."""
+    root = _server(tmp_path)
+    for f in (root / "venv" / "Scripts" / "python.exe", root / "app" / "backend" / "pipeline.py"):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+    code, out = _ps(tmp_path, f"""
+$global:tasks = @()
+function global:New-ScheduledTaskAction {{ [CmdletBinding()]
+    param($Execute, $WorkingDirectory, $Argument)
+    [pscustomobject]@{{ Execute = $Execute; Argument = $Argument }} }}
+function global:New-ScheduledTaskTrigger {{ [CmdletBinding()] param([switch]$Once, [switch]$Daily,
+    [switch]$Weekly, $At, $RepetitionInterval, $DaysOfWeek)
+    $every = $null; if ($RepetitionInterval) {{ $every = $RepetitionInterval.TotalMinutes }}
+    [pscustomobject]@{{ At = ([datetime]$At).ToString('HH:mm'); Every = $every }} }}
+function global:New-ScheduledTaskPrincipal {{ [CmdletBinding()]
+    param($UserId, $LogonType, $RunLevel) 'SYSTEM' }}
+function global:New-ScheduledTaskSettingsSet {{ [CmdletBinding()] param([switch]$StartWhenAvailable,
+    $MultipleInstances, [switch]$DontStopIfGoingOnBatteries, [switch]$AllowStartIfOnBatteries,
+    $ExecutionTimeLimit) [pscustomobject]@{{ Multiple = "$MultipleInstances" }} }}
+function global:Get-ScheduledTask {{ [CmdletBinding()] param($TaskName) $null }}
+function global:Register-ScheduledTask {{ [CmdletBinding()] param($TaskName, $Action, $Trigger,
+    $Principal, $Settings, $Description)
+    $global:tasks += [pscustomobject]@{{ Name = $TaskName; Execute = $Action.Execute;
+        Argument = $Action.Argument; At = $Trigger.At; Every = $Trigger.Every;
+        Multiple = $Settings.Multiple }} }}
+& '{DEPLOY / "register-tasks.ps1"}' -Root '{root}' *> $null
+'TASKS=' + ($global:tasks | ConvertTo-Json -Compress)
+""")
+    assert code == 0, out
+    import re
+
+    tasks = {t["Name"]: t for t in json.loads(out.split("TASKS=", 1)[1].strip())}
+    assert sorted(tasks) == sorted(TASKS)
+    errors = {}
+    for name, t in tasks.items():
+        assert t["Execute"] == "cmd.exe" and t["Multiple"] == "IgnoreNew", t
+        m = re.search(r' 1>NUL 2>>"([^"]+)"', t["Argument"])
+        assert m, t["Argument"]
+        errors[name] = m.group(1)
+    assert len(set(errors.values())) == len(errors), errors
+    assert errors["GameSense-Sync"].endswith("task-sync.err.log")
+    assert errors["GameSense-Backup"].endswith("task-backup.err.log")
+    starts = {n: (t["At"], t["Every"]) for n, t in tasks.items()}
+    assert starts == {
+        "GameSense-Update": ("00:00", 10), "GameSense-Sync": ("00:01", 15),
+        "GameSense-Notify": ("00:02", 15), "GameSense-Sex": ("00:04", 60),
+        "GameSense-Plan": ("17:00", None), "GameSense-Score": ("11:00", None),
+        "GameSense-Backup": ("03:07", None), "GameSense-RestoreCheck": ("04:37", None),
+    }
+
+
+def _backup_run(tmp_path: Path, root: Path, during: str = "") -> tuple[int, dict, str]:
+    """backup.ps1 with robocopy stood in for: it copies the photo folder (thumbnails
+    left out), then runs `during`, which happens while the copy is still going."""
+    dump = tmp_path / "pg_stub"
+    dump.write_text('#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = "-f" ] && echo dump > "$2"; '
+                    "shift; done\nexit 0\n")
+    dump.chmod(0o755)
+    env = root / "app" / "backend" / ".env"
+    env.write_text(env.read_text() + f"PGDUMP={dump}\nPGRESTORE={dump}\n")
+    code, out = _ps(tmp_path, f"""
+function global:robocopy {{
+    $src = $args[0]; $dst = $args[1]
+    New-Item -ItemType Directory -Force $dst | Out-Null
+    Get-ChildItem -Force $src | Where-Object Name -ne 'thumbs' |
+        Copy-Item -Recurse -Force -Destination $dst
+    {during}
+    $global:LASTEXITCODE = 1
+}}
+& '{DEPLOY / "backup.ps1"}' -Root '{root}'
+exit $LASTEXITCODE
+""")
+    status = json.loads((root / "data" / "backup-status.json").read_text(encoding="utf-8-sig"))
+    return code, status, out
+
+
+def _photos(root: Path, *names: str) -> Path:
+    night = root / "data" / "media" / "estate-1" / "camera-1" / "2026-09-27"
+    night.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (night / name).write_bytes(b"jpeg")
+    thumbs = root / "data" / "media" / "thumbs" / "ab"
+    thumbs.mkdir(parents=True, exist_ok=True)
+    (thumbs / "ab12.webp").write_bytes(b"webp")
+    return night
+
+
+@needs_pwsh
+def test_a_photo_that_arrives_during_the_backup_is_the_next_nights(tmp_path):
+    """The 03:00 fetch writes a photo (and the .tmp of one still downloading) into a
+    folder the copy has already walked: the night's backup is still good (R7BE-2)."""
+    root = _server(tmp_path)
+    night = _photos(root, "sp-1.jpg", "sp-2.jpg")
+    code, status, out = _backup_run(tmp_path, root, during=(
+        f"Set-Content -Path '{night / 'sp-3.jpg'}' -Value 'jpeg'; "
+        f"Set-Content -Path '{night / 'tmpab12.tmp'}' -Value 'partial'"))
+    assert code == 0, out
+    assert status["ok"] is True and status["error"] is None, status
+    assert (status["photos_on_server"], status["photos_in_backup"]) == (2, 2)
+    assert status["last_ok_at"] == status["finished_at"]
+
+
+@needs_pwsh
+def test_a_photo_missing_from_the_backup_fails_the_night(tmp_path):
+    root = _server(tmp_path)
+    _photos(root, "sp-1.jpg", "sp-2.jpg")
+    copied = tmp_path / "D" / "GameSense-Backup" / "media" / "estate-1" / "camera-1" / "2026-09-27"
+    code, status, out = _backup_run(tmp_path, root, during=(
+        f"Remove-Item -Force '{copied / 'sp-2.jpg'}'"))
+    assert code == 1, out
+    assert status["ok"] is False and status["last_ok_at"] is None
+    assert status["error"] == ("1 of the server's 2 photos aren't in the backup "
+                               "(see backup-media.log).")
+
+
+@needs_pwsh
+def test_no_photo_folder_is_a_failed_backup_not_a_good_one(tmp_path):
+    """MEDIA_ROOT pointing where there is nothing (moved, or set only in the service's
+    environment): no photo was backed up, so it is not a good backup (R7BE-3)."""
+    moved = tmp_path / "media-moved"
+    root = _server(tmp_path, MEDIA_ROOT=str(moved))
+    code, status, out = _backup_run(tmp_path, root)
+    assert code == 1, out
+    assert status["ok"] is False and status["photos_on_server"] is None
+    assert status["error"] == f"The photo folder {moved} isn't there, so no photos were backed up."
+    assert status["dump"]  # the database was still backed up
+
+
+def _git_server(tmp_path: Path) -> tuple[Path, str, str]:
+    """A fake server whose app is a clone at B, B deployed, and origin's deploy branch
+    at A, older (CI made it at its first green commit after main had put B live)."""
+    import subprocess
+
+    def git(*args, cwd):
+        return subprocess.run(["git", "-c", "user.email=t@x", "-c", "user.name=t",
+                               "-c", "commit.gpgsign=false", *args], cwd=cwd, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    src = tmp_path / "src"
+    (src / "backend").mkdir(parents=True)
+    git("init", "-q", "-b", "main", cwd=src)
+    (src / "backend" / "x.py").write_text("A = 1\n")
+    git("add", "-A", cwd=src)
+    git("commit", "-qm", "A: start", cwd=src)
+    a = git("rev-parse", "HEAD", cwd=src)
+    (src / "backend" / "x.py").write_text("A = 2\n")
+    git("commit", "-qam", "B: on main", cwd=src)
+    b = git("rev-parse", "HEAD", cwd=src)
+    origin = tmp_path / "origin.git"
+    git("init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+    git("push", "-q", str(origin), "main", f"{a}:refs/heads/deploy", cwd=src)
+    root = tmp_path / "GameSense"
+    git("clone", "-q", str(origin), str(root / "app"), cwd=tmp_path)
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "deployed.sha").write_text(b)
+    (root / "app" / "backend" / ".env").write_text(f"MODELS_ROOT={root / 'data' / 'models'}\n")
+    _shim(root / "tools" / "git" / "cmd" / "git.exe", "git")
+    # pipeline.py busy: nothing runs.
+    (root / "venv" / "Scripts").mkdir(parents=True)
+    (root / "venv" / "Scripts" / "python.exe").write_text("#!/bin/bash\nexit 0\n")
+    (root / "venv" / "Scripts" / "python.exe").chmod(0o755)
+    return root, a, b
+
+
+@needs_pwsh
+def test_a_deploy_branch_behind_what_runs_is_waited_for_not_deployed(tmp_path):
+    """Deploys only go forward: CI making the branch at a commit older than the one
+    main already put live must not roll the server back to it (R7BE-4)."""
+    import subprocess
+
+    root, a, b = _git_server(tmp_path)
+    for _ in range(2):
+        code, out = _ps(tmp_path, f"& '{DEPLOY / 'update.ps1'}' -Root '{root}'\nexit $LASTEXITCODE")
+        assert code == 0, out
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root / "app", check=True,
+                          capture_output=True, text=True).stdout.strip()
+    assert head == b
+    status = json.loads((root / "data" / "deploy-status.json").read_text(encoding="utf-8-sig"))
+    assert status["state"] == "current" and status["source"] == "deploy"
+    assert status["running"] == b and status["behind"] == a and status["failed"] is None
+    assert status["waiting_for_tests"] == 0
+    log = (root / "logs" / "update.log").read_text()
+    assert log.count("wait: ") == 1 and "update: " not in log  # said once, nothing deployed
+
+
+@needs_pwsh
+def test_the_restore_test_needs_room_on_the_database_disk(tmp_path):
+    """A restore writes a second copy of the database on the live one's disk; with no
+    room for it, the test fails in words and nothing is restored (R7BE-6)."""
+    calls = tmp_path / "psql-calls.log"
+    psql = tmp_path / "psql_stub"
+    psql.write_text(f'#!/bin/bash\necho "$@" >> {calls}\n'
+                    'case "$*" in *pg_database_size*) echo 1099511627776000;; esac\nexit 0\n')
+    psql.chmod(0o755)
+    root = _server(tmp_path, PSQL=str(psql), PGRESTORE=str(psql))
+    dumps = tmp_path / "D" / "GameSense-Backup" / "db"
+    dumps.mkdir(parents=True)
+    (dumps / "gamesense-20260927-030700.dump").write_bytes(b"dump")
+    _shim(root / "venv" / "Scripts" / "python.exe", os.sys.executable,
+          env=f"export PYTHONPATH={BACKEND}\n")
+    code, out = _ps(tmp_path,
+                    f"& '{DEPLOY / 'restore-check.ps1'}' -Root '{root}'\nexit $LASTEXITCODE")
+    assert code == 1, out
+    result = json.loads((root / "data" / "restore-check.json").read_text(encoding="utf-8-sig"))
+    assert result["ok"] is False
+    assert result["error"].startswith("Not enough room on the server's disk to test the restore")
+    assert "Nothing was restored." in result["error"]
+    assert "CREATE DATABASE" not in calls.read_text()

@@ -27,7 +27,7 @@ env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "22"
   PLAYWRIGHT_VERSION: "1.56.1"
-  # tests/conftest.py makes a database per test by swapping the "/postgres?" in this.
+  # tests/conftest.py makes a database per test on this server (dsn_for).
   GAMESENSE_TEST_DSN: postgresql+psycopg://postgres:postgres@localhost:5432/postgres?sslmode=disable
 
 jobs:
@@ -59,6 +59,13 @@ jobs:
         env:
           GAMESENSE_REQUIRE_DB: "1"
         run: python -m pytest -q
+      - name: The Suntek camera receivers' tests (a deploy restarts them too)
+        # update.ps1 restarts GameSenseFTP, GameSenseFTPImport and GameSenseMail on
+        # every deploy. Two of these files share a name, hence importlib mode.
+        run: |
+          pip install -r ftp-receiver/requirements.txt
+          python -m pytest -q -p no:cacheprovider --import-mode=importlib \
+            ftp-receiver/tests mail-receiver/tests integration-tests
       - name: ruff - errors anywhere
         working-directory: backend
         run: ruff check --select E9,F63,F7,F82 .

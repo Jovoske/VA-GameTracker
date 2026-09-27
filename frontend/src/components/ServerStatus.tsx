@@ -78,7 +78,7 @@ export function UpdateStatus({ info }: { info: VersionInfo | null }) {
       {d.running && (
         <div style={line}>
           Running {d.running_subject ? <>“{d.running_subject}”</> : short(d.running)}
-          {d.running_since ? `, in since ${whenLabel(d.running_since)}.` : '.'}
+          {d.running_since ? `, live since ${whenLabel(d.running_since)}.` : '.'}
         </div>
       )}
       {failed && (

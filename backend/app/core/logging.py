@@ -81,8 +81,16 @@ def redact_access_log() -> None:
         access.addFilter(RedactTokens())
 
 
+# Libraries that log every HTTP request at INFO: a photo fetch makes hundreds (full
+# addresses, signed query strings and all), and a scheduled task keeps stderr in its
+# error file (deploy/register-tasks.ps1), where they would bury the reason a job died.
+QUIET = ("httpx", "httpcore")
+
+
 def configure_logging(level: str = "INFO", log_file: str | Path | None = None) -> None:
     logging.basicConfig(format="%(message)s", level=getattr(logging, level, logging.INFO))
+    for name in QUIET:
+        logging.getLogger(name).setLevel(logging.WARNING)
     redact_access_log()
     out = sys.stdout
     if log_file is not None:

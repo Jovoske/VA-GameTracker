@@ -153,10 +153,12 @@ def _run(mode: str, args: list[str], db) -> int:
         log.info("pipeline.sync", result=run_fetch(db))
         _catch_up(db)
     elif mode == "backfill":
+        from app.ingestion.fetch import room_to_fetch
         from app.ingestion.sync import backfill_all
 
         months = int(args[0]) if args else int(os.environ.get("BACKFILL_MONTHS", "1"))
-        log.info("pipeline.backfill", result=backfill_all(db, months=months))
+        if room_to_fetch(db):
+            log.info("pipeline.backfill", result=backfill_all(db, months=months))
         _checked(db)
         _catch_up(db)
     elif mode == "scan":
@@ -166,13 +168,18 @@ def _run(mode: str, args: list[str], db) -> int:
         if not args:
             log.error("pipeline.login_needs_id")
             return 2
+        from app.ingestion.fetch import room_to_fetch
         from app.models import CameraAccount
 
         account = db.get(CameraAccount, uuid.UUID(args[0]))
         if account is None:
             log.warning("pipeline.login_gone", account=args[0])
             return 0
-        if account.provider == "ubox":
+        if not room_to_fetch(db):
+            # Its history waits: the routine fetch imports a login never imported yet,
+            # once there is room.
+            log.warning("pipeline.login_waits_for_room", account=args[0])
+        elif account.provider == "ubox":
             from app.ingestion.ubox_sync import backfill_ubox_account
 
             log.info("pipeline.login", result=backfill_ubox_account(db, args[0]))

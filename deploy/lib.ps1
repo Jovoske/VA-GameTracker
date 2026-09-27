@@ -120,3 +120,12 @@ function Limit-Log([string]$Path, [int]$MaxMB = 5) {
         Move-Item -Force -Path $Path -Destination "$Path.1" -EA SilentlyContinue
     }
 }
+
+# The scheduled tasks' error files (logs\task-<job>.err.log, register-tasks.ps1), each
+# rolled over past 5 MB. One a task has open right now can't be moved (cmd.exe holds
+# it): it is left for the next time round.
+function Limit-TaskLogs([string]$Logs) {
+    Get-ChildItem -Path $Logs -Filter 'task-*.err.log' -File -EA SilentlyContinue |
+        Where-Object { $_.Name -like 'task-*.err.log' } |
+        ForEach-Object { Limit-Log $_.FullName }
+}

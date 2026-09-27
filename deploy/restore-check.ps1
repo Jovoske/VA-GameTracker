@@ -8,6 +8,12 @@
 # again. The live database is only read. Settings -> System shows the result, in red
 # when it failed.
 #
+# The copy is a whole second database, written (with its WAL) on the disk the live one
+# uses, and PostgreSQL stops when that disk fills, the app with it. So it is only
+# tried with room for twice the live database and 5 GB to spare; otherwise the test
+# counts as failed, and nothing is restored. The database login needs CREATEDB
+# (register-tasks.ps1 checks).
+#
 # Run it by hand:  powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\restore-check.ps1
 # A real restore (after a disk failure) is in docs/09-deployment.md.
 
@@ -65,8 +71,28 @@ if (-not $dump) {
     exit 1
 }
 
-Note "restoring $(Split-Path $dump -Leaf) into $scratch"
 $env:PGPASSWORD = $db.Password
+# Room for the copy, on the disk that holds the database: where PostgreSQL says its
+# data is (it may not tell a login that isn't a superuser), else C:\GameSense's disk,
+# which on Db01 holds it too. Only told for a database on this machine.
+$local = @('localhost', '127.0.0.1', '::1', $env:COMPUTERNAME) -contains $db.Host
+if ($local) {
+    $bytes = & $psql -h $db.Host -p $db.Port -U $db.User -d $db.Db -tAc 'SELECT pg_database_size(current_database())' 2> $null
+    $dataDir = & $psql -h $db.Host -p $db.Port -U $db.User -d $db.Db -tAc "SELECT setting FROM pg_settings WHERE name = 'data_directory'" 2> $null
+    $dataDir = "$dataDir".Trim()
+    if (-not $dataDir) { $dataDir = $Root }
+    $free = Get-FreeGB $dataDir
+    $sizeGB = 0
+    if ("$bytes".Trim() -match '^\d+$') { $sizeGB = [double]"$bytes".Trim() / 1GB }
+    $needGB = [math]::Round(2 * $sizeGB + 5, 1)
+    if ($free -ne $null -and $free -lt $needGB) {
+        $env:PGPASSWORD = ''
+        Check @('--error', ("Not enough room on the server's disk to test the restore: {0} GB free, it needs about {1} GB. Nothing was restored." -f $free, $needGB)) | Out-Null
+        exit 1
+    }
+}
+
+Note "restoring $(Split-Path $dump -Leaf) into $scratch"
 Drop-Scratch
 & $psql -h $db.Host -p $db.Port -U $db.User -d postgres -c "CREATE DATABASE $scratch" *> "$logs\restore-check-psql.log"
 if ($LASTEXITCODE -ne 0) {

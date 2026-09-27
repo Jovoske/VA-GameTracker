@@ -64,7 +64,7 @@ const okStatus = {
     // ── all well ──
     await page.goto(base + '/settings');
     const v = section('version');
-    await v.getByText('Running “Wind by the hour”, in since', { exact: false }).waitFor();
+    await v.getByText('Running “Wind by the hour”, live since', { exact: false }).waitFor();
     await v.getByText('Only changes that passed the tests go in. The server looks every 10 minutes (last look', { exact: false }).waitFor();
     await v.getByText('2 newer changes are waiting for their tests to pass.').waitFor();
     assert.equal(await v.getByRole('alert').count(), 0);

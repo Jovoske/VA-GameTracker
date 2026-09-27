@@ -15,7 +15,8 @@ laptop --git push main--> GitHub --CI: tests--> `deploy` branch --(<=10 min)--> 
 
 - the backend tests against a real PostgreSQL (the repo's own PostGIS + pgvector
   image, `docker/postgres`) with `GAMESENSE_REQUIRE_DB=1`, so a missing database
-  fails instead of skipping;
+  fails instead of skipping, and the Suntek camera receivers' own tests
+  (`ftp-receiver`, `mail-receiver`, `integration-tests`: a deploy restarts them too);
 - ruff: errors anywhere, and no new finding in any backend file the change touches
   (`backend/scripts/ruff_ratchet.py`: the old findings stay until someone is in that
   file anyway);
@@ -30,6 +31,16 @@ once and made that branch, the server deploys `main` as it always did, so nothin
 stops when this lands first. A commit can be put live by hand, past the tests, with
 `git push origin <commit>:deploy`; don't, unless CI itself is what's broken. If
 `main`'s branch protection refuses the Actions bot, allow it to push `deploy`.
+
+The server only goes forward too. When `deploy` points at a commit older than the one
+that runs (CI made the branch at its first green commit while `main` had already put
+a newer one live), the server stays on what runs and waits for `deploy` to pass it;
+Settings counts the newer changes as waiting for their tests. **Putting an older
+version back on purpose** is done by hand: move the branch
+(`git push -f origin <commit>:deploy`), then on Db01
+`powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\update.ps1 -AllowOlder`.
+Mind a migration: the older code can't run on a schema a newer commit moved on (see
+"A real restore" below).
 
 **On the server.** `deploy/update.ps1` runs every 10 minutes as the
 `GameSense-Update` scheduled task (SYSTEM), at any hour: there is no evening pause
@@ -122,20 +133,28 @@ brought back to what the script says):
 | Task | When | Runs | Does |
 |---|---|---|---|
 | `GameSense-Update` | every 10 min | `deploy/update.ps1` | the loop above |
-| `GameSense-Sync` | every 15 min | `pipeline.py sync` | SPYPOINT and UBox Pro pull + local AI (up to 300 photos, newest first) + exposure recompute |
-| `GameSense-Notify` | every 15 min | `pipeline.py notify` | alerts that waited for a sit or quiet hours, as one message; tonight's plan push about 2 h before sunset |
-| `GameSense-Sex` | hourly | `pipeline.py sex` | cloud vision stag/hind pass (costs API credit) |
+| `GameSense-Sync` | every 15 min, from :01 | `pipeline.py sync` | SPYPOINT and UBox Pro pull + local AI (up to 300 photos, newest first) + exposure recompute |
+| `GameSense-Notify` | every 15 min, from :02 | `pipeline.py notify` | alerts that waited for a sit or quiet hours, as one message; tonight's plan push about 2 h before sunset |
+| `GameSense-Sex` | hourly, at :04 | `pipeline.py sex` | cloud vision stag/hind pass (costs API credit) |
 | `GameSense-Plan` | 17:00 daily | `pipeline.py plan` | record tonight's claims **before** the night |
 | `GameSense-Score` | 11:00 daily | `pipeline.py score` | grade the claims of every finished night not graded yet (last 14 days) |
-| `GameSense-Backup` | 03:00 daily | `deploy/backup.ps1` | the database and the photos to the backup disk (below) |
-| `GameSense-RestoreCheck` | Sundays 04:30 | `deploy/restore-check.ps1` | restore the newest backup into a scratch database and check it (below) |
+| `GameSense-Backup` | 03:07 daily | `deploy/backup.ps1` | the database and the photos to the backup disk (below) |
+| `GameSense-RestoreCheck` | Sundays 04:37 | `deploy/restore-check.ps1` | restore the newest backup into a scratch database and check it (below) |
+
+The repeating ones start a minute or two apart, so they don't all start in the same
+second.
 
 **Their output is kept.** Task Scheduler throws a task's output away, so each task
-runs through `cmd.exe` with its errors appended to
-`C:\GameSense\logs\tasks-stderr.log`: a job that dies before it can write its own
-log (an import that fails) still leaves the reason. `pipeline.py` writes everything
-it logs to `pipeline.log` itself; `update.ps1`, `backup.ps1` and `restore-check.ps1`
-keep their own logs in the same folder, rolled over at 5 MB.
+runs through `cmd.exe` with its errors appended to a file of its own,
+`C:\GameSense\logs\task-<job>.err.log` (`task-sync.err.log`, `task-update.err.log`,
+...): a job that dies before it can write its own log (an import that fails) still
+leaves the reason. Never one file for two tasks: `cmd.exe` keeps its redirect open,
+and shut to other writers, until the job ends, so a second task sent to the same file
+would not start at all. `update.ps1` and `backup.ps1` roll these over at 5 MB; the
+jobs' every HTTP request to SPYPOINT or UBox is not logged there (only warnings are),
+so the reason a job died isn't buried. `pipeline.py` writes everything it logs
+to `pipeline.log` itself; `update.ps1`, `backup.ps1` and `restore-check.ps1` keep
+their own logs in the same folder, rolled over at 5 MB.
 
 Sighting notifications are sent by the dispatcher at the end of every
 classification pass, so the `sync` task carries them. `notify` is for what can't
@@ -244,7 +263,7 @@ Invoke-Command -ComputerName Db01 { Get-Content C:\GameSense\logs\pipeline.log -
 
 ## Backups, and proving they restore
 
-`deploy/backup.ps1` runs at 03:00 (`GameSense-Backup`) and copies to `BACKUP_DIR` in
+`deploy/backup.ps1` runs at 03:07 (`GameSense-Backup`) and copies to `BACKUP_DIR` in
 `backend\.env`, else `D:\GameSense-Backup` — a disk other than the one the database
 and the photos are on, or it is no backup of them (audit H-10):
 
@@ -260,15 +279,23 @@ and the photos are on, or it is no backup of them (audit H-10):
 
 It writes `C:\GameSense\data\backup-status.json`, and Settings → System shows it:
 "Last backup 5 h ago", or in red when it failed, when the last good one is more than
-36 hours old, or when there has never been one. It also says how many photos the
-server and the backup hold; a backup with fewer counts as failed.
+36 hours old, or when there has never been one. Every photo the server held when the
+copy started must be in the backup after it, or the night counts as failed; a photo
+the fetch brings in during the copy (it runs all night) is the next night's, and a
+download still being written is no photo. No photo folder where `MEDIA_ROOT` says
+(or it can't be read) is a failure too, never a good backup with no photos in it.
 
-`deploy/restore-check.ps1` runs on Sundays at 04:30 (`GameSense-RestoreCheck`). It
+`deploy/restore-check.ps1` runs on Sundays at 04:37 (`GameSense-RestoreCheck`). It
 restores the newest dump into a scratch database (`gamesense_restorecheck`) on the
 same server, compares it with the live one table by table, looks for 50 of its photos
 in the backup's photo folder (`python -m app.backup_check`), and drops the scratch
 database. The live database is only read. Settings → System shows "Restore test:
-passed 2 d ago", or why it failed.
+passed 2 d ago", or why it failed. The copy is written on the live database's disk,
+and PostgreSQL stops when that disk fills, so the test only runs with room for twice
+the database and 5 GB to spare; otherwise it counts as failed ("Not enough room on the
+server's disk to test the restore") and nothing is restored. The database login needs
+`CREATEDB` for the scratch database; `register-tasks.ps1` checks it
+(`ALTER ROLE gamesense CREATEDB;` as `postgres` if not).
 
 Run either by hand:
 
@@ -306,8 +333,10 @@ estate's folder on, so nothing has to be rewritten in the database.
 The photos, the database and the pre-migration dumps share `C:`. Settings → System
 says "Space for photos: 12 GB free. Getting full" in amber under 20 GB, and in red
 under 5 GB, where the photo fetch stops downloading (the photos wait on the cameras'
-clouds and come in once there is room) so the database keeps room to work (H-18). A
-deploy notes a warning under 10 GB free and doesn't start under 2 GB.
+clouds and come in once there is room) so the database keeps room to work (H-18).
+A new camera login's first import and the history pull ask the same first, and say
+why nothing came in. A deploy notes a warning under 10 GB free and doesn't start under
+2 GB.
 
 ## Gotchas
 

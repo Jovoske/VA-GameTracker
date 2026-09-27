@@ -14,7 +14,8 @@ and a run killed during the AI pass still leaves a true count behind.
 With less than app.ops.FULL_DISK_BYTES free where the photos are kept, nothing is
 downloaded and the run says why (audit H-18): that disk is the database's too, and a
 full one stops Postgres and every import at once. The photos wait on the cameras'
-clouds and come in on the first fetch after room is made.
+clouds and come in on the first fetch after room is made. The one-off imports (a new
+login's first, the history pull; pipeline.py) ask the same (room_to_fetch).
 """
 from __future__ import annotations
 
@@ -67,22 +68,47 @@ def summarize(results: dict) -> dict:
     return {"status": status, "downloaded": downloaded, "problems": problems}
 
 
+def disk_full() -> dict | None:
+    """The run's DISK result when the photos' disk is nearly full (nothing may be
+    downloaded), else None. Every run that downloads asks: the routine fetch, a new
+    login's first import and the history pull alike."""
+    from app import ops
+
+    free = ops.disk_free()
+    if free is None or free >= ops.FULL_DISK_BYTES:
+        return None
+    log.error("fetch.disk_full", free_gb=round(free / 1024**3, 1))
+    return {
+        "status": "error", "total": 0,
+        "reason": f"Nearly full ({free / 1024**3:.1f} GB free). The photos wait on the "
+                  "cameras and come in once there is room.",
+    }
+
+
+def _summary(db: Session, started: datetime, results: dict) -> SyncLog:
+    summary = summarize(results)
+    row = SyncLog(
+        status=summary["status"], started_at=started, images_downloaded=summary["downloaded"],
+        error="; ".join(f"{p['label']}: {p['error']}" for p in summary["problems"]) or None,
+        details={"provider": "pipeline", "stage": "identifying",
+                 "problems": summary["problems"], "results": results},
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
 def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
     """Fetch from every provider; returns the summary row (stage "identifying")."""
-    from app import jobs, ops
+    from app import jobs
     from app.ingestion.sync import sync_all
     from app.ingestion.ubox_sync import sync_ubox_all
 
     started = datetime.now(UTC)
     results: dict = {}
-    free = ops.disk_free()
-    if free is not None and free < ops.FULL_DISK_BYTES:
-        log.error("fetch.disk_full", free_gb=round(free / 1024**3, 1))
-        results[DISK] = {
-            "status": "error", "total": 0,
-            "reason": f"Nearly full ({free / 1024**3:.1f} GB free). The photos wait on the "
-                      "cameras and come in once there is room.",
-        }
+    full = disk_full()
+    if full is not None:
+        results[DISK] = full
     runs = () if DISK in results else (("spypoint", sync_all), ("ubox", sync_ubox_all))
     for provider, run in runs:
         if jobs.lock_lost():
@@ -97,16 +123,18 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
                 "reason": f"The {PROVIDERS[provider]} fetch failed ({type(exc).__name__}). "
                           "It tries again on the next one.",
             }
-    summary = summarize(results)
-    row = SyncLog(
-        status=summary["status"], started_at=started, images_downloaded=summary["downloaded"],
-        error="; ".join(f"{p['label']}: {p['error']}" for p in summary["problems"]) or None,
-        details={"provider": "pipeline", "stage": "identifying",
-                 "problems": summary["problems"], "results": results},
-    )
-    db.add(row)
-    db.commit()
-    return row, results
+    return _summary(db, started, results), results
+
+
+def room_to_fetch(db: Session) -> bool:
+    """For a one-off import (a new login's first, the history pull): False when the
+    photos' disk is nearly full, with the reason left where the Check button and
+    Settings read the last fetch, so they say why nothing came in."""
+    full = disk_full()
+    if full is None:
+        return True
+    finish(db, _summary(db, datetime.now(UTC), {DISK: full}))
+    return False
 
 
 def finish(db: Session, row: SyncLog, error: str | None = None) -> None:

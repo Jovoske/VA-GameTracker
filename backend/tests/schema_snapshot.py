@@ -82,12 +82,12 @@ def refresh(admin_dsn: str) -> str:
     """Load the snapshot into a scratch database, upgrade it to head, dump it back."""
     from alembic import command
 
-    from .conftest import alembic_config
+    from .conftest import alembic_config, dsn_for
 
     name = f"gs_snapshot_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(**_libpq(admin_dsn), autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{name}"')
-    dsn = admin_dsn.replace("/postgres?", f"/{name}?")
+    dsn = dsn_for(name, admin_dsn)
     try:
         load(dsn)
         command.upgrade(alembic_config(dsn), "head")

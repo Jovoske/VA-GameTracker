@@ -13,6 +13,12 @@
 # nothing stops when this lands before CI is live. Moving 'deploy' by hand also works:
 # git push origin <commit>:deploy.
 #
+# ONLY EVER FORWARD. A target older than what runs (the branch CI makes at a commit
+# before the one main already put live) is waited for, not deployed: the server stays
+# on what runs until the branch passes it. Putting an older commit back on purpose is
+# a step by hand: move 'deploy' back, then run this script with -AllowOlder on the
+# server (docs/09-deployment.md).
+#
 # IN WHAT ORDER, and why:
 #   1. Every job's lock is taken (pipeline.py hold) and kept until the new version
 #      answers, so no job runs new code on the old schema, or has its rows moved by a
@@ -50,7 +56,9 @@ param(
     # How long the new version gets to answer /api/health after the restart.
     [int]$HealthSeconds = 90,
     # The pause before a failed pip install or build gets its second go.
-    [int]$RetryPauseSeconds = 60
+    [int]$RetryPauseSeconds = 60,
+    # By hand only: deploy the target even when it is older than what runs.
+    [switch]$AllowOlder
 )
 
 $ErrorActionPreference = 'Continue'
@@ -79,6 +87,7 @@ $RETRY_HOURS = 6
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 Limit-Log $log
+Limit-TaskLogs $logs
 
 function Note($msg) {
     Add-Content -Path $log -Value ("{0}  {1}" -f (Get-Date -Format 's'), $msg)
@@ -103,6 +112,8 @@ $status = [ordered]@{
     state = 'current'
     failed = $null
     disk_free_gb = $null
+    # The target, while it is older than what runs and so is waited for.
+    behind = $null
 }
 if ($previous) {
     $status.running_since = As-Stamp $previous.running_since
@@ -177,6 +188,23 @@ if (-not $good) {
     $good = $head
     Write-TextFile $shaFile $good
     if (-not $status.running_since) { $status.running_since = Get-UtcStamp }
+}
+
+if ($target -ne $good -and -not $AllowOlder) {
+    & $git merge-base --is-ancestor $target $good *> $null
+    if ($LASTEXITCODE -eq 0) {
+        # What runs is newer than the target: main put it live before CI made the
+        # deploy branch at an older commit, or the branch was moved back. Deploys only
+        # go forward, so what runs stays until the branch passes it (and is put back
+        # on disk, should an interrupted run have left something else there).
+        if (-not $previous -or $previous.behind -ne $target) {
+            Note ("wait: {0} ({1}) is behind what runs, {2} - waiting for it to pass" -f
+                  $target.Substring(0, 7), $status.source, $good.Substring(0, 7))
+        }
+        $status.behind = $target
+        $status.waiting_for_tests = [int]((& $git rev-list --count "$good..refs/remotes/origin/main").Trim())
+        $target = $good
+    }
 }
 
 if ($target -eq $good -and $head -eq $good) {

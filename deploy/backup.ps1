@@ -7,7 +7,9 @@
 #   1. pg_dump -Fc of the database to <target>\db, checked by listing it back with
 #      pg_restore. The newest 14 are kept.
 #   2. The photos, copied to <target>\media. New and changed files only; a photo
-#      is never deleted from the backup because it went from the server.
+#      is never deleted from the backup because it went from the server. Every photo
+#      the server held when the copy started must be in the backup after it; one the
+#      fetch brings in meanwhile is the next night's. No photo folder is a failure.
 #   3. backend\.env to <target>\config: without its JWT_SECRET / CREDENTIALS_KEY the
 #      saved camera passwords in a restored database can't be read. It holds secrets:
 #      the target folder must be no more open than C:\GameSense is.
@@ -36,6 +38,7 @@ $data    = Get-DataDir $envFile $Root
 $statusFile = "$data\backup-status.json"
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 Limit-Log $log
+Limit-TaskLogs $logs
 
 function Note($msg) {
     Add-Content -Path $log -Value ("{0}  {1}" -f (Get-Date -Format 's'), $msg)
@@ -45,6 +48,8 @@ if (-not $Target) { $Target = Read-EnvValue $envFile 'BACKUP_DIR' }
 if (-not $Target) { $Target = 'D:\GameSense-Backup' }
 $media = Read-EnvValue $envFile 'MEDIA_ROOT'
 if (-not $media) { $media = "$data\media" }
+# A relative MEDIA_ROOT is the app's, and the app runs in backend\.
+if (-not [System.IO.Path]::IsPathRooted($media)) { $media = Join-Path "$app\backend" $media }
 
 # The last one that worked, so a failed night still says how old the good copy is.
 $previous = Read-JsonFile $statusFile
@@ -119,21 +124,48 @@ Get-ChildItem "$Target\db" -Filter 'gamesense-*.dump' |
 
 # ---- 2. the photos --------------------------------------------------------------------------
 
-if (Test-Path $media) {
-    # /E every folder; no /MIR: a photo gone from the server stays in the backup.
-    # thumbs are left out: they are made again from the photos.
-    robocopy $media "$Target\media" /E /XD (Join-Path $media 'thumbs') /R:2 /W:5 /NP /NFL /NDL /NJH /NJS *> "$logs\backup-media.log"
-    $copied = $LASTEXITCODE
-    if ($copied -ge 8) { Finish "Some photos couldn't be copied (see backup-media.log)." }
-    $count = { param($dir) @(Get-ChildItem -Path $dir -Recurse -File -EA SilentlyContinue |
-                              Where-Object { $_.FullName -notmatch '[\\/]thumbs[\\/]' }).Count }
-    $status.photos_on_server = & $count $media
-    $status.photos_in_backup = & $count "$Target\media"
-    if ($status.photos_in_backup -lt $status.photos_on_server) {
-        Finish ("The backup has {0} photos, the server {1}." -f $status.photos_in_backup, $status.photos_on_server)
-    }
-} else {
-    Note "note: no photo folder at $media"
+# What is not a photo of its own: thumbnails (made again from the photos) and a
+# download still being written (the fetch's *.tmp, the camera receiver's .ftp-*).
+$notPhoto = '^thumbs[\\/]|\.tmp$|(^|[\\/])\.ftp-[^\\/]*$'
+# Every photo under $Dir, by its path below it. Throws when the folder can't be read.
+function Get-Photos([string]$Dir) {
+    $base = (Get-Item -LiteralPath $Dir -Force -EA Stop).FullName.TrimEnd('\', '/')
+    Get-ChildItem -LiteralPath $Dir -Recurse -File -Force -EA Stop |
+        ForEach-Object { $_.FullName.Substring($base.Length + 1) } |
+        Where-Object { $_ -notmatch $notPhoto }
+}
+
+if (-not (Test-Path -LiteralPath $media -PathType Container)) {
+    Finish "The photo folder $media isn't there, so no photos were backed up."
+}
+# The photos as they are before the copy starts: one the fetch brings in while
+# robocopy runs (GameSense-Sync runs every 15 minutes, all night) is the next night's
+# to copy, not a hole in this one.
+try {
+    $onServer = @(Get-Photos $media)
+} catch {
+    Finish "The photo folder $media can't be read ($($_.Exception.Message)), so no photos were backed up."
+}
+# /E every folder; no /MIR: a photo gone from the server stays in the backup.
+robocopy $media "$Target\media" /E /XD (Join-Path $media 'thumbs') /XF *.tmp .ftp-* /R:2 /W:5 /NP /NFL /NDL /NJH /NJS *> "$logs\backup-media.log"
+$copied = $LASTEXITCODE
+if ($copied -ge 8) { Finish "Some photos couldn't be copied (see backup-media.log)." }
+$inBackup = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+try {
+    foreach ($photo in (Get-Photos "$Target\media")) { [void]$inBackup.Add($photo) }
+} catch {
+    Finish "The backup's photo folder can't be read ($($_.Exception.Message))."
+}
+# Each of them must be in the backup now, unless it has gone from the server since.
+$missing = @($onServer | Where-Object {
+    -not $inBackup.Contains($_) -and (Test-Path -LiteralPath (Join-Path $media $_))
+})
+$status.photos_on_server = $onServer.Count
+$status.photos_in_backup = $inBackup.Count
+if ($missing.Count -gt 0) {
+    Note ("not in the backup: {0}" -f (($missing | Select-Object -First 5) -join ', '))
+    Finish ("{0} of the server's {1} photos aren't in the backup (see backup-media.log)." -f
+            $missing.Count, $onServer.Count)
 }
 
 # ---- 3. the settings that unlock it ---------------------------------------------------------------

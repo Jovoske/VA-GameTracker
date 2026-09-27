@@ -14,10 +14,18 @@ import uuid
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 DEFAULT_DSN = "postgresql+psycopg://postgres@/postgres?host=/tmp&port=55432"
 ADMIN_DSN = os.environ.get("GAMESENSE_TEST_DSN", DEFAULT_DSN)
+
+
+def dsn_for(name: str, admin: str = ADMIN_DSN) -> str:
+    """The DSN of database `name` on the test server, whatever form the admin DSN has
+    (with a query string or without: replacing "/postgres?" in one without found
+    nothing, and every test then ran in the server's own postgres database)."""
+    return make_url(admin).set(database=name).render_as_string(hide_password=False)
 
 
 def _server_reachable(dsn: str) -> bool:
@@ -83,7 +91,7 @@ def fresh_db(admin_engine):
     name = f"gs_test_{uuid.uuid4().hex[:12]}"
     with admin_engine.connect() as c:
         c.execute(text(f'CREATE DATABASE "{name}"'))
-    dsn = ADMIN_DSN.replace("/postgres?", f"/{name}?")
+    dsn = dsn_for(name)
     try:
         yield dsn
     finally:
@@ -122,5 +130,6 @@ def alembic_config(dsn: str):
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = Config(os.path.join(here, "alembic.ini"))
     cfg.set_main_option("script_location", os.path.join(here, "alembic"))
-    cfg.set_main_option("sqlalchemy.url", dsn)
+    # A config value takes % as the start of an interpolation: a literal one is %%.
+    cfg.set_main_option("sqlalchemy.url", dsn.replace("%", "%%"))
     return cfg
