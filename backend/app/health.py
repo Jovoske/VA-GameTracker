@@ -5,8 +5,9 @@ The `producing` flag is the one the forecast cares about: a camera that isn't pr
 must not have its silence read as an absence of game.
 
 Three things that look like a dead camera are not one, and each gets its own words:
-- the camera login stopped working (not_syncing): the camera may be fine, its photos
-  just are not reaching us, so the hunter is sent to Settings, not to the batteries;
+- the camera login stopped working, or the fetch could not list this camera's photos
+  although its login works (not_syncing): the camera may be fine, its photos just are
+  not reaching us, so the hunter is sent to Settings, not to the batteries;
 - no login fetches it any more, say its login was removed (disconnected): nothing
   to check at the camera, and it is left out of the ranking;
 - a Suntek camera sending by FTP or email has no check-in, only photos, so a quiet
@@ -50,6 +51,7 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
 
     low_battery = cam.battery_pct is not None and cam.battery_pct < LOW_BATTERY_PCT
     login_down = login is not None and login.get("state") in ("failing", "stale")
+    fetch_error = getattr(cam, "fetch_error", None)
 
     if cam.active is False:
         status = "disconnected"
@@ -57,6 +59,10 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
     elif login_down:
         status = "not_syncing"
         detail = NOT_SYNCING if login.get("state") == "failing" else NOT_FETCHED
+    elif fetch_error:
+        # Its login works, but the fetch could not list this camera's photos.
+        status = "not_syncing"
+        detail = f"Photos not coming in. {fetch_error}"
     elif not heartbeat:
         # Photo-only: its last photo is the only sign of life, and a week of none is
         # "have a look", never "check the battery" (it may just be quiet ground).
@@ -95,6 +101,10 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
         "credits_left": credits_left,
         "hours_since_report": round(hours) if hours is not None else None,
     }
-    if status == "not_syncing":
+    if status == "not_syncing" and login_down:
         out["login"] = {"label": login.get("label"), "error": login.get("error")}
+    elif status == "not_syncing":
+        # `camera`: the login is fine, only this camera's listing failed.
+        out["login"] = {"label": (login or {}).get("label"), "error": fetch_error,
+                        "camera": True}
     return out

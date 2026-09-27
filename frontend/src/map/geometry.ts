@@ -3,7 +3,8 @@
 export type CameraHealth = {
   status: string; detail: string; producing: boolean; hours_since_report: number | null
   // With status not_syncing: the login that fetches this camera, and what is wrong with it.
-  login?: { label: string | null; error: string | null }
+  // `camera`: the login works, only this camera's photos could not be listed.
+  login?: { label: string | null; error: string | null; camera?: boolean }
 }
 export type LatestPhoto = { image_id: string; captured_at: string; species_id: string | null; label: string }
 export type Visits = { species_id: string | null; label: string; visits: number }

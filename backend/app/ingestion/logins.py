@@ -9,11 +9,15 @@ this on their camera_accounts row; the estate's main SPYPOINT login lives in .en
 its record is an app_settings document.
 
 Settings lists every login with it. camera_health turns a failing or stalled login
-into "Photos not coming in", and the Tonight plan says when its photos are old.
+into "Photos not coming in", and the Tonight plan says when its photos are old. While
+a long job holds the pipeline (the AI pass after a big import, the hourly pass), a
+login that has not fetched lately is "busy", not stopped.
 """
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 from sqlalchemy import func, select
@@ -30,8 +34,16 @@ PRIMARY_KEY = "spypoint_primary_login"
 PRIMARY_LABEL = "Main SPYPOINT login"
 # Fetches run every 15 minutes: two hours without a good one is a stoppage, not a blip.
 STALE_AFTER = timedelta(hours=2)
+# A pipeline lock older than this was left by a crashed run (pipeline.py ignores it too).
+LOCK_STALE = timedelta(hours=3)
 
 UNREADABLE = "The saved password can't be read. Re-enter it."
+SPYPOINT_REFUSED = "SPYPOINT refused the password. Re-enter it."
+UBOX_REFUSED = "UBox refused the password. Re-enter it."
+UBOX_SIGNED_OUT = "UBox signed this login out. Re-enter the password."
+# The problems a new password fixes; for the others (no answer, busy, a copy of
+# the main login) typing the password again would not help.
+PASSWORD_PROBLEMS = frozenset({UNREADABLE, SPYPOINT_REFUSED, UBOX_REFUSED, UBOX_SIGNED_OUT})
 
 
 class LoginProblem(Exception):
@@ -58,22 +70,24 @@ def login_error(exc: BaseException, provider: str) -> str:
     if isinstance(exc, InvalidToken):
         return UNREADABLE
     if isinstance(exc, SpypointAuthError):
-        return "SPYPOINT refused the password. Re-enter it."
+        return SPYPOINT_REFUSED
     if isinstance(exc, SpypointError):
         status = exc.status or 0
         if status == 429:
             return f"SPYPOINT is turning requests away for now. {later}"
         if status >= 500:
             return f"SPYPOINT isn't answering properly right now. {later}"
-        return f"SPYPOINT said no ({exc}). {later}"
+        if status >= 400:
+            return f"SPYPOINT refused the request. {later}"
+        return f"SPYPOINT sent something the app can't read. {later}"
     if isinstance(exc, UboxError):
         text = str(exc)
         if "rejected the account or password" in text:
-            return "UBox refused the password. Re-enter it."
+            return UBOX_REFUSED
         if "did not recognize this account" in text:
             return "UBox doesn't know this login. Check the email used in the UBox Pro app."
         if "reconnect the account" in text or "authentication failed" in text:
-            return "UBox signed this login out. Re-enter the password."
+            return UBOX_SIGNED_OUT
         if text.startswith("Unable to reach UBox"):
             return f"Couldn't reach UBox. {later}"
         if "(HTTP " in text:
@@ -96,6 +110,74 @@ def read_password(db: Session, account: CameraAccount) -> str:
     return password
 
 
+def asks_for_password(error: str | None) -> bool:
+    """True when the fix is to type the login's password in again."""
+    return error in PASSWORD_PROBLEMS
+
+
+def _primary_doc(db: Session) -> tuple[AppSetting | None, dict]:
+    row = db.get(AppSetting, PRIMARY_KEY)
+    value = dict(row.value) if row is not None else {}
+    if value.get("username") != settings.spypoint_username:
+        value = {"username": settings.spypoint_username}  # a different login: start afresh
+    return row, value
+
+
+def _save_primary(db: Session, row: AppSetting | None, value: dict) -> None:
+    if row is None:
+        db.add(AppSetting(key=PRIMARY_KEY, value=value))
+    else:
+        row.value = value
+
+
+def saved_session(db: Session, account: CameraAccount | None) -> str | None:
+    """The sign-in kept from an earlier fetch (`account` None: the main login), or
+    None to sign in afresh: none kept, it has run out, or it can't be read."""
+    if account is not None:
+        sealed = account.session_enc
+    else:
+        row = db.get(AppSetting, PRIMARY_KEY)
+        value = row.value if row is not None else {}
+        same = value.get("username") == settings.spypoint_username
+        sealed = value.get("session_enc") if same else None
+    if not sealed:
+        return None
+    try:
+        kept = json.loads(decrypt(sealed))
+    except (InvalidToken, ValueError):
+        return None
+    until = _when(kept.get("until"))
+    if until is not None and until <= datetime.now(UTC):
+        return None
+    return kept.get("token") or None
+
+
+def keep_session(
+    db: Session, account: CameraAccount | None, token: str | None, *,
+    valid_hours: int | None = None,
+) -> None:
+    """Keep the login's sign-in, sealed like its password, for the next fetch; None
+    forgets it. `account` None is the main login. The caller commits."""
+    if token and valid_hours is None and saved_session(db, account) == token:
+        return  # already kept (sealing it again would only rewrite the row)
+    sealed = None
+    if token:
+        kept = {"token": token}
+        if valid_hours:
+            # Renewed an hour early rather than refused mid-fetch.
+            kept["until"] = (datetime.now(UTC) + timedelta(hours=valid_hours - 1)).isoformat()
+        sealed = encrypt(json.dumps(kept))
+    if account is not None:
+        if account.session_enc != sealed:
+            account.session_enc = sealed
+        return
+    row, value = _primary_doc(db)
+    if value.get("session_enc") == sealed:
+        return
+    value["session_enc"] = sealed
+    _save_primary(db, row, value)
+
+
 def record(
     db: Session, account: CameraAccount | None, *, error: str | None = None,
     cameras: int | None = None, now: datetime | None = None,
@@ -113,20 +195,14 @@ def record(
             if cameras is not None:
                 account.reported_cameras = cameras
         return
-    row = db.get(AppSetting, PRIMARY_KEY)
-    value = dict(row.value) if row is not None else {}
-    if value.get("username") != settings.spypoint_username:
-        value = {"username": settings.spypoint_username}  # a different login: start afresh
+    row, value = _primary_doc(db)
     value["last_attempt_at"] = now.isoformat()
     value["last_error"] = error
     if error is None:
         value["last_ok_at"] = now.isoformat()
         if cameras is not None:
             value["reported_cameras"] = cameras
-    if row is None:
-        db.add(AppSetting(key=PRIMARY_KEY, value=value))
-    else:
-        row.value = value
+    _save_primary(db, row, value)
 
 
 def _when(value) -> datetime | None:
@@ -155,13 +231,35 @@ def primary_status(db: Session) -> dict | None:
     }
 
 
-def state(last_attempt_at, last_ok_at, last_error, now: datetime) -> str:
-    """unknown (never tried here yet), failing, stale (no good fetch lately) or ok."""
+def pipeline_busy_since(now: datetime | None = None) -> datetime | None:
+    """When the run holding the pipeline lock began, or None when none holds it.
+
+    pipeline.py and the app's buttons share one lock file beside the models, written
+    when a run starts; one left by a crashed run stops counting after LOCK_STALE.
+    """
+    now = now or datetime.now(UTC)
+    try:
+        started = datetime.fromtimestamp(
+            (Path(settings.models_root).parent / "pipeline.lock").stat().st_mtime, UTC)
+    except OSError:
+        return None
+    return started if now - started < LOCK_STALE else None
+
+
+def state(last_attempt_at, last_ok_at, last_error, now: datetime,
+          busy_since: datetime | None = None) -> str:
+    """unknown (never tried here yet), failing, stale (no good fetch lately), busy (no
+    good fetch lately, but a long job holding the pipeline since explains it) or ok."""
     if last_attempt_at is None:
         return "unknown"
     if last_error:
         return "failing"
     if last_ok_at is None or now - last_ok_at > STALE_AFTER:
+        # The job took the pipeline before this login was due to be called stopped.
+        if busy_since is not None and last_ok_at is not None and (
+            busy_since <= last_ok_at + STALE_AFTER
+        ):
+            return "busy"
         return "stale"
     return "ok"
 
@@ -169,7 +267,7 @@ def state(last_attempt_at, last_ok_at, last_error, now: datetime) -> str:
 def _entry(label: str, provider: str, last_attempt_at, last_ok_at, last_error, now) -> dict:
     return {
         "label": label, "provider": provider,
-        "state": state(last_attempt_at, last_ok_at, last_error, now),
+        "state": state(last_attempt_at, last_ok_at, last_error, now, pipeline_busy_since(now)),
         "error": last_error, "last_ok_at": last_ok_at, "last_attempt_at": last_attempt_at,
     }
 
@@ -202,14 +300,22 @@ def camera_logins(db: Session, cameras, now: datetime | None = None) -> dict:
     accounts = {
         a.id: a for a in db.scalars(select(CameraAccount).where(CameraAccount.id.in_(ids)))
     } if ids else {}
+    main = settings.spypoint_username.strip().lower() if primary_configured() else None
+    copies = {a.id for a in accounts.values()
+              if main and a.provider == "spypoint" and a.username.strip().lower() == main}
     primary = None
-    if any(c.spypoint_id and c.account_id is None for c in cameras):
+    if any(c.spypoint_id and (c.account_id is None or c.account_id in copies) for c in cameras):
         primary = primary_entry(db, now)
     out = {}
     for c in cameras:
         if c.spypoint_id is None and c.ubox_uid is None:
             continue
-        if c.account_id is not None:
+        if c.account_id in copies:
+            # A copy of the main login (added before copies were refused): the main
+            # login fetches the camera, and the copy's own problem is not the camera's.
+            if primary is not None:
+                out[c.id] = primary
+        elif c.account_id is not None:
             account = accounts.get(c.account_id)
             out[c.id] = account_entry(account, now) if account is not None else {
                 "label": None, "provider": "ubox" if c.ubox_uid else "spypoint",
@@ -264,12 +370,17 @@ def run_status(statuses: list[str], downloaded: int) -> str:
     return "partial"
 
 
-def disconnect_unlisted(db: Session, estate_id, provider: str, listed: set[str]) -> int:
-    """After a run in which every login listed its cameras: switch off this provider's
-    cameras that none of them listed (a login removed, or a camera taken off one).
+def disconnect_unlisted(
+    db: Session, estate_id, provider: str, listed: set[str], *, answered: set, tried: set,
+) -> int:
+    """After a run: switch off this provider's cameras that no login listed (a camera
+    taken off its login, or one whose login was removed).
 
-    Their photos stay. Only on a complete listing, and never on an empty one, which
-    is more likely a provider hiccup than every camera gone at once.
+    Only where the login that fetches the camera (Camera.account_id, None for the
+    main SPYPOINT login) listed its cameras this run (`answered`), or is not among
+    the logins at all (`tried`): a login that failed, or listed nothing, which is
+    more likely a hiccup than every camera gone, may still have it. Never on a run
+    that listed nothing at all. Their photos stay.
     """
     if not listed:
         return 0
@@ -278,17 +389,26 @@ def disconnect_unlisted(db: Session, estate_id, provider: str, listed: set[str])
         Camera.estate_id == estate_id, Camera.active.is_(True),
         column.isnot(None), column.not_in(sorted(listed)),
     )).all()
+    off = 0
     for camera in rows:
-        camera.active = False
-        log.info("camera.not_listed", camera=str(camera.id), provider=provider)
-    return len(rows)
+        if camera.account_id in answered or camera.account_id not in tried:
+            camera.active = False
+            off += 1
+            log.info("camera.not_listed", camera=str(camera.id), provider=provider)
+    return off
 
 
-def not_reached(db: Session, account_id) -> None:
-    """Switch off the cameras only this login fetched (it was removed or switched off).
+def not_reached(db: Session, account: CameraAccount) -> None:
+    """The login is being removed: switch off the cameras it fetched, and leave none
+    pointing at it.
 
     Their photos stay. A login that still lists one switches it back on at its next
-    fetch (both providers' upsert_camera).
+    fetch (both providers' upsert_camera). A copy of the main SPYPOINT login hands its
+    cameras to the main login, which lists them already, so they never stop.
     """
-    for camera in db.scalars(select(Camera).where(Camera.account_id == account_id)):
-        camera.active = False
+    main = settings.spypoint_username.strip().lower() if primary_configured() else None
+    copy = main and account.provider == "spypoint" and account.username.strip().lower() == main
+    for camera in db.scalars(select(Camera).where(Camera.account_id == account.id)):
+        if not copy:
+            camera.active = False
+        camera.account_id = None

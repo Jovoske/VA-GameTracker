@@ -36,10 +36,16 @@ type CameraProvider = 'spypoint' | 'ubox'
 type ImportLimits = { interval: string; daily: string }
 /** Whether a login still works, as the last fetch found it (app.ingestion.logins). */
 type LoginStatus = {
-  state: 'ok' | 'failing' | 'stale' | 'unknown' | 'off'
+  // busy: no fetch lately because a long job (the AI pass) holds the server.
+  state: 'ok' | 'failing' | 'stale' | 'busy' | 'unknown' | 'off'
   error: string | null
   last_ok_at: string | null
   last_attempt_at: string | null
+  // A new password would fix it (refused, signed out, unreadable), not a network blip.
+  password_problem: boolean
+  // Its cameras whose photos didn't come on the last fetch although the login worked.
+  cameras_failing: number
+  camera_error: string | null
 }
 type CamAccount = {
   id: string
@@ -71,26 +77,37 @@ type CamAccount = {
 }
 // The fetch summary's status (app.ingestion.fetch), in words.
 const FETCH_WORDS: Record<string, string> = {
-  ok: 'Worked', partial: 'Some logins need attention', error: 'Failed',
+  ok: 'Worked', partial: 'Partly worked', error: 'Failed',
   skipped: 'No camera logins', running: 'Running', never: 'Never run',
 }
 const providerName = (provider: CameraProvider) => provider === 'ubox' ? 'UBox Pro' : 'SPYPOINT'
-const needsLook = (a: CamAccount) => a.active && (a.status.state === 'failing' || a.status.state === 'stale')
+const needsLook = (a: CamAccount) => a.active
+  && (a.status.state === 'failing' || a.status.state === 'stale' || a.status.cameras_failing > 0)
+/** "3 h", "2 d": how long, from ageLabel's "3 h ago". */
+const forLabel = (iso: string) => ageLabel(iso).replace(/ ago$/, '')
 
 /** One line on whether the login works, in words: what is wrong comes first. */
 function loginLine(a: CamAccount): { text: string; warn: boolean } {
   const s = a.status
-  if (!a.active) return { text: 'Not fetched: another copy of this login is. Remove this one.', warn: false }
+  if (!a.active) return { text: 'Another copy of this login is already fetched. Remove this one.', warn: false }
   if (a.importing) return { text: 'Fetching its photos for the first time…', warn: false }
-  const where = a.primary ? ' It is set in the server’s .env file (SPYPOINT_PASSWORD).' : ''
+  const where = a.primary && s.password_problem ? ' It is set in the server’s .env file (SPYPOINT_PASSWORD).' : ''
+  if ((s.state === 'ok' || s.state === 'busy') && s.cameras_failing > 0) {
+    const which = s.cameras_failing === 1 ? 'One of its cameras' : `${s.cameras_failing} of its cameras`
+    return { text: `${which} didn’t come through on the last fetch. ${s.camera_error ?? ''}`.trim(), warn: true }
+  }
   switch (s.state) {
     case 'failing':
       return { text: `${s.error ?? 'The last fetch failed.'}${where}`, warn: true }
     case 'stale':
       return {
-        text: `No fetch has worked ${s.last_ok_at ? `since ${ageLabel(s.last_ok_at)}` : 'yet'}. Photos have stopped coming in.`,
+        text: s.last_ok_at
+          ? `No fetch has worked for ${forLabel(s.last_ok_at)}. Photos have stopped coming in.`
+          : 'No fetch has worked yet. Photos have stopped coming in.',
         warn: true,
       }
+    case 'busy':
+      return { text: 'Busy going through new photos. Fetching carries on when that’s done.', warn: false }
     case 'ok':
       return { text: `Working. Last fetch ${s.last_ok_at ? ageLabel(s.last_ok_at) : 'just now'}.`, warn: false }
     default:
@@ -463,11 +480,11 @@ export default function Admin() {
                 </div>
               </div>
               {a.can_remove && (
-                <button type="button" onClick={() => delAccount(a)} style={smallBtn}
+                <button type="button" onClick={() => delAccount(a)} style={loginBtn}
                   disabled={limitsBusy} aria-label={`Remove ${a.label}`}>Remove</button>
               )}
             </div>
-            {a.can_edit && !a.primary && a.active && reentering?.id !== a.id && (a.status.state === 'failing' || a.status.state === 'stale') && (
+            {a.can_edit && !a.primary && a.active && reentering?.id !== a.id && a.status.password_problem && (
               <button type="button" style={{ ...loginBtn, marginTop: 8 }} onClick={() => { setReenterMsg(null); setReentering({ id: a.id, password: '' }) }}
                 aria-label={`Re-enter the password for ${a.label}`}>Re-enter password</button>
             )}
@@ -709,7 +726,7 @@ export default function Admin() {
               <span style={{ color: 'var(--text-dim)' }}>Suntek photos</span>
               <span style={{ textAlign: 'right', color: status.suntek.failed ? 'var(--skip)' : undefined }}>
                 {status.suntek.ready ?? '?'} waiting{status.suntek.failed
-                  ? `, ${status.suntek.failed} failed (on the server: ftp_import retry)` : ''}
+                  ? `. ${status.suntek.failed} failed: ask whoever runs the server to retry them.` : ''}
               </span>
             </div>
           )}

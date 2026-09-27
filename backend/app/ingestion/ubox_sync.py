@@ -26,7 +26,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from PIL import Image as PillowImage
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -34,10 +34,12 @@ from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
 from app.ingestion.logins import (
     disconnect_unlisted,
+    keep_session,
     login_error,
     read_password,
     record,
     run_status,
+    saved_session,
 )
 from app.ingestion.ubox import UboxClient, UboxDevice, UboxError, UboxEvent, UboxPageLimitError
 from app.models import Camera, CameraAccount, Estate, Image, SyncLog
@@ -222,9 +224,34 @@ def _cleanup_uncommitted(db, paths) -> None:
             break
 
 
-def _snapshot_note(failed: int) -> str:
-    return (f"{failed} photo{'s' if failed != 1 else ''} wouldn't download. "
-            "They're tried again on the next fetch.")
+def _snapshot_note(failed: int, retried: int) -> str:
+    """Snapshots that would not download: whether they are tried again or let go."""
+    note = f"{failed} photo{'s' if failed != 1 else ''} wouldn't download."
+    if retried == failed:
+        return f"{note} {'It is' if failed == 1 else 'They are'} tried again on the next fetch."
+    if retried == 0:
+        return (f"{note} {'It was' if failed == 1 else 'They were'} tried "
+                f"{MAX_SNAPSHOT_ATTEMPTS} times, so {'it is' if failed == 1 else 'they are'} "
+                "left out.")
+    return (f"{note} {retried} {'is' if retried == 1 else 'are'} tried again on the next "
+            f"fetch; the rest were tried {MAX_SNAPSHOT_ATTEMPTS} times and are left out.")
+
+
+def _list_devices(db: Session, client: UboxClient, account: CameraAccount) -> list[UboxDevice]:
+    """The login's cameras, signed in with the sign-in kept from the last fetch while it
+    is valid (UBox gives it for weeks), so a login is not signed in afresh every 15
+    minutes (E-21). One UBox has let lapse is signed in again."""
+    token = saved_session(db, account)
+    if token is not None:
+        client.use_token(token)
+        try:
+            return client.list_devices()
+        except UboxError as exc:
+            if "rejected the account or password" in str(exc):
+                raise
+            log.info("ubox.session_retry", account=str(account.id), error=type(exc).__name__)
+    client.login()
+    return client.list_devices()
 
 
 def _sync_camera(
@@ -263,6 +290,7 @@ def _sync_camera(
     # The oldest capture this pass left unfinished, which the next fetch must reach.
     hold = None
     result = dict.fromkeys(COUNTERS, 0)
+    result["retried"] = 0  # of the failed, those the next fetch tries again
     result.update(account_id=str(account.id), camera_id=str(camera.id), camera=camera.name)
     window_end = until
     while window_end > since:
@@ -313,6 +341,7 @@ def _sync_camera(
                 window_failures += 1
                 failures[event.event_id] = [attempts + 1, event.captured_at.isoformat()]
                 if attempts + 1 < MAX_SNAPSHOT_ATTEMPTS:
+                    result["retried"] += 1
                     hold = min(hold or event.captured_at, event.captured_at)
                 log.warning("ubox.snapshot_failed", camera=str(camera.id),
                             attempt=attempts + 1, error=type(exc).__name__)
@@ -324,6 +353,7 @@ def _sync_camera(
         window_end = window_start
     camera.import_failures = failures
     camera.last_sync_at = hold or until
+    camera.fetch_error = None
     log.info("ubox.camera_synced", **result)
     return result
 
@@ -339,22 +369,25 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
     results = []
     account_results = []
     listed: set[str] = set()
-    every_login_listed = True
+    answered: set = set()  # logins that listed their cameras
     for account in accounts:
         label = account.label or account.username
         summary = {"account_id": str(account.id), "label": label, "status": "ok", "error": None}
         account_results.append(summary)
         failures: list[str] = []
-        failed_snapshots = 0
+        failed_snapshots = retried_snapshots = 0
         devices: list[UboxDevice] = []
+        kept = saved_session(db, account)
         try:
             estate = db.get(Estate, account.estate_id)
             if estate is None:
                 raise UboxError("Account has no estate")
             with UboxClient(account.username, read_password(db, account)) as client:
-                client.login()
-                devices = client.list_devices()
+                devices = _list_devices(db, client, account)
+                session = (client.token, client.token_valid_hours)
                 listed.update(device.uid for device in devices)
+                if devices:
+                    answered.add(account.id)
                 for device in devices:
                     created_paths = []
                     try:
@@ -371,31 +404,43 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
                         db.commit()
                         results.append(result)
                         failed_snapshots += result["failed"]
+                        retried_snapshots += result["retried"]
                     except Exception as exc:
                         db.rollback()
                         _cleanup_uncommitted(db, created_paths)
-                        failures.append(login_error(exc, "ubox"))
+                        words = login_error(exc, "ubox")
+                        failures.append(words)
+                        # Its login works: say on the camera's card that its photos
+                        # could not be fetched.
+                        db.execute(update(Camera).where(Camera.ubox_uid == device.uid)
+                                   .values(fetch_error=words)
+                                   .execution_options(synchronize_session=False))
+                        db.commit()
                         results.append({"account_id": str(account.id), "camera": device.name,
                                         "error": type(exc).__name__})
                         log.error("ubox.camera_failed", account=str(account.id),
                                   error=type(exc).__name__)
         except Exception as exc:
             db.rollback()
-            every_login_listed = False
             words = login_error(exc, "ubox")
             summary.update(status="error", error=words)
             log.error("ubox.account_failed", account=str(account.id), error=type(exc).__name__)
             if (row := db.get(CameraAccount, account.id)) is not None:
                 record(db, row, error=words)
+                if account.id not in answered:
+                    keep_session(db, row, None)  # sign in afresh next time
                 db.commit()
             continue
+        if session[0] != kept:
+            keep_session(db, account, session[0], valid_hours=session[1])
         if failures:
             everything = len(failures) == len(devices)
             summary["status"] = "error" if everything else "partial"
             summary["error"] = (failures[0] if everything else
                                 f"{len(failures)} of {len(devices)} cameras failed. {failures[0]}")
         elif failed_snapshots:
-            summary.update(status="partial", error=_snapshot_note(failed_snapshots))
+            summary.update(status="partial",
+                           error=_snapshot_note(failed_snapshots, retried_snapshots))
         if not failures:
             # Every camera was listed: the login's history is in, even if some
             # snapshots are still being retried (their cameras hold their own place).
@@ -403,9 +448,11 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
         record(db, account, cameras=len(devices),
                error=summary["error"] if summary["status"] == "error" else None)
         db.commit()
-    if account_id is None and every_login_listed and accounts:
-        # Every login answered: a camera none of them listed is no longer connected.
-        disconnect_unlisted(db, accounts[0].estate_id, "ubox", listed)
+    if account_id is None and accounts:
+        # A camera no login listed is no longer connected, once the login that
+        # fetched it has answered (a failing one might still list it).
+        disconnect_unlisted(db, accounts[0].estate_id, "ubox", listed, answered=answered,
+                            tried={a.id for a in accounts})
     totals = {key: sum(r.get(key, 0) for r in results) for key in COUNTERS}
     sync.status = run_status([a["status"] for a in account_results], totals["downloaded"])
     sync.error = "; ".join(f"{a['label']}: {a['error']}" for a in account_results

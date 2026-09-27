@@ -32,7 +32,7 @@ class SpypointAuthError(SpypointError):
     """SPYPOINT refused the username or password."""
 
 
-# A 429 or 503 is waited out once when SPYPOINT says how long (Retry-After), up to
+# A 429 or 5xx is waited out once when SPYPOINT says how long (Retry-After), up to
 # this long; any longer and the fetch gives up until its next run.
 RETRY_AFTER_MAX_S = 30
 
@@ -252,7 +252,7 @@ def _extract_tags(photo: dict) -> list[str]:
 
 def _retry_after(resp: httpx.Response) -> float | None:
     """Seconds to wait before one more try, when SPYPOINT is busy and says how long."""
-    if resp.status_code not in (429, 503):
+    if resp.status_code != 429 and resp.status_code < 500:
         return None
     try:
         seconds = float(resp.headers.get("retry-after", ""))
@@ -275,14 +275,33 @@ class SpypointClient:
         self._client = httpx.Client(timeout=timeout)
 
     # ── auth ────────────────────────────────────────────────
+    @property
+    def token(self) -> str | None:
+        """The sign-in in use, kept by the fetch for next time (sync._keep)."""
+        return self._token
+
+    def use_token(self, token: str) -> None:
+        """Carry on with a sign-in kept from an earlier fetch instead of signing in;
+        SPYPOINT refusing it (401) signs in afresh (_request)."""
+        self._token = token
+
     def login(self) -> str:
         if not self._username or not self._password:
             raise SpypointError("SPYPOINT credentials are not configured")
-        resp = self._client.post(
-            f"{SPYPOINT_API}/user/login",
-            json={"username": self._username, "password": self._password},
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-        )
+
+        def post() -> httpx.Response:
+            return self._client.post(
+                f"{SPYPOINT_API}/user/login",
+                json={"username": self._username, "password": self._password},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+
+        resp = post()
+        wait = _retry_after(resp)
+        if wait is not None:  # busy: wait as long as asked, once, then try again
+            log.info("spypoint.retry_after", status=resp.status_code, seconds=wait)
+            time.sleep(wait)
+            resp = post()
         if resp.status_code in (400, 401, 403):
             raise SpypointAuthError(f"login refused: HTTP {resp.status_code}", resp.status_code)
         if resp.status_code != 200:

@@ -155,11 +155,16 @@ def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(
     shot = datetime(2026, 9, 25, 21, 40, tzinfo=UTC)
 
     class FakeClient:
+        token = None
+
         def __init__(self, *_):
             pass
 
         def login(self):
             pass
+
+        def use_token(self, token):
+            self.token = token
 
         def list_cameras(self):
             return [SpypointCamera("sp-1", "Charca"), SpypointCamera("sp-2", "Pinar Alto"),

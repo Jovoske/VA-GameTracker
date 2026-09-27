@@ -61,6 +61,22 @@ def device_token(email: str) -> str:
     return base64.b32encode(digest).decode().lower()[:30]
 
 
+# A 429 or 5xx is waited out once when UBox says how long (Retry-After), up to this
+# long; any longer and the fetch gives up until its next run.
+RETRY_AFTER_MAX_S = 30
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds to wait before one more try, when UBox is busy and says how long."""
+    if response.status_code != 429 and response.status_code < 500:
+        return None
+    try:
+        seconds = float(response.headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return seconds if 0 <= seconds <= RETRY_AFTER_MAX_S else None
+
+
 class UboxError(Exception):
     """An intentionally credential-free error, safe to show in account/sync UI."""
 
@@ -198,6 +214,25 @@ class UboxClient:
     def close(self) -> None:
         self._client.close()
 
+    @property
+    def token(self) -> str | None:
+        """The sign-in in use, kept by the fetch for next time (logins.keep_session)."""
+        return self._token
+
+    def use_token(self, token: str) -> None:
+        """Carry on with a sign-in kept from an earlier fetch instead of signing in;
+        UBox saying it has expired signs in afresh (_request)."""
+        self._token = token
+
+    def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+        response = self._client.post(url, **kwargs)
+        wait = _retry_after(response)
+        if wait is not None:  # busy: wait as long as asked, once, then try again
+            log.info("ubox.retry_after", status=response.status_code, seconds=wait)
+            time.sleep(wait)
+            response = self._client.post(url, **kwargs)
+        return response
+
     @staticmethod
     def _payload(response: httpx.Response) -> dict[str, Any]:
         try:
@@ -231,7 +266,7 @@ class UboxClient:
         self._token = None
         try:
             with _private_request():
-                response = self._client.post(f"{UBOX_API}/api/v3/login", json={
+                response = self._post(f"{UBOX_API}/api/v3/login", json={
                     "account": self._email,
                     "password": hash_password(self._password),
                 "lang": "en", "app": self._app, "device_type": 2,
@@ -265,7 +300,7 @@ class UboxClient:
                 self.login()
             try:
                 with _private_request():
-                    response = self._client.post(
+                    response = self._post(
                         f"{UBOX_API}{path}", json={**(body or {}), "token": self._token},
                         headers={"x-ubia-auth-usertoken": self._token or ""},
                     )

@@ -554,8 +554,10 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
             for table, column in (
                 ("camera_accounts", "last_attempt_at"), ("camera_accounts", "last_ok_at"),
                 ("camera_accounts", "last_error"), ("camera_accounts", "reported_cameras"),
+                ("camera_accounts", "session_enc"),
                 ("cameras", "photos_listed_to"), ("cameras", "import_failures"),
-                ("images", "download_attempts"),
+                ("cameras", "photos_gap_from"), ("cameras", "photos_gap_to"),
+                ("cameras", "fetch_error"), ("images", "download_attempts"),
             ):
                 c.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
             estate_id = c.execute(text(
@@ -599,6 +601,12 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
                 "SELECT download_attempts, spypoint_photo_id FROM images")).one() == (0, "p-1")
             assert c.execute(text("SELECT import_failures FROM cameras WHERE id=:c"),
                              {"c": orphan}).scalar_one() == {}
+            # Nothing listed or failing yet: the first fetch finds its own place.
+            assert c.execute(text(
+                "SELECT photos_listed_to, photos_gap_from, photos_gap_to, fetch_error "
+                "FROM cameras WHERE id=:c"), {"c": doubled}).one() == (None, None, None, None)
+            assert c.execute(text("SELECT session_enc FROM camera_accounts WHERE id=:a"),
+                             {"a": first}).scalar_one() is None
             # One active copy of a login from now on, whatever the case of its email.
             with pytest.raises(IntegrityError), c.begin_nested():
                 c.execute(text(
@@ -617,6 +625,9 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
         command.downgrade(cfg, "0019_camera_alerts_photo_notes")
         assert "last_error" not in _columns(eng, "camera_accounts")
         assert "photos_listed_to" not in _columns(eng, "cameras")
+        gone = {"photos_gap_from", "photos_gap_to", "fetch_error"}
+        assert not gone & set(_columns(eng, "cameras"))
+        assert "session_enc" not in _columns(eng, "camera_accounts")
         assert "download_attempts" not in _columns(eng, "images")
         assert _index(eng, "camera_accounts", "uq_camera_accounts_provider_login") is None
         with eng.connect() as c:

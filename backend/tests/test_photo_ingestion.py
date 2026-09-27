@@ -46,15 +46,31 @@ class FakeSpypoint:
     downloads: list[str] = []
     pages: list[tuple[str, str | None]] = []
     on_list = None
+    signins: list[str] = []
+    issued: list[str] = []
+    expired: set[str] = set()  # sign-ins SPYPOINT no longer takes
 
     def __init__(self, username, password, **_):
         self.username, self.password = username, password
+        self.token = None
+
+    @classmethod
+    def sign_everyone_out(cls):
+        cls.expired.update(cls.issued)
 
     def login(self):
         if self.username in self.login_errors:
             raise self.login_errors[self.username]
+        self.signins.append(self.username)
+        self.token = f"session-{self.username}-{len(self.signins)}"
+        self.issued.append(self.token)
+
+    def use_token(self, token):
+        self.token = token
 
     def list_cameras(self):
+        if self.token is None or self.token in self.expired:
+            self.login()  # as SpypointClient._request signs in again on a 401
         return [SpypointCamera(cid, f"Cam {cid}", last_report_at=datetime.now(UTC))
                 for cid in self.cameras.get(self.username, [])]
 
@@ -95,6 +111,7 @@ def spypoint(db_session, monkeypatch, tmp_path):
     FakeSpypoint.login_errors, FakeSpypoint.list_errors = {}, {}
     FakeSpypoint.dead_urls, FakeSpypoint.downloads, FakeSpypoint.pages = set(), [], []
     FakeSpypoint.on_list = None
+    FakeSpypoint.signins, FakeSpypoint.issued, FakeSpypoint.expired = [], [], set()
     monkeypatch.setattr(sync, "SpypointClient", FakeSpypoint)
     monkeypatch.setattr(sync, "enrich_image", lambda db, image: None)
     monkeypatch.setattr(settings, "media_root", str(tmp_path / "media"))
@@ -191,6 +208,26 @@ def test_a_photo_whose_file_never_came_stops_blinding_its_night(db_session, spyp
     assert fresh.processed_at is None  # still being retried by the fetch
 
 
+@requires_db
+def test_a_photo_the_fetch_gave_up_on_is_let_through_at_once(db_session, spypoint):
+    from app.ai import empty_filter
+
+    camera = Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="Charca")
+    db_session.add(camera)
+    db_session.flush()
+    given_up = Image(camera_id=camera.id, spypoint_photo_id="b", captured_at=NOW,
+                     cdn_url="https://cdn/b.jpg", created_at=NOW - timedelta(hours=7),
+                     download_attempts=sync.MAX_DOWNLOAD_ATTEMPTS)
+    no_link = Image(camera_id=camera.id, spypoint_photo_id="c", captured_at=NOW)
+    retrying = Image(camera_id=camera.id, spypoint_photo_id="d", captured_at=NOW,
+                     cdn_url="https://cdn/d.jpg", download_attempts=2)
+    db_session.add_all([given_up, no_link, retrying])
+    db_session.commit()
+    assert empty_filter.scan_unprocessed(db_session)["scanned"] == 2
+    assert given_up.processed_at is not None and no_link.processed_at is not None
+    assert retrying.processed_at is None  # the fetch is still trying for its file
+
+
 # ── E-02: an outage leaves no hole ──────────────────────────────────────────────
 
 
@@ -218,22 +255,98 @@ def test_fetch_after_an_outage_pages_back_to_photos_already_listed(db_session, s
 
 
 @requires_db
-def test_the_page_cap_bounds_a_fetch_and_does_not_claim_what_it_missed(
+def test_an_outage_longer_than_the_page_cap_is_closed_by_the_next_fetches(
     db_session, spypoint, monkeypatch,
 ):
+    monkeypatch.setattr(sync, "MAX_PAGES", 3)  # stands for 20 pages of 100
     FakeSpypoint.cameras["owner@example.com"] = ["sp-1"]
-    FakeSpypoint.photos["sp-1"] = shots("sp-1", 500, NOW - timedelta(minutes=5),
-                                        step=timedelta(minutes=5))
-    listed_to = NOW - timedelta(days=5)
+    listed_to = NOW - timedelta(days=11)
+    history = shots("sp-1", 100, listed_to, step=timedelta(hours=2), prefix="old")
+    outage = shots("sp-1", 500, NOW - timedelta(minutes=5), step=timedelta(minutes=30))
+    FakeSpypoint.photos["sp-1"] = history + outage
     db_session.add(Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="Charca",
                           photos_listed_to=listed_to))
     db_session.commit()
-    monkeypatch.setattr(sync, "MAX_PAGES", 2)
+    camera = db_session.scalar(select(Camera))
+
+    first = sync.sync_all(db_session)["cameras"][0]
+    db_session.refresh(camera)
+    assert (first["pages"], first["complete"]) == (3, False)
+    assert db_session.scalar(select(func.count(Image.id))) == 298  # dateEnd is inclusive
+    # What the cap left is kept as the camera's gap; the mark is the newest listed.
+    assert camera.photos_listed_to == outage[0].captured_at
+    assert camera.photos_gap_from == listed_to - sync.OVERLAP
+    assert camera.photos_gap_to == outage[297].captured_at
+
+    runs = []
+    for _ in range(3):
+        FakeSpypoint.pages.clear()
+        result = sync.sync_all(db_session)["cameras"][0]
+        runs.append((len(FakeSpypoint.pages), result["complete"]))
+    # New photos first (one page), then on through the gap with what is left of the
+    # cap, until it is closed; after that a fetch reads one page again.
+    assert runs == [(3, False), (2, True), (1, True)]
+    stored = set(db_session.scalars(select(Image.spypoint_photo_id)))
+    assert {p.spypoint_id for p in outage} <= stored
+    db_session.refresh(camera)
+    assert camera.photos_gap_from is None and camera.photos_gap_to is None
+
+
+@requires_db
+def test_a_fetch_cut_short_by_an_error_leaves_its_gap_for_the_next(db_session, spypoint):
+    FakeSpypoint.cameras["owner@example.com"] = ["sp-1", "sp-2"]
+    FakeSpypoint.photos["sp-1"] = shots("sp-1", 300, NOW - timedelta(minutes=5),
+                                        step=timedelta(minutes=30))
+    FakeSpypoint.photos["sp-2"] = shots("sp-2", 2, NOW - timedelta(hours=1))
+
+    def drop_third_page(camera_id, date_end):
+        if len(FakeSpypoint.pages) == 3:
+            raise SpypointError("POST /photo/all -> HTTP 502", 502)
+
+    FakeSpypoint.on_list = drop_third_page
     result = sync.sync_all(db_session)
-    assert result["cameras"][0]["complete"] is False
-    # Only a complete listing moves the mark, so the next fetch looks again.
-    assert db_session.scalar(select(Camera)).photos_listed_to == listed_to
-    assert db_session.scalar(select(func.count(Image.id))) == 199  # dateEnd is inclusive
+    assert result["status"] == "partial" and len(images(db_session, "sp-1")) == 199
+    camera = db_session.scalar(select(Camera).where(Camera.spypoint_id == "sp-1"))
+    assert camera.photos_gap_to == FakeSpypoint.photos["sp-1"][198].captured_at
+    # Its login works: the camera itself says its photos didn't come.
+    assert camera.fetch_error == (
+        "SPYPOINT isn't answering properly right now. It tries again on the next fetch.")
+    health = camera_health(camera, login=logins.camera_logins(db_session, [camera])[camera.id])
+    assert health["status"] == "not_syncing" and health["login"]["camera"] is True
+
+    FakeSpypoint.on_list = None
+    sync.sync_all(db_session)
+    db_session.refresh(camera)
+    assert len(images(db_session, "sp-1")) == 300
+    assert camera.photos_gap_to is None and camera.fetch_error is None
+    assert camera_health(camera)["status"] == "ok"
+
+
+@requires_db
+def test_a_camera_fetched_before_the_upgrade_reads_one_page_not_the_whole_cap(
+    db_session, spypoint, monkeypatch,
+):
+    """Right after 0020 a camera has no mark yet: it pages back to its newest stored
+    photo, not two months, so a busy one doesn't read the whole cap every fetch."""
+    monkeypatch.setattr(sync, "MAX_PAGES", 4)
+    FakeSpypoint.cameras["owner@example.com"] = ["sp-1"]
+    FakeSpypoint.photos["sp-1"] = shots("sp-1", 500, NOW - timedelta(minutes=5),
+                                        step=timedelta(minutes=86))
+    camera = Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="Charca")
+    db_session.add(camera)
+    db_session.commit()
+    for p in FakeSpypoint.photos["sp-1"]:
+        db_session.add(Image(camera_id=camera.id, spypoint_photo_id=p.spypoint_id,
+                             captured_at=p.captured_at, original_path="/x.jpg", cdn_url=p.url))
+    db_session.commit()
+    runs = []
+    for _ in range(2):
+        FakeSpypoint.pages.clear()
+        result = sync.sync_all(db_session)
+        runs.append((len(FakeSpypoint.pages), result["cameras"][0]["complete"], result["total"]))
+    assert runs == [(1, True, 0), (1, True, 0)]
+    db_session.refresh(camera)
+    assert camera.photos_listed_to == FakeSpypoint.photos["sp-1"][0].captured_at
 
 
 # ── E-04 / E-17: one error never costs the rest ─────────────────────────────────
@@ -323,8 +436,44 @@ def test_backfill_account_keeps_going_past_a_camera_that_fails(db_session, spypo
     assert result["status"] == "partial"
     assert len(images(db_session, "sp-9")) == 3
     db_session.refresh(marco)
-    assert marco.last_sync_at is None  # the next fetch imports the one that failed
     assert marco.reported_cameras == 2
+    # Tried: the next fetch is a routine one, and the camera that failed says so.
+    assert marco.last_sync_at is not None
+    failed = db_session.scalar(select(Camera).where(Camera.spypoint_id == "sp-8"))
+    assert failed is None  # its first page never came, so there is no card to mark
+
+
+@requires_db
+def test_a_new_login_with_one_failing_camera_is_not_imported_again_every_fetch(
+    db_session, spypoint,
+):
+    from app.api.routes_camera_accounts import list_accounts
+
+    marco = guest(db_session, spypoint, imported=False)
+    FakeSpypoint.cameras.update({"owner@example.com": [],
+                                 "marco@example.com": ["sp-good", "sp-bad"]})
+    FakeSpypoint.photos["sp-good"] = shots("sp-good", 600, NOW - timedelta(minutes=5),
+                                           step=timedelta(hours=2))  # 50 days
+    FakeSpypoint.photos["sp-bad"] = shots("sp-bad", 3, NOW - timedelta(hours=1))
+    sync.sync_all(db_session)  # sp-bad comes in once, then its listing starts failing
+    FakeSpypoint.list_errors["sp-bad"] = SpypointError("POST /photo/all -> HTTP 500", 500)
+    per_run = []
+    for _ in range(2):
+        FakeSpypoint.pages.clear()
+        sync.sync_all(db_session)
+        per_run.append(sum(1 for p in FakeSpypoint.pages if p[0] == "sp-good"))
+    assert per_run == [1, 1]  # a routine page, not the two months again
+    row = next(r for r in list_accounts(_member(db_session, spypoint, "admin"), db_session)
+               if r["id"] == str(marco.id))
+    assert row["importing"] is False and row["status"]["state"] == "ok"
+    assert row["status"]["cameras_failing"] == 1
+    assert row["status"]["camera_error"].startswith("SPYPOINT isn't answering properly")
+    bad = db_session.scalar(select(Camera).where(Camera.spypoint_id == "sp-bad"))
+    health = camera_health(bad, login=logins.camera_logins(db_session, [bad])[bad.id])
+    assert health["status"] == "not_syncing" and not health["producing"]
+    assert health["login"] == {"label": "Marco's cameras", "camera": True,
+                               "error": bad.fetch_error}
+    assert bad.fetch_error.startswith("SPYPOINT isn't answering properly")
 
 
 # ── E-03: a camera clock that is obviously wrong is not believed ────────────────
@@ -485,6 +634,113 @@ def test_a_guest_copy_of_the_main_login_is_not_fetched_twice(db_session, spypoin
     assert copy.last_error == sync.DUPLICATE_OF_PRIMARY
 
 
+@requires_db
+def test_a_copy_of_the_main_login_left_from_before_hands_its_cameras_back(
+    db_session, spypoint,
+):
+    """A copy added before copies were refused still owns the main cameras: the main
+    login takes them back on its first fetch, the copy's problem is not theirs, and
+    removing the copy never switches them off."""
+    from app.api.routes_camera_accounts import remove_account
+
+    copy = guest(db_session, spypoint, "Owner@Example.com", label="Owner again")
+    camera = Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="PL14",
+                    account_id=copy.id, last_report_at=NOW)
+    db_session.add_all([camera, Camera(estate_id=spypoint.id, spypoint_id="sp-gone",
+                                       name="Orphan", account_id=None)])
+    db_session.commit()
+    # Before any fetch: the main login is who fetches it.
+    logins.record(db_session, None, cameras=1)
+    logins.record(db_session, copy, error=sync.DUPLICATE_OF_PRIMARY)
+    db_session.commit()
+    assert logins.camera_logins(db_session, [camera])[camera.id]["label"] == "Main SPYPOINT login"
+
+    FakeSpypoint.cameras["owner@example.com"] = ["sp-1"]
+    FakeSpypoint.photos["sp-1"] = shots("sp-1", 3, NOW - timedelta(minutes=30))
+    assert sync.sync_all(db_session)["total"] == 3
+    db_session.refresh(camera)
+    assert camera.account_id is None
+    health = camera_health(camera, login=logins.camera_logins(db_session, [camera])[camera.id])
+    assert health["status"] == "ok" and health["producing"]
+    # The copy doesn't stop a camera no login lists from being switched off.
+    orphan = db_session.scalar(select(Camera).where(Camera.spypoint_id == "sp-gone"))
+    assert orphan.active is False
+
+    # A camera still linked to the copy when it is removed stays on, with the main login.
+    camera.account_id = copy.id
+    db_session.commit()
+    remove_account(copy.id, _member(db_session, spypoint, "admin"), db_session)
+    db_session.refresh(camera)
+    assert camera.active is True and camera.account_id is None
+
+
+@requires_db
+def test_a_camera_two_logins_list_belongs_to_the_first(db_session, spypoint):
+    marco = guest(db_session, spypoint)
+    FakeSpypoint.cameras.update({"owner@example.com": ["sp-1"],
+                                 "marco@example.com": ["sp-1", "sp-2"]})
+    sync.sync_all(db_session)
+    owners = dict(db_session.execute(select(Camera.spypoint_id, Camera.account_id)).all())
+    assert owners == {"sp-1": None, "sp-2": marco.id}
+    # Marco's login breaking doesn't make the shared camera look stopped.
+    FakeSpypoint.sign_everyone_out()
+    FakeSpypoint.login_errors["marco@example.com"] = SpypointAuthError("refused", 401)
+    sync.sync_all(db_session)
+    cams = db_session.scalars(select(Camera).order_by(Camera.spypoint_id)).all()
+    states = logins.camera_logins(db_session, cams)
+    assert [camera_health(c, login=states.get(c.id))["status"] for c in cams] == [
+        "ok", "not_syncing"]
+
+
+# ── E-21: a login is not signed in afresh every 15 minutes ──────────────────────
+
+
+@requires_db
+def test_a_login_keeps_its_sign_in_between_fetches(db_session, spypoint, verified):
+    from app.api import routes_camera_accounts as accounts
+
+    marco = guest(db_session, spypoint)
+    marco.owner_user_id = _member(db_session, spypoint).id
+    FakeSpypoint.cameras.update({"owner@example.com": ["sp-1"], "marco@example.com": ["sp-2"]})
+    for _ in range(3):
+        sync.sync_all(db_session)
+    assert sorted(FakeSpypoint.signins) == ["marco@example.com", "owner@example.com"]
+    db_session.refresh(marco)
+    assert marco.session_enc and "session-" not in marco.session_enc  # sealed
+    assert logins.saved_session(db_session, None) == "session-owner@example.com-1"
+
+    # SPYPOINT lets the sign-in lapse: the login signs in again, once, and keeps it.
+    FakeSpypoint.sign_everyone_out()
+    sync.sync_all(db_session)
+    sync.sync_all(db_session)
+    assert len(FakeSpypoint.signins) == 4
+
+    # A new password starts a new sign-in.
+    accounts.replace_password(marco.id, accounts.PasswordBody(password="new"),
+                              db_session.get(User, marco.owner_user_id), db_session)
+    assert logins.saved_session(db_session, db_session.get(CameraAccount, marco.id)) is None
+
+    # One that can't be read (the key changed) is simply signed in afresh.
+    marco = db_session.get(CameraAccount, marco.id)
+    marco.session_enc = "not-a-sealed-token"
+    db_session.commit()
+    assert logins.saved_session(db_session, marco) is None
+
+
+def test_a_kept_sign_in_runs_out_before_ubox_refuses_it(monkeypatch):
+    kept = {}
+
+    class Account:
+        session_enc = None
+
+    account = Account()
+    logins.keep_session(None, account, "tok", valid_hours=2)
+    kept["fresh"] = logins.saved_session(None, account)
+    logins.keep_session(None, account, "tok", valid_hours=1)  # an hour early: gone now
+    kept["lapsed"] = logins.saved_session(None, account)
+    assert kept == {"fresh": "tok", "lapsed": None}
+
+
 # ── E-05: a broken login is visible everywhere a hunter looks ───────────────────
 
 
@@ -501,6 +757,8 @@ def test_a_refused_main_login_says_so_in_settings_cards_and_alerts(
                                  "marco@example.com": ["sp-3"]})
     FakeSpypoint.photos["sp-3"] = shots("sp-3", 2, NOW - timedelta(hours=1))
     sync.sync_all(db_session)  # everything works first
+    # Later SPYPOINT signs the main login out and refuses its password.
+    FakeSpypoint.sign_everyone_out()
     FakeSpypoint.login_errors["owner@example.com"] = SpypointAuthError(
         "login refused: HTTP 401", 401)
     result = sync.sync_all(db_session)
@@ -569,6 +827,168 @@ def test_tonight_says_when_the_photos_behind_it_are_old(db_session, spypoint, mo
     assert plan["freshness"]["last_fetch_ok_at"] is not None
 
 
+@requires_db
+def test_a_long_job_holding_the_pipeline_is_busy_not_stopped(
+    db_session, spypoint, monkeypatch,
+):
+    from app.forecasting import alerts, model
+
+    monkeypatch.setattr(model, "_tonight_conditions", lambda now: {"moon_phase": "New Moon"})
+    cameras = []
+    for n, username in enumerate(("marco@example.com", "ana@example.com", "leo@example.com")):
+        account = guest(db_session, spypoint, username, label=username.split("@")[0])
+        logins.record(db_session, account, cameras=1, now=NOW - timedelta(hours=3))
+        cameras.append(Camera(estate_id=spypoint.id, spypoint_id=f"sp-{n}", name=f"Cam {n}",
+                              account_id=account.id, last_report_at=NOW - timedelta(hours=1)))
+    db_session.add_all(cameras)
+    db_session.commit()
+    # The AI pass after a big import took the pipeline 2 h 30 min ago, before the
+    # logins were due to be called stopped.
+    monkeypatch.setattr(logins, "pipeline_busy_since", lambda now=None: NOW - timedelta(hours=2.5))
+    states = logins.camera_logins(db_session, cameras, NOW)
+    assert {s["state"] for s in states.values()} == {"busy"}
+    assert camera_health(cameras[0], NOW, states[cameras[0].id])["status"] == "ok"
+    assert logins.freshness(db_session, now=NOW)["problem"] is None
+
+    # No job explains it: stopped, and one alert for the estate, not one per login.
+    monkeypatch.setattr(logins, "pipeline_busy_since", lambda now=None: None)
+    feed = [a for a in alerts.compute_alerts(db_session) if a["type"] == "camera"]
+    assert [a["title"] for a in feed] == ["Photos not coming in"]
+    assert "Cam 0, Cam 1, Cam 2" in feed[0]["text"]
+    # A job that only began after they had stopped doesn't excuse them.
+    busy = datetime.now(UTC) - timedelta(minutes=10)
+    monkeypatch.setattr(logins, "pipeline_busy_since", lambda now=None: busy)
+    assert logins.camera_logins(db_session, cameras)[cameras[0].id]["state"] == "stale"
+
+
+def test_the_pipeline_lock_file_says_when_a_job_began(monkeypatch, tmp_path):
+    import os
+
+    monkeypatch.setattr(settings, "models_root", str(tmp_path / "models"))
+    assert logins.pipeline_busy_since() is None
+    lock = tmp_path / "pipeline.lock"
+    lock.write_text("sync 0")
+    began = datetime.now(UTC) - timedelta(minutes=20)
+    os.utime(lock, (began.timestamp(), began.timestamp()))
+    assert abs(logins.pipeline_busy_since() - began) < timedelta(seconds=1)
+    crashed = datetime.now(UTC) - timedelta(hours=4)
+    os.utime(lock, (crashed.timestamp(), crashed.timestamp()))
+    assert logins.pipeline_busy_since() is None  # left by a crashed run
+
+
+@pytest.mark.parametrize(("exc", "words"), [
+    (SpypointError("GET /camera/all -> HTTP 404", 404),
+     "SPYPOINT refused the request. It tries again on the next fetch."),
+    (SpypointError("login response missing token"),
+     "SPYPOINT sent something the app can't read. It tries again on the next fetch."),
+    (SpypointAuthError("login refused: HTTP 401", 401),
+     "SPYPOINT refused the password. Re-enter it."),
+])
+def test_login_errors_are_words_without_the_request_behind_them(exc, words):
+    assert logins.login_error(exc, "spypoint") == words
+
+
+@pytest.mark.parametrize(("error", "asks"), [
+    ("SPYPOINT refused the password. Re-enter it.", True),
+    ("UBox signed this login out. Re-enter the password.", True),
+    ("The saved password can't be read. Re-enter it.", True),
+    ("Couldn't reach SPYPOINT. It tries again on the next fetch.", False),
+    ("SPYPOINT is turning requests away for now. It tries again on the next fetch.", False),
+    (sync.DUPLICATE_OF_PRIMARY, False),
+    (None, False),
+])
+def test_only_a_password_problem_asks_for_the_password(error, asks):
+    assert logins.asks_for_password(error) is asks
+
+
+@requires_db
+def test_re_entering_a_password_while_the_provider_is_unreachable_says_so(
+    db_session, spypoint, verified, monkeypatch,
+):
+    from app.api import routes_camera_accounts as accounts
+
+    admin = _member(db_session, spypoint, "admin")
+    marco = guest(db_session, spypoint)
+    logins.record(db_session, marco,
+                  error="Couldn't reach SPYPOINT. It tries again on the next fetch.")
+    db_session.commit()
+    row = next(r for r in accounts.list_accounts(admin, db_session) if r["id"] == str(marco.id))
+    assert row["status"]["password_problem"] is False  # a new password wouldn't help
+
+    for failure in (httpx.ConnectTimeout("timed out"), httpx.ProxyError("proxy"),
+                    SpypointError("login failed: HTTP 503", 503)):
+        def unreachable(self, failure=failure):
+            raise failure
+
+        monkeypatch.setattr(verified, "login", unreachable)
+        with pytest.raises(HTTPException) as exc:
+            accounts.replace_password(marco.id, accounts.PasswordBody(password="new"),
+                                      admin, db_session)
+        assert exc.value.status_code == 503
+        assert exc.value.detail == (
+            "Couldn't reach SPYPOINT to check the password. Try again in a few minutes.")
+    assert crypto.decrypt(db_session.get(CameraAccount, marco.id).password_enc) == "guest-secret"
+
+    def refused(self):
+        raise SpypointAuthError("login refused: HTTP 401", 401)
+
+    monkeypatch.setattr(verified, "login", refused)
+    with pytest.raises(HTTPException) as exc:
+        accounts.add_account(accounts.AddAccountBody(username="new@example.com", password="x"),
+                             BackgroundTasks(), admin, db_session)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == (
+        "SPYPOINT refused that email and password. Check them in the SPYPOINT app.")
+
+    monkeypatch.setattr(accounts, "UboxClient", _UnreachableUbox)
+    with pytest.raises(HTTPException) as exc:
+        accounts.add_account(accounts.AddAccountBody(username="ana@example.com", password="x",
+                                                     provider="ubox"),
+                             BackgroundTasks(), admin, db_session)
+    assert exc.value.status_code == 503 and "Couldn't reach UBox" in exc.value.detail
+
+
+class _UnreachableUbox:
+    def __init__(self, *_):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def login(self):
+        from app.ingestion.ubox import UboxError
+
+        raise UboxError("Unable to reach UBox for login")
+
+
+@requires_db
+def test_a_disconnected_camera_keeps_its_photo_filter(db_session, spypoint):
+    from app.api.routes_photos import filters
+    from app.models import Detection, Species
+
+    user = _member(db_session, spypoint, "viewer")
+    kept = Camera(estate_id=spypoint.id, spypoint_id="sp-1", name="Old feeder", active=False)
+    bare = Camera(estate_id=spypoint.id, spypoint_id="sp-2", name="Never used", active=False)
+    live = Camera(estate_id=spypoint.id, spypoint_id="sp-3", name="Charca")
+    db_session.add_all([kept, bare, live])
+    db_session.flush()
+    if db_session.get(Species, "wild_boar") is None:
+        db_session.add(Species(id="wild_boar", common_name="Wild boar"))
+    photo = Image(camera_id=kept.id, captured_at=NOW, original_path="/x.jpg",
+                  processed_at=NOW, is_empty_frame=False)
+    db_session.add(photo)
+    db_session.flush()
+    db_session.add(Detection(image_id=photo.id, species_id="wild_boar", species_conf=0.9))
+    db_session.commit()
+    chips = {c["name"]: c for c in filters(user, db_session)["cameras"]}
+    assert set(chips) == {"Old feeder", "Charca"}
+    assert chips["Old feeder"]["connected"] is False and chips["Old feeder"]["count"] == 1
+    assert chips["Charca"]["connected"] is True
+
+
 # ── E-23: a removed login's cameras are "not connected", not "check battery" ────
 
 
@@ -604,21 +1024,30 @@ def test_removing_a_login_disconnects_its_cameras_until_a_login_lists_them(
 
 
 @requires_db
-def test_a_camera_no_login_lists_is_disconnected_only_after_a_complete_run(
+def test_a_camera_no_login_lists_is_disconnected_once_its_own_login_answers(
     db_session, spypoint,
 ):
+    """E-23: a camera left by a login removed before this change (no login on it)
+    is switched off as soon as the main login answers without it, even while a
+    guest's login is failing; a camera of that guest's stays until the guest answers."""
     marco = guest(db_session, spypoint)
-    db_session.add(Camera(estate_id=spypoint.id, spypoint_id="sp-gone", name="Orphan"))
+    db_session.add_all([
+        Camera(estate_id=spypoint.id, spypoint_id="sp-gone", name="Orphan"),
+        Camera(estate_id=spypoint.id, spypoint_id="sp-4", name="Marco's old one",
+               account_id=marco.id),
+    ])
     db_session.commit()
     FakeSpypoint.cameras.update({"owner@example.com": ["sp-1"], "marco@example.com": ["sp-3"]})
     FakeSpypoint.login_errors["marco@example.com"] = SpypointAuthError("refused", 401)
     sync.sync_all(db_session)
     orphan = db_session.scalar(select(Camera).where(Camera.spypoint_id == "sp-gone"))
-    assert orphan.active is True  # Marco's login didn't answer: it may be his
+    marcos = db_session.scalar(select(Camera).where(Camera.spypoint_id == "sp-4"))
+    assert orphan.active is False
+    assert marcos.active is True  # Marco's login didn't answer: it may still list it
     del FakeSpypoint.login_errors["marco@example.com"]
     sync.sync_all(db_session)
-    db_session.refresh(orphan)
-    assert orphan.active is False
+    db_session.refresh(marcos)
+    assert marcos.active is False
     assert db_session.get(CameraAccount, marco.id).last_error is None
 
 

@@ -4,7 +4,15 @@ Two entry points share the same per-photo ingest logic:
 - sync_all:     incremental, every 15 min. Pages back from the newest photo until it
                 reaches photos already listed (Camera.photos_listed_to), so a fetch
                 after an outage leaves no hole instead of reading only the newest 100.
+                A fetch reads at most MAX_PAGES pages per camera; what an outage left
+                beyond that is kept as the camera's gap (photos_gap_from/to), which
+                the next fetches page on through until it is closed.
 - backfill_all: pages backward through the full history to seed pattern data.
+
+A camera two logins list belongs to the first that lists it in a run (the main login
+comes first), so a guest sharing it, or a copy of the main login, can't make it look
+stopped. A camera whose own listing fails while its login works says so on its card
+(Camera.fetch_error).
 
 A photo whose file fails to download is stored without one and tried again on later
 fetches, up to MAX_DOWNLOAD_ATTEMPTS. One photo's database error rolls back that photo
@@ -19,7 +27,7 @@ import tempfile
 import uuid as uuidlib
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -30,13 +38,21 @@ from app.ingestion.logins import (
     PRIMARY_LABEL,
     LoginProblem,
     disconnect_unlisted,
+    keep_session,
     login_error,
     primary_configured,
     read_password,
     record,
     run_status,
+    saved_session,
 )
-from app.ingestion.spypoint import SpypointCamera, SpypointClient, SpypointPhoto
+from app.ingestion.spypoint import (
+    SpypointAuthError,
+    SpypointCamera,
+    SpypointClient,
+    SpypointError,
+    SpypointPhoto,
+)
 from app.models import Camera, CameraAccount, Estate, Image, SyncLog
 
 log = get_logger(__name__)
@@ -48,14 +64,19 @@ REPAIR_PER_CAMERA = 20
 # How far back a camera new to us is read. SPYPOINT keeps about a month.
 LOOKBACK = timedelta(days=62)
 # Pages go back past the last listed capture by this much: a camera out of signal
-# uploads late, and a late photo is filed under when it was taken.
+# uploads late, and a late photo is filed under when it was taken. At most
+# OVERLAP_PAGES pages of it, so a busy camera doesn't spend its page cap re-reading.
 OVERLAP = timedelta(hours=48)
+OVERLAP_PAGES = 3
 # A routine fetch reads at most this many pages (of 100) per camera.
 MAX_PAGES = 20
 
 DUPLICATE_OF_PRIMARY = (
     "This is the estate's main SPYPOINT login, which is fetched already. Remove this copy."
 )
+# upsert_camera's account_id when the camera stays with the login it has: another
+# login listed it first in this run.
+KEEP = object()
 
 
 def _accounts(db: Session) -> list[dict]:
@@ -76,6 +97,7 @@ def _accounts(db: Session) -> list[dict]:
                  "imported": a.last_sync_at is not None}
         if primary and a.username.strip().lower() == primary:
             entry["problem"] = DUPLICATE_OF_PRIMARY
+            entry["copy_of_primary"] = True  # the main login lists its cameras
         else:
             try:
                 entry["password"] = read_password(db, a)
@@ -94,7 +116,12 @@ def _media_path(estate_id, camera_id, captured_at: datetime, photo_id: str) -> s
     return os.path.join(folder, f"{photo_id}.jpg")
 
 
-def upsert_camera(db: Session, estate_id, cam: SpypointCamera, account_id=None) -> Camera:
+def upsert_camera(db: Session, estate_id, cam: SpypointCamera, account_id=KEEP) -> Camera:
+    """The camera's row, refreshed from what SPYPOINT says about it.
+
+    account_id is the login that fetches it (None: the main .env login); KEEP leaves
+    the one it has.
+    """
     # Refresh even an already-loaded instance after acquiring the row lock: a
     # rename in another transaction must not be overwritten by a stale sync.
     row = db.scalar(select(Camera).where(Camera.spypoint_id == cam.spypoint_id)
@@ -104,7 +131,7 @@ def upsert_camera(db: Session, estate_id, cam: SpypointCamera, account_id=None) 
         row = Camera(estate_id=estate_id, spypoint_id=cam.spypoint_id,
                      name=default_name, provider_name=default_name)
         db.add(row)
-    if account_id is not None:
+    if account_id is not KEEP:
         row.account_id = account_id
     row.active = True  # a login lists it, so it is connected (again)
     if cam.name:
@@ -260,78 +287,124 @@ def repair_missing(
     return sum(_retry_file(client, estate_id, camera, image) for image in rows)
 
 
+def _newest_stored(db: Session, camera: Camera, now: datetime) -> datetime | None:
+    """The newest capture on file for the camera (a clock running ahead aside)."""
+    return db.scalar(select(func.max(Image.captured_at)).where(
+        Image.camera_id == camera.id, Image.captured_at <= now))
+
+
+def _set_gap(camera: Camera, gap: tuple[datetime, datetime] | None) -> None:
+    camera.photos_gap_from, camera.photos_gap_to = gap or (None, None)
+
+
 def _page_back(
     db: Session, client: SpypointClient, estate_id, camera: Camera, cam: SpypointCamera, *,
     stop_at: datetime, cutoff: datetime, page_size: int, max_pages: int | None,
+    tried: set, gap: bool = False, top: datetime | None = None,
 ) -> dict:
-    """Page backward from the newest photo until `stop_at`, committing each page.
+    """Page backward until `stop_at`, committing each page with how far it got.
 
-    Returns counts and whether the listing reached `stop_at` (or the end of the
-    camera's photos). Only a complete listing moves Camera.photos_listed_to, so a
-    fetch cut short by an error or the page cap is picked up again next time.
+    From the newest photo, or with `gap` from the top of the camera's gap. Each page
+    commits the camera's marks along with its photos, so a fetch cut short by the
+    page cap or an error leaves a true record of what is still to list:
+    - from the newest photo: photos_listed_to moves up to the newest listed, and
+      until the listing reaches `stop_at` the stretch below where it got to is kept
+      as the gap (with any gap already there). `top` is the newest capture listed
+      before: past it, only OVERLAP_PAGES pages are read;
+    - through the gap: its top moves down as pages come, and it closes at `stop_at`.
+    Returns counts, and whether the listing reached `stop_at` (or the end of the
+    camera's photos).
     """
     now = datetime.now(UTC)
-    date_end: str | None = None
+    before = (camera.photos_gap_from, camera.photos_gap_to) if camera.photos_gap_to else None
+    date_end = client.date_cursor(camera.photos_gap_to) if gap else None
     seen_oldest: datetime | None = None
-    newest: datetime | None = None
-    pages = seen = downloaded = 0
+    pages = seen = downloaded = past_top = 0
     complete = False
-    tried: set = set()
     while max_pages is None or pages < max_pages:
         photos = client.list_photos(cam.spypoint_id, limit=page_size, date_end=date_end)
         pages += 1
-        if not photos:
-            complete = True
-            break
+        oldest = min((p.captured_at for p in photos), default=None)
         for photo in photos:
             if photo.captured_at >= cutoff:
                 downloaded += _ingest_photo(db, client, estate_id, camera, photo, tried)
         seen += len(photos)
-        top = max(p.captured_at for p in photos)
-        newest = top if newest is None else max(newest, top)
+        if top is not None and oldest is not None and oldest <= top:
+            past_top += 1
+        # Reached photos already listed (and enough of the overlap), the cutoff, the
+        # end, or no progress.
+        complete = (oldest is None or oldest <= stop_at or oldest == seen_oldest
+                    or past_top >= OVERLAP_PAGES)
+        if gap:
+            _set_gap(camera, None if complete else (camera.photos_gap_from, oldest))
+        else:
+            if photos:
+                # Never past now: a camera clock running ahead must not hide what follows.
+                mark = min(max(p.captured_at for p in photos), now)
+                if camera.photos_listed_to is None or mark > camera.photos_listed_to:
+                    camera.photos_listed_to = mark
+            if complete:
+                # A gap older than where this listing began stays to be read.
+                _set_gap(camera, before if before and before[0] < stop_at else None)
+            else:
+                _set_gap(camera, (min(before[0], stop_at) if before else stop_at, oldest))
         db.commit()  # each page lands on its own; an interrupted fetch keeps what it got
-        oldest = min(p.captured_at for p in photos)
-        log.info("spypoint.page", camera=cam.name, page=pages, oldest=str(oldest), new=downloaded)
-        if oldest <= stop_at or oldest == seen_oldest:
-            complete = True  # reached photos already listed, the cutoff, or no progress
+        log.info("spypoint.page", camera=cam.name, page=pages, oldest=str(oldest),
+                 new=downloaded, gap=gap)
+        if complete:
             break
         seen_oldest = oldest
         date_end = client.date_cursor(oldest)
-    repaired = repair_missing(db, client, estate_id, camera, skip=tried)
-    if complete and newest is not None:
-        # Never past now: a camera clock running ahead must not hide what follows it.
-        mark = min(newest, now)
-        if camera.photos_listed_to is None or mark > camera.photos_listed_to:
-            camera.photos_listed_to = mark
-    db.flush()
-    return {"pages": pages, "seen": seen, "downloaded": downloaded + repaired,
-            "repaired": repaired, "complete": complete}
+    return {"pages": pages, "seen": seen, "downloaded": downloaded, "complete": complete}
 
 
 def sync_camera(
     db: Session, client: SpypointClient, estate_id, cam: SpypointCamera, *,
-    limit: int = 100, account_id=None, max_pages: int | None = None,
+    limit: int = 100, account_id=KEEP, max_pages: int | None = None,
 ) -> dict:
+    """What came in since the last fetch, then on through the camera's gap, if any,
+    with what is left of the page cap; then the files that did not come last time."""
     camera = upsert_camera(db, estate_id, cam, account_id=account_id)
-    cutoff = datetime.now(UTC) - LOOKBACK
-    listed_to = camera.photos_listed_to
+    now = datetime.now(UTC)
+    cutoff = now - LOOKBACK
+    budget = max_pages or MAX_PAGES
+    # A camera fetched before this was kept has no mark: its newest stored photo is
+    # as far as the old fetch listed, so it pages back to that, not the whole cutoff.
+    listed_to = camera.photos_listed_to or _newest_stored(db, camera, now)
     stop_at = max(listed_to - OVERLAP, cutoff) if listed_to else cutoff
+    tried: set = set()
     res = _page_back(db, client, estate_id, camera, cam, stop_at=stop_at, cutoff=cutoff,
-                     page_size=limit, max_pages=max_pages or MAX_PAGES)
-    return {"camera": cam.name, "photos_seen": res["seen"], "downloaded": res["downloaded"],
-            "pages": res["pages"], "complete": res["complete"]}
+                     page_size=limit, max_pages=budget, tried=tried, top=listed_to)
+    pages, seen, downloaded = res["pages"], res["seen"], res["downloaded"]
+    if camera.photos_gap_to is not None and camera.photos_gap_to <= cutoff:
+        _set_gap(camera, None)  # older than SPYPOINT keeps: nothing left to fetch there
+    if res["complete"] and camera.photos_gap_to is not None and pages < budget:
+        more = _page_back(db, client, estate_id, camera, cam,
+                          stop_at=max(camera.photos_gap_from, cutoff), cutoff=cutoff,
+                          page_size=limit, max_pages=budget - pages, tried=tried, gap=True)
+        pages, seen = pages + more["pages"], seen + more["seen"]
+        downloaded += more["downloaded"]
+    downloaded += repair_missing(db, client, estate_id, camera, skip=tried)
+    camera.fetch_error = None
+    db.flush()
+    return {"camera": cam.name, "photos_seen": seen, "downloaded": downloaded,
+            "pages": pages, "complete": camera.photos_gap_to is None}
 
 
 def backfill_camera(
     db: Session, client: SpypointClient, estate_id, cam: SpypointCamera, *,
-    months: int = 13, page_size: int = 100, account_id=None,
+    months: int = 13, page_size: int = 100, account_id=KEEP,
 ) -> dict:
     """Page backward through a camera's full history via the dateEnd cursor."""
     camera = upsert_camera(db, estate_id, cam, account_id=account_id)
     cutoff = datetime.now(UTC) - timedelta(days=months * 31)
+    tried: set = set()
     res = _page_back(db, client, estate_id, camera, cam, stop_at=cutoff, cutoff=cutoff,
-                     page_size=page_size, max_pages=None)
-    return {"camera": cam.name, "pages": res["pages"], "new": res["downloaded"]}
+                     page_size=page_size, max_pages=None, tried=tried)
+    new = res["downloaded"] + repair_missing(db, client, estate_id, camera, skip=tried)
+    camera.fetch_error = None
+    db.flush()
+    return {"camera": cam.name, "pages": res["pages"], "new": new}
 
 
 def _account_row(db: Session, acct: dict) -> CameraAccount | None:
@@ -344,6 +417,45 @@ def _record(db: Session, acct: dict, **outcome) -> None:
         record(db, None, **outcome)  # the main .env login
     elif (row := _account_row(db, acct)) is not None:
         record(db, row, **outcome)
+
+
+def _camera_failed(db: Session, spypoint_id: str, words: str) -> None:
+    """Say on the camera's card that its photos could not be listed (its login works)."""
+    db.execute(update(Camera).where(Camera.spypoint_id == spypoint_id)
+               .values(fetch_error=words).execution_options(synchronize_session=False))
+
+
+def _session(db: Session, acct: dict) -> str | None:
+    if acct["id"] is None:
+        return saved_session(db, None)
+    row = _account_row(db, acct)
+    return saved_session(db, row) if row is not None else None
+
+
+def _keep(db: Session, acct: dict, token: str | None) -> None:
+    """Keep the login's sign-in for the next fetch (a removed login has nowhere to go)."""
+    if acct["id"] is None:
+        keep_session(db, None, token)
+    elif (row := _account_row(db, acct)) is not None:
+        keep_session(db, row, token)
+
+
+def _list_cameras(db: Session, client: SpypointClient, acct: dict) -> list[SpypointCamera]:
+    """The login's cameras, signed in with the sign-in kept from the last fetch if there
+    is one, so a login is not signed in afresh every 15 minutes (E-21). An expired one
+    is signed in again: on SPYPOINT's refusal (SpypointClient._request), or, should it
+    answer anything else, once here."""
+    token = _session(db, acct)
+    if token is not None:
+        client.use_token(token)
+        try:
+            return client.list_cameras()
+        except SpypointAuthError:
+            raise
+        except SpypointError as e:
+            log.info("spypoint.session_retry", account=acct["username"], error=str(e))
+    client.login()
+    return client.list_cameras()
 
 
 def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
@@ -368,13 +480,18 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
     results: list[dict] = []
     account_results: list[dict] = []
     listed: set[str] = set()
-    every_login_listed = True
+    fetched: set[str] = set()  # cameras whose photos some login listed this run
+    answered: set = set()  # logins that listed their cameras (None: the main login)
+    tried: set = set()
+    copies: set = set()
     for acct in accounts:
         key = str(acct["id"]) if acct["id"] else None
         summary = {"account_id": key, "label": acct["label"], "status": "ok", "error": None}
         account_results.append(summary)
+        tried.add(acct["id"])
         if acct.get("problem"):
-            every_login_listed = False
+            if acct.get("copy_of_primary"):
+                copies.add(acct["id"])
             summary.update(status="error", error=acct["problem"])
             _record(db, acct, error=acct["problem"])
             db.commit()
@@ -382,34 +499,43 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
         client = SpypointClient(acct["username"], acct["password"])
         try:
             try:
-                client.login()
-                cameras = client.list_cameras()
+                cameras = _list_cameras(db, client, acct)
             except Exception as e:
                 db.rollback()
-                every_login_listed = False
                 words = login_error(e, "spypoint")
                 summary.update(status="error", error=words)
                 log.error(f"{label}.account_failed", account=acct["username"], error=str(e))
                 _record(db, acct, error=words)
+                _keep(db, acct, None)  # sign in afresh next time
                 db.commit()
                 continue
             log.info(f"{label}.cameras_found", account=acct["username"], count=len(cameras))
-            listed.update(cam.spypoint_id for cam in cameras)
+            if cameras:
+                answered.add(acct["id"])
             fetch = per_camera if acct["imported"] or per_new_camera is None else per_new_camera
             failures: list[str] = []
             for cam in cameras:
+                # A camera two logins list belongs to the first: the main login, then
+                # guests' in the order they were added.
+                owner = acct["id"] if cam.spypoint_id not in listed else KEEP
+                listed.add(cam.spypoint_id)
                 # One commit per camera (and per page inside it), as the UBox sync does:
                 # its photos show as soon as they are in, and one camera's failure
                 # rolls back only its own unfinished page.
                 try:
-                    res = fetch(db, client, estate.id, cam, acct["id"])
+                    res = fetch(db, client, estate.id, cam, owner)
                     db.commit()
+                    fetched.add(cam.spypoint_id)
                     res["account_id"] = key
                     results.append(res)
                     total += res.get("downloaded", res.get("new", 0))
                 except Exception as e:
                     db.rollback()
-                    failures.append(login_error(e, "spypoint"))
+                    words = login_error(e, "spypoint")
+                    failures.append(words)
+                    if cam.spypoint_id not in fetched:
+                        _camera_failed(db, cam.spypoint_id, words)
+                        db.commit()
                     log.error(f"{label}.camera_failed", camera=cam.name, error=str(e))
                     results.append({"camera": cam.name, "account_id": key, "error": str(e)})
             if failures:
@@ -419,19 +545,24 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
                     else f"{len(failures)} of {len(cameras)} cameras failed. {failures[0]}"
                 )
             row = _account_row(db, acct)
-            # Every camera there answered, so the login's history is in.
-            if row is not None and not failures:
+            # Its history import has been tried: a camera whose listing failed has no
+            # photos listed yet, so the routine fetch pages back through its two
+            # months (bounded per fetch) without walking the others' again.
+            if row is not None:
                 row.last_sync_at = datetime.now(UTC)
             # A login whose every camera fails is not bringing photos in either.
             _record(db, acct, cameras=len(cameras),
                     error=summary["error"] if summary["status"] == "error" else None)
+            _keep(db, acct, client.token)
             db.commit()
         finally:
             client.close()
 
-    if every_login_listed:
-        # Every login answered: a camera none of them listed is no longer connected.
-        disconnect_unlisted(db, estate.id, "spypoint", listed)
+    if None in answered:
+        answered |= copies  # a copy's cameras are the main login's
+    # A camera no login listed is no longer connected, once the login that fetched it
+    # has answered (a failing one might still list it).
+    disconnect_unlisted(db, estate.id, "spypoint", listed, answered=answered, tried=tried)
     sync_row.status = run_status([a["status"] for a in account_results], total)
     sync_row.error = "; ".join(
         f"{a['label']}: {a['error']}" for a in account_results if a["error"]
@@ -472,8 +603,9 @@ def backfill_all(db: Session, *, months: int = 13) -> dict:
 def backfill_account(db: Session, account_id: str, *, months: int = 2) -> dict:
     """Initial import for ONE newly-connected guest account (SPYPOINT keeps ~1 month).
 
-    Each camera commits on its own; the login counts as imported only when every
-    camera came through, so one that failed is picked up by the next fetch.
+    Each camera commits on its own, and the login counts as imported once each has
+    been tried: a camera that failed has nothing listed yet, so the routine fetch
+    pages back through its history, a page cap at a time.
     """
     acct = db.get(CameraAccount, uuidlib.UUID(account_id))
     if acct is None:
@@ -501,19 +633,24 @@ def backfill_account(db: Session, account_id: str, *, months: int = 2) -> dict:
             db.commit()
             return {"status": "error", "error": words}
         for cam in cameras:
+            # A camera another login fetches already stays with it.
+            known = db.scalar(select(Camera.active).where(Camera.spypoint_id == cam.spypoint_id))
             try:
                 results.append(backfill_camera(db, client, estate.id, cam, months=months,
-                                               account_id=entry["id"]))
+                                               account_id=KEEP if known else entry["id"]))
                 db.commit()
             except Exception as e:
                 db.rollback()
                 failed += 1
+                _camera_failed(db, cam.spypoint_id, login_error(e, "spypoint"))
+                db.commit()
                 log.error("backfill_account.camera_failed", camera=cam.name, error=str(e))
                 results.append({"camera": cam.name, "error": str(e)})
         row = _account_row(db, entry)
-        if row is not None and failed == 0:
+        if row is not None:
             row.last_sync_at = datetime.now(UTC)
         _record(db, entry, cameras=len(cameras))
+        _keep(db, entry, client.token)
         db.commit()
     finally:
         client.close()

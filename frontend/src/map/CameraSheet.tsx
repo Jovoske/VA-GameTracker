@@ -63,9 +63,11 @@ export function lastNightLine(c: Camera): NightLine {
 function trouble(c: Camera): ReactNode | null {
   const h = c.health
   if (h.status === 'not_syncing') return <>
-    {h.login?.error
-      ? `Photos not coming in. Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
-      : 'Photos not coming in. No photo fetch has worked for over 2 hours.'}{' '}
+    {h.login?.camera
+      ? `Photos not coming in. The last fetch couldn’t get them. ${h.login.error}`
+      : h.login?.error
+        ? `Photos not coming in. Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
+        : 'Photos not coming in. No photo fetch has worked for over 2 hours.'}{' '}
     <Link className="map-link" to="/settings#accounts">Camera logins</Link>
   </>
   if (h.status === 'disconnected') return 'Not connected. No camera login here fetches it now; its photos so far stay.'

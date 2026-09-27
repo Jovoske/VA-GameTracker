@@ -48,13 +48,17 @@ def scan_image(db: Session, image: Image) -> bool:
 
 def scan_unprocessed(db: Session, *, limit: int = 5000, only_unprocessed: bool = True) -> dict:
     # A photo whose file never downloaded is retried by the fetch for a while
-    # (ingestion.sync). Past a day it is let through as "no file", so one lost frame
-    # stops holding its whole night as "not checked yet"; if the file does come in
-    # later, the fetch sends the photo back here.
-    no_file_given_up = and_(
-        Image.original_path.is_(None),
+    # (ingestion.sync). Once the fetch has given up on it (or has no link to try),
+    # or past a day, it is let through as "no file", so one lost frame stops holding
+    # its whole night as "not checked yet"; if the file does come in later, the
+    # fetch sends the photo back here.
+    from app.ingestion.sync import MAX_DOWNLOAD_ATTEMPTS
+
+    no_file_given_up = and_(Image.original_path.is_(None), or_(
+        Image.download_attempts >= MAX_DOWNLOAD_ATTEMPTS,
+        Image.cdn_url.is_(None), Image.cdn_url == "",
         Image.created_at < datetime.now(UTC) - MISSING_FILE_GRACE,
-    )
+    ))
     q = select(Image).where(
         or_(Image.original_path.isnot(None), no_file_given_up), Image.reviewed.is_(False),
     )

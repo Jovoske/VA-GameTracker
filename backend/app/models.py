@@ -83,6 +83,9 @@ class CameraAccount(Base):
     # How many cameras the provider listed last time, so a login shows its cameras
     # before the first import has linked them.
     reported_cameras: Mapped[int | None] = mapped_column(Integer)
+    # The provider's sign-in token, encrypted like the password, kept between fetches
+    # so a login is not signed in afresh every 15 minutes; None signs in anew.
+    session_enc: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("provider IN ('spypoint','ubox')", name="provider_valid"),
@@ -139,6 +142,14 @@ class Camera(Base):
     # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
     # pages back to it (less an overlap) rather than reading only the newest page.
     photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SPYPOINT: a stretch below photos_listed_to not listed yet (captures after
+    # photos_gap_from, up to photos_gap_to), left by a fetch its page cap cut short;
+    # later fetches page on through it with what is left of their cap.
+    photos_gap_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    photos_gap_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Why the last fetch could not list this camera's photos although its login
+    # worked, in words; None once a fetch lists them again.
+    fetch_error: Mapped[str | None] = mapped_column(Text)
     # UBox snapshots that would not download, {event_id: [attempts, captured_at]}:
     # retried on later fetches, then given up on so one dead link can't hold the
     # camera's import back (ubox_sync).

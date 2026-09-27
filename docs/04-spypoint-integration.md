@@ -29,29 +29,46 @@ This endpoint set and the host/path URL reconstruction are the genuinely valuabl
 
 - **Paging back to what is already listed.** Each camera keeps `photos_listed_to`: every
   photo captured up to then has been listed. A routine fetch pages back from the newest
-  photo to that mark less 48 h (late uploads from a camera out of signal), at most 20
-  pages of 100, committing each page. Only a complete listing moves the mark, so a
-  fetch cut short tries again next time. A login whose history was never imported (added
-  while the pipeline was busy) gets the 2-month backfill instead.
+  photo to that mark less 48 h (late uploads from a camera out of signal; at most 3
+  pages past the mark), at most 20 pages of 100, committing each page with how far it
+  got. A camera with no mark yet (fetched before this) pages back to its newest stored
+  photo instead. A login whose history was never imported (added while the pipeline
+  was busy) gets the 2-month backfill on its first fetch, and counts as imported once
+  that has been tried, whatever failed.
+- **Outages longer than the cap.** What a fetch cut short (by the cap or an error) did
+  not reach is kept as the camera's gap (`photos_gap_from` / `photos_gap_to`); later
+  fetches page on through it with what is left of their 20 pages until it is closed.
 - **Retried downloads.** A photo whose file fails to download (or cannot be written) is
   stored without one and tried again with the freshest link on the next 5 fetches; a
-  repair pass also retries recent file-less rows the listing no longer shows. After a
-  day the detector lets such a row through as "no file", so it stops holding its night
-  as "not checked yet"; if the file comes later, the photo is looked at again.
+  repair pass also retries recent file-less rows the listing no longer shows. Once the
+  fetch has given up on it (or after a day), the detector lets such a row through as
+  "no file", so it stops holding its night as "not checked yet"; if the file comes
+  later, the photo is looked at again.
+- **Sign-ins are kept.** A login's sign-in token is kept between fetches, sealed like its
+  password (`camera_accounts.session_enc`, or the .env login's `app_settings` record),
+  and it signs in again only when SPYPOINT (or UBox, whose token lasts weeks) refuses
+  it. Re-entering a password starts a new one.
 - **One error costs one photo or one camera.** Photo inserts and enrichment run in
   savepoints, pages commit on their own, and a login or camera failing never stops the
   others (or UBox, or the AI pass: `app.ingestion.fetch`).
 - **Camera clocks.** An `originDate` more than 30 days before SPYPOINT's `date`, or more
   than 3 h after it, is a reset or wrong clock: the photo is filed at `date` instead.
-- **Busy.** A 429/503 with `Retry-After` of up to 30 s is waited out once.
+- **Busy.** A 429 or 5xx with `Retry-After` of up to 30 s is waited out once (SPYPOINT
+  and UBox, sign-in included).
 - **Login status.** Every fetch records per login (guests on `camera_accounts`, the .env
   login in `app_settings.spypoint_primary_login`) when it last tried, when it last
   worked and, if not, why in words. Settings, the camera cards, the map sheet, the alerts
-  and Tonight read it (`app.ingestion.logins`).
-- **Cameras no login lists.** After a run in which every login answered, a camera none of
-  them listed (its login was removed) is switched off (`active = false`): shown as "Not
-  connected", left out of Tonight's ranking, photos kept. A login listing it again
-  switches it back on.
+  and Tonight read it (`app.ingestion.logins`). No good fetch for 2 h is "stopped",
+  unless a long job has held the pipeline since before then ("busy"). A camera whose own
+  listing failed while its login worked says so on its card (`cameras.fetch_error`).
+- **Who fetches a camera.** A camera two logins list belongs to the first that lists it
+  in a run: the .env login, then guests' in the order they were added. A copy of the
+  .env login (added before copies were refused) is not fetched, and its cameras go back
+  to the .env login.
+- **Cameras no login lists.** A camera no login listed is switched off (`active = false`)
+  once the login that fetched it has listed its cameras without it, or when it has no
+  login any more: shown as "Not connected", left out of Tonight's ranking, photos kept
+  (and still in the Photos camera filter). A login listing it again switches it back on.
 
 ## Client shape
 

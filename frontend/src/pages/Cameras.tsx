@@ -13,7 +13,8 @@ type Health = {
   credits_left: number | null
   hours_since_report: number | null
   // With status not_syncing: the login that fetches this camera, and what is wrong.
-  login?: { label: string | null; error: string | null }
+  // `camera`: the login works, only this camera's photos could not be listed.
+  login?: { label: string | null; error: string | null; camera?: boolean }
 }
 /** What /cameras/sync/status says about the latest photo fetch. */
 type SyncStatus = {
@@ -144,9 +145,11 @@ function HealthNote({ c }: { c: Camera }) {
     // With an error, the login is the problem; without one, fetching has stopped.
     return (
       <p className="cam-health-note cam-health-note--warn">
-        {h.login?.error
-          ? `Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
-          : 'No photo fetch has worked for over 2 hours.'}{' '}
+        {h.login?.camera
+          ? `The last fetch couldn’t get its photos. ${h.login.error}`
+          : h.login?.error
+            ? `Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
+            : 'No photo fetch has worked for over 2 hours.'}{' '}
         <Link to="/settings#accounts">Camera logins</Link>
       </p>
     )
@@ -431,10 +434,16 @@ export default function Cameras() {
       const ours = !s.started_at || new Date(s.started_at).getTime() >= since
       if (s.status === 'running') continue
       if (s.status === 'identifying') {
-        if (ours && !counted) {
+        if (!ours) continue
+        const n = s.images_downloaded ?? 0
+        if (n === 0) {
+          // Nothing came in to look at: this is the result, whatever else the
+          // detector is still working through.
+          done = true
+          setSync(resultLine(s))
+        } else if (!counted) {
           counted = true
-          const line = resultLine(s)
-          setSync({ ...line, state: 'running', msg: `${line.msg} Looking for animals in them…` })
+          setSync({ state: 'running', msg: `${n} new photo${n === 1 ? '' : 's'} came in. Looking for animals in them…` })
           void loadCameras()
         }
         continue
