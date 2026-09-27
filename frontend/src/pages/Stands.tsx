@@ -95,7 +95,9 @@ export default function Stands() {
       if (r.sent && !saving.current) getFresh<Sit[]>('/sits', { save: true }).then(setSitsGot).catch(() => {})
     })
     flushSits().then((r) => {
-      if (r.sent) setNotice(`${r.sent === 1 ? 'A sit report' : `${r.sent} sit reports`} saved on this phone went through.`)
+      // Counted by reports: a START or END SIT that went on its own is not a report.
+      if (r.reports) setNotice(`${r.reports === 1 ? 'A sit report' : `${r.reports} sit reports`} saved on this phone went through.`)
+      else if (r.sent) setNotice('Your sit was updated.')
     })
     return () => {
       off()
@@ -150,13 +152,24 @@ export default function Stands() {
     const how = await saveSit(sitId, { outcome, correct: true })
     return how === 'queued' ? 'No signal. The report is saved on this phone and goes when there’s signal.' : undefined
   }
-  // Your own sit first: a dawn sit still on and tonight's reservation can share a stand.
-  const sitFor = (id: string) => { const here = sits.filter(s => s.stand_id === id); return here.find(s => !!me && s.user_id === me.id) ?? here[0] }
+  const sitsAt = (id: string) => sits.filter(s => s.stand_id === id)
+  // Your own sit first, the one on now before tonight's: a dawn sit still on and
+  // tonight's reservation can share a stand.
+  const sitFor = (id: string) => {
+    const here = sitsAt(id), own = here.filter(s => !!me && s.user_id === me.id)
+    return own.find(s => isOn(s)) ?? own[0] ?? here.find(s => s.night === tonightKey) ?? here[0]
+  }
   const owned = (s: Stand) => !!me && (sitFor(s.id)?.user_id === me.id || s.claimed_by === me.id)
-  const occupied = (s: Stand) => s.claimed_tonight || !!sitFor(s.id)
+  // Tonight is the coming evening. A dawn sit from before 06:00, still on, doesn't
+  // hold it: the stand can be reserved for the evening.
+  const occupied = (s: Stand) => s.claimed_tonight || sitsAt(s.id).some(x => x.night === tonightKey)
+  const yoursTonight = (s: Stand) => !!me && (s.claimed_by === me.id || sitsAt(s.id).some(x => x.night === tonightKey && x.user_id === me.id))
+  // Somebody else is in it right now, from a dawn sit.
+  const otherIn = (s: Stand) => !!me && sitsAt(s.id).some(x => x.night !== tonightKey && isOn(x) && x.user_id !== me.id)
   const shown = stands?.filter(s => filter === 'all' || (filter === 'mine' ? owned(s) : !occupied(s))) ?? []
   const free = stands?.filter(s => !occupied(s)) ?? []
   const yours = stands?.filter(owned) ?? []
+  const reservedByYou = stands?.filter(yoursTonight) ?? []
   const stateOf = (sit: Sit | undefined, mine: boolean, taken: boolean) => {
     // An earlier night's copy can't say who has what tonight; "Free tonight" would be a guess.
     if (!mine && reservationsUnknown) return 'Tonight not known yet'
@@ -186,7 +199,7 @@ export default function Stands() {
     {stands && stands.length > 0 && !reservationsUnknown && <>
       <p className="stand-tonight" aria-label="Tonight's reservations">
         {free.length === 0 ? 'Every stand is taken tonight.' : free.length === stands.length ? 'Every stand is free tonight.' : `${free.length} of ${stands.length} stands free tonight.`}
-        {yours.length > 0 && ` You have ${yours.map(s => s.name).join(' and ')}.`}
+        {reservedByYou.length > 0 && ` You have ${reservedByYou.map(s => s.name).join(' and ')}.`}
       </p>
       <div className="stand-filters" aria-label="Filter stands">{[['all', `All · ${stands.length}`], ['available', `Free · ${free.length}`], ['mine', `Yours · ${yours.length}`]].map(([value, label]) => <button key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div>
     </>}
@@ -201,13 +214,18 @@ export default function Stands() {
       const wind = winds[s.id]
       const windLine = wind ? WIND_LINE[wind.status] ?? null : null
       const hasDetails = !!(wind?.text || (mine && sit?.wind_text))
+      // In your dawn sit, Back to sit comes first; reserving the evening is the lesser thing.
+      const later = mine && on
+      const reserve = !taken && !reservationsUnknown && canReserve && <button className={`map-button${later ? ' stand-reserve-later' : ' map-button--primary'}`} disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : later ? 'Reserve for tonight' : 'Reserve'}</button>
       return <article key={s.id} id={`stand-${s.id}`} className={`stand-entry${params.get('stand') === s.id ? ' stand-entry--selected' : ''}`}>
         <div className="stand-entry-top"><div><h2>{s.name}</h2><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{stateOf(sit, mine, taken)}</span></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Place on map ↗' : 'Map ↗'}</Link></div>
         {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}</p>}
-        {!taken && !reservationsUnknown && canReserve && <button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : 'Reserve'}</button>}
+        {otherIn(s) && <p className="stand-now">Another hunter is in it now, from a dawn sit.</p>}
+        {!later && reserve}
         {mine && sit && <>
           {(on || fresh) && <div className="map-actions"><button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => (on ? Promise.resolve() : start(sit.id)), '', `/sit/${sit.id}`)}>{busy === s.id ? 'Saving…' : on ? 'Back to sit' : 'Start sit'}</button>{fresh && <button className="map-link" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: 'cancelled', at: new Date().toISOString() }), timeoutMs: WRITE_TIMEOUT_MS }), 'Reservation cancelled.')}>Cancel</button>}</div>}
           {sit.unsent && <p className="stand-unsent">Saved on this phone. It goes when there’s signal.</p>}
+          {later && reserve}
           <details className="stand-outcome" open={ask || undefined}><summary>What happened?</summary><div className="stand-outcome-buttons">{OUTCOMES.map(([value, label]) => <button key={value} className="map-button" aria-pressed={sit.outcome === value} disabled={!!busy} onClick={() => run(s.id, () => report(sit.id, value), 'Sit report saved.')}>{label}</button>)}</div></details>
         </>}
         {hasDetails && <details className="stand-wind"><summary>Wind details</summary>

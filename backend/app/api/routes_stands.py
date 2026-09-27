@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import uuid
 import zlib
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -36,7 +37,7 @@ OUTCOMES = ("unreported", "nothing", "seen", "shootable_no_shot", "shot", "cance
 def tonight(now: datetime | None = None) -> date:
     """The night now belongs to — before 06:00 still counts as last evening."""
     now = now or datetime.now(UTC)
-    local = now.astimezone(__import__("zoneinfo").ZoneInfo(settings.estate_timezone))
+    local = now.astimezone(ZoneInfo(settings.estate_timezone))
     return (local - timedelta(hours=6)).date()
 
 
@@ -78,14 +79,13 @@ def _stand_out(s: Stand, claim: Sit | None = None) -> dict:
 
 @router.get("/stands")
 def list_stands(_: CurrentUser, db: DB) -> list[dict]:
-    now = datetime.now(UTC)
-    night = tonight(now)
-    # Tonight's reservations, and a sit still on from the night before (a dawn sit
-    # after 06:00): somebody is in that stand now. Tonight's wins a stand.
-    live = db.scalars(
-        select(Sit).where(or_(and_(Sit.night == night, Sit.outcome != "cancelled"), _live(now)))
-    ).all()
-    claims = {c.stand_id: c for c in sorted(live, key=lambda c: c.night == night)}
+    # Tonight's reservations only. A dawn sit still on from the night before is in
+    # /sits (somebody is in that stand now), but the coming evening is free.
+    night = tonight()
+    claims = {
+        c.stand_id: c
+        for c in db.scalars(select(Sit).where(Sit.night == night, Sit.outcome != "cancelled"))
+    }
     rows = db.scalars(select(Stand).order_by(Stand.name)).all()
     return [_stand_out(s, claims.get(s.id)) for s in rows]
 
@@ -189,10 +189,18 @@ def delete_stand(
 # 'cancelled' are not on it (see update_sit).
 RANK = {"nothing": 0, "seen": 1, "shootable_no_shot": 2, "shot": 3}
 
-# A sit started and not ended stays on Stands this long whatever its night, so a
-# dawn sit does not vanish at the 06:00 changeover (audit A-20). Bounded, because a
-# phone that died before END SIT would otherwise leave the stand taken for good.
+# A sit started and not ended is on until END SIT, for at most this long, while its
+# night lasts. Bounded, because a phone that died before END SIT would otherwise
+# keep it on for good.
 LIVE_FOR = timedelta(hours=12)
+
+# After the 06:00 changeover only a dawn sit is still on: one reserved before 06:00
+# (so it counts toward the night before, audit A-20) and started from 03:00 that
+# morning, for at most DAWN_FOR. An evening sit nobody ended is over at 06:00: the
+# hunter walked home, so it is asked about ("What happened last night?") and its
+# stand is free for the coming evening.
+DAWN_FROM = time(3)
+DAWN_FOR = timedelta(hours=6)
 
 # How many nights back "What happened last night?" still asks about a sit.
 ASK_NIGHTS = 3
@@ -248,19 +256,44 @@ def _sit_reply(db: Session, sit: Sit) -> dict:
     return _sit_out(sit, stand.name if stand else None)
 
 
+def _done(db: Session, sit: Sit) -> dict:
+    """Commit a write to a sit (or nothing, for one that changed nothing) and answer.
+
+    Ends the transaction either way, and the sit's row lock with it (_own_sit)."""
+    db.commit()
+    return _sit_reply(db, sit)
+
+
 def _live(now: datetime):
-    """Started, not ended, not cancelled, and started recently enough to be on."""
+    """On now: started, not ended, not cancelled, and either tonight's (started in
+    the last LIVE_FOR) or a dawn sit from the night before (see DAWN_FROM)."""
+    night = tonight(now)
+    dawn = datetime.combine(night, DAWN_FROM, tzinfo=ZoneInfo(settings.estate_timezone))
     return and_(
         Sit.started_at.is_not(None),
-        Sit.started_at >= now - LIVE_FOR,
         Sit.ended_at.is_(None),
         Sit.outcome != "cancelled",
+        or_(
+            and_(Sit.night == night, Sit.started_at >= now - LIVE_FOR),
+            and_(
+                Sit.night == night - timedelta(days=1),
+                Sit.started_at >= dawn,
+                Sit.started_at >= now - DAWN_FOR,
+            ),
+        ),
     )
 
 
 def _own_sit(db: Session, sit_id: uuid.UUID, user: User) -> Sit:
-    """The sit, if this person may write to it: its hunter, or an admin for the record."""
-    sit = db.get(Sit, sit_id)
+    """The sit, if this person may write to it: its hunter, or an admin for the record.
+
+    Locked for the rest of the transaction (SELECT ... FOR UPDATE): a PATCH the phone
+    gave up on can still be running when the retry or the next tap arrives, and a
+    hunter and an admin can write at once. Each write then sees the one before it,
+    so an older SEEN can't land on a newer SHOT. Every writer ends its transaction
+    before answering, which lets the lock go.
+    """
+    sit = db.get(Sit, sit_id, with_for_update=True, populate_existing=True)
     if sit is None:
         raise HTTPException(404, "That sit isn't on the app.")
     if user.role == "viewer":
@@ -299,16 +332,17 @@ def list_sits(_: CurrentUser, db: DB, night: date | None = None) -> list[dict]:
 def my_sits(user: CurrentUser, db: DB) -> dict:
     """Your sits that want something from you.
 
-    `live`: started and not ended, so Tonight can say "Back to sit" after the phone
+    `live`: on now (see _live), so Tonight can say "Back to sit" after the phone
     killed the app mid-sit. `to_report`: nobody said what happened, from the last
     few nights, or from tonight once it ended. A reserved sit that was never started
     is asked about too: plenty of hunters never open Sit mode, and "unreported" is
-    not "saw nothing".
+    not "saw nothing". So is a sit nobody ended, once it is no longer on: most
+    hunters just walk home.
     """
     now = datetime.now(UTC)
     night = tonight(now)
     rows = db.execute(
-        select(Sit, Stand.name)
+        select(Sit, Stand.name, _live(now).label("on"))
         .join(Stand, Stand.id == Sit.stand_id)
         .where(
             Sit.user_id == user.id,
@@ -318,11 +352,12 @@ def my_sits(user: CurrentUser, db: DB) -> dict:
         .order_by(Sit.night.desc(), Sit.claimed_at.desc())
     ).all()
     live, to_report = [], []
-    for s, name in rows:
-        on = s.started_at is not None and s.ended_at is None and s.started_at >= now - LIVE_FOR
+    for s, name, on in rows:
         if on:
             live.append(_sit_out(s, name))
-        elif s.outcome == "unreported" and (s.night < night or s.ended_at is not None):
+        elif s.outcome == "unreported" and (
+            s.night < night or s.ended_at is not None or s.started_at is not None
+        ):
             to_report.append(_sit_out(s, name))
     return {"live": live, "to_report": to_report}
 
@@ -460,12 +495,12 @@ def update_sit(sit_id: uuid.UUID, body: OutcomeIn, user: CurrentUser, db: DB) ->
     current, target = sit.outcome, body.outcome
     if current == "cancelled":
         if target == "cancelled":
-            return _sit_reply(db, sit)
+            return _done(db, sit)
         raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
 
     at = _client_time(body.at, datetime.now(UTC))
     if sit.reported_at is not None and at < sit.reported_at:
-        return _sit_reply(db, sit)
+        return _done(db, sit)
     if target == "cancelled" and current != "unreported":
         raise HTTPException(409, "You've already said what happened on this sit.")
 
@@ -490,8 +525,7 @@ def update_sit(sit_id: uuid.UUID, body: OutcomeIn, user: CurrentUser, db: DB) ->
     # would make a queued, older SHOT look stale when it finally arrives.
     if took or body.correct:
         sit.reported_at = at
-    db.commit()
-    return _sit_reply(db, sit)
+    return _done(db, sit)
 
 
 @router.post("/sits/{sit_id}/start")
@@ -505,8 +539,7 @@ def start_sit(
     if sit.started_at is None:
         at = _client_time(body.at if body else None, datetime.now(UTC))
         sit.started_at = max(at, sit.claimed_at) if sit.claimed_at else at
-        db.commit()
-    return _sit_reply(db, sit)
+    return _done(db, sit)
 
 
 @router.post("/sits/{sit_id}/end")
@@ -524,8 +557,7 @@ def end_sit(sit_id: uuid.UUID, user: CurrentUser, db: DB, body: TapIn | None = N
     if sit.ended_at is None:
         at = _client_time(body.at if body else None, datetime.now(UTC))
         sit.ended_at = max(at, sit.started_at)
-        db.commit()
-    return _sit_reply(db, sit)
+    return _done(db, sit)
 
 
 @router.get("/stands/{stand_id}/suggested-arcs")

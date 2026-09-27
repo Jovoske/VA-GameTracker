@@ -336,7 +336,7 @@ export async function getFresh<T>(
   }
 }
 
-export { fromEarlierNight, nightOf } from './night'
+export { fromEarlierNight, nightBefore, nightOf } from './night'
 
 export function ageLabel(iso: string): string {
   const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))

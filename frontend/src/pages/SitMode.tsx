@@ -76,9 +76,9 @@ export default function SitMode() {
   const nav = useNavigate()
   const [sit, setSit] = useState<Sit | null>(() => savedSit(sitId))
   const [clock, setClock] = useState(new Date())
-  // A report for this sit is on the phone and hasn't reached the server. Read from
+  // A report for this sit is on the phone and a send found no signal. Read from
   // the phone, so it survives a reload or the app being killed (audit A-25).
-  const [pending, setPending] = useState(() => !!(sitId && pendingFor(sitId)))
+  const [pending, setPending] = useState(() => !!(sitId && pendingFor(sitId)?.waiting))
   const [ending, setEnding] = useState(false)
   const [flash, setFlash] = useState('')
   const [holding, setHolding] = useState(false)
@@ -159,9 +159,9 @@ export default function SitMode() {
   useEffect(() => {
     if (!sitId) return
     const off = onSitSync((r) => {
-      const still = !!pendingFor(sitId)
-      if (pendingRef.current && !still && r.sent > 0) say('Signal’s back. Report sent.', 3500)
-      setPending(still)
+      const left = pendingFor(sitId)
+      if (pendingRef.current && !left && r.sent > 0) say(r.reports > 0 ? 'Signal’s back. Report sent.' : 'Signal’s back.', 3500)
+      setPending(!!left?.waiting)
     })
     void flushSits()
     return off

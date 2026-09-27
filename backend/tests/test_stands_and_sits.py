@@ -463,30 +463,113 @@ def _sit_row(db, stand, user, night, **kw):
     return row
 
 
+def _madrid(y, mo, d, h, mi=0) -> datetime:
+    """A wall-clock time on the estate, as UTC."""
+    from zoneinfo import ZoneInfo
+
+    return datetime(y, mo, d, h, mi, tzinfo=ZoneInfo("Europe/Madrid")).astimezone(UTC)
+
+
+def _freeze(monkeypatch, when: datetime) -> None:
+    """Stop the stands API's clock at `when`."""
+    import app.api.routes_stands as routes
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return when.astimezone(tz) if tz else when.replace(tzinfo=None)
+
+    monkeypatch.setattr(routes, "datetime", Frozen)
+
+
+# A normal autumn morning, and the one the clocks go back (03:00 CEST -> 02:00 CET).
+MORNINGS = [(2026, 9, 27), (2026, 10, 25)]
+
+
 @requires_db
-def test_a_sit_still_on_after_six_stays_on_stands(client, admin, db_session, estate):
-    """A dawn sit reserved at 05:30 counts toward the evening before; at 06:00 it
-    must not vanish, nor its stand show free while the hunter is in it (A-20)."""
-    from app.api.routes_stands import tonight
+@pytest.mark.parametrize("day", MORNINGS)
+def test_an_evening_sit_nobody_ended_is_over_at_six(
+    client, admin, db_session, estate, monkeypatch, day
+):
+    """Sat from 21:00, walked home without END SIT: the usual case. At 06:00 it is
+    last night's. The hunter is asked what happened, Tonight doesn't say the sit is
+    on, and the stand is free for the coming evening (review R2FE-1)."""
+    from datetime import date
+
+    alice, a_h = admin
+    _, b_h = _user(db_session, estate, "bob7@estate.local", role="member")
+    stand = Stand(estate_id=estate.id, name="Charca")
+    db_session.add(stand)
+    db_session.commit()
+    y, mo, d = day
+    evening = date(y, mo, d) - timedelta(days=1)
+    sit = _sit_row(
+        db_session, stand, alice, evening,
+        started_at=_madrid(evening.year, evening.month, evening.day, 21),
+    )
+
+    # 05:30: still last night, and the sit is on.
+    _freeze(monkeypatch, _madrid(y, mo, d, 5, 30))
+    mine = client.get("/api/sits/mine", headers=a_h).json()
+    assert [x["id"] for x in mine["live"]] == [str(sit.id)] and mine["to_report"] == []
+    stands = {x["name"]: x for x in client.get("/api/stands", headers=b_h).json()}
+    assert stands["Charca"]["claimed_tonight"] is True
+
+    # 07:30: over. Asked about, not on, and nobody else's evening is blocked.
+    _freeze(monkeypatch, _madrid(y, mo, d, 7, 30))
+    mine = client.get("/api/sits/mine", headers=a_h).json()
+    assert mine["live"] == []
+    assert [x["id"] for x in mine["to_report"]] == [str(sit.id)]
+    stands = {x["name"]: x for x in client.get("/api/stands", headers=b_h).json()}
+    assert stands["Charca"]["claimed_tonight"] is False
+    assert stands["Charca"]["claimed_by"] is None
+    assert client.get("/api/sits", headers=b_h).json() == []
+    claim = client.post("/api/sits", json={"stand_id": str(stand.id)}, headers=b_h)
+    assert claim.status_code == 201, claim.text
+    assert claim.json()["night"] == date(y, mo, d).isoformat()
+
+
+@requires_db
+@pytest.mark.parametrize("day", MORNINGS)
+def test_a_dawn_sit_stays_on_after_six_but_the_evening_is_free(
+    client, admin, db_session, estate, monkeypatch, day
+):
+    """A dawn sit reserved at 05:20 counts toward the evening before; at 06:00 it
+    must not vanish while the hunter is in it (A-20). It holds nothing for the
+    coming evening, and it is over DAWN_FOR after it started."""
+    from datetime import date
 
     user, headers = admin
-    stand = Stand(estate_id=estate.id, name="Alba")
-    gone = Stand(estate_id=estate.id, name="Olvido")
-    db_session.add_all([stand, gone])
+    _, b_h = _user(db_session, estate, "bob8@estate.local", role="member")
+    alba = Stand(estate_id=estate.id, name="Alba")
+    olvido = Stand(estate_id=estate.id, name="Olvido")
+    db_session.add_all([alba, olvido])
     db_session.commit()
-    last = tonight() - timedelta(days=1)
-    now = datetime.now(UTC)
-    on = _sit_row(db_session, stand, user, last, started_at=now - timedelta(hours=2))
-    # A phone that died mid-sit two nights ago must not hold its stand for good.
-    _sit_row(db_session, gone, user, last, started_at=now - timedelta(hours=13))
+    y, mo, d = day
+    last = date(y, mo, d) - timedelta(days=1)
+    dawn = _sit_row(db_session, alba, user, last, started_at=_madrid(y, mo, d, 5, 30))
+    # Started at 02:30 that morning: the end of a long night sit, not a dawn sit.
+    late = _sit_row(db_session, olvido, user, last, started_at=_madrid(y, mo, d, 2, 30))
 
-    sits = client.get("/api/sits", headers=headers).json()
-    assert [x["id"] for x in sits] == [str(on.id)]
-    stands = {x["name"]: x for x in client.get("/api/stands", headers=headers).json()}
-    assert stands["Alba"]["claimed_tonight"] is True
-    assert stands["Olvido"]["claimed_tonight"] is False
+    _freeze(monkeypatch, _madrid(y, mo, d, 7, 30))
+    mine = client.get("/api/sits/mine", headers=headers).json()
+    assert [x["id"] for x in mine["live"]] == [str(dawn.id)]
+    assert [x["id"] for x in mine["to_report"]] == [str(late.id)]
+    # Everyone sees somebody is in Alba now...
+    assert [x["id"] for x in client.get("/api/sits", headers=b_h).json()] == [str(dawn.id)]
+    # ...and the coming evening is free.
+    stands = {x["name"]: x for x in client.get("/api/stands", headers=b_h).json()}
+    assert stands["Alba"]["claimed_tonight"] is False
     # An asked-for night is that night only.
-    assert client.get(f"/api/sits?night={tonight().isoformat()}", headers=headers).json() == []
+    tonight_key = date(y, mo, d).isoformat()
+    assert client.get(f"/api/sits?night={tonight_key}", headers=headers).json() == []
+
+    # Six hours after it started, a dawn sit nobody ended is over too.
+    _freeze(monkeypatch, _madrid(y, mo, d, 11, 31))
+    mine = client.get("/api/sits/mine", headers=headers).json()
+    assert mine["live"] == []
+    assert {x["id"] for x in mine["to_report"]} == {str(dawn.id), str(late.id)}
+    assert client.get("/api/sits", headers=b_h).json() == []
 
 
 @requires_db
@@ -633,3 +716,57 @@ def test_the_unique_index_backs_up_the_lock(
     db_session.rollback()
     db_session.add(Sit(stand_id=row.stand_id, night=row.night, outcome="cancelled"))
     db_session.commit()  # a cancelled one is history, not a reservation
+
+
+@requires_db
+@pytest.mark.parametrize("first", ["older", "newer"])
+def test_two_reports_for_one_sit_at_once_keep_the_best(
+    threaded_client, monkeypatch, admin, first
+):
+    """A PATCH the phone gave up on can still be running when the retry or the next
+    tap arrives (or a hunter and an admin write at once). Each write must see the
+    one before it: an older SEEN handled alongside a newer SHOT used to land last
+    and take the shot away (review R2FE-2)."""
+    import app.api.routes_stands as routes
+
+    _, h = admin
+    s = _stand(threaded_client, h, "Puente")
+    sit = threaded_client.post("/api/sits", json={"stand_id": s["id"]}, headers=h).json()
+    threaded_client.post(f"/api/sits/{sit['id']}/start", headers=h)
+
+    now = datetime.now(UTC)
+    taps = {"seen": now - timedelta(minutes=30), "shot": now - timedelta(minutes=10)}
+    slow_one = "seen" if first == "older" else "shot"
+    inside = threading.Event()
+    real = routes._client_time
+
+    def held(at, n):
+        # The first write stops here, after it has read the sit, for long enough
+        # that the second has read it too unless the row is locked.
+        if at is not None and at == taps[slow_one]:
+            inside.set()
+            threading.Event().wait(0.8)
+        return real(at, n)
+
+    monkeypatch.setattr(routes, "_client_time", held)
+    out = {}
+
+    def go(outcome):
+        out[outcome] = threaded_client.patch(
+            f"/api/sits/{sit['id']}",
+            json={"outcome": outcome, "at": taps[outcome].isoformat()},
+            headers=h,
+        )
+
+    a = threading.Thread(target=go, args=(slow_one,))
+    a.start()
+    assert inside.wait(10)
+    b = threading.Thread(target=go, args=("shot" if slow_one == "seen" else "seen",))
+    b.start()
+    a.join(20)
+    b.join(20)
+
+    assert {k: r.status_code for k, r in out.items()} == {"seen": 200, "shot": 200}
+    got = threaded_client.get("/api/sits", headers=h).json()[0]
+    assert got["outcome"] == "shot", got
+    assert datetime.fromisoformat(got["reported_at"]) == taps["shot"]

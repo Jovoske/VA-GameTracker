@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { type Got, getFresh, nightOf, peek } from '../api'
+import { type Got, getFresh, nightBefore, nightOf, peek } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { dawnStart } from '../night'
 import { isOn, onSitSync, saveSit, withPending } from '../sits'
 import './sitprompts.css'
 
@@ -15,6 +16,10 @@ import './sitprompts.css'
  *   report used to be possible only until 06:00, so quiet sits stayed "unreported"
  *   for good and the record leant towards the good nights (J-22). Stands asks only
  *   about earlier nights: tonight's ended sit asks on its own stand.
+ *
+ * Which is which is decided here, by the same rule as the server (sits.ts isOn), not
+ * by the list a sit came in: a copy saved at 05:50 must not keep an evening sit
+ * nobody ended "on" at 07:30. At 06:00 it becomes a question.
  */
 
 type MySit = {
@@ -39,14 +44,11 @@ const label = (outcome: string) => ANSWERS.find(([k]) => k === outcome)?.[1] ?? 
 // As the server asks (routes_stands.ASK_NIGHTS): older than this, the moment has gone.
 const ASK_NIGHTS = 3
 
-/** The night key `days` before `key` ("2026-09-27" → "2026-09-26"), by the calendar. */
-const nightBefore = (key: string, days = 1) =>
-  new Date(Date.parse(`${key}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10)
-
-function whenWords(night: string, tonight: string): string {
-  if (night === tonight) return 'on your sit this evening'
-  if (night === nightBefore(tonight)) return 'last night'
-  const day = new Date(`${night}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'long', timeZone: 'UTC' })
+function whenWords(sit: MySit, tonight: string): string {
+  if (sit.night === tonight) return 'on your sit this evening'
+  // A dawn sit reserved before 06:00 belongs to the night before, but it was this morning.
+  if (sit.night === nightBefore(tonight)) return sit.started_at && dawnStart(sit.started_at, tonight) ? 'this morning' : 'last night'
+  const day = new Date(`${sit.night}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'long', timeZone: 'UTC' })
   return `on ${day} night`
 }
 
@@ -106,11 +108,11 @@ export default function SitPrompts({ page }: { page: 'tonight' | 'stands' }) {
 
   const tonight = nightOf(Date.now())
   const oldest = nightBefore(tonight, ASK_NIGHTS)
-  const live = page === 'tonight' ? (got?.data.live ?? []).map(withPending).filter((s) => isOn(s)) : []
-  const ask = (got?.data.to_report ?? [])
-    .map(withPending)
-    .filter((s) => !answered[s.id] && s.outcome === 'unreported' && s.night >= oldest)
-    .filter((s) => (page === 'stands' ? s.night < tonight : s.night < tonight || !!s.ended_at))
+  const all = [...new Map([...(got?.data.live ?? []), ...(got?.data.to_report ?? [])].map((s) => [s.id, s])).values()].map(withPending)
+  const live = page === 'tonight' ? all.filter((s) => isOn(s)) : []
+  const ask = all
+    .filter((s) => !isOn(s) && !answered[s.id] && s.outcome === 'unreported' && s.night >= oldest)
+    .filter((s) => (page === 'stands' ? s.night < tonight : s.night < tonight || !!s.ended_at || !!s.started_at))
   const cards = [...Object.values(answered).map((a) => ({ sit: a.sit, words: a.words })), ...ask.map((sit) => ({ sit, words: '' }))]
   if (!live.length && !cards.length) return null
 
@@ -127,10 +129,10 @@ export default function SitPrompts({ page }: { page: 'tonight' | 'stands' }) {
       ))}
       {cards.map(({ sit, words }) => (
         <section key={sit.id} className="card sp-ask" aria-labelledby={`sp-ask-${sit.id}`}>
-          <h2 id={`sp-ask-${sit.id}`}>What happened {whenWords(sit.night, tonight)}?</h2>
+          <h2 id={`sp-ask-${sit.id}`}>What happened {whenWords(sit, tonight)}?</h2>
           <p className="sp-where">
             {sit.stand ?? 'Your stand'}.{' '}
-            {words ? '' : sit.started_at ? 'You ended the sit without saying.' : 'You reserved it and didn’t say.'}
+            {words ? '' : sit.ended_at ? 'You ended the sit without saying.' : sit.started_at ? 'You started the sit and didn’t say.' : 'You reserved it and didn’t say.'}
           </p>
           {words ? (
             <p className="sp-done" role="status">{words}</p>

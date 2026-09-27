@@ -1,4 +1,5 @@
 import { type Failure, SIT_QUEUE_KEY, api, getToken, tokenSubject } from './api'
+import { startedSitIsOn } from './night'
 
 /**
  * Sit reports that survive a valley with no signal.
@@ -32,9 +33,14 @@ export type PendingSit = {
   start?: string
   /** When END SIT was tapped. */
   end?: string
+  /** A send of it found no signal: it waits for signal, and the stand says so. Not
+   *  set while the first send is still in the air. */
+  waiting?: boolean
 }
 
-export type SyncResult = { sent: number; left: number; offline: boolean }
+/** `sent`: sits whose waiting changes went; `reports` of them carried a report (not
+ *  only START or END SIT). */
+export type SyncResult = { sent: number; reports: number; left: number; offline: boolean }
 
 // Up the ladder only; 'unreported' and 'cancelled' sit below it.
 export const RANK: Record<string, number> = { nothing: 0, seen: 1, shootable_no_shot: 2, shot: 3 }
@@ -96,25 +102,24 @@ export function pendingCount(): number {
   return read().filter(mine).length
 }
 
-// A sit started and not ended counts as on for this long, as the server says
-// (routes_stands.LIVE_FOR): a phone that died before END SIT must not keep it on.
-export const LIVE_FOR_MS = 12 * 3600_000
-
-type SitState = { id: string; outcome: string; started_at: string | null; ended_at: string | null }
+type SitState = { id: string; night: string; outcome: string; started_at: string | null; ended_at: string | null }
 
 /** A sit as this phone knows it: the server's copy plus what still waits for signal
  *  (a report, START, END SIT), so ending a sit in the valley doesn't leave the
- *  stand saying "Your sit is on". `unsent` says something is still on the phone. */
+ *  stand saying "Your sit is on". `unsent` says a send found no signal and it is
+ *  waiting on the phone; a send still in the air is not "no signal". */
 export function withPending<S extends SitState>(sit: S): S & { unsent: boolean } {
   const p = pendingFor(sit.id)
   if (!p) return { ...sit, unsent: false }
   const outcome = p.outcome && (p.correct || rank(p.outcome) > rank(sit.outcome)) ? p.outcome : sit.outcome
-  return { ...sit, outcome, started_at: sit.started_at ?? p.start ?? null, ended_at: sit.ended_at ?? p.end ?? null, unsent: true }
+  return { ...sit, outcome, started_at: sit.started_at ?? p.start ?? null, ended_at: sit.ended_at ?? p.end ?? null, unsent: !!p.waiting }
 }
 
-/** Started, not ended, and started recently enough to still be on. */
+/** On now, as the server counts it (night.ts startedSitIsOn): started, not ended,
+ *  and tonight's, or a dawn sit from before 06:00. An evening sit nobody ended is
+ *  over at 06:00, so the morning asks what happened instead of "Back to sit". */
 export function isOn(sit: SitState, now: number = Date.now()): boolean {
-  return !!sit.started_at && !sit.ended_at && sit.outcome !== 'cancelled' && now - Date.parse(sit.started_at) < LIVE_FOR_MS
+  return !!sit.started_at && !sit.ended_at && sit.outcome !== 'cancelled' && startedSitIsOn(sit.night, sit.started_at, now)
 }
 
 /** Signing out takes this person's unsent reports with it (api.signOut): ask first. */
@@ -172,10 +177,18 @@ function drop(sitId: string): void {
   write(read().filter((e) => e.sitId !== sitId))
 }
 
+/** No signal: everything of this person's on the phone waits for it. */
+function markWaiting(): void {
+  const queue = read()
+  for (const e of queue) if (mine(e)) e.waiting = true
+  write(queue)
+}
+
 const writeOpts = (method: string, body: object) => ({ method, body: JSON.stringify(body), timeoutMs: WRITE_TIMEOUT_MS })
 
-/** Start, report, end: in that order, each forgotten as soon as it is through. */
-async function send(entry: PendingSit): Promise<void> {
+/** Start, report, end: in that order, each forgotten as soon as it is through.
+ *  Says whether a report went. */
+async function send(entry: PendingSit): Promise<boolean> {
   const id = entry.sitId
   if (entry.start) {
     await api(`/sits/${id}/start`, writeOpts('POST', { at: entry.start }))
@@ -189,6 +202,7 @@ async function send(entry: PendingSit): Promise<void> {
     await api(`/sits/${id}/end`, writeOpts('POST', { at: entry.end }))
     settle(id, 'end', entry)
   }
+  return !!entry.outcome
 }
 
 // A refusal that will never change: the sit is gone, cancelled or not yours. 401
@@ -207,6 +221,7 @@ const key = (e: PendingSit) => `${e.sitId}|${e.outcome}|${e.at}|${e.correct}|${e
 
 async function drain(): Promise<SyncResult> {
   let sent = 0
+  let reports = 0
   const tried = new Set<string>()
   // Re-read after every write: a tap can land while one is in the air, and that
   // entry goes next. Bounded, so a finger drumming on the screen can't pin it here.
@@ -215,25 +230,28 @@ async function drain(): Promise<SyncResult> {
     if (!entry) break
     tried.add(key(entry))
     try {
-      await send(entry)
+      if (await send(entry)) reports++
       refused.delete(entry.sitId)
       sent++
     } catch (e) {
-      if (!refusedForGood(e)) return { sent, left: pendingCount(), offline: true }
+      if (!refusedForGood(e)) {
+        markWaiting()
+        return { sent, reports, left: pendingCount(), offline: true }
+      }
       // The server said no for good (cancelled, not yours, gone): keeping it would
       // only say "saved on phone" forever.
       refused.set(entry.sitId, (e as Error).message)
       drop(entry.sitId)
     }
   }
-  return { sent, left: pendingCount(), offline: false }
+  return { sent, reports, left: pendingCount(), offline: false }
 }
 
 /** Send what's waiting. Callers share one flight; nobody starts a second. */
 export function flushSits(): Promise<SyncResult> {
   if (!flight) {
     flight = drain()
-      .catch(() => ({ sent: 0, left: pendingCount(), offline: true }))
+      .catch(() => ({ sent: 0, reports: 0, left: pendingCount(), offline: true }))
       .then((r) => {
         flight = null
         listeners.forEach((fn) => fn(r))
