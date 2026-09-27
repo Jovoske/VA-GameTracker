@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, plainWords, thumbUrl, whoAmI } from '../api'
-import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import { type Failure, type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, plainWords, thumbUrl, whoAmI } from '../api'
+import PhotoLightbox, { type LightboxPhoto, morePhotosFailed } from '../components/PhotoLightbox'
 import SwitchRow from '../components/SwitchRow'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
+import { whenSeen } from '../night'
 import './cameras.css'
 
 type Health = {
@@ -40,6 +41,10 @@ type Camera = {
   model: string | null
   image_count: number
   empty_count: number
+  /** Checked photos with an animal in them, as the strip and Photos show them. */
+  animal_count?: number
+  /** Photos the strip shows that the AI hasn't checked yet (often grass). */
+  unchecked_count?: number
   last_capture: string | null
   last_report_at: string | null
   photo_count: number | null
@@ -59,39 +64,29 @@ type Img = {
   is_empty_frame: boolean | null
   reviewed: boolean
   animal_conf: number | null
-  species: string | null
-  group_type: string | null
+  /** Its name as Photos and Animals write it ("Stag", "Sounder"); null while nobody has named it. */
+  label: string | null
+  species_id?: string | null
   group_size: number | null
-  sex: string | null
+  fixed_by?: string | null
   notes_count: number
   // The AI hasn't finished with it: still to be checked, or given up on after failing.
   checking?: 'waiting' | 'failed' | null
 }
 
-/** What a photo nobody has named is called: an animal only once the AI has looked. */
+/** What a photo nobody has named is called: an animal only once the AI has looked,
+ *  and "Animal" then, as Photos and the viewer call it (routes_photos._items). */
 function unnamed(im: Img): string {
   if (im.checking === 'waiting') return 'Not checked yet'
   if (im.checking === 'failed') return 'Couldn’t check'
-  return 'Unknown animal'
+  return 'Animal'
 }
 
-// Species + group make-up (+ sex once known) as one short label.
+/** The photo's name as the server writes it everywhere (routes_photos._items), with
+ *  the head count of a group: this page used to make up its own ("Boar ♂"). */
 function classLabel(im: Img): string {
-  const sp = im.species || ''
-  const n = im.group_size || 0
-  const sexed = im.sex && im.sex !== 'unknown' ? im.sex : null
-  if (sexed && im.group_type === 'solitary') {
-    if (sp === 'Red Deer') return sexed === 'male' ? 'Stag' : 'Hind'
-    if (sp === 'Wild Boar') return sexed === 'male' ? 'Boar ♂' : 'Sow'
-  }
-  switch (im.group_type) {
-    case 'sow_with_piglets': return `Sow + piglets (${n})`
-    case 'sounder': return `Boar sounder (${n})`
-    case 'hind_with_calf': return `Hind + calf (${n})`
-    case 'herd': return `${sp} herd (${n})`
-    case 'group': return `${sp} (${n})`
-    default: return sp
-  }
+  if (!im.label) return ''
+  return im.group_size && im.group_size > 1 ? `${im.label} ×${im.group_size}` : im.label
 }
 
 function batteryColor(p: number | null): string {
@@ -114,15 +109,9 @@ function timeAgo(ts: string | null): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
 }
-/** "yesterday", "Tuesday" or "3 Sep": when the camera last spoke to us. */
-function sinceLabel(ts: string): string {
-  const d = new Date(ts)
-  const days = Math.floor((Date.now() - d.getTime()) / 86400000)
-  if (days < 1) return 'today'
-  if (days === 1) return 'yesterday'
-  if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' })
-  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
-}
+/** "last night", "Tuesday" or "3 Sep": when the camera last spoke to us, by the
+ *  estate's nights as Photos and Animals say it (audit C-14). */
+const sinceLabel = (ts: string): string => whenSeen(ts)
 /** Camera health in words a hunter uses, not a status code. */
 function healthWords(c: Camera): { label: string; color: string; ok: boolean } {
   const status = c.health?.status ?? 'ok'
@@ -215,7 +204,20 @@ function fetchLine(s: SyncStatus): SyncLine {
 
 const wait = (ms: number) => new Promise((res) => setTimeout(res, ms))
 
-type Zoom = { photos: LightboxPhoto[]; idx: number }
+/** The viewer, over one camera's strip: it pages on into the strip's older photos. */
+type Zoom = { camId: string; start: number }
+/** Where a photo is counted on its card: checked with an animal, not checked yet, or empty. */
+type Kind = 'animal' | 'unchecked' | 'empty'
+const kindOf = (im: Pick<Img, 'is_empty_frame'>): Kind =>
+  im.is_empty_frame === true ? 'empty' : im.is_empty_frame === false ? 'animal' : 'unchecked'
+
+/** Why a hide or keep wasn't saved, in words: a reload never helps with no signal. */
+function notSaved(e: unknown): string {
+  const x = e as Failure
+  if (x.offline) return 'No signal, so that wasn’t saved. Try again when you have a connection.'
+  if (x.timeout) return 'No answer from the server, so that wasn’t saved. Try again.'
+  return `That wasn’t saved. ${plainWords(x.message || '')}`.trim()
+}
 type CameraName = Pick<Camera, 'id' | 'name' | 'provider_name' | 'name_is_custom' | 'can_rename'>
 
 function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value: CameraName) => void }) {
@@ -374,6 +376,8 @@ function toPhoto(cam: string, im: Img): LightboxPhoto {
     notes_count: im.notes_count,
     // Where a hunter finds what the detector missed: a note keeps it (PhotoNotes).
     empty: im.is_empty_frame === true,
+    species_id: im.species_id,
+    fixed_by: im.fixed_by,
   }
 }
 
@@ -389,7 +393,13 @@ function lastSeenLine(c: Camera, imgs: Img[]): string {
   return 'No photos yet'
 }
 
-const imagesPath = (camId: string, includeEmpty: boolean) => `/cameras/${camId}/images?limit=80&include_empty=${includeEmpty}`
+const STRIP = 80
+// The most one reload asks for (the server's cap): a strip paged further back than
+// this starts over at this many.
+const STRIP_MAX = 300
+const imagesPath = (camId: string, includeEmpty: boolean, after?: Img, limit = STRIP) =>
+  `/cameras/${camId}/images?limit=${limit}&include_empty=${includeEmpty}${after
+    ? `&before=${encodeURIComponent(after.captured_at)}&before_id=${encodeURIComponent(after.id)}` : ''}`
 
 export default function Cameras() {
   // What this session last saw paints at once; the network replaces it (audit K-08).
@@ -415,6 +425,15 @@ export default function Cameras() {
   const [loading, setLoading] = useState(true)
   const [actionErr, setActionErr] = useState('')
   const [zoom, setZoom] = useState<Zoom | null>(null)
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
+  // Viewers look; only members and admins hide or keep photos (the server refuses them).
+  const [writer, setWriter] = useState(() => (peekMe()?.role ?? 'viewer') !== 'viewer')
+  useEffect(() => {
+    let live = true
+    whoAmI().then((me) => { if (live) setWriter(me.role !== 'viewer') }).catch(() => {})
+    return () => { live = false }
+  }, [])
   // Photos being marked empty/animal, held long enough to leave rather than
   // blink out when the strip reloads underneath them.
   const [flagging, setFlagging] = useState<Set<string>>(new Set())
@@ -432,9 +451,57 @@ export default function Cameras() {
     return ctl.current.signal
   }
 
-  async function loadImages(camId: string, includeEmpty: boolean) {
-    const { data: imgs } = await getFresh<Img[]>(imagesPath(camId, includeEmpty), { signal: signal() })
+  // The newest request for each camera's strip: an older answer arriving late (a
+  // slow first load, then "Show empty photos") must not overwrite it (audit C-16).
+  const stripRequest = useRef<Record<string, number>>({})
+  // Read when a strip is fetched, not when the fetch was set up: a refetch started
+  // before the toggle still asks for what is on screen.
+  const hiddenRef = useRef(showHidden)
+  hiddenRef.current = showHidden
+  // Whether each strip has older photos than it shows ("Show older photos"), and why
+  // the last older page didn't come.
+  const [older, setOlder] = useState<Record<string, boolean>>({})
+  const [olderBusy, setOlderBusy] = useState<string | null>(null)
+  const [olderErr, setOlderErr] = useState<Record<string, string>>({})
+  const imagesRef = useRef(images)
+  imagesRef.current = images
+
+  /** A camera's strip, again. As far back as it had been paged (a hide, a fix or a
+   *  return to the app used to drop the older photos shown), or the first page. */
+  async function loadImages(camId: string, includeEmpty = !!hiddenRef.current[camId], fresh = false) {
+    const id = (stripRequest.current[camId] ?? 0) + 1
+    stripRequest.current[camId] = id
+    const shown = fresh ? 0 : imagesRef.current[camId]?.length ?? 0
+    const limit = Math.min(STRIP_MAX, Math.max(STRIP, shown))
+    const { data: imgs } = await getFresh<Img[]>(imagesPath(camId, includeEmpty, undefined, limit), { signal: signal() })
+    if (stripRequest.current[camId] !== id) return
     setImages((prev) => ({ ...prev, [camId]: imgs }))
+    setOlder((prev) => ({ ...prev, [camId]: imgs.length >= limit }))
+  }
+
+  /** The next page of a camera's strip, older than the last photo it shows. */
+  async function loadOlder(camId: string) {
+    const shown = images[camId]
+    const last = shown?.[shown.length - 1]
+    if (!last || olderBusy) return
+    const id = stripRequest.current[camId] ?? 0
+    setOlderBusy(camId)
+    setOlderErr((prev) => ({ ...prev, [camId]: '' }))
+    try {
+      const more = await api<Img[]>(imagesPath(camId, !!hiddenRef.current[camId], last), { signal: signal(), timeoutMs: 20_000 })
+      if (stripRequest.current[camId] !== id) return
+      setImages((prev) => {
+        const have = new Set((prev[camId] ?? []).map((im) => im.id))
+        return { ...prev, [camId]: [...(prev[camId] ?? []), ...more.filter((im) => !have.has(im.id))] }
+      })
+      setOlder((prev) => ({ ...prev, [camId]: more.length >= STRIP }))
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError' && stripRequest.current[camId] === id) {
+        setOlderErr((prev) => ({ ...prev, [camId]: morePhotosFailed(e) }))
+      }
+    } finally {
+      setOlderBusy(null)
+    }
   }
 
   async function loadCameras() {
@@ -445,7 +512,7 @@ export default function Cameras() {
       setCameras(cams)
       setSavedCopy(got.stale ? got : null)
       setErr('')
-      await Promise.all(cams.map((c) => loadImages(c.id, !!showHidden[c.id])))
+      await Promise.all(cams.map((c) => loadImages(c.id)))
     } catch (e) {
       if ((e as Error).name !== 'AbortError') setErr((e as Error).message)
     } finally {
@@ -457,7 +524,8 @@ export default function Cameras() {
     loadCameras()
     return () => ctl.current?.abort()
   }, [])
-  useRefetchOnReturn(loadCameras)
+  // Not with a photo open: the strip it pages through would change under it.
+  useRefetchOnReturn(() => { if (!zoomRef.current) void loadCameras() })
 
   // Showing empties turns the scroll strip into a wrapped grid. A short fade
   // over the reflow hides the jump.
@@ -466,12 +534,14 @@ export default function Cameras() {
     setSwapping(camId)
     window.setTimeout(() => {
       setShowHidden((p) => ({ ...p, [camId]: next }))
-      loadImages(camId, next).catch(() => setActionErr('Could not load those photos. Try again.'))
+      setOlderErr((prev) => ({ ...prev, [camId]: '' }))
+      loadImages(camId, next, true).catch(() => setActionErr('Could not load those photos. Try again.'))
       requestAnimationFrame(() => setSwapping(null))
     }, 110)
   }
 
-  async function flag(camId: string, imgId: string, isEmpty: boolean) {
+  async function flag(camId: string, im: Img, isEmpty: boolean) {
+    const imgId = im.id
     setActionErr('')
     setFlagging((s) => new Set(s).add(imgId))
     try {
@@ -481,18 +551,51 @@ export default function Cameras() {
         api(`/images/${imgId}/flag`, {
           method: 'POST',
           body: JSON.stringify({ is_empty: isEmpty }),
+          timeoutMs: 20_000,
         }),
         new Promise((res) => setTimeout(res, 180)),
       ])
-      await loadImages(camId, !!showHidden[camId])
-    } catch {
-      setActionErr('Could not save that. Reload and try again.')
+      // The card's counts follow at once; they used to stay as they were until a reload.
+      recount(camId, kindOf(im), isEmpty ? 'empty' : 'animal')
+      await loadImages(camId)
+    } catch (e) {
+      setActionErr(notSaved(e))
     }
     setFlagging((s) => {
       const n = new Set(s)
       n.delete(imgId)
       return n
     })
+  }
+
+  /** A photo moved from one count on its card to another. One not checked yet that
+   *  is hidden was never one of the animal photos, so that count stays. */
+  function recount(camId: string, from: Kind, to: Kind) {
+    if (from === to) return
+    const key = { animal: 'animal_count', unchecked: 'unchecked_count', empty: 'empty_count' } as const
+    setCameras((cs) => cs.map((c) => {
+      if (c.id !== camId) return c
+      const n: Record<Kind, number> = {
+        animal: c.animal_count ?? Math.max(0, c.image_count - c.empty_count),
+        unchecked: c.unchecked_count ?? 0,
+        empty: c.empty_count,
+      }
+      return { ...c, [key[from]]: Math.max(0, n[from] - 1), [key[to]]: n[to] + 1 }
+    }))
+  }
+
+  // Fixes made in the viewer ("Wrong?"): that camera's strip and counts are asked
+  // again once the viewer closes, so nothing moves under it while it is open.
+  const fixedCams = useRef(new Set<string>())
+  function photoFixed(id: string) {
+    const camId = Object.keys(images).find((cam) => images[cam].some((im) => im.id === id))
+    if (camId) fixedCams.current.add(camId)
+  }
+  function closeViewer() {
+    setZoom(null)
+    if (!fixedCams.current.size) return
+    fixedCams.current.clear()
+    void loadCameras()
   }
 
   // Ask for a fetch, then follow it to its end: the count as soon as the photos are
@@ -590,7 +693,8 @@ export default function Cameras() {
           const hidden = !!showHidden[c.id]
           const imgs = (images[c.id] || []).filter((im) => im.file_url)
           const health = healthWords(c)
-          const animalPhotos = Math.max(0, c.image_count - c.empty_count)
+          const animalPhotos = c.animal_count ?? Math.max(0, c.image_count - c.empty_count)
+          const unchecked = c.unchecked_count ?? 0
           return (
             <div key={c.id} className="card cam-card">
               <div className="cam-card-head">
@@ -630,21 +734,19 @@ export default function Cameras() {
                         aria-label={`Open photo from ${c.name}: ${isEmpty ? 'no animal' : (classLabel(im) || unnamed(im)).toLowerCase()}`}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                         src={thumbUrl(im.id)}
-                        alt={im.species || 'trail-camera photo'}
+                        alt={im.label || 'trail-camera photo'}
                         loading="lazy"
-                        onClick={() => {
-                          setZoom({ photos: imgs.map((x) => toPhoto(c.name, x)), idx: imgs.indexOf(im) })
-                        }}
+                        onClick={() => setZoom({ camId: c.id, start: imgs.indexOf(im) })}
                         style={{
                           opacity: isEmpty ? 0.4 : 1,
                           border: im.reviewed ? '2px solid var(--teal)' : 'none',
                         }}
                       />
                       <NoteMark count={im.notes_count} />
-                      {hidden && (
+                      {hidden && writer && (
                         <button
                           className="cam-flag"
-                          onClick={() => flag(c.id, im.id, !isEmpty)}
+                          onClick={() => flag(c.id, im, !isEmpty)}
                           disabled={leaving}
                           aria-label={isEmpty ? 'Keep this photo: there is an animal in it' : 'Hide this photo: nothing in it'}
                           title={isEmpty ? 'Keep (animal)' : 'Hide (empty)'}
@@ -659,10 +761,10 @@ export default function Cameras() {
                       {hidden && isEmpty && im.animal_conf != null && im.animal_conf >= 0.05 && (
                         <div className="cam-thumb-tag">Maybe</div>
                       )}
-                      {!isEmpty && im.species && (
+                      {!isEmpty && im.label && (
                         <div className="cam-thumb-tag cam-thumb-tag--label">{classLabel(im)}</div>
                       )}
-                      {!isEmpty && !im.species && im.checking && (
+                      {!isEmpty && !im.label && im.checking && (
                         <div className="cam-thumb-tag" data-checking={im.checking}>{unnamed(im)}</div>
                       )}
                     </div>
@@ -670,6 +772,12 @@ export default function Cameras() {
                 })}
                 {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? 'Loading photos…' : hidden ? 'No photos yet.' : 'No animal photos yet. Tap Check for new photos.'}</div>}
               </div>
+              {olderErr[c.id] && older[c.id] && olderBusy !== c.id && <p className="cam-health-note cam-health-note--warn" role="alert">{olderErr[c.id]}</p>}
+              {older[c.id] && imgs.length > 0 && (
+                <button className="cam-empties-toggle" onClick={() => loadOlder(c.id)} disabled={olderBusy === c.id}>
+                  {olderBusy === c.id ? 'Loading…' : 'Show older photos'}
+                </button>
+              )}
 
               {c.empty_count > 0 && (
                 <button className="cam-empties-toggle" onClick={() => toggleHidden(c.id)} aria-pressed={hidden}>
@@ -687,7 +795,7 @@ export default function Cameras() {
                     <div><dt>Photo plan</dt><dd style={{ color: creditColor(c.photo_count, c.photo_limit) }}>{c.photo_count ?? '?'} of {c.photo_limit} used{c.plan_name ? ` (${c.plan_name})` : ''}</dd></div>
                   )}
                   {c.sd_total_mb ? <div><dt>SD card</dt><dd>{Math.round(((c.sd_used_mb ?? 0) / c.sd_total_mb) * 100)}% full</dd></div> : null}
-                  <div><dt>Photos</dt><dd>{animalPhotos} with animals{c.empty_count > 0 ? `, ${c.empty_count} empty` : ''}</dd></div>
+                  <div><dt>Photos</dt><dd>{animalPhotos} with animals{unchecked > 0 ? `, ${unchecked} not checked yet` : ''}{c.empty_count > 0 ? `, ${c.empty_count} empty` : ''}</dd></div>
                   {c.model ? <div><dt>Model</dt><dd>{c.model}</dd></div> : null}
                 </dl>
                 {admin && <RetireCamera camera={c} onSaved={(retiredAt) => { setCameras((cs) => cs.map((x) => (x.id === c.id ? { ...x, retired_at: retiredAt } : x))); void loadCameras() }} />}
@@ -697,15 +805,20 @@ export default function Cameras() {
         })}
       </div>
 
-      {zoom && <PhotoLightbox photos={zoom.photos} start={zoom.idx} backLabel="Back to cameras" onClose={() => setZoom(null)}
+      {zoom && <PhotoLightbox photos={(images[zoom.camId] || []).filter((im) => im.file_url)
+        .map((im) => toPhoto(cameras.find((c) => c.id === zoom.camId)?.name ?? '', im))}
+        start={zoom.start} backLabel="Back to cameras" onClose={closeViewer}
+        hasMore={!!older[zoom.camId]} onNeedMore={() => void loadOlder(zoom.camId)} moreError={olderErr[zoom.camId]}
+        onFixed={photoFixed}
         onNotesChange={(id, n) => setImages((prev) => Object.fromEntries(Object.entries(prev).map(([cam, imgs]) =>
           [cam, imgs.map((im) => (im.id === id ? { ...im, notes_count: n } : im))])))}
         onKept={(id) => {
           // Kept as an animal photo, as its Keep button would: the tile and the count follow.
           const camId = Object.keys(images).find((cam) => images[cam].some((im) => im.id === id))
+          const was = camId ? images[camId].find((im) => im.id === id) : undefined
           setImages((prev) => Object.fromEntries(Object.entries(prev).map(([cam, imgs]) =>
             [cam, imgs.map((im) => (im.id === id ? { ...im, is_empty_frame: false, reviewed: true } : im))])))
-          if (camId) setCameras((cs) => cs.map((c) => (c.id === camId ? { ...c, empty_count: Math.max(0, c.empty_count - 1) } : c)))
+          if (camId && was) recount(camId, kindOf(was), 'animal')
         }} />}
     </div>
   )

@@ -51,14 +51,29 @@ ESTATE_CLASSES = frozenset({
 ESTATE_KEYS = frozenset(species_key(n) for n in ESTATE_CLASSES)
 
 
-# DeepFaune's "lagomorph" is the taxonomic order (rabbits + hares); on this estate it is
-# shown simply as "Rabbit". Keep the model class / species key as "lagomorph"; only the
-# human-facing name is overridden.
-_NAME_OVERRIDES = {"lagomorph": "Rabbit"}
+# The name a species starts with in the app: a hunter's word, written as in a sentence
+# ("Wild boar", not "Wild Boar"). Four DeepFaune classes are lab groups and get plain
+# words instead: "lagomorph" is hares and rabbits together (the model can't tell them
+# apart; hares used to show as "Rabbit" and went with the rabbits when those were
+# hidden), and "micromammal", "mustelid" and "equid" are what nobody on a hunt says.
+# The key stays the model's class. An admin can rename any species in Settings; this
+# is the name it goes back to. Migration 0025 moved the old names over.
+READABLE_NAMES = {
+    "lagomorph": "Hare or rabbit",
+    "micromammal": "Mouse or rat",
+    "mustelid": "Marten or weasel",
+    "equid": "Horse or donkey",
+}
 
 
 def common_name(name: str) -> str:
-    return _NAME_OVERRIDES.get(name, name.title())
+    """The app's name for a DeepFaune class: "wild boar" -> "Wild boar"."""
+    return READABLE_NAMES.get(name, name[:1].upper() + name[1:])
+
+
+def default_name(key: str) -> str:
+    """The app's name for a species key: "wild_boar" -> "Wild boar"."""
+    return common_name(key.replace("_", " "))
 
 
 _model = None

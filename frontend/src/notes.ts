@@ -55,6 +55,8 @@ export type Highlight = {
   species_id: string | null
   group_size: number | null
   notes_count: number
+  /** Who said what it is, when a hunter fixed it ("Wrong?" in the viewer). */
+  fixed_by?: string | null
   notes: PhotoNote[]
   marked_at: string
 }

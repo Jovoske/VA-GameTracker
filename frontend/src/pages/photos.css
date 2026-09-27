@@ -14,3 +14,7 @@
 .photos-day { font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 14px 0 6px; grid-column: 1 / -1; }
 .photos-day:first-child { margin-top: 0; }
 .photos-more { display: block; width: 100%; margin-top: 14px; }
+/* A new choice of chips on its way: the old photos dim, so a slow link doesn't read
+   as a tap that missed (audit C-25). */
+.photos-grid[data-pending] { opacity: 0.45; transition: opacity var(--d-fast) var(--ease-out); }
+.photos-pending { font-size: 13px; color: var(--text-dim); padding: 0 8px 8px; }

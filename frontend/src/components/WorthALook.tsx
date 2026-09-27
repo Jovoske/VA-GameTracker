@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { api, thumbUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 import { noteSnippet, type Highlight } from '../notes'
+import type { PhotoFix } from './PhotoFix'
 import PhotoLightbox from './PhotoLightbox'
 
 type Failure = Error & { offline?: boolean; timeout?: boolean }
@@ -28,21 +29,27 @@ function rememberMarks(key: string, had: boolean) {
  * something has been marked.
  *
  * Tapping one opens the photo viewer over the strip, where the notes can be read in
- * full and added to. The strip asks again once the viewer closes if anything
- * changed there, whenever `refreshKey` changes (a note added from the grid), and
- * on coming back to the app, when a teammate may have marked something meanwhile.
+ * full and added to, and a wrong animal fixed. The strip asks again once the viewer
+ * closes if anything changed there, whenever `refreshKey` changes (a note added from
+ * the grid), and on coming back to the app, when a teammate may have marked something
+ * meanwhile. A fix is passed on (`onFixed`, then `onClosed`) so the page's own list,
+ * which may show the same photo, follows it too.
  *
  * While the first answer is on its way the strip holds its place if it had photos
  * last time, and takes none if it didn't, so a late answer doesn't move what is
  * already under a thumb.
  */
-export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, limit = 20, onChange, className, quietErrors = false }: {
+export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, limit = 20, onChange, onFixed, onClosed, className, quietErrors = false }: {
   cameraId?: string
   refreshKey?: string | number
   backLabel: string
   limit?: number
   /** A note was added or removed in the viewer opened from here. */
   onChange?: (imageId: string, count: number) => void
+  /** "Wrong?" in the viewer opened from here changed what a photo is. */
+  onFixed?: (imageId: string, fix: PhotoFix) => void
+  /** That viewer closed: a list can drop the photos a fix took out of it now. */
+  onClosed?: () => void
   className?: string
   /** Say nothing when it can't load: something else on the screen already says why. */
   quietErrors?: boolean
@@ -114,15 +121,20 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
       </ul>
       {zoom != null && createPortal(
         <PhotoLightbox
-          photos={items.map((h) => ({ id: h.image_id, file_url: h.file_url, captured_at: h.captured_at, camera: h.camera, label: h.label, notes_count: h.notes_count }))}
+          photos={items.map((h) => ({
+            id: h.image_id, file_url: h.file_url, captured_at: h.captured_at, camera: h.camera, label: h.label,
+            notes_count: h.notes_count, species_id: h.species_id, fixed_by: h.fixed_by,
+          }))}
           start={zoom}
           backLabel={backLabel}
           zIndex={70}
           onClose={() => {
             setZoom(null)
             if (changed.current) { changed.current = false; load() }
+            onClosed?.()
           }}
           onNotesChange={(id, n) => { changed.current = true; onChange?.(id, n) }}
+          onFixed={(id, fix) => { changed.current = true; onFixed?.(id, fix) }}
         />,
         document.body,
       )}

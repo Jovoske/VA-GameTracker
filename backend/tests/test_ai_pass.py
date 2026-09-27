@@ -339,7 +339,8 @@ def test_the_species_model_only_picks_among_the_estates_animals():
     probs = [0.0] * len(classifier.DEEPFAUNE_CLASSES)
     probs[classifier.DEEPFAUNE_CLASSES.index("moose")] = 0.6
     probs[classifier.DEEPFAUNE_CLASSES.index("red deer")] = 0.3
-    assert classifier._best_allowed(probs) == ("red_deer", "Red Deer", 0.3)
+    # Named as the app writes it ("Red deer"), not DeepFaune's title case.
+    assert classifier._best_allowed(probs) == ("red_deer", "Red deer", 0.3)
     assert not {"moose", "bison", "reindeer", "chamois", "wolf"} & classifier.ESTATE_CLASSES
 
 

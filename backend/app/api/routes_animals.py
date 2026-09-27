@@ -6,6 +6,7 @@ clusters, not asserted identities.
 """
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Annotated
 
@@ -156,6 +157,25 @@ class PatchBody(BaseModel):
     notes: str | None = None
 
 
+# The name "Look for repeats" gives a new group: "Wild boar #3". Anything else is a
+# name a hunter chose.
+_AUTO_LABEL = re.compile(r".+ #\d+")
+
+
+def is_auto_label(label: str | None) -> bool:
+    return not label or bool(_AUTO_LABEL.fullmatch(label.strip()))
+
+
+def _confirm(db: Session, individual_id: uuid.UUID) -> None:
+    """Every sighting of the animal is the hunter's word now: "Look for repeats" keeps
+    an animal with a confirmed sighting as it is, and rebuilds the rest."""
+    db.execute(
+        update(DetectionIndividual)
+        .where(DetectionIndividual.individual_id == individual_id)
+        .values(confirmed_by_user=True)
+    )
+
+
 @router.patch("/{individual_id}")
 def patch_animal(
     individual_id: uuid.UUID,
@@ -163,19 +183,33 @@ def patch_animal(
     _: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ) -> dict:
+    """Name an animal, or note or mark it.
+
+    Naming it says which animal it is, so it confirms its sightings: "Look for
+    repeats" used to throw away every group nobody had confirmed, names and notes
+    and all, and bring it back as "Wild boar #3".
+    """
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "Animal not found.")
+        raise HTTPException(404, "That animal isn't on the app any more.")
     if body.label is not None:
-        ind.label = body.label.strip() or ind.label
+        label = " ".join(body.label.split())
+        if not label:
+            raise HTTPException(422, "Type a name first.")
+        if len(label) > 60:
+            raise HTTPException(422, "A name is at most 60 characters.")
+        ind.label = label
     if body.status is not None:
         if body.status not in _STATUSES:
             raise HTTPException(422, f"status must be one of {_STATUSES}")
         ind.status = body.status
     if body.notes is not None:
-        ind.notes = body.notes
+        ind.notes = body.notes.strip() or None
+    if body.model_fields_set & {"label", "status", "notes"}:
+        _confirm(db, individual_id)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "id": str(ind.id), "label": ind.label, "status": ind.status,
+            "notes": ind.notes, "confirmed": True}
 
 
 def _refresh_range(db: Session, ind: Individual) -> None:
@@ -191,6 +225,8 @@ def _refresh_range(db: Session, ind: Individual) -> None:
 class MergeBody(BaseModel):
     source_ids: list[uuid.UUID]
     target_id: uuid.UUID
+    # The name to keep, when more than one of them had been named (the app asks).
+    label: str | None = None
 
 
 @router.post("/merge")
@@ -199,14 +235,29 @@ def merge_animals(
     _: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Fold source individuals into the target — a user assertion they're the same animal."""
+    """Fold source individuals into the target — a user assertion they're the same animal.
+
+    The merged animal keeps the name a hunter gave: the one asked for (`label`), or
+    else the target's own if a hunter named it, or else the one name among the
+    others. It used to keep whichever had the most sightings and drop the typed one.
+    Notes from all of them are kept.
+    """
     target = db.get(Individual, body.target_id)
     if target is None:
         raise HTTPException(404, "The animal to merge into was not found.")
+    sources = [db.get(Individual, sid) for sid in dict.fromkeys(body.source_ids)
+               if sid != body.target_id]
+    sources = [ind for ind in sources if ind is not None]
+    named = [ind.label for ind in sources if not is_auto_label(ind.label)]
+    chosen = " ".join((body.label or "").split())
+    if chosen:
+        target.label = chosen[:60]
+    elif is_auto_label(target.label) and len(set(named)) == 1:
+        target.label = named[0]
+    notes = [n for n in [target.notes, *(ind.notes for ind in sources)] if n and n.strip()]
+    target.notes = "\n".join(dict.fromkeys(n.strip() for n in notes)) or None
     moved = 0
-    for sid in body.source_ids:
-        if sid == body.target_id:
-            continue
+    for sid in (ind.id for ind in sources):
         res = db.execute(
             update(DetectionIndividual)
             .where(DetectionIndividual.individual_id == sid)
@@ -215,14 +266,10 @@ def merge_animals(
         moved += res.rowcount or 0
         db.execute(delete(Individual).where(Individual.id == sid))
     # The merge itself is a confirmation of the whole group.
-    db.execute(
-        update(DetectionIndividual)
-        .where(DetectionIndividual.individual_id == body.target_id)
-        .values(confirmed_by_user=True)
-    )
+    _confirm(db, body.target_id)
     _refresh_range(db, target)
     db.commit()
-    return {"ok": True, "merged": moved}
+    return {"ok": True, "merged": moved, "label": target.label}
 
 
 @router.post("/{individual_id}/confirm")
@@ -234,11 +281,7 @@ def confirm_animal(
     ind = db.get(Individual, individual_id)
     if ind is None:
         raise HTTPException(404, "Animal not found.")
-    db.execute(
-        update(DetectionIndividual)
-        .where(DetectionIndividual.individual_id == individual_id)
-        .values(confirmed_by_user=True)
-    )
+    _confirm(db, individual_id)
     db.commit()
     return {"ok": True}
 

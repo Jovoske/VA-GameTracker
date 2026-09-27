@@ -2,6 +2,7 @@
 import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,15 +12,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app import jobs
-from app.ai.checking import photo_states
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
+from app.api.routes_photos import _items, after_cursor
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.db import get_db
 from app.health import camera_health
 from app.ingestion.logins import camera_logins
-from app.models import Camera, CameraView, Detection, Image, Species, User
-from app.notes import note_counts
+from app.models import Camera, CameraView, Image, User
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -70,31 +70,43 @@ def _start(db: Session, mode: str, *args: str) -> None:
 def list_cameras(
     user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> list[dict]:
+    """The estate's cameras, each with its photo counts as the strip shows them.
+
+    The strip lists `animal_count` + `unchecked_count` photos: the checked ones with
+    an animal in them (not only a hidden animal, with a picture), and the ones the AI
+    has not checked yet (or couldn't), which are often grass, so they are counted
+    apart. `empty_count` is the "nothing in it" ones "Show empty photos" brings up.
+    They used to be every frame minus the empty ones, so hidden rabbits and frames
+    not checked yet counted as animals, and it took four queries a camera; now it is
+    one for them all.
+    """
     rows = db.scalars(
         select(Camera).where(Camera.estate_id == user.estate_id).order_by(Camera.name)
     ).all()
     now = datetime.now(UTC)
     login_states = camera_logins(db, rows, now)
+    has_file = Image.original_path.isnot(None)
+    counts = {r.camera_id: r for r in db.execute(
+        select(
+            Image.camera_id,
+            func.max(Image.captured_at).label("last"),
+            func.count(Image.id).label("count"),
+            func.count(Image.id).filter(
+                has_file, Image.is_empty_frame.is_(False), VISIBLE_ANIMAL).label("animals"),
+            func.count(Image.id).filter(
+                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL).label("unchecked"),
+            func.count(Image.id).filter(has_file, Image.is_empty_frame.is_(True)).label("empty"),
+        )
+        .where(Image.camera_id.in_([c.id for c in rows]))
+        .group_by(Image.camera_id)
+    ).all()}
     out = []
     for c in rows:
-        last = db.scalar(
-            select(Image.captured_at)
-            .where(Image.camera_id == c.id)
-            .order_by(Image.captured_at.desc())
-            .limit(1)
-        )
-        count = db.scalar(select(func.count(Image.id)).where(Image.camera_id == c.id))
-        empty = db.scalar(
-            select(func.count(Image.id)).where(
-                Image.camera_id == c.id, Image.is_empty_frame.is_(True)
-            )
-        )
-        coords = db.execute(
-            select(Camera.lat, Camera.lon).where(Camera.id == c.id)
-        ).first()
-        lat = float(coords[0]) if coords and coords[0] is not None else None
-        lng = float(coords[1]) if coords and coords[1] is not None else None
-        sightings = (count or 0) - (empty or 0)
+        n = counts.get(c.id)
+        last, count = (n.last, n.count) if n else (None, 0)
+        animals, unchecked, empty = (n.animals, n.unchecked, n.empty) if n else (0, 0, 0)
+        lat = float(c.lat) if c.lat is not None else None
+        lng = float(c.lon) if c.lon is not None else None
         out.append({
             "id": str(c.id), "name": c.name, "battery_pct": c.battery_pct,
             "provider_name": c.provider_name or c.name,
@@ -108,7 +120,9 @@ def list_cameras(
             "photo_count": c.photo_count, "photo_limit": c.photo_limit,
             "plan_name": c.plan_name, "cycle_end": c.cycle_end,
             "sd_used_mb": c.sd_used_mb, "sd_total_mb": c.sd_total_mb,
-            "image_count": count or 0, "empty_count": empty or 0, "sightings": sightings,
+            "image_count": count, "empty_count": empty, "animal_count": animals,
+            "unchecked_count": unchecked,
+            "sightings": animals,
             "lat": lat, "lng": lng,
             "health": camera_health(c, now, login_states.get(c.id)),
         })
@@ -362,43 +376,45 @@ def camera_images(
     include_empty: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    before: Annotated[datetime | None, Query(description="the last photo's time")] = None,
+    before_id: Annotated[uuid.UUID | None, Query(description="the last photo's id")] = None,
 ) -> list[dict]:
-    q = select(Image).where(Image.camera_id == camera_id)
+    """The camera's photos, newest first; empties too with `include_empty`. Older ones
+    a page at a time with the last photo's time and id (`before`, `before_id`).
+
+    `label` is the photo's name as Photos and Animals write it: its surest sighting
+    of a species that isn't hidden (routes_photos._items). This page used to build
+    its own ("Boar ♂", "Red Deer herd (3)") from whichever sighting came last.
+    """
+    # A photo with no picture yet (still to download) has nothing to show.
+    q = select(Image).where(Image.camera_id == camera_id, Image.original_path.isnot(None))
     # Photos of nothing but hidden species never show; empties only on request.
     q = q.where(or_(Image.is_empty_frame.is_(True), VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
-    rows = db.scalars(q.order_by(Image.captured_at.desc()).limit(limit)).all()
-    ids = [i.id for i in rows]
-    det_map: dict = {}
-    if ids:
-        drows = db.execute(
-            select(
-                Detection.image_id, Species.common_name,
-                Detection.group_type, Detection.group_size, Detection.sex,
-            )
-            .join(Species, Detection.species_id == Species.id)
-            .where(Detection.image_id.in_(ids))
-        ).all()
-        det_map = {
-            r.image_id: {
-                "species": r.common_name, "group_type": r.group_type,
-                "group_size": r.group_size, "sex": r.sex,
-            }
-            for r in drows
-        }
-    counts = note_counts(db, ids)
-    states = photo_states(db, ids)
-    return [{
-        "id": str(i.id),
-        "captured_at": i.captured_at,
-        "file_url": f"/api/images/{i.id}/file" if i.original_path else None,
-        "species": det_map.get(i.id, {}).get("species"),
-        "group_type": det_map.get(i.id, {}).get("group_type"),
-        "group_size": det_map.get(i.id, {}).get("group_size"),
-        "sex": det_map.get(i.id, {}).get("sex"),
-        "is_empty_frame": i.is_empty_frame,
-        "reviewed": i.reviewed,
-        "animal_conf": i.animal_conf,
-        "notes_count": counts.get(i.id, 0),
-        # "waiting" / "failed" while the AI has not finished with it (checking.photo_states).
-        "checking": states.get(i.id),
-    } for i in rows]
+    q = after_cursor(q, before, before_id)
+    rows = db.scalars(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit)).all()
+    cam_name = db.scalar(select(Camera.name).where(Camera.id == camera_id))
+    items = _items(db, [
+        SimpleNamespace(id=i.id, captured_at=i.captured_at, camera_id=camera_id, name=cam_name)
+        for i in rows
+    ])
+    out = []
+    for i, it in zip(rows, items, strict=True):
+        named = it["species_id"] is not None
+        out.append({
+            "id": str(i.id),
+            "captured_at": i.captured_at,
+            "file_url": f"/api/images/{i.id}/file" if i.original_path else None,
+            # None while nobody has named it ("checking" says why, when the AI hasn't).
+            "label": it["label"] if named else None,
+            "species": it["label"] if named else None,  # what an older app reads
+            "species_id": it["species_id"],
+            "group_size": it["group_size"],
+            "fixed_by": it["fixed_by"],
+            "is_empty_frame": i.is_empty_frame,
+            "reviewed": i.reviewed,
+            "animal_conf": i.animal_conf,
+            "notes_count": it["notes_count"],
+            # "waiting" / "failed" while the AI has not finished with it (checking.photo_states).
+            "checking": it["checking"],
+        })
+    return out

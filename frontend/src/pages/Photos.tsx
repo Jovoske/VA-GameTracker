@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
-import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
+import PhotoLightbox, { type LightboxPhoto, morePhotosFailed } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
+import type { PhotoFix } from '../components/PhotoFix'
 import { useRefetchOnReturn } from '../hooks'
+import { photoHeading } from '../night'
 import './photos.css'
 
 /**
- * Every animal photo from every camera, newest first. Pick the animals and
- * cameras you want with the chips, or none for everything. Empty frames and
- * hidden animals (Settings) never appear here. Above them, the photos the team
- * marked "Worth a look", once there are any.
+ * Every animal photo from every camera, newest first, under headings by night as
+ * the server counts nights ("Last night", "Thu night": 18:00 to 06:00 on the estate's
+ * clock) and by day for the daytime ones ("Today", "Yesterday"). Pick the animals and
+ * cameras you want with the chips, or none for everything. Empty frames and hidden animals (Settings) never appear here. Above
+ * them, the photos the team marked "Worth a look", once there are any.
  */
 
 type Filters = {
@@ -27,12 +30,18 @@ type Photo = {
   species_id: string | null
   group_size: number | null
   notes_count: number
+  fixed_by?: string | null
 }
-type Page = { items: Photo[]; next_before: string | null }
+/** A page, and where the next starts: the last photo's time and id (a burst can
+ *  share one time, and paging by time alone skipped its frames at a page break). */
+type Page = { items: Photo[]; next_before: string | null; next_before_id?: string | null }
+type Cursor = { before: string; before_id: string | null }
+const cursorOf = (p: Page): Cursor | null => (p.next_before ? { before: p.next_before, before_id: p.next_before_id ?? null } : null)
 type Failure = Error & { status?: number }
 
 const toViewer = (p: Photo): LightboxPhoto => ({
   id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count,
+  species_id: p.species_id, fixed_by: p.fixed_by,
 })
 
 const PICK_KEY = 'gs.photos.pick'
@@ -47,15 +56,6 @@ function readPick(): { species: string[]; cameras: string[] } {
   }
 }
 
-const dayOf = (iso: string) => {
-  const d = new Date(iso)
-  const today = new Date()
-  const y = new Date(today)
-  y.setDate(today.getDate() - 1)
-  if (d.toDateString() === today.toDateString()) return 'Today'
-  if (d.toDateString() === y.toDateString()) return 'Yesterday'
-  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-}
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 
 /** Newest first, as the server orders the feed: by when the photo was taken, then id. */
@@ -75,8 +75,12 @@ export default function Photos() {
   // The newest page from earlier in this session paints at once, then the network
   // replaces it: coming back to Photos from another tab is not "Loading…" again.
   const [photos, setPhotos] = useState<Photo[] | null>(null)
-  const [nextBefore, setNextBefore] = useState<string | null>(null)
+  const [nextBefore, setNextBefore] = useState<Cursor | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
+  // Why the last older page didn't come: under "Show older photos", and in the viewer.
+  const [moreErr, setMoreErr] = useState('')
+  // A new choice of chips is on its way: the old photos dim under a "Loading…".
+  const [pending, setPending] = useState(false)
   const [err, setErr] = useState('')
   // The feed on screen is what this session saw earlier, because the network didn't answer.
   const [savedCopy, setSavedCopy] = useState<Got<Page> | null>(null)
@@ -88,6 +92,13 @@ export default function Photos() {
   const [notesTick, setNotesTick] = useState(0)
   const wantImage = useRef<string | null>(params.get('image'))
   const request = useRef(0)
+  // The older page being asked for, by the request it belongs to. A new choice of
+  // chips drops it, so a slow page can neither hold "Loading…" for good nor land in
+  // the new list (audit C-01).
+  const inFlight = useRef<number | null>(null)
+  // Photos a fix in the viewer took out of this list: they go when the viewer closes.
+  const leaving = useRef(new Set<string>())
+  const anyFix = useRef(false)
   const sentinel = useRef<HTMLDivElement>(null)
   const photosRef = useRef(photos)
   photosRef.current = photos
@@ -101,28 +112,35 @@ export default function Photos() {
   }
   useEffect(() => () => ctl.current?.abort(), [])
 
-  const query = useCallback((before?: string | null) => {
+  const query = useCallback((after?: Cursor | null) => {
     const q = new URLSearchParams()
     if (pick.species.length) q.set('species', pick.species.join(','))
     if (pick.cameras.length) q.set('cameras', pick.cameras.join(','))
-    if (before) q.set('before', before)
+    if (after) {
+      q.set('before', after.before)
+      if (after.before_id) q.set('before_id', after.before_id)
+    }
     q.set('limit', String(PAGE))
     return `/photos?${q.toString()}`
   }, [pick])
 
   const load = useCallback(() => {
     const id = ++request.current
+    inFlight.current = null
+    setLoadingMore(false)
+    setMoreErr('')
     setErr('')
     const hit = peek<Page>(query())
-    if (hit) { setPhotos(hit.data.items); setNextBefore(hit.data.next_before) }
+    if (hit) { setPhotos(hit.data.items); setNextBefore(cursorOf(hit.data)) } else setPending(true)
     getFresh<Page>(query(), { signal: signal() })
       .then((got) => {
         if (id !== request.current) return
         setPhotos(got.data.items)
-        setNextBefore(got.data.next_before)
+        setNextBefore(cursorOf(got.data))
         setSavedCopy(got.stale ? got : null)
       })
       .catch((e) => { if (id === request.current && (e as Error).name !== 'AbortError') setErr(e.message) })
+      .finally(() => { if (id === request.current) setPending(false) })
   }, [query])
 
   // The chips, once they arrive, also clean the saved pick: an animal hidden or
@@ -181,8 +199,16 @@ export default function Photos() {
         const since = Date.parse(top.captured_at)
         const oldest = page.items[page.items.length - 1]
         if (page.items.length >= PAGE && oldest && Date.parse(oldest.captured_at) > since) {
+          // The list starts over: an older page still on its way belongs to the one
+          // thrown away. Landing after the new newest page, it left a hole in the feed
+          // down to where the old list had got to (audit C-01).
+          request.current++
+          inFlight.current = null
+          setLoadingMore(false)
+          setPending(false)
+          setMoreErr('')
           setPhotos(page.items)
-          setNextBefore(page.next_before)
+          setNextBefore(cursorOf(page))
           return
         }
         setPhotos((prev) => {
@@ -223,9 +249,11 @@ export default function Photos() {
   }, [])
 
   const loadMore = useCallback(() => {
-    if (!nextBefore || loadingMore) return
+    if (!nextBefore || inFlight.current === request.current) return
     const id = request.current
+    inFlight.current = id
     setLoadingMore(true)
+    setMoreErr('')
     api<Page>(query(nextBefore), { signal: signal(), timeoutMs: 20_000 })
       .then((page) => {
         if (id !== request.current) return
@@ -234,11 +262,40 @@ export default function Photos() {
           const have = new Set((prev ?? []).map((p) => p.image_id))
           return [...(prev ?? []), ...page.items.filter((p) => !have.has(p.image_id))]
         })
-        setNextBefore(page.next_before)
+        setNextBefore(cursorOf(page))
       })
-      .catch((e) => { if (id === request.current) setErr(e.message) })
-      .finally(() => { if (id === request.current) setLoadingMore(false) })
-  }, [nextBefore, loadingMore, query])
+      .catch((e) => { if (id === request.current && (e as Error).name !== 'AbortError') setMoreErr(morePhotosFailed(e)) })
+      .finally(() => {
+        if (inFlight.current !== id) return
+        inFlight.current = null
+        setLoadingMore(false)
+      })
+  }, [nextBefore, query])
+
+  /** "Wrong?" in the viewer: the tile takes the new name now; a photo that no longer
+   *  belongs here (nothing in it, a hidden animal, or not one of the chosen animals)
+   *  goes when the viewer closes. */
+  const photoFixed = useCallback((id: string, fix: PhotoFix) => {
+    setPhotos((prev) => prev && prev.map((p) => (p.image_id === id
+      ? { ...p, label: fix.empty ? p.label : fix.label, species_id: fix.species_id, fixed_by: fix.fixed_by }
+      : p)))
+    const off = fix.empty || fix.hidden || (pick.species.length > 0 && !pick.species.includes(fix.species_id ?? ''))
+    if (off) leaving.current.add(id)
+    else leaving.current.delete(id)
+    anyFix.current = true
+  }, [pick])
+  const closeViewer = useCallback(() => {
+    setZoom(null)
+    setSingle(null)
+    if (!anyFix.current) return
+    anyFix.current = false
+    const gone = new Set(leaving.current)
+    leaving.current.clear()
+    if (gone.size) setPhotos((prev) => prev && prev.filter((p) => !gone.has(p.image_id)))
+    // The chips' counts and the team's strip above say what the photos are now.
+    loadFilters()
+    setNotesTick((t) => t + 1)
+  }, [loadFilters])
 
   // Keep filling as the person scrolls; the button below is for when that is not wanted.
   useEffect(() => {
@@ -256,13 +313,17 @@ export default function Photos() {
   const toggleIn = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
   const everything = pick.species.length === 0 && pick.cameras.length === 0
 
+  // By night, as the server counts them: last night's photos after midnight are
+  // under "Last night" with the rest of it, not under "Today" (audit I-27); and the
+  // daytime ones under the day, as whenSeen says them ("Today", "Yesterday").
   const grouped = useMemo(() => {
-    const out: { day: string; start: number; items: Photo[] }[] = []
+    const out: { day: string; label: string; start: number; items: Photo[] }[] = []
+    const now = Date.now()
     ;(photos ?? []).forEach((p, i) => {
-      const day = dayOf(p.captured_at)
+      const { key, label } = photoHeading(p.captured_at, now)
       const last = out[out.length - 1]
-      if (last && last.day === day) last.items.push(p)
-      else out.push({ day, start: i, items: [p] })
+      if (last && last.day === key) last.items.push(p)
+      else out.push({ day: key, label, start: i, items: [p] })
     })
     return out
   }, [photos])
@@ -272,9 +333,10 @@ export default function Photos() {
       <h1 className="page-title">Photos</h1>
 
       {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>}
-      <HighlightStrip refreshKey={notesTick} backLabel="Back to photos" onChange={notesChanged} />
+      <HighlightStrip refreshKey={notesTick} backLabel="Back to photos" onChange={notesChanged}
+        onFixed={photoFixed} onClosed={closeViewer} />
 
-      <div className="photos-filters">
+      <div className="photos-filters" aria-busy={pending}>
         <div className="photos-filter-row">
           <button className="photos-chip" aria-pressed={everything} onClick={() => choose({ species: [], cameras: [] })}>
             Everything
@@ -301,7 +363,8 @@ export default function Photos() {
         )}
       </div>
 
-      {err && <div className="status-panel" role="alert">Could not load photos: {err}<button className="text-action" onClick={load}>Retry</button></div>}
+      {pending && photos && <div role="status" className="photos-pending">Loading…</div>}
+      {err && <div className="status-panel" role="alert">Could not load photos. {err}<button className="text-action" onClick={load}>Try again</button></div>}
       {savedCopy && !err && (
         <div className="status-panel" role="status">
           {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
@@ -315,10 +378,10 @@ export default function Photos() {
         </div>
       )}
 
-      <div className="photos-grid">
+      <div className="photos-grid" data-pending={pending || undefined}>
         {grouped.map((g) => (
           <div key={g.day + g.start} style={{ display: 'contents' }}>
-            <div className="photos-day">{g.day}</div>
+            <div className="photos-day">{g.label}</div>
             {g.items.map((p, j) => (
               <div
                 key={p.image_id}
@@ -342,6 +405,7 @@ export default function Photos() {
       </div>
 
       <div ref={sentinel} aria-hidden style={{ height: 1 }} />
+      {moreErr && nextBefore && !loadingMore && <div className="status-panel" role="alert">{moreErr}</div>}
       {nextBefore && (
         <button className="text-action photos-more" onClick={loadMore} disabled={loadingMore}>
           {loadingMore ? 'Loading…' : 'Show older photos'}
@@ -357,16 +421,21 @@ export default function Photos() {
           photos={photos.map(toViewer)}
           start={zoom}
           backLabel="Back to photos"
-          onClose={() => setZoom(null)}
+          onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
+          onFixed={photoFixed}
+          hasMore={!!nextBefore}
+          onNeedMore={loadMore}
+          moreError={moreErr}
         />
       )}
       {single && (
         <PhotoLightbox
           photos={[toViewer(single)]}
           backLabel="Back to photos"
-          onClose={() => setSingle(null)}
+          onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
+          onFixed={(id, fix) => { photoFixed(id, fix); setSingle((p) => p && { ...p, label: fix.label }) }}
         />
       )}
     </div>

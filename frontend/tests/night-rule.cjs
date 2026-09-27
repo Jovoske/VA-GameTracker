@@ -13,7 +13,7 @@ const { transformSync } = require('esbuild')
 const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'night.ts'), 'utf8')
 const mod = { exports: {} }
 new Function('module', 'exports', transformSync(src, { loader: 'ts', format: 'cjs' }).code)(mod, mod.exports)
-const { nightOf, fromEarlierNight, nightBefore, startedSitIsOn } = mod.exports
+const { nightOf, fromEarlierNight, nightBefore, startedSitIsOn, nightLabel, photoHeading, whenSeen, estateStamp } = mod.exports
 
 // On each clock-change morning, 05:59 is still the night before and 06:00 is the new one.
 const cases = [
@@ -84,4 +84,44 @@ const sits = [
 ]
 for (const [night, started, now, on, what] of sits) assert.equal(startedSitIsOn(night, started, Date.parse(now)), on, what)
 
-console.log(`PASS: the night turns at 06:00 Madrid time on both clock-change mornings (${cases.length} named moments, ${checked} five-minute steps), a copy made before 06:00 is last night's after it, and a sit nobody ended is over at 06:00 unless it is a dawn sit (${sits.length} sits).`)
+// Photos are filed by night, and Animals and Cameras say when in the same words: at
+// 08:00 on Sat 26 Sep, a boar at 21:30 or 00:40 was "last night", not "today" (C-14).
+const sat8 = Date.parse('2026-09-26T06:00:00Z')
+const weekday = (night, style) => new Date(`${night}T12:00:00Z`).toLocaleDateString(undefined, { weekday: style, timeZone: 'UTC' })
+assert.equal(nightLabel(nightOf('2026-09-25T19:30:00Z'), sat8), 'Last night')
+assert.equal(nightLabel(nightOf('2026-09-25T22:40:00Z'), sat8), 'Last night', '00:40 is still last night')
+assert.equal(nightLabel(nightOf('2026-09-26T05:00:00Z'), sat8), 'Today', '07:00 this morning')
+assert.equal(nightLabel(nightOf('2026-09-26T05:00:00Z'), Date.parse('2026-09-26T17:00:00Z')), 'Tonight')
+assert.equal(nightLabel('2026-09-24', sat8), `${weekday('2026-09-24', 'short')} night`)
+assert.match(nightLabel('2026-09-10', sat8), /^Night of /)
+assert.equal(whenSeen('2026-09-25T19:30:00Z', sat8), 'last night')
+assert.equal(whenSeen('2026-09-25T22:40:00Z', sat8), 'last night')
+assert.equal(whenSeen('2026-09-25T12:00:00Z', sat8), 'yesterday')
+assert.equal(whenSeen('2026-09-26T05:00:00Z', sat8), 'today')
+assert.equal(whenSeen('2026-09-24T19:30:00Z', sat8), `${weekday('2026-09-24', 'long')} night`)
+assert.equal(whenSeen('2026-09-26T19:30:00Z', Date.parse('2026-09-26T20:00:00Z')), 'tonight')
+// Photos heads a night's dark hours and its daytime apart, in whenSeen's words: at
+// 19:30 on Sun 27 Sep this morning's 10:15 deer is "Today", not "Tonight", and
+// yesterday's 10:00 one "Yesterday", not "Last night".
+const sun1930 = Date.parse('2026-09-27T17:30:00Z')
+const heads = [
+  ['2026-09-27T08:15:00Z', 'Today', 'today'],
+  ['2026-09-27T17:00:00Z', 'Tonight', 'tonight'],
+  ['2026-09-26T08:00:00Z', 'Yesterday', 'yesterday'],
+  ['2026-09-26T20:00:00Z', 'Last night', 'last night'],
+  ['2026-09-26T23:30:00Z', 'Last night', 'last night'],
+  ['2026-09-24T08:00:00Z', weekday('2026-09-24', 'long'), weekday('2026-09-24', 'long')],
+  ['2026-09-24T20:00:00Z', `${weekday('2026-09-24', 'short')} night`, `${weekday('2026-09-24', 'long')} night`],
+]
+for (const [iso, label, seen] of heads) {
+  assert.equal(photoHeading(iso, sun1930).label, label, iso)
+  assert.equal(whenSeen(iso, sun1930), seen, iso)
+}
+assert.notEqual(photoHeading('2026-09-27T08:15:00Z', sun1930).key, photoHeading('2026-09-27T17:00:00Z', sun1930).key)
+assert.equal(photoHeading('2026-09-26T20:00:00Z', sun1930).key, photoHeading('2026-09-26T23:30:00Z', sun1930).key)
+assert.match(photoHeading('2026-09-10T08:00:00Z', sun1930).label, /10/)
+// Saved photos are named on the estate's clock, to the second, like the server's.
+assert.equal(estateStamp('2026-09-25T20:05:07Z'), '2026-09-25_22-05-07')
+assert.equal(estateStamp('2026-11-25T20:05:00Z'), '2026-11-25_21-05-00')
+
+console.log(`PASS: the night turns at 06:00 Madrid time on both clock-change mornings (${cases.length} named moments, ${checked} five-minute steps), a copy made before 06:00 is last night's after it, a sit nobody ended is over at 06:00 unless it is a dawn sit (${sits.length} sits), and photos are filed and dated by night, their daytime by day.`)
