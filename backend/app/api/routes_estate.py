@@ -25,6 +25,10 @@ def _box_out(db: Session) -> dict:
         "box_set": saved is not None,
         "box_set_at": saved.get("set_at") if saved else None,
         "box_km": [round(ew / 1000, 1), round(ns / 1000, 1)],
+        # Connected cameras too far from the stands, bedding and centre to be on the
+        # estate (a cell-tower fix, a camera taken home): left out of this box and of
+        # the hill shape, and named so an admin can place them by hand.
+        "cameras_left_out": estate_area.cameras_left_out(db),
     }
 
 
@@ -32,7 +36,8 @@ def _box_out(db: Session) -> dict:
 def estate(_: Annotated[User, Depends(get_current_user)], db: DB) -> dict:
     """The estate's name, centre and time zone, and `box`: the ground the map saves
     on a phone for use with no signal (south, west, north, east). An admin's box when
-    one is set (`box_set`), else one round everything placed, with a margin."""
+    one is set (`box_set`), else one round everything placed, with a margin.
+    `cameras_left_out`: cameras whose position is too far off to be on the estate."""
     return {
         "name": settings.estate_name,
         "lat": settings.estate_lat,

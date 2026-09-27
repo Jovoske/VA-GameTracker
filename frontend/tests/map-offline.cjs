@@ -9,6 +9,12 @@
 // pictures, every placed stand and camera, a camera's sheet with its photos, and an
 // honest line about how old it is; a copy from an earlier night drops its wind; an
 // admin sets the estate's box and a member can't; Remove takes it off the phone.
+// And (review R4FE-2 to 5): the download carries on with the Map sheet closed, says
+// how far it has got on the map, and a Stop leaves "Part of the estate saved" that can
+// be finished or removed; zoomed in past what was saved the map says "This close needs
+// signal"; on a link that never answers the camera sheet paints the photos saved on
+// the phone; pictures that never come settle on one notice instead of swapping bases
+// for ever, and with no signal the map never turns to Esri's.
 // Env: API_URL (required), EMAIL / MEMBER_EMAIL / PASSWORD (devstack logins),
 // PLAYWRIGHT_MODULE, PW_CHANNEL (as the other tests), DIST (default ../dist),
 // UX_SCREENSHOTS (a folder for screenshots).
@@ -41,11 +47,14 @@ const latOf=(y,z)=>{const n=Math.PI-2*Math.PI*y/2**z;return 180/Math.PI*Math.ata
 const touches=(t,b)=>lonOf(t.x,t.z)<=b.east&&lonOf(t.x+1,t.z)>=b.west&&latOf(t.y,t.z)>=b.south&&latOf(t.y+1,t.z)<=b.north;
 
 const net={mode:'pass'};
+// Requests held open on a link that never answers (net.mode 'hang').
+const held=[];
 const types={'.js':'text/javascript','.css':'text/css','.html':'text/html','.json':'application/json','.webmanifest':'application/manifest+json','.png':'image/png','.woff2':'font/woff2','.svg':'image/svg+xml'};
 const server=http.createServer((req,res)=>{
  const u=new URL(req.url,'http://x');
  if(net.mode==='drop')return req.socket.destroy();
  if(u.pathname.startsWith('/api/')){
+  if(net.mode==='hang'){held.push(res);return}
   const up=http.request(API+u.pathname+u.search,{method:req.method,headers:{...req.headers,host:new URL(API).host}},r=>{res.writeHead(r.statusCode,r.headers);r.pipe(res)});
   up.on('error',()=>{res.writeHead(502);res.end()});
   return req.pipe(up);
@@ -72,7 +81,9 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  const placed=(await call(admin,'/map/tonight')).body.stands.filter(s=>s.lat!=null).length+(await call(admin,'/map/cameras')).body.filter(c=>c.lat!=null).length;
  const errors=[];
  const tiles=[];
- const stubTiles=ctx=>ctx.route(/ign\.es|arcgisonline|catastro/,r=>{tiles.push(r.request().url());return r.fulfill({status:200,contentType:'image/png',headers:{'Access-Control-Allow-Origin':'*'},body:TILE})});
+ // slow.ms: each picture takes this long, so a download can be caught part way.
+ const slow={ms:0};
+ const stubTiles=ctx=>ctx.route(/ign\.es|arcgisonline|catastro/,async r=>{tiles.push(r.request().url());if(slow.ms)await new Promise(res=>setTimeout(res,slow.ms));return r.fulfill({status:200,contentType:'image/png',headers:{'Access-Control-Allow-Origin':'*'},body:TILE}).catch(()=>{})});
  // No signal: the backend and the tile servers unreachable, for the page and its worker.
  const signal=async(ctx,on)=>{net.mode=on?'pass':'drop';if(on){await ctx.setOffline(false);await stubTiles(ctx)}else{await ctx.unrouteAll({behavior:'ignoreErrors'});await ctx.setOffline(true)}};
  const context=async(tok)=>{
@@ -83,7 +94,11 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  };
  const open=async(ctx)=>{const page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));return page};
  const sheet=async page=>{await page.getByRole('button',{name:'Map type, layers and tools'}).click();await page.locator('.msheet-offline').waitFor()};
- const status=page=>page.locator('.msheet-offline .msheet-status').innerText();
+ const status=async page=>{await page.waitForFunction(()=>!/^Checking this phone/.test(document.querySelector('.msheet-offline .msheet-status')?.textContent||'Checking this phone'));return page.locator('.msheet-offline .msheet-status').innerText()};
+ const notices=page=>page.locator('.map-notices').innerText().catch(()=>'');
+ // Watch the map's notices for a while: each different text, in order.
+ const watch=async(page,ms)=>{const seen=[];for(const end=Date.now()+ms;Date.now()<end;){const t=await notices(page);if(seen[seen.length-1]!==t)seen.push(t);await page.waitForTimeout(250)}return seen};
+ const ready=async page=>{await page.evaluate(()=>navigator.serviceWorker.ready);await page.waitForFunction(async()=>{const k=(await caches.keys()).find(n=>n.startsWith('gamesense-shell-'));if(!k||!navigator.serviceWorker.controller)return false;return (await (await caches.open(k)).keys()).some(r=>/\/assets\/Map-.*\.js$/.test(r.url))},null,{timeout:30000,polling:500})};
  // Share of the map painted by the stubbed picture (green), not the dark page, with
  // the pins, buttons and lines over it hidden for the measure.
  const painted=async page=>{
@@ -97,8 +112,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  // ── 1. With signal: the whole app stored by its worker; the estate saved on demand ──
  const ctx=await context(admin),page=await open(ctx);
  await page.goto(base+'/map');
- await page.evaluate(()=>navigator.serviceWorker.ready);
- await page.waitForFunction(async()=>{const k=(await caches.keys()).find(n=>n.startsWith('gamesense-shell-'));if(!k||!navigator.serviceWorker.controller)return false;return (await (await caches.open(k)).keys()).some(r=>/\/assets\/Map-.*\.js$/.test(r.url))},null,{timeout:30000,polling:500});
+ await ready(page);
  await page.reload();await page.locator('.map-pin').first().waitFor({timeout:20000});
  assert.equal(await page.locator('.map-pin').count(),placed,'every placed stand and camera');
  await sheet(page);
@@ -112,7 +126,34 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  tiles.length=0;
  const main=page.getByRole('button',{name:'Download the estate for offline'});
  assert.ok((await main.boundingBox()).height>=56,'the main action is glove-sized');
+ // Slow pictures, so the download can be caught part way.
+ slow.ms=120;
  await main.click();
+ await page.waitForFunction(()=>/Saving the map… (\d+)/.test(document.querySelector('.msheet-progress')?.textContent||'')&&+RegExp.$1>=40,null,{timeout:60000,polling:100});
+ // It carries on with the Map sheet closed, and the map says how far it has got.
+ await page.keyboard.press('Escape');
+ await page.locator('.msheet-offline').waitFor({state:'detached'});
+ const pill=page.locator('.map-pill--saving');
+ await pill.waitFor();
+ const doneNow=async()=>+/Saving the map… ([\d,]+)/.exec(await pill.innerText())[1].replace(/,/g,'');
+ const n1=await doneNow();await page.waitForTimeout(2000);const n2=await doneNow();
+ assert.ok(n2>n1,`the download carries on with the sheet closed (${n1} then ${n2})`);
+ if(shots)await page.screenshot({path:shots+'/offline-progress-on-map.png'});
+ // Stop, on the map: what came through is kept, said as such, and can be removed.
+ await pill.getByRole('button',{name:'Stop saving the map'}).click();
+ await pill.waitFor({state:'detached',timeout:20000});
+ await page.waitForFunction(()=>/Stopped\. What came through is kept/.test(document.querySelector('.map-notices')?.textContent||''),null,{timeout:5000});
+ slow.ms=0;
+ await sheet(page);
+ assert.match(await status(page),/^Part of the estate saved on this phone · \d+ (MB|KB) · just now$/);
+ assert.match(await page.locator('.msheet-offline').innerText(),/[\d,]+ of [\d,]+ map squares so far\. Download again to finish it\./);
+ assert.equal(await page.getByRole('button',{name:'Remove from this phone'}).count(),1,'what a stopped download left can be removed');
+ await page.reload();await page.locator('.map-pin').first().waitFor({timeout:20000});
+ await sheet(page);
+ assert.match(await status(page),/^Part of the estate saved on this phone/,'after a reload too');
+ assert.equal(await page.getByRole('button',{name:'Remove from this phone'}).count(),1);
+ if(shots)await page.screenshot({path:shots+'/offline-part-saved.png'});
+ await page.getByRole('button',{name:'Finish the download'}).click();
  await page.waitForFunction(()=>/^Estate map saved on this phone · \d+ (MB|KB) · just now$/.test(document.querySelector('.msheet-offline .msheet-status')?.textContent||''),null,{timeout:120000,polling:250});
  assert.match(await page.locator('.msheet-offline').innerText(),/Saved\. The map works here with no signal\./);
  const saved=tiles.map(tileOf).filter(t=>t.layer==='OI.OrthoimageCoverage');
@@ -137,7 +178,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  await page.waitForFunction(()=>/^No signal\. Map from (just now|\d+ min ago)\./.test(document.querySelector('.map-pill--age')?.textContent||''),null,{timeout:20000});
  const green=await painted(page);
  assert.ok(green>.95,`with no signal the estate’s pictures show (${Math.round(green*100)}% of the map)`);
- assert.equal(await page.getByText('Part of the map picture didn’t load').count(),0,'the saved estate covers the view');
+ assert.doesNotMatch(await notices(page),/didn’t load|needs signal|isn’t saved/,'the saved estate covers the view');
  if(shots)await page.screenshot({path:shots+'/offline-map.png'});
  // A camera's sheet: its latest photos from the phone.
  await page.locator('.map-pin--camera').first().click({force:true});
@@ -145,9 +186,16 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  await page.waitForTimeout(400);const pickRow=page.locator('.map-pick-row',{hasText:'Camera'}).first();if(await pickRow.count())await pickRow.click();
  await page.locator('.cam-strip-row img').first().waitFor({timeout:15000});
  await page.waitForFunction(()=>[...document.querySelectorAll('.cam-strip-row img')].slice(0,3).every(i=>i.complete&&i.naturalWidth>0),null,{timeout:15000});
- assert.equal(await page.locator('.cam-strip-msg').count(),0,'no "No signal, so the photos didn’t load"');
+ await page.waitForFunction(()=>/^No signal\. These photos were saved on this phone (just now|\d+ min ago)\.$/.test(document.querySelector('.cam-strip-age')?.textContent||''),null,{timeout:15000});
+ assert.equal(await page.locator('.bsheet .map-inline-error').count(),0,'no "No signal, so the photos didn’t load"');
  if(shots)await page.screenshot({path:shots+'/offline-camera.png'});
  await page.keyboard.press('Escape');
+ // Zoomed in past the closest level saved: that needs signal, and it says so (R4FE-5).
+ await page.locator('.bsheet').waitFor({state:'detached'});
+ for(let i=0;i<6;i++){await page.getByRole('button',{name:'Zoom in'}).click();await page.waitForTimeout(400)}
+ await page.waitForFunction(()=>/This close needs signal\. Zoom out a little for the map saved on this phone\./.test(document.querySelector('.map-notices')?.textContent||''),null,{timeout:15000});
+ assert.doesNotMatch(await notices(page),/past the estate/,'the view is on the estate');
+ if(shots)await page.screenshot({path:shots+'/offline-too-close.png'});
  // The Map sheet says what the phone has.
  await page.goto(base+'/map').catch(()=>{});await page.locator('.map-pin').first().waitFor({timeout:20000});
  await sheet(page);
@@ -164,6 +212,23 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  assert.doesNotMatch(await later.locator('.bsheet').innerText(),/Wind is (right|wrong)/,'no verdict from last night’s wind');
  assert.match(await later.locator('.bsheet').innerText(),/earlier night/);
  await later.close();
+
+ // ── 3b. One bar that never answers: the camera sheet paints what the phone saved ──
+ await signal(ctx,true);net.mode='hang';
+ {
+  const cam=(await call(admin,'/map/cameras')).body.find(c=>c.lat!=null);
+  const hang=await open(ctx);
+  await hang.goto(base+'/map?camera='+cam.id).catch(()=>{});
+  // Long before the sheet's own 20 s wait for an answer runs out.
+  await hang.locator('.cam-strip-row img').first().waitFor({timeout:8000});
+  // (Any age: the earlier-night page above moved this context's clock on.)
+  await hang.waitForFunction(()=>/^No answer from the server\. These photos were saved on this phone (just now|.+ ago)\.$/.test(document.querySelector('.cam-strip-age')?.textContent||''),null,{timeout:30000});
+  assert.ok(await hang.locator('.cam-strip-row img').count()>0,'the saved photos stay when the answer never comes');
+  assert.equal(await hang.locator('.bsheet .map-inline-error').count(),0);
+  if(shots)await hang.screenshot({path:shots+'/offline-hanging-link.png'});
+  await hang.close();
+ }
+ held.splice(0).forEach(r=>{try{r.destroy()}catch{}});
 
  // ── 4. Back with signal: an admin sets the box, a member downloads what it covers ──
  await signal(ctx,true);
@@ -192,7 +257,33 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
   await mctx.close();
  }
  await call(admin,'/estate/box',{method:'DELETE'});
+
+ // ── 5. Pictures that never come (R4FE-3): one fallback, then a notice, never a swap
+ //       back and forth; and with no signal no turn to Esri's pictures at all ──
+ {
+  const c5=await context(admin);
+  await c5.unrouteAll({behavior:'ignoreErrors'});
+  await c5.route(/ign\.es|arcgisonline|catastro/,r=>r.abort('internetdisconnected'));
+  const p5=await open(c5);
+  await p5.goto(base+'/map');await ready(p5);
+  // An estate saved on this phone (its note; none of its pictures are here), wider
+  // than the view, and only partly downloaded.
+  const wide={south:estate.box.south-.05,west:estate.box.west-.05,north:estate.box.north+.05,east:estate.box.east+.05};
+  await p5.evaluate(async b=>{const c=await caches.open('gamesense-estate-v1');await c.put('/__gamesense/estate-offline.json',new Response(JSON.stringify({base:'aerial',box:b,minZoom:11,maxZoom:18,tiles:100,missing:0,bytes:1e6,photos:0,at:new Date().toISOString(),partial:true,planned:900}),{headers:{'Content-Type':'application/json'}}))},wide);
+  await p5.reload();await p5.locator('.map-pin').first().waitFor({timeout:20000});
+  const seen=await watch(p5,14000);
+  assert.ok(!seen.some(t=>/so this is the Aerial saved on this phone/.test(t)),`no swap back to the base that already failed (${JSON.stringify(seen)})`);
+  assert.match(seen[seen.length-1],/Part of the map picture didn’t load/,`it settles on the notice (${JSON.stringify(seen)})`);
+  // No signal: the map saved on the phone or nothing; never Esri's.
+  await c5.setOffline(true);net.mode='drop';
+  await p5.goto(base+'/map').catch(()=>{});await p5.locator('.map-pin').first().waitFor({timeout:20000});
+  const off=await watch(p5,10000);
+  assert.ok(!off.some(t=>/world/.test(t)),`with no signal the map never turns to Esri’s (${JSON.stringify(off)})`);
+  assert.match(off[off.length-1],/No signal, and this part of the estate isn’t saved on this phone\./,JSON.stringify(off));
+  net.mode='pass';
+  await c5.close();
+ }
  assert.deepEqual(errors,[]);
- console.log('PASS: the estate saved on a phone (box, zooms 11-18, IGN only, status line with size and age, no double downloads), the map with no signal (pictures, every pin, camera sheets with photos, an honest age line), an earlier night’s copy without its wind, the admin’s box, remove.');
- } finally { await browser.close(); server.close() }
+ console.log('PASS: the estate saved on a phone (box, zooms 11-18, IGN only, status line with size and age, no double downloads, carries on with the sheet closed, Stop leaves a part that can be finished or removed), the map with no signal (pictures, every pin, camera sheets with photos, an honest age line, "This close needs signal"), a link that never answers (saved camera sheet), an earlier night’s copy without its wind, the admin’s box, remove, no base swapping and no Esri with no signal.');
+ } finally { held.forEach(r=>{try{r.destroy()}catch{}});await browser.close(); server.close() }
 })().catch(e=>{console.error(e);process.exit(1)});

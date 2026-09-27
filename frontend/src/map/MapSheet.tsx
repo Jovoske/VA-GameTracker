@@ -10,7 +10,7 @@ import { VIEWS, type View } from './activity'
 import { BASES, CALLOUT_ZOOM, CATASTRO_MINZOOM, type BaseId, type MapPrefs } from './basemaps'
 import type { Camera } from './geometry'
 import type { Layers } from './layers'
-import type { Box, Saved } from './offline'
+import type { Box } from './offline'
 import OfflinePanel from './OfflinePanel'
 
 export type Unplaced = { kind: 'stand' | 'camera'; id: string; name: string }
@@ -53,7 +53,7 @@ export default function MapSheet({ view, onView, prefs, onPrefs, onRetryBase, zo
   terrain: { needed: boolean; outside: string[]; busy: boolean; err: string; onLoad: () => void }
   /** How the likely paths layer is doing: a line under its switch, or null. */
   paths: string | null
-  offline: { cameras: Camera[]; viewBox: () => Box | null; onBox: (box: Box | null) => void; onSaved: (saved: Saved | null) => void }
+  offline: { cameras: Camera[]; viewBox: () => Box | null; onBox: (box: Box | null) => void }
 }) {
   const layer = (key: keyof Layers) => (on: boolean) => onPrefs({ ...prefs, layers: { ...prefs.layers, [key]: on } })
   return <div className="msheet">
@@ -112,7 +112,7 @@ export default function MapSheet({ view, onView, prefs, onPrefs, onRetryBase, zo
       {!admin && unplaced.length > 0 && <p className="msheet-note">{unplaced.map(u => u.name).join(', ')} {unplaced.length === 1 ? 'isn’t' : 'aren’t'} on the map yet. An admin can place {unplaced.length === 1 ? 'it' : 'them'}.</p>}
     </section>
 
-    <OfflinePanel admin={admin} cameras={offline.cameras} base={prefs.base} viewBox={offline.viewBox} onBox={offline.onBox} onSaved={offline.onSaved} />
+    <OfflinePanel admin={admin} cameras={offline.cameras} base={prefs.base} viewBox={offline.viewBox} onBox={offline.onBox} />
 
     <section aria-labelledby="msheet-size">
       <h3 id="msheet-size">Size</h3>

@@ -10,6 +10,13 @@ Two things need a box around the estate rather than one point at its centre:
 The box for the phone is the one an admin set (Map sheet: "Use this view as the
 estate"), else one drawn round everything placed, with a margin. Kept in
 app_settings: one small document, no table of its own.
+
+"Everything placed" is what is out on the estate: the stands and bedding (put on the
+map by hand), and the cameras that are connected, not retired, and within
+CAMERA_REACH_M of a stand, a bedding outline or the estate's centre. A SPYPOINT fix
+from a cell tower can be kilometres off, and a camera taken home to charge reports
+home: one such camera used to pull both boxes off the estate (review R4FE-1). Those
+are named (cameras_left_out) so an admin can place them by hand.
 """
 from __future__ import annotations
 
@@ -33,6 +40,9 @@ MIN_SIDE_M = 2_000.0
 MAX_SIDE_M = 15_000.0
 # With nothing placed yet: a square this wide round the configured centre.
 DEFAULT_SIDE_M = 4_000.0
+# A camera further than this from every stand, bedding corner and the estate's centre
+# isn't on the estate, whatever its GPS says.
+CAMERA_REACH_M = 8_000.0
 
 Box = dict  # {"south", "west", "north", "east"} in degrees
 
@@ -66,32 +76,83 @@ def square(lat: float, lon: float, side: float) -> Box:
             "north": lat + half_lat, "east": lon + half_lon}
 
 
-def placed_points(db: Session) -> list[tuple[float, float]]:
-    """(lat, lon) of every placed stand and camera and every bedding corner."""
+def _hand_placed(db: Session) -> list[tuple[float, float]]:
+    """(lat, lon) of every stand and every bedding corner: put on the map by hand."""
     pts = [(s.lat, s.lon) for s in db.scalars(select(Stand)).all()]
-    pts += [(c.lat, c.lon) for c in db.scalars(select(Camera)).all()]
     for z in db.scalars(select(Zone)).all():
         pts += geo.ring(z.polygon)
     return [p for p in pts if geo.plausible_position(p[0], p[1])]
 
 
-def _fit(box: Box, min_side: float, max_side: float) -> Box:
+def _cameras(db: Session, hand: list[tuple[float, float]]
+             ) -> tuple[list[Camera], list[tuple[Camera, float]]]:
+    """The cameras out on the estate now, and those left out as too far from it (each
+    with its distance to the nearest stand, bedding corner or the centre, in metres).
+    A camera that isn't connected or is retired is in neither: it isn't out there."""
+    refs = [*hand, (settings.estate_lat, settings.estate_lon)]
+    kept: list[Camera] = []
+    far: list[tuple[Camera, float]] = []
+    rows = db.scalars(select(Camera).where(Camera.active.is_(True), Camera.retired_at.is_(None))
+                      .order_by(Camera.name)).all()
+    for c in rows:
+        if not geo.plausible_position(c.lat, c.lon):
+            continue
+        near = min(geo.distance_m(c.lat, c.lon, lat, lon) for lat, lon in refs)
+        if near <= CAMERA_REACH_M:
+            kept.append(c)
+        else:
+            far.append((c, near))
+    return kept, far
+
+
+def estate_points(db: Session) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """(everything on the estate, the stands and bedding alone), as (lat, lon)."""
+    hand = _hand_placed(db)
+    kept, _ = _cameras(db, hand)
+    return hand + [(c.lat, c.lon) for c in kept], hand
+
+
+def cameras_left_out(db: Session) -> list[dict]:
+    """Connected cameras whose position is too far from the estate to be on it: left
+    out of the box a phone saves and of the hill shape."""
+    _, far = _cameras(db, _hand_placed(db))
+    return [{"id": str(c.id), "name": c.name, "km": round(d / 1000)} for c, d in far]
+
+
+def _window(lo: float, hi: float, focus_lo: float, focus_hi: float,
+            size: float) -> tuple[float, float]:
+    """[lo, hi] made `size` wide (degrees). A short one grows round its middle; a long
+    one is cut round the middle of [focus_lo, focus_hi], kept inside [lo, hi], so what
+    goes is the far edge of the rest, not the focus."""
+    if hi - lo <= size:
+        mid = (lo + hi) / 2
+        return mid - size / 2, mid + size / 2
+    start = min(max((focus_lo + focus_hi) / 2 - size / 2, lo), hi - size)
+    return start, start + size
+
+
+def _fit(box: Box, min_side: float, max_side: float, focus: Box | None = None) -> Box:
     """Grow a box to at least min_side a side, and cut one over max_side down round
-    its middle."""
+    `focus` (the stands and bedding, or the centre)."""
     ew, ns = side_m(box)
-    mid_lat, mid_lon = (box["south"] + box["north"]) / 2, (box["west"] + box["east"]) / 2
+    f = focus or box
+    mid_lat = (box["south"] + box["north"]) / 2
     ew2, ns2 = min(max(ew, min_side), max_side), min(max(ns, min_side), max_side)
-    half_lat, half_lon = ns2 / 2 / 111_320.0, ew2 / 2 / _m_per_deg_lon(mid_lat)
-    return {"south": mid_lat - half_lat, "west": mid_lon - half_lon,
-            "north": mid_lat + half_lat, "east": mid_lon + half_lon}
+    south, north = _window(box["south"], box["north"], f["south"], f["north"], ns2 / 111_320.0)
+    west, east = _window(box["west"], box["east"], f["west"], f["east"],
+                         ew2 / _m_per_deg_lon(mid_lat))
+    return {"south": south, "west": west, "north": north, "east": east}
 
 
 def suggested_box(db: Session) -> Box:
-    """Everything placed plus MARGIN_M, or a DEFAULT_SIDE_M square round the centre."""
-    box = around(placed_points(db), MARGIN_M)
+    """Everything on the estate plus MARGIN_M, or a DEFAULT_SIDE_M square round the
+    centre. Cut to MAX_SIDE_M round the stands and bedding (or the centre) when wider."""
+    points, hand = estate_points(db)
+    home = square(settings.estate_lat, settings.estate_lon, DEFAULT_SIDE_M)
+    box = around(points, MARGIN_M)
     if box is None:
-        return square(settings.estate_lat, settings.estate_lon, DEFAULT_SIDE_M)
-    return _fit(box, MIN_SIDE_M, MAX_SIDE_M)
+        return home
+    return _fit(box, MIN_SIDE_M, MAX_SIDE_M, around(hand, MARGIN_M) or home)
 
 
 def saved_box(db: Session) -> dict | None:
@@ -139,11 +200,13 @@ def clear_box(db: Session) -> None:
 def terrain_box(db: Session, centre_lat: float, centre_lon: float, base_side_m: float,
                 max_side_m: float) -> Box:
     """What the hill shape should cover: the square round the centre it always had,
-    grown to take in everything placed (plus a margin), up to max_side_m a side."""
+    grown to take in everything on the estate (plus a margin), up to max_side_m a
+    side, cut round the stands and bedding when it would be wider."""
     base = square(centre_lat, centre_lon, base_side_m)
-    placed = around(placed_points(db), MARGIN_M)
+    points, hand = estate_points(db)
+    placed = around(points, MARGIN_M)
     if placed is None:
         return base
     union = {k: min(base[k], placed[k]) for k in ("south", "west")}
     union |= {k: max(base[k], placed[k]) for k in ("north", "east")}
-    return _fit(union, base_side_m, max_side_m)
+    return _fit(union, base_side_m, max_side_m, around(hand, MARGIN_M) or base)

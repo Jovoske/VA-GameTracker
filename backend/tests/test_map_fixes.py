@@ -427,3 +427,77 @@ def test_suggested_box_never_grows_past_a_phones_worth(db_session, estate):
     db_session.commit()
     ew, ns = estate_area.side_m(estate_area.suggested_box(db_session))
     assert max(ew, ns) <= estate_area.MAX_SIDE_M + 1
+
+
+# ── a camera off the estate moves neither box (review R4FE-1) ────────────────
+
+CENTRE = (39.0947, -1.3608)
+EAST_M = 1 / (111_320 * 0.776)  # degrees of longitude per metre round 39° N
+
+
+def _inside(box, lat, lon, margin_m=0.0):
+    dlat, dlon = margin_m / 111_320, margin_m * EAST_M
+    return (box["south"] + dlat <= lat <= box["north"] - dlat
+            and box["west"] + dlon <= lon <= box["east"] - dlon)
+
+
+def test_a_camera_far_off_moves_neither_box_off_the_estate(client, db_session, estate):
+    """A SPYPOINT fix from a cell tower, or a camera taken home to charge, 44 km off:
+    both boxes were cut round the middle of everything and covered none of the stands."""
+    admin = _user(db_session, estate)
+    stands = [Stand(estate_id=estate.id, name=f"Stand {i}", lat=lat, lon=lon)
+              for i, (lat, lon) in enumerate([(39.094, -1.361), (39.10, -1.35),
+                                              (39.085, -1.37), (39.09, -1.355)])]
+    db_session.add_all(stands)
+    db_session.add_all([Camera(estate_id=estate.id, name=f"Cam {i}", lat=lat, lon=lon)
+                        for i, (lat, lon) in enumerate([(39.095, -1.36), (39.092, -1.365),
+                                                        (39.098, -1.357)])])
+    db_session.add(Camera(estate_id=estate.id, name="PL-home", lat=38.99, lon=-1.86))
+    db_session.commit()
+
+    hill = estate_area.terrain_box(db_session, *CENTRE, terrain.BOX_KM * 1000,
+                                   terrain.MAX_BOX_KM * 1000)
+    phone = estate_area.suggested_box(db_session)
+    for box in (hill, phone):
+        assert all(_inside(box, s.lat, s.lon, margin_m=900) for s in stands), box
+    assert max(estate_area.side_m(phone)) < 5_000, "round the estate, not out to the camera"
+    assert max(estate_area.side_m(hill)) <= terrain.BOX_KM * 1000 + 1
+
+    body = client.get("/api/estate", headers=admin).json()
+    assert [(c["name"], c["km"]) for c in body["cameras_left_out"]] == [("PL-home", 44)]
+
+
+def test_retired_and_disconnected_cameras_are_not_on_the_estate(client, db_session, estate):
+    admin = _user(db_session, estate)
+    db_session.add(Stand(estate_id=estate.id, name="Centre", lat=CENTRE[0], lon=CENTRE[1]))
+    north, south = CENTRE[0] + 5000 / 111_320, CENTRE[0] - 5000 / 111_320
+    db_session.add_all([
+        Camera(estate_id=estate.id, name="In a drawer", lat=north, lon=CENTRE[1],
+               retired_at=datetime.now(UTC)),
+        Camera(estate_id=estate.id, name="Login removed", lat=south, lon=CENTRE[1],
+               active=False),
+    ])
+    db_session.commit()
+    box = estate_area.suggested_box(db_session)
+    assert box["north"] < north and box["south"] > south
+    assert client.get("/api/estate", headers=admin).json()["cameras_left_out"] == [], \
+        "not out on the estate at all, so not named as left out"
+
+
+def test_a_box_too_wide_is_cut_round_the_stands_not_its_middle(db_session, estate):
+    """Cameras within reach east of the stands make the hill shape's box wider than
+    12 km: the cut keeps the stands (with their margin) and loses the far east."""
+    lat = CENTRE[0]
+    west, east = CENTRE[1] - 2000 * EAST_M, CENTRE[1] + 2000 * EAST_M
+    db_session.add_all([Stand(estate_id=estate.id, name="W", lat=lat, lon=west),
+                        Stand(estate_id=estate.id, name="E", lat=lat, lon=east)])
+    for i, dy in enumerate((-500, 500)):
+        db_session.add(Camera(estate_id=estate.id, name=f"Far east {i}", lat=lat + dy / 111_320,
+                              lon=east + 7900 * EAST_M))
+    db_session.commit()
+    box = estate_area.terrain_box(db_session, *CENTRE, terrain.BOX_KM * 1000,
+                                  terrain.MAX_BOX_KM * 1000)
+    ew, _ = estate_area.side_m(box)
+    assert ew == pytest.approx(terrain.MAX_BOX_KM * 1000, rel=0.01), "cut to 12 km"
+    for lon in (west, east):
+        assert _inside(box, lat, lon, margin_m=900), (box, lon)

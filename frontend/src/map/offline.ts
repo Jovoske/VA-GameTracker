@@ -1,4 +1,5 @@
-import { getFresh, getToken, thumbUrl } from '../api'
+import { useSyncExternalStore } from 'react'
+import { ESTATE_CACHE, getFresh, getToken, thumbUrl } from '../api'
 import { MAX_ZOOM, TILES, type BaseId } from './basemaps'
 import type { Camera } from './geometry'
 
@@ -15,7 +16,14 @@ import type { Camera } from './geometry'
  *     team's marked photos and their small photos.
  * The service worker (public/sw.js) answers from ESTATE_CACHE when there is no
  * signal: map pictures and small photos first from there, the rest when the network
- * fails. A note of what was saved, and when, is kept in the same store.
+ * fails. A note of what was saved, and when, is kept in the same store, and kept up
+ * to date as the download goes: one that stops part way (Stop, no signal, a phone
+ * short of room, the app closed) is said as "Part of the estate saved", and can be
+ * finished or removed.
+ *
+ * The download belongs to this module, not to the sheet that starts it: closing the
+ * Map sheet, opening a camera or going to Tonight leaves it running, and the map
+ * shows how far it has got. Only Stop stops it.
  *
  * Only IGN's bases are saved. They are free public services, reused with credit,
  * and a few hundred pictures over one estate is what a hunter's phone would ask for
@@ -23,17 +31,24 @@ import type { Camera } from './geometry'
  * imagery, so "Aerial (world)" isn't offered. Nothing outside the box, and nothing
  * closer than the level a phone uses on a stand (18 for the aerial, the topo's own 17).
  */
-export const ESTATE_CACHE = 'gamesense-estate-v1'
+export { ESTATE_CACHE }
 // A key in the store, never a URL the server has: what was saved and when.
 const NOTE_KEY = '/__gamesense/estate-offline.json'
 
 export type Box = { south: number; west: number; north: number; east: number }
-export type EstateBox = { box: Box; box_set: boolean; box_set_at: string | null; box_km: [number, number] }
+export type EstateBox = {
+  box: Box; box_set: boolean; box_set_at: string | null; box_km: [number, number]
+  // Cameras too far from the stands and bedding to be on the estate (a cell-tower
+  // fix, a camera taken home): left out of the box and the hill shape.
+  cameras_left_out?: { id: string; name: string; km: number }[]
+}
 export type Saved = {
   base: BaseId; box: Box; minZoom: number; maxZoom: number
   tiles: number; missing: number; bytes: number; photos: number; at: string
   // Cut short by the size budget (the box an admin set is bigger than planned).
   capped?: boolean
+  // A download that stopped part way: `tiles` of `planned` map squares are here.
+  partial?: boolean; planned?: number
 }
 export type Plan = { base: BaseId; box: Box; minZoom: number; maxZoom: number; tiles: number; bytes: number }
 export type Progress = { done: number; total: number; bytes: number; stage: 'map' | 'sheets' }
@@ -112,8 +127,34 @@ export async function readSaved(): Promise<Saved | null> {
   }
 }
 
+/** How many things the store holds (map squares, answers, small photos, the note):
+ *  a download killed before its first note still left something to remove. */
+export async function storedCount(): Promise<number> {
+  try {
+    if (!hasStore() || !(await caches.has(ESTATE_CACHE))) return 0
+    return (await (await caches.open(ESTATE_CACHE)).keys()).length
+  } catch {
+    return 0
+  }
+}
+
 export async function removeSaved(): Promise<void> {
   if (hasStore()) await caches.delete(ESTATE_CACHE)
+  changed()
+}
+
+/**
+ * Whether the map saved on this phone can show this view: 'close' (zoomed in past
+ * its closest level: the map asks for pictures a level deeper than the zoom it
+ * shows, 256 px ones), 'outside' (the view reaches past the box it covers, or is
+ * zoomed out past its overview), 'partial' (inside, but the download didn't finish
+ * or left gaps), or 'inside'.
+ */
+export function coverage(s: Saved, view: Box, zoom: number): 'outside' | 'close' | 'partial' | 'inside' {
+  const b = s.box, level = Math.round(zoom + 1)
+  if (level > s.maxZoom) return 'close'
+  if (level < s.minZoom || view.south < b.south || view.north > b.north || view.west < b.west || view.east > b.east) return 'outside'
+  return s.partial || s.missing ? 'partial' : 'inside'
 }
 
 /** "38 MB", "900 KB". */
@@ -129,6 +170,10 @@ export const sameBox = (a: Box, b: Box) =>
 // ── saving it ──
 
 const stamp = () => new Date().toISOString()
+// A note of how far a download has got is written every this many map squares.
+const NOTE_EVERY = 64
+export const NO_ROOM = 'The phone ran out of room part way. What came through is kept: free some space on the phone and download again to finish it.'
+const noRoom = (e: unknown) => (e as DOMException)?.name === 'QuotaExceededError'
 // Keys as the store gives them back: whole addresses.
 const href = (url: string) => new URL(url, location.origin).href
 const bytesOf = (res: Response | undefined) => Number(res?.headers.get('X-GameSense-Bytes') || 0)
@@ -198,8 +243,11 @@ export const marksPath = (cameraId: string) => `/photos/highlights?${new URLSear
 
 /**
  * Save the estate. Pictures already saved are kept (a second download fills the
- * gaps a weak link left); pictures and answers from an older box or base go.
- * Throws Error with words a hunter reads; an AbortError when stopped.
+ * gaps a weak link left); pictures and answers from an older box or base go once
+ * this one is whole. Throws Error with words a hunter reads; an AbortError when
+ * stopped. Either way what came through stays, and the note says how far it got,
+ * unless a whole save from before is still there: that stays what the note says
+ * until this one is whole, as nothing of it has been removed.
  */
 export async function download({ base, box, cameras, signal, onProgress }: {
   base: BaseId; box: Box; cameras: Camera[]; signal: AbortSignal; onProgress: (p: Progress) => void
@@ -212,68 +260,135 @@ export async function download({ base, box, cameras, signal, onProgress }: {
   // Ask the phone not to clear it when it runs short of room. It may say no.
   navigator.storage?.persist?.().catch(() => false)
   const cache = await caches.open(ESTATE_CACHE)
+  const before = await readSaved()
   const wanted = new Set<string>()
-  let done = 0, bytes = 0, missing = 0, capped = false
-
+  let done = 0, bytes = 0, missing = 0, photos = 0, capped = false
   // The map's pictures, overview first, so a stop part way still leaves a usable map.
   const urls = [...tilesOf(p)]
-  const queue = urls.slice()
-  const report = () => onProgress({ done, total: urls.length, bytes, stage: 'map' })
-  report()
-  const worker = async () => {
-    for (let url = queue.shift(); url; url = queue.shift()) {
-      if (signal.aborted) throw new DOMException('Stopped', 'AbortError')
-      if (bytes > HARD_CAP_BYTES) { capped = true; return }
-      wanted.add(href(url))
-      const had = await cache.match(url)
-      if (had) bytes += bytesOf(had)
-      else {
-        const blob = await fetchTile(url, signal)
-        if (blob) {
-          await cache.put(url, new Response(blob, { headers: { 'Content-Type': blob.type, 'X-GameSense-Bytes': String(blob.size) } }))
-          bytes += blob.size
-        } else missing++
+  const note = (partial: boolean): Saved => ({
+    base, box, minZoom: p.minZoom, maxZoom: p.maxZoom, tiles: done - missing, missing, bytes, photos, at: stamp(),
+    ...(capped ? { capped } : {}), ...(partial ? { partial, planned: urls.length } : {}),
+  })
+  const writeNote = (s: Saved) => cache.put(NOTE_KEY, new Response(JSON.stringify(s), { headers: { 'Content-Type': 'application/json' } }))
+  const notePart = async () => {
+    // Nothing of this one here yet, or a whole save from before still is.
+    if (done - missing === 0 || (before && !before.partial)) return
+    await writeNote(note(true)).catch(() => {})
+    changed()
+  }
+
+  try {
+    const queue = urls.slice()
+    const report = () => onProgress({ done, total: urls.length, bytes, stage: 'map' })
+    report()
+    const worker = async () => {
+      for (let url = queue.shift(); url; url = queue.shift()) {
+        if (signal.aborted) throw new DOMException('Stopped', 'AbortError')
+        if (bytes > HARD_CAP_BYTES) { capped = true; return }
+        wanted.add(href(url))
+        const had = await cache.match(url)
+        if (had) bytes += bytesOf(had)
+        else {
+          const blob = await fetchTile(url, signal)
+          if (blob) {
+            await cache.put(url, new Response(blob, { headers: { 'Content-Type': blob.type, 'X-GameSense-Bytes': String(blob.size) } }))
+            bytes += blob.size
+          } else missing++
+        }
+        done++
+        if (done % 8 === 0 || done === urls.length) report()
+        if (done % NOTE_EVERY === 0) await notePart()
       }
-      done++
-      if (done % 8 === 0 || done === urls.length) report()
     }
-  }
-  await Promise.all(Array.from({ length: PARALLEL }, worker))
-  if (missing === urls.length) throw new Error('No map pictures came through. Check the signal and try again.')
+    await Promise.all(Array.from({ length: PARALLEL }, worker))
+    if (missing === urls.length) throw new Error('No map pictures came through. Check the signal and try again.')
 
-  // Tonight's map, the cameras and each camera's sheet.
-  onProgress({ done: 0, total: cameras.length + 2, bytes, stage: 'sheets' })
-  await Promise.all([getFresh('/map/tonight', { save: true, timeoutMs: 30_000 }), getFresh('/map/cameras', { save: true, timeoutMs: 30_000 })])
-    .catch(() => { throw new Error('The stands and cameras didn’t load. Check the signal and try again.') })
-  let photos = 0
-  const keep = async (path: string) => {
-    wanted.add(href(`/api${path}`))
-    const answer = await keepJson(cache, path, signal)
-    bytes += bytesOf(await cache.match(`/api${path}`))
-    return answer
-  }
-  await keep('/map/paths').catch(() => null)
-  await keep('/estate').catch(() => null)
-  let sheets = 0
-  for (const cam of cameras) {
-    if (signal.aborted) throw new DOMException('Stopped', 'AbortError')
-    const ids = new Set<string>(cam.latest ? [cam.latest.image_id] : [])
-    const strip = await keep(stripPath(cam.id)).catch(() => null) as { items?: { image_id: string }[] } | null
-    const marks = await keep(marksPath(cam.id)).catch(() => null) as { items?: { image_id?: string; id?: string }[] } | null
-    strip?.items?.forEach(x => ids.add(x.image_id))
-    marks?.items?.forEach(x => { const id = x.image_id ?? x.id; if (id) ids.add(id) })
-    for (const id of ids) {
-      wanted.add(href(`/api/images/${id}/thumb`))
-      const n = await keepThumb(cache, id, signal).catch(() => 0)
-      if (n) { photos++; bytes += n }
+    // Tonight's map, the cameras and each camera's sheet.
+    onProgress({ done: 0, total: cameras.length + 2, bytes, stage: 'sheets' })
+    await Promise.all([getFresh('/map/tonight', { save: true, timeoutMs: 30_000 }), getFresh('/map/cameras', { save: true, timeoutMs: 30_000 })])
+      .catch(() => { throw new Error('The stands and cameras didn’t load. Check the signal and try again.') })
+    const keep = async (path: string) => {
+      wanted.add(href(`/api${path}`))
+      const answer = await keepJson(cache, path, signal)
+      bytes += bytesOf(await cache.match(`/api${path}`))
+      return answer
     }
-    onProgress({ done: ++sheets + 2, total: cameras.length + 2, bytes, stage: 'sheets' })
-  }
+    // A full phone is said as such; any other failure of one answer leaves a gap.
+    const orGap = (e: unknown) => { if (noRoom(e)) throw e; return null }
+    await keep('/map/paths').catch(orGap)
+    await keep('/estate').catch(orGap)
+    let sheets = 0
+    for (const cam of cameras) {
+      if (signal.aborted) throw new DOMException('Stopped', 'AbortError')
+      const ids = new Set<string>(cam.latest ? [cam.latest.image_id] : [])
+      const strip = await keep(stripPath(cam.id)).catch(orGap) as { items?: { image_id: string }[] } | null
+      const marks = await keep(marksPath(cam.id)).catch(orGap) as { items?: { image_id?: string; id?: string }[] } | null
+      strip?.items?.forEach(x => ids.add(x.image_id))
+      marks?.items?.forEach(x => { const id = x.image_id ?? x.id; if (id) ids.add(id) })
+      for (const id of ids) {
+        wanted.add(href(`/api/images/${id}/thumb`))
+        const n = await keepThumb(cache, id, signal).catch(orGap)
+        if (n) { photos++; bytes += n }
+      }
+      onProgress({ done: ++sheets + 2, total: cameras.length + 2, bytes, stage: 'sheets' })
+    }
 
-  // What an older box, base or camera left behind goes.
-  wanted.add(href(NOTE_KEY))
-  for (const req of await cache.keys()) if (!wanted.has(req.url)) await cache.delete(req)
-  const saved: Saved = { base, box, minZoom: p.minZoom, maxZoom: p.maxZoom, tiles: done - missing, missing, bytes, photos, at: stamp(), ...(capped ? { capped } : {}) }
-  await cache.put(NOTE_KEY, new Response(JSON.stringify(saved), { headers: { 'Content-Type': 'application/json' } }))
-  return saved
+    // What an older box, base or camera left behind goes.
+    wanted.add(href(NOTE_KEY))
+    for (const req of await cache.keys()) if (!wanted.has(req.url)) await cache.delete(req)
+    const saved = note(false)
+    await writeNote(saved)
+    changed()
+    return saved
+  } catch (e) {
+    await notePart()
+    if (noRoom(e)) throw new Error(NO_ROOM)
+    throw e
+  }
+}
+
+// ── the download, running whatever the screen shows ──
+
+export type Outcome = { ok: boolean; text: string }
+export type Job = {
+  /** The download under way, or null, and the map type it saves. */
+  progress: Progress | null
+  base: BaseId | null
+  /** How the last one ended, in words, until the next starts. */
+  outcome: Outcome | null
+  /** Bumped whenever what is saved changes (a note written, a download done, Remove). */
+  version: number
+}
+let job: Job = { progress: null, base: null, outcome: null, version: 0 }
+let jobCtl: AbortController | null = null
+const listeners = new Set<() => void>()
+function setJob(next: Partial<Job>) {
+  job = { ...job, ...next }
+  listeners.forEach(l => l())
+}
+function changed() { setJob({ version: job.version + 1 }) }
+const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l) } }
+
+/** The download and what is saved, for any screen: it re-renders as they change. */
+export function useDownload(): Job {
+  return useSyncExternalStore(subscribe, () => job)
+}
+
+/** Start saving the estate, unless a download is already under way. */
+export function startDownload(args: { base: BaseId; box: Box; cameras: Camera[] }): void {
+  if (jobCtl) return
+  const ctl = new AbortController()
+  jobCtl = ctl
+  setJob({ progress: { done: 0, total: plan(args.box, args.base).tiles, bytes: 0, stage: 'map' }, base: args.base, outcome: null })
+  download({ ...args, signal: ctl.signal, onProgress: progress => { if (jobCtl === ctl) setJob({ progress }) } })
+    .then(s => setJob({ outcome: { ok: true, text: s.missing ? 'Saved, with gaps. Download again with better signal to fill them.' : 'Saved. The map works here with no signal.' } }))
+    .catch((e: Error) => setJob({ outcome: e.name === 'AbortError'
+      ? { ok: true, text: 'Stopped. What came through is kept.' }
+      : { ok: false, text: e.message } }))
+    .finally(() => { if (jobCtl === ctl) jobCtl = null; setJob({ progress: null }) })
+}
+
+/** Stop: the one way a download ends before it is done. */
+export function stopDownload(): void {
+  jobCtl?.abort()
 }

@@ -286,6 +286,7 @@
 .cam-sheet-night-note { display: block; margin-top: 2px; font-weight: 400; font-size: 13px; color: var(--text-dim); }
 /* As tall as the strip it stands for, so the photos arriving don't move the buttons below. */
 .cam-strip-msg { margin: 0 0 14px; min-height: 76px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+.cam-strip-msg.cam-strip-age { min-height: 0; margin-bottom: 8px; }
 .cam-strip-row { display: flex; gap: 8px; margin: 0 -16px 14px; padding: 0 16px 4px; scroll-padding: 0 16px; list-style: none; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; }
 .cam-strip-row::-webkit-scrollbar { display: none; }
 .cam-strip-row li { flex: 0 0 auto; scroll-snap-align: start; }

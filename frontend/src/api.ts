@@ -241,6 +241,9 @@ const newer = <T,>(a: Got<T> | null, b: Got<T> | null) =>
 
 /** The service worker's store of API answers (API_CACHE in public/sw.js). */
 const WORKER_API_CACHE = 'gamesense-api-v2'
+/** What "Download the estate" saved (src/map/offline.ts, ESTATE_CACHE in public/sw.js):
+ *  the camera sheets, the likely paths and the estate's box among the rest. */
+export const ESTATE_CACHE = 'gamesense-estate-v1'
 
 /** Which saved answers each page read, so a page that breaks drops only its own. */
 const readOn = new Map<string, Set<string>>()
@@ -269,9 +272,11 @@ export function forgetSaved(page: string = location.pathname): void {
     // Storage blocked: nothing was saved there either.
   }
   if ('caches' in window) {
-    caches.open(WORKER_API_CACHE)
-      .then((c) => Promise.all(paths.map((p) => c.delete(`/api${p}`))))
-      .catch(() => {})
+    for (const name of [WORKER_API_CACHE, ESTATE_CACHE]) {
+      caches.open(name)
+        .then((c) => Promise.all(paths.map((p) => c.delete(`/api${p}`))))
+        .catch(() => {})
+    }
   }
 }
 
@@ -283,20 +288,35 @@ export function peek<T>(path: string): Got<T> | null {
 }
 
 /**
- * The service worker's own copy, read by the page. The worker only answers from
- * it when the network fails outright; on a link that hangs, the page gives up
- * first (its timeout) and the worker never gets the chance (audit J-06). A page
- * with nothing saved of its own then still has something to show.
+ * The service worker's own copies, read by the page: its store of answers and the
+ * estate saved on the phone. The worker only answers from them when the network
+ * fails outright; on a link that hangs, the page gives up first (its timeout) and
+ * the worker never gets the chance (audit J-06, review R4FE-4). A page with nothing
+ * saved of its own then still has something to show.
  */
 async function workerCopy<T>(path: string): Promise<Got<T> | null> {
-  try {
-    if (!('caches' in window)) return null
-    const hit = await caches.match(`/api${path}`, { cacheName: WORKER_API_CACHE })
-    const at = hit?.headers.get('X-GameSense-Cached-At')
-    return hit && at ? { data: (await hit.json()) as T, at, stale: true } : null
-  } catch {
-    return null
+  let best: Got<T> | null = null
+  if (!('caches' in window)) return best
+  for (const cacheName of [WORKER_API_CACHE, ESTATE_CACHE]) {
+    try {
+      const hit = await caches.match(`/api${path}`, { cacheName })
+      const at = hit?.headers.get('X-GameSense-Cached-At')
+      if (hit && at) best = newer(best, { data: (await hit.json()) as T, at, stale: true })
+    } catch {
+      // A copy that won't read is no copy.
+    }
   }
+  return best
+}
+
+/**
+ * The newest copy the phone has for `path`, wherever it keeps one (this session,
+ * its own store, the service worker's, the estate saved on it), for a sheet to paint
+ * at once while it asks again. Null when there is none.
+ */
+export async function savedCopy<T>(path: string): Promise<Got<T> | null> {
+  const got = newer(peek<T>(path), await workerCopy<T>(path))
+  return got && { ...got, stale: true }
 }
 
 /**
