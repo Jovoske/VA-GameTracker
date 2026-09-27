@@ -28,6 +28,8 @@ What used to go wrong, and what happens now:
   still can't read becomes an "Animal" nobody has named, never "couldn't check".
 * A run that lost its lock (it stalled and another run took over) stops at the next
   photo rather than checking the same photos alongside the new owner.
+* A photo with an animal in it gets its small copy for the grids (app.thumbs) as soon
+  as it is checked, so the Photos grid at dusk is quick from the first look (E-24).
 """
 from __future__ import annotations
 
@@ -40,7 +42,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import jobs, thumbs
 from app.ai import empty_filter, species
 from app.ai.detector import DETECT_CONF, detect_animals
 from app.core.config import settings
@@ -199,6 +201,17 @@ def _record_failures(db: Session, failures: list[tuple], now: datetime) -> int:
     return given_up
 
 
+def _thumb(db: Session, image: Image) -> None:
+    """The small copy the grids show, made now so the first look at dusk is quick. A
+    failure never holds the pass up: the first request for it makes it instead."""
+    try:
+        if thumbs.ensure_thumb(image):
+            db.commit()
+    except Exception as e:  # a corrupt file, an odd format, a full disk
+        db.rollback()
+        log.warning("thumb.failed", image_id=str(image.id), error=_short(e))
+
+
 def _announce(db: Session) -> None:
     # A sighting exists from this moment, so this is where it is announced. It may
     # never fail the pass: a push service being down is no reason to leave photos
@@ -327,6 +340,8 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
             if image.ai_attempts:
                 image.ai_attempts, image.ai_error = 0, None
                 db.commit()
+            if outcome not in ("empty", "skipped"):
+                _thumb(db, image)
             touched.append(image_id)
             result["checked"] += 1
             if outcome == "empty":

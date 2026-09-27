@@ -72,11 +72,13 @@ def list_cameras(
 ) -> list[dict]:
     """The estate's cameras, each with its photo counts as the strip shows them.
 
-    `animal_count` is the checked photos the strip and the Photos feed list as
-    animals (kept, not only a hidden animal, with a picture), and `empty_count` the
-    "nothing in it" ones "Show empty photos" brings up. They used to be every frame
-    minus the empty ones, so hidden rabbits and frames not checked yet counted as
-    animals, and it took four queries a camera; now it is one for them all.
+    The strip lists `animal_count` + `unchecked_count` photos: the checked ones with
+    an animal in them (not only a hidden animal, with a picture), and the ones the AI
+    has not checked yet (or couldn't), which are often grass, so they are counted
+    apart. `empty_count` is the "nothing in it" ones "Show empty photos" brings up.
+    They used to be every frame minus the empty ones, so hidden rabbits and frames
+    not checked yet counted as animals, and it took four queries a camera; now it is
+    one for them all.
     """
     rows = db.scalars(
         select(Camera).where(Camera.estate_id == user.estate_id).order_by(Camera.name)
@@ -91,6 +93,8 @@ def list_cameras(
             func.count(Image.id).label("count"),
             func.count(Image.id).filter(
                 has_file, Image.is_empty_frame.is_(False), VISIBLE_ANIMAL).label("animals"),
+            func.count(Image.id).filter(
+                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL).label("unchecked"),
             func.count(Image.id).filter(has_file, Image.is_empty_frame.is_(True)).label("empty"),
         )
         .where(Image.camera_id.in_([c.id for c in rows]))
@@ -100,7 +104,7 @@ def list_cameras(
     for c in rows:
         n = counts.get(c.id)
         last, count = (n.last, n.count) if n else (None, 0)
-        animals, empty = (n.animals, n.empty) if n else (0, 0)
+        animals, unchecked, empty = (n.animals, n.unchecked, n.empty) if n else (0, 0, 0)
         lat = float(c.lat) if c.lat is not None else None
         lng = float(c.lon) if c.lon is not None else None
         out.append({
@@ -116,6 +120,7 @@ def list_cameras(
             "plan_name": c.plan_name, "cycle_end": c.cycle_end,
             "sd_used_mb": c.sd_used_mb, "sd_total_mb": c.sd_total_mb,
             "image_count": count, "empty_count": empty, "animal_count": animals,
+            "unchecked_count": unchecked,
             "sightings": animals,
             "lat": lat, "lng": lng,
             "health": camera_health(c, now, login_states.get(c.id)),
@@ -330,7 +335,8 @@ def camera_images(
     of a species that isn't hidden (routes_photos._items). This page used to build
     its own ("Boar ♂", "Red Deer herd (3)") from whichever sighting came last.
     """
-    q = select(Image).where(Image.camera_id == camera_id)
+    # A photo with no picture yet (still to download) has nothing to show.
+    q = select(Image).where(Image.camera_id == camera_id, Image.original_path.isnot(None))
     # Photos of nothing but hidden species never show; empties only on request.
     q = q.where(or_(Image.is_empty_frame.is_(True), VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
     q = after_cursor(q, before, before_id)

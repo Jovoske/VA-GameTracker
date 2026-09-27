@@ -164,24 +164,32 @@ def _camera_forecast(
     }
 
 
-def sentence_case(name: str) -> str:
-    """"Roe Deer" -> "Roe deer". Older builds stored names in title case; the app
-    writes them as words in a sentence, the way "Wild boar" and "Red deer" read.
+# The names older builds of the classifier stored, in title case ("Wild Boar", "Roe
+# Deer"). Migration 0025 moved them to the app's names, but a copy restored from
+# before it, or a seed, can still hold one. Written out, not worked out from
+# name.title(): an admin's "Iberian Ibex" is a name somebody typed and keeps its capitals.
+_OLD_TITLE_CASE = frozenset({"Wild Boar", "Red Deer", "Roe Deer", "Fallow Deer"})
 
-    A name written some other way (an admin's "Hare or rabbit", "Big Tusker's sow")
-    is left as written, bar a capital to start it: lower-casing every name threw
-    away capitals that someone had typed on purpose.
+
+def sentence_case(name: str) -> str:
+    """"Roe Deer" -> "Roe deer": a name as an older build stored it, written as words
+    in a sentence, the way "Wild boar" and "Red deer" read.
+
+    Any other name is left as it was written (an admin's "Iberian Ibex", "Big
+    Tusker's sow"), bar a capital to start it, so a tile writes it as Settings does.
     """
-    if name == name.title() or name.isupper():
-        return name[:1].upper() + name[1:].lower()
+    if name in _OLD_TITLE_CASE:
+        return name[:1] + name[1:].lower()
     return name[:1].upper() + name[1:]
 
 
 def class_label(species_id: str | None, common_name: str | None, sex: str | None, group_type: str | None) -> str:
     """Human class from species + sex + group composition (mirrors the gallery chip).
 
-    Every other species is its name in sentence case ("Roe deer", "Fallow deer"), so
-    the Photos tiles, the map and the alerts all write it the same way.
+    Stag / Hind / Boar / Sow / Sounder are what the animal is; a boar or red deer
+    nobody could sex is called by the species' name, so an admin's rename in Settings
+    reaches those tiles too. Every other species is its name ("Roe deer", "Fallow
+    deer"), so the Photos tiles, the map and the alerts all write it the same way.
     """
     if species_id == "red_deer":
         if group_type == "hind_with_calf":
@@ -190,7 +198,8 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
             return "Stag"
         if sex == "female":
             return "Hind"
-        return "Red deer (herd)" if group_type == "herd" else "Red deer"
+        name = sentence_case(common_name) if common_name else "Red deer"
+        return f"{name} (herd)" if group_type == "herd" else name
     if species_id == "wild_boar":
         if group_type == "sow_with_piglets":
             return "Sow + piglets"
@@ -198,7 +207,9 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
             return "Boar"
         if sex == "female":
             return "Sow"
-        return "Sounder" if group_type == "sounder" else "Wild boar"
+        if group_type == "sounder":
+            return "Sounder"
+        return sentence_case(common_name) if common_name else "Wild boar"
     return sentence_case(common_name) if common_name else (species_id or "Animal")
 
 

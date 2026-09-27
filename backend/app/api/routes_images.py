@@ -2,7 +2,6 @@
 or say what is in it."""
 import os
 import re
-import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,8 +13,6 @@ import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from PIL import Image as PImage
-from PIL import ImageOps
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,6 +27,7 @@ from app.core.logging import get_logger
 from app.core.security import decode_token
 from app.forecasting.model import class_label
 from app.models import Camera, Detection, Image, Species, User
+from app.thumbs import make_thumb, thumb_path
 
 router = APIRouter(prefix="/images", tags=["images"])
 log = get_logger(__name__)
@@ -37,13 +35,10 @@ log = get_logger(__name__)
 # auto_error=False so a missing header falls through to the ?token= fallback.
 _optional_bearer = HTTPBearer(auto_error=False)
 
-# Grids, strips and the map show photos at 56-150px. A 320px-wide WebP is sharp at
-# twice that on a phone screen and a few tens of KB, where the original can be
-# several MB on the estate's weak signal (audit C-04, I-18, J-14).
-THUMB_WIDTH = 320
-THUMB_QUALITY = 70
-# A photo never changes once taken, so its small copy never does either.
-THUMB_CACHE = "private, max-age=31536000, immutable"
+# A photo never changes once taken (its file is written whole, once), so neither it
+# nor its small copy (app.thumbs) does: the phone keeps both, and paging back through
+# a night on a weak signal costs nothing the second time.
+PHOTO_CACHE = "private, max-age=31536000, immutable"
 
 VIEWERS_LOOK = "Viewers can look at the photos but can't change them."
 
@@ -116,51 +111,10 @@ def image_file(
             image.original_path,
             media_type="image/jpeg",
             filename=download_name(cam.name, image.captured_at),
+            headers={"Cache-Control": PHOTO_CACHE},
         )
-    return FileResponse(image.original_path, media_type="image/jpeg")
-
-
-def thumb_path(image_id: uuid.UUID) -> Path:
-    """Where a photo's small copy lives: MEDIA_ROOT/thumbs/ab/<id>.webp.
-
-    Keyed by the photo's id, so it can be found again without the database, and
-    fanned out by the first two characters so no one folder holds a season.
-    """
-    name = str(image_id)
-    return Path(settings.media_root) / "thumbs" / name[:2] / f"{name}.webp"
-
-
-def make_thumb(source: str, dest: Path) -> None:
-    """Write a THUMB_WIDTH-wide WebP of `source` to `dest`, upright.
-
-    Written to a temporary file and renamed into place, so a request that reads it
-    at the same moment never gets half a file, and two requests making the same one
-    at once both end with a whole one.
-    """
-    with PImage.open(source) as im:
-        # JPEG can decode at 1/2, 1/4 or 1/8 scale for nearly free, which matters
-        # for 4608px UBox frames. Asking for a square keeps both sides >= the target,
-        # so a photo that EXIF then turns on its side is still wide enough.
-        im.draft("RGB", (THUMB_WIDTH, THUMB_WIDTH))
-        im = ImageOps.exif_transpose(im)
-        if im.mode not in ("RGB", "L"):
-            im = im.convert("RGB")
-        if im.width > THUMB_WIDTH:
-            height = max(1, round(im.height * THUMB_WIDTH / im.width))
-            im = im.resize((THUMB_WIDTH, height), PImage.Resampling.LANCZOS)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=dest.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as out:
-                im.save(out, "WEBP", quality=THUMB_QUALITY, method=4)
-            os.chmod(tmp, 0o644)  # mkstemp makes it owner-only; the originals are not
-            os.replace(tmp, dest)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except FileNotFoundError:
-                pass
-            raise
+    return FileResponse(image.original_path, media_type="image/jpeg",
+                        headers={"Cache-Control": PHOTO_CACHE})
 
 
 @router.get("/{image_id}/thumb")
@@ -170,7 +124,8 @@ def image_thumb(
     creds: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
 ) -> FileResponse:
-    """A 320px-wide WebP of the photo, made the first time anyone asks for it.
+    """A 320px-wide WebP of the photo (app.thumbs): made by the AI pass once it has
+    found an animal in it, or here the first time anyone asks for it.
 
     For every grid and strip and the map; the photo viewer keeps the original. If
     the small copy cannot be made the original is sent instead, uncached, so the
@@ -181,7 +136,7 @@ def image_thumb(
     # The small copy may outlive the original (originals are pruned after a while).
     if cached.is_file():
         return FileResponse(
-            cached, media_type="image/webp", headers={"Cache-Control": THUMB_CACHE}
+            cached, media_type="image/webp", headers={"Cache-Control": PHOTO_CACHE}
         )
     if not image.original_path or not os.path.exists(image.original_path):
         raise HTTPException(404, "Photo not found.")
@@ -198,7 +153,7 @@ def image_thumb(
     if image.thumbnail_path != str(dest):
         image.thumbnail_path = str(dest)
         db.commit()
-    return FileResponse(dest, media_type="image/webp", headers={"Cache-Control": THUMB_CACHE})
+    return FileResponse(dest, media_type="image/webp", headers={"Cache-Control": PHOTO_CACHE})
 
 
 class FlagBody(BaseModel):
@@ -237,12 +192,19 @@ class SpeciesBody(BaseModel):
     species_id: str
 
 
-def _fixed(db: Session, image: Image, camera: Camera) -> dict:
+def _fixed(db: Session, image: Image, camera: Camera, visit: set | None = None) -> dict:
     """The photo as the feed lists it after a fix (its label as every tile writes it,
     who fixed it), and whether it still shows: `hidden` when the animal is one hidden
-    in Settings, `empty` when it is marked "nothing in it"."""
+    in Settings, `empty` when it is marked "nothing in it". `visit`: the other photos
+    of the burst that followed the fix (or its Undo), each the same way, oldest first."""
     from app.api.routes_photos import _items
 
+    others = [] if not visit else [
+        _fixed(db, other, camera)
+        for other in db.scalars(
+            select(Image).where(Image.id.in_(visit)).order_by(Image.captured_at)
+        )
+    ]
     row = SimpleNamespace(id=image.id, captured_at=image.captured_at, camera_id=camera.id,
                           name=camera.name)
     item = _items(db, [row])[0]
@@ -258,7 +220,8 @@ def _fixed(db: Session, image: Image, camera: Camera) -> dict:
         det, sp = top
         item.update(label=class_label(sp.id, sp.common_name, det.sex, det.group_type),
                     species_id=sp.id, group_size=det.group_size)
-    return {**item, "hidden": hidden, "empty": image.is_empty_frame is True}
+    return {**item, "hidden": hidden, "empty": image.is_empty_frame is True,
+            **({"visit": others} if visit is not None else {})}
 
 
 @router.post("/{image_id}/species")
@@ -273,7 +236,9 @@ def set_species(
     Any animal that can be on the estate (the species list the viewer offers,
     GET /species/choices). The fix is the hunter's and the AI never changes it back;
     every list, count and the forecast read the species from the sighting, so they
-    all follow at once. "Nothing in it" is POST /flag. DELETE takes the fix back.
+    all follow at once. The rest of the burst follows too (species.set_by_hand), and
+    `visit` lists those photos as they are now. "Nothing in it" is POST /flag. DELETE
+    takes the fix back.
     """
     if user.role == "viewer":
         raise HTTPException(403, VIEWERS_LOOK)
@@ -283,9 +248,9 @@ def set_species(
     image, camera = _estate_image(db, image_id, user)
     if not image.original_path:
         raise HTTPException(409, "This photo has no picture yet, so there's nothing to fix.")
-    species_ai.set_by_hand(db, image, key, user.id)
+    visit = species_ai.set_by_hand(db, image, key, user.id)
     db.commit()
-    return _fixed(db, image, camera)
+    return _fixed(db, image, camera, visit)
 
 
 @router.delete("/{image_id}/species")
@@ -294,10 +259,11 @@ def undo_species(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    """Take a hunter's fix back to what the AI had said (the viewer's Undo)."""
+    """Take a hunter's fix back to what the AI had said (the viewer's Undo), the rest
+    of its burst with it (`visit`)."""
     if user.role == "viewer":
         raise HTTPException(403, VIEWERS_LOOK)
     image, camera = _estate_image(db, image_id, user)
-    species_ai.undo_by_hand(db, image)
+    visit = species_ai.undo_by_hand(db, image)
     db.commit()
-    return _fixed(db, image, camera)
+    return _fixed(db, image, camera, visit)

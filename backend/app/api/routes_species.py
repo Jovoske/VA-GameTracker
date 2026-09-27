@@ -109,12 +109,12 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
 
 
 # Stag / Hind / Hind + calf / Red deer (herd) / Red deer and the boar classes, as SQL,
-# so a class gallery pages in the database (forecasting.model.class_label in reverse).
+# so a class gallery pages in the database (forecasting.model.class_label in reverse):
+# the young one's group type, then the group's. The labels come from class_label, so
+# a species renamed in Settings is found under its new name.
 _CLASSES = {
-    "red_deer": ("hind_with_calf", "Hind + calf", "Stag", "Hind", "herd", "Red deer (herd)",
-                 "Red deer"),
-    "wild_boar": ("sow_with_piglets", "Sow + piglets", "Boar", "Sow", "sounder", "Sounder",
-                  "Wild boar"),
+    "red_deer": ("hind_with_calf", "herd"),
+    "wild_boar": ("sow_with_piglets", "sounder"),
 }
 
 
@@ -125,17 +125,25 @@ def class_filter(species_id: str, common_name: str | None, label: str | None):
     classes = _CLASSES.get(species_id)
     if classes is None:
         return true() if label == class_label(species_id, common_name, None, None) else false()
-    young_type, young, male, female, group_type, group, alone = classes
+    young_type, group_type = classes
+
+    def name(sex: str | None, gt: str | None) -> str:
+        return class_label(species_id, common_name, sex, gt)
+
     not_young = or_(Detection.group_type.is_(None), Detection.group_type != young_type)
     unsexed = Detection.sex.notin_(("male", "female"))
-    return {
-        young: Detection.group_type == young_type,
-        male: and_(not_young, Detection.sex == "male"),
-        female: and_(not_young, Detection.sex == "female"),
-        group: and_(unsexed, Detection.group_type == group_type),
-        alone: and_(unsexed, or_(Detection.group_type.is_(None),
-                                 Detection.group_type.notin_((young_type, group_type)))),
-    }.get(label, false())
+    # A list, not a dict: a boar renamed "Boar" is the unsexed ones and the males both.
+    hits = [where for lbl, where in (
+        (name(None, young_type), Detection.group_type == young_type),
+        (name("male", None), and_(not_young, Detection.sex == "male")),
+        (name("female", None), and_(not_young, Detection.sex == "female")),
+        (name(None, group_type), and_(unsexed, Detection.group_type == group_type)),
+        (name(None, None), and_(unsexed, or_(
+            Detection.group_type.is_(None),
+            Detection.group_type.notin_((young_type, group_type)),
+        ))),
+    ) if lbl == label]
+    return or_(*hits) if hits else false()
 
 
 def _gallery(db: Session, species_id: str, label: str | None, before: datetime | None,
@@ -260,7 +268,9 @@ class HuntableBody(BaseModel):
         value = " ".join(value.split())
         if not 1 <= len(value) <= 40:
             raise ValueError("A name is 1 to 40 characters.")
-        return value
+        # Kept as typed, bar a capital to start it: Settings then shows it as the
+        # tiles write it (forecasting.model.sentence_case).
+        return value[:1].upper() + value[1:]
 
 
 @router.patch("/{species_id}")

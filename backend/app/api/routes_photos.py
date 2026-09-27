@@ -77,9 +77,9 @@ def feed(
     species: str | None = Query(None, description="Comma-separated species ids; omit for all"),
     cameras: str | None = Query(None, description="Comma-separated camera ids; omit for all"),
     before: datetime | None = Query(None, description="Only photos taken before this instant"),
-    before_id: uuid.UUID | None = Query(
-        None, description="With `before`: the last photo of the page before (next_before_id)",
-    ),
+    before_id: Annotated[uuid.UUID | None, Query(
+        description="With `before`: the last photo of the page before (next_before_id)",
+    )] = None,
     limit: int = Query(60, ge=1, le=200),
     checked: bool = Query(
         False, description="Only photos the detector has checked and kept, as on the map",

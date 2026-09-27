@@ -273,12 +273,13 @@ def test_a_class_gallery_is_exactly_the_photos_with_that_label(client, db_sessio
     cam = _camera(db_session, estate)
     labels = {}
     n = 0
+    name = db_session.get(Species, species_id).common_name
     for sex in ("male", "female", "unknown"):
         for gt in (None, "solitary", "sow_with_piglets", "sounder", "hind_with_calf", "herd"):
             n += 1
             img = _photo(db_session, cam, NIGHT - timedelta(minutes=n), species=(species_id,),
                          sex=sex, group_type=gt, commit=False)
-            labels[str(img.id)] = class_label(species_id, "x", sex, gt)
+            labels[str(img.id)] = class_label(species_id, name, sex, gt)
     db_session.commit()
     for label in set(labels.values()):
         got = client.get(f"/api/species/{species_id}/photos", headers=headers,
@@ -313,8 +314,17 @@ def test_the_camera_card_counts_what_its_strip_shows(client, db_session, estate)
     gone.original_path = None
     db_session.commit()
     card = client.get("/api/cameras", headers=headers).json()[0]
-    assert (card["animal_count"], card["empty_count"], card["image_count"]) == (1, 2, 8)
+    assert (card["animal_count"], card["unchecked_count"], card["empty_count"],
+            card["image_count"]) == (1, 1, 2, 8)
     assert card["last_capture"].startswith("2026-09-20T21:00")
+    # The strip lists the checked animal photo and the one still to check; the card
+    # says which is which, so at dusk the two never disagree.
+    strip = client.get(f"/api/cameras/{cam.id}/images", headers=headers).json()
+    assert len(strip) == card["animal_count"] + card["unchecked_count"]
+    assert sorted(str(p["checking"]) for p in strip) == ["None", "waiting"]
+    with_empty = client.get(f"/api/cameras/{cam.id}/images?include_empty=true",
+                            headers=headers).json()
+    assert len(with_empty) == len(strip) + card["empty_count"]
 
 
 def test_listing_cameras_costs_the_same_for_two_as_for_ten(client, db_session, estate):
@@ -391,6 +401,74 @@ def test_a_download_is_named_on_the_estates_clock():
     assert download_name("PL19", first) != download_name("PL19", second)
 
 
+# ── photo files: cached long, small copies made as the photos are checked (E-24) ──
+
+
+def test_a_photo_file_is_kept_by_the_phone(client, db_session, estate, tmp_path):
+    """The original never changes once stored, so the viewer's photo, its preloaded
+    neighbours and a saved copy are fetched once, not every time the night is paged."""
+    from PIL import Image as PImage
+
+    user, _ = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    img = _photo(db_session, cam, NIGHT)
+    img.original_path = str(tmp_path / "a.jpg")
+    PImage.new("RGB", (64, 48), (90, 120, 60)).save(img.original_path, "JPEG")
+    db_session.commit()
+    token = create_access_token(str(user.id))
+    for url in (f"/api/images/{img.id}/file", f"/api/images/{img.id}/file?download=1"):
+        r = client.get(f"{url}{'&' if '?' in url else '?'}token={token}")
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "private, max-age=31536000, immutable"
+    # A photo with no file yet is not cached as missing.
+    img.original_path = None
+    db_session.commit()
+    r = client.get(f"/api/images/{img.id}/file?token={token}")
+    assert r.status_code == 404 and "immutable" not in r.headers.get("cache-control", "")
+
+
+def test_the_ai_pass_makes_the_small_copy_of_each_animal_photo(db_session, estate, tmp_path,
+                                                                monkeypatch):
+    from PIL import Image as PImage
+
+    from app.ai import checking
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "media_root", str(tmp_path / "media"))
+    cam = _camera(db_session, estate)
+    photos = {}
+    for name, at in (("boar", NIGHT), ("grass", NIGHT - timedelta(hours=1))):
+        img = _photo(db_session, cam, at, species=(), empty=None)
+        img.original_path = str(tmp_path / f"{name}.jpg")
+        PImage.new("RGB", (1600, 900), (90, 120, 60)).save(img.original_path, "JPEG")
+        photos[name] = img
+    db_session.commit()
+    boxes = {photos["boar"].original_path: [{"bbox": [0.1, 0.1, 0.5, 0.5], "confidence": 0.9}]}
+    monkeypatch.setattr(checking, "load_models", lambda: None)
+    monkeypatch.setattr(checking, "detect_animals", lambda path: boxes.get(path, []))
+    monkeypatch.setattr(species_ai, "classify_crop",
+                        lambda path, bbox: ("wild_boar", "Wild boar", 0.9))
+    checking.check_photos(db_session, now=datetime(2026, 9, 21, 20, 0, tzinfo=UTC))
+    db_session.expire_all()
+    boar, grass = (db_session.get(Image, photos[k].id) for k in ("boar", "grass"))
+    assert grass.is_empty_frame is True and grass.thumbnail_path is None
+    assert boar.thumbnail_path == str(tmp_path / "media" / "thumbs" / str(boar.id)[:2]
+                                      / f"{boar.id}.webp")
+    with PImage.open(boar.thumbnail_path) as thumb:
+        assert thumb.size == (320, 180)
+
+    # A file the thumbnail can't be made from never holds the pass up.
+    bad = _photo(db_session, cam, NIGHT + timedelta(hours=1), species=(), empty=None)
+    bad.original_path = str(tmp_path / "bad.jpg")
+    (tmp_path / "bad.jpg").write_bytes(b"not a photo")
+    db_session.commit()
+    boxes[bad.original_path] = boxes[photos["boar"].original_path]
+    got = checking.check_photos(db_session, now=datetime(2026, 9, 21, 21, 0, tzinfo=UTC))
+    assert got["checked"] == 1 and got["failed"] == 0
+    db_session.expire_all()
+    assert db_session.get(Image, bad.id).thumbnail_path is None
+
+
 # ── feature 20: fixing a wrong species from the viewer ─────────────────────────
 
 
@@ -442,6 +520,7 @@ def test_the_ai_never_changes_a_hunters_fix(client, db_session, estate, monkeypa
     after = _photo(db_session, cam, NIGHT + timedelta(seconds=30), conf=0.97)
     client.post(f"/api/images/{img.id}/species", headers=headers, json={"species_id": "fox"})
 
+    # The visit follows the fix at once, and a later vote changes nothing back.
     assert species_ai.vote_bursts(db_session, [before.id, img.id, after.id]) == 0
     db_session.commit()
     # The species model is never asked again: it isn't waiting, and a run that got to
@@ -455,7 +534,8 @@ def test_the_ai_never_changes_a_hunters_fix(client, db_session, estate, monkeypa
     dets = db_session.scalars(select(Detection).where(Detection.image_id == img.id)).all()
     assert [d.species_id for d in dets] == ["fox"]
 
-    # And its word counts in the vote of a frame the model can't name.
+    # A frame of the visit the model can't name, checked later, is the hunter's fox too,
+    # though the model was sure of boar on two frames and the hunter looked at one.
     late = _photo(db_session, cam, NIGHT + timedelta(seconds=10), species=("fox",), conf=0.3)
     det = db_session.scalar(select(Detection).where(Detection.image_id == late.id))
     det.species_id = None
@@ -464,7 +544,7 @@ def test_the_ai_never_changes_a_hunters_fix(client, db_session, estate, monkeypa
     species_ai.vote_bursts(db_session, [late.id])
     db_session.commit()
     db_session.refresh(det)
-    assert det.species_id == "wild_boar"  # boar 0.97+0.97 outweighs one sure fox
+    assert det.species_id == "fox"
 
 
 def test_a_photo_the_ai_never_named_or_never_reached_can_be_named(client, db_session, estate):
@@ -515,6 +595,133 @@ def test_undo_puts_back_exactly_what_the_ai_said(client, db_session, estate):
     assert "ai" not in det.bbox
 
 
+def _visits(db):
+    from app.forecasting.exposure import visits_by_night
+
+    out = {}
+    for (_, _, sid), v in visits_by_night(db).items():
+        out[sid] = out.get(sid, 0) + v["visits"]
+    return out
+
+
+def test_a_fix_to_one_frame_of_a_burst_fixes_the_visit(client, db_session, estate):
+    """A fox the AI called boar on every frame of its burst: the hunter fixes the frame
+    on screen, and the visit is one fox, not a fox and a boar. A badger the model is
+    sure of in the same minutes is another animal and stays one. Undo puts every
+    frame back as the AI had it, the boar's sex and its animal (Animals) included."""
+    _, headers = _user(db_session, estate)
+    db_session.add(Species(id="badger", common_name="Badger"))
+    cam = _camera(db_session, estate)
+    first = _photo(db_session, cam, NIGHT, conf=0.97, sex="male", group_type="solitary")
+    middle = _photo(db_session, cam, NIGHT + timedelta(seconds=5))
+    last = _photo(db_session, cam, NIGHT + timedelta(seconds=10))
+    badger = _photo(db_session, cam, NIGHT + timedelta(seconds=40), species=("badger",),
+                    conf=0.95)
+    tusker = Individual(estate_id=estate.id, label="Tusker", species_id="wild_boar")
+    db_session.add(tusker)
+    db_session.flush()
+    first_det = db_session.scalar(select(Detection).where(Detection.image_id == first.id))
+    db_session.add(DetectionIndividual(detection_id=first_det.id, individual_id=tusker.id,
+                                       match_conf=0.9, confirmed_by_user=True))
+    db_session.commit()
+    assert _visits(db_session) == {"wild_boar": 1, "badger": 1}
+
+    r = client.post(f"/api/images/{middle.id}/species", headers=headers,
+                    json={"species_id": "fox"}).json()
+    assert r["label"] == "Fox"
+    assert [(p["image_id"], p["label"], p["fixed_by"]) for p in r["visit"]] == [
+        (str(first.id), "Fox", None), (str(last.id), "Fox", None)]
+    assert _visits(db_session) == {"fox": 1, "badger": 1}
+    labels = {p["image_id"]: p["label"] for p in client.get("/api/photos", headers=headers)
+              .json()["items"]}
+    assert labels == {str(first.id): "Fox", str(middle.id): "Fox", str(last.id): "Fox",
+                      str(badger.id): "Badger"}
+    # The fox is no longer one of Tusker's visits, and the AI's next vote leaves it be.
+    assert db_session.scalars(select(DetectionIndividual)).all() == []
+    assert species_ai.vote_bursts(db_session, [first.id, middle.id, last.id]) == 0
+
+    r = client.delete(f"/api/images/{middle.id}/species", headers=headers).json()
+    assert (r["label"], r["fixed_by"]) == ("Wild boar", None)
+    assert {p["image_id"]: p["label"] for p in r["visit"]} == {
+        str(first.id): "Boar", str(last.id): "Wild boar"}
+    assert _visits(db_session) == {"wild_boar": 1, "badger": 1}
+    db_session.expire_all()
+    det = db_session.get(Detection, first_det.id)
+    assert (det.species_id, det.sex, det.species_conf) == ("wild_boar", "male", 0.97)
+    assert not {"before_hand", "vote"} & set(det.bbox)
+    link = db_session.scalars(select(DetectionIndividual)).one()
+    assert (link.individual_id, link.confirmed_by_user) == (tusker.id, True)
+
+
+def test_two_frames_fixed_to_two_animals_are_two_animals(client, db_session, estate):
+    _, headers = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    frames = [_photo(db_session, cam, NIGHT + timedelta(seconds=s)) for s in (0, 5, 10)]
+    client.post(f"/api/images/{frames[0].id}/species", headers=headers,
+                json={"species_id": "fox"})
+    r = client.post(f"/api/images/{frames[2].id}/species", headers=headers,
+                    json={"species_id": "wild_boar"}).json()
+    # The first fix made the whole burst a fox. The second says there were two
+    # animals: the frame between goes back to what the AI said of it.
+    assert [(p["image_id"], p["label"]) for p in r["visit"]] == [(str(frames[1].id), "Wild boar")]
+    labels = [p["label"] for p in client.get("/api/photos", headers=headers).json()["items"]]
+    assert sorted(labels) == ["Fox", "Wild boar", "Wild boar"]
+
+
+def test_undo_on_a_photo_never_checked_lets_the_detector_look(client, db_session, estate,
+                                                                monkeypatch):
+    """A frame still waiting for the detector, fixed by mistake and then Undo: it is
+    waiting again, and the detector marks it empty as it does the frame beside it.
+    It used to stay an "Animal" for good, the detector skipped."""
+    from app.ai import checking
+
+    _, headers = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    control = _photo(db_session, cam, NIGHT - timedelta(hours=1), species=(), empty=None)
+    waiting = _photo(db_session, cam, NIGHT, species=(), empty=None)
+    client.post(f"/api/images/{waiting.id}/species", headers=headers, json={"species_id": "fox"})
+    client.delete(f"/api/images/{waiting.id}/species", headers=headers)
+    db_session.expire_all()
+    img = db_session.get(Image, waiting.id)
+    assert (img.processed_at, img.reviewed, img.is_empty_frame) == (None, False, None)
+
+    monkeypatch.setattr(checking, "load_models", lambda: None)
+    monkeypatch.setattr(checking, "detect_animals", lambda path: [])
+    monkeypatch.setattr(species_ai, "classify_crop",
+                        lambda path, bbox: ("wild_boar", "Wild boar", 0.2))
+    checking.check_photos(db_session, now=datetime(2026, 9, 21, 20, 0, tzinfo=UTC))
+    db_session.expire_all()
+    assert db_session.get(Image, control.id).is_empty_frame is True
+    assert db_session.get(Image, waiting.id).is_empty_frame is True
+    assert client.get("/api/photos", headers=headers).json()["items"] == []
+
+
+def test_undo_puts_the_photo_back_as_the_ai_left_it(client, db_session, estate):
+    """Empty by the AI (so the daytime rescan may look again), or given up on: after a
+    fix and Undo it is exactly that again, not "checked by a hunter"."""
+    _, headers = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    empty = _photo(db_session, cam, NIGHT, species=(), empty=True)
+    failed = _photo(db_session, cam, NIGHT - timedelta(hours=2), species=(), empty=None)
+    failed.ai_attempts, failed.ai_error = 3, "OSError: truncated file"
+    failed.ai_failed_at = NIGHT + timedelta(hours=1)
+    db_session.commit()
+
+    def state(img):
+        db_session.refresh(img)
+        return (img.processed_at, img.reviewed, img.is_empty_frame, img.ai_attempts,
+                img.ai_failed_at, img.ai_error)
+
+    for img in (empty, failed):
+        before = state(img)
+        client.post(f"/api/images/{img.id}/species", headers=headers, json={"species_id": "fox"})
+        assert state(img) != before
+        client.delete(f"/api/images/{img.id}/species", headers=headers)
+        assert state(img) == before
+    feed = client.get("/api/photos", headers=headers).json()["items"]
+    assert [p["label"] for p in feed] == ["Couldn’t check"]
+
+
 def test_nothing_here_hides_a_false_alarm_from_every_list(client, db_session, estate):
     _, member = _user(db_session, estate, "member")
     _, viewer = _user(db_session, estate, "viewer")
@@ -559,14 +766,18 @@ def test_a_fix_to_a_hidden_animal_says_the_photo_leaves_the_lists(client, db_ses
 
 
 def test_a_fixed_sighting_leaves_an_animal_of_another_species(client, db_session, estate):
+    """Cyclops' two frames a minute apart are one visit: fixed to a fox, the visit
+    leaves the boar; Undo brings both frames back to it."""
     _, headers = _user(db_session, estate, "admin")
     cam = _camera(db_session, estate)
     ind = _individual(db_session, estate, cam, "Cyclops", 2)
     first = db_session.scalars(select(DetectionIndividual)).first()
     det = db_session.get(Detection, first.detection_id)
-    client.post(f"/api/images/{det.image_id}/species", headers=headers, json={"species_id": "fox"})
-    got = client.get(f"/api/animals/{ind.id}", headers=headers).json()
-    assert len(got["sightings"]) == 1
+    url = f"/api/images/{det.image_id}/species"
+    client.post(url, headers=headers, json={"species_id": "fox"})
+    assert client.get(f"/api/animals/{ind.id}", headers=headers).json()["sightings"] == []
+    client.delete(url, headers=headers)
+    assert len(client.get(f"/api/animals/{ind.id}", headers=headers).json()["sightings"]) == 2
 
 
 def test_a_species_never_seen_before_gets_its_readable_name(client, db_session, estate):
@@ -592,10 +803,21 @@ def test_species_names_are_hunters_words():
     assert default_name("red_deer") == "Red deer"
     names = [default_name(k) for k in ESTATE_KEYS]
     assert not {"Micromammal", "Mustelid", "Equid", "Lagomorph", "Rabbit"} & set(names)
-    # Written as a sentence writes them, but a name somebody typed keeps its capitals.
+    # The old classifier names are written as a sentence writes them, but a name
+    # somebody typed keeps its capitals, title case included.
     assert sentence_case("Roe Deer") == "Roe deer"
+    assert sentence_case("Wild Boar") == "Wild boar"
     assert sentence_case("Hare or rabbit") == "Hare or rabbit"
     assert sentence_case("Big Tusker's sow") == "Big Tusker's sow"
+    assert sentence_case("Iberian Ibex") == "Iberian Ibex"
+    assert sentence_case("Fox (Red)") == "Fox (Red)"
+    assert class_label("ibex", "Iberian Ibex", None, None) == "Iberian Ibex"
+    # A boar or deer nobody could sex is called by the species' name, renamed or not.
+    assert class_label("wild_boar", "Wild Boar", None, None) == "Wild boar"
+    assert class_label("wild_boar", "Jabalí", None, None) == "Jabalí"
+    assert class_label("wild_boar", "Jabalí", "male", None) == "Boar"
+    assert class_label("red_deer", "Ciervo", None, "herd") == "Ciervo (herd)"
+    assert class_label("red_deer", None, None, None) == "Red deer"
 
 
 def test_the_viewer_offers_every_animal_of_the_estate(client, db_session, estate):
@@ -633,6 +855,34 @@ def test_an_admin_renames_an_animal_and_can_go_back(client, db_session, estate):
     assert db_session.get(Species, "fox").common_name == "Red fox"
     r = client.patch("/api/species/fox", headers=admin, json={"common_name": None})
     assert r.json()["common_name"] == "Fox" == r.json()["default_name"]
+
+
+def test_a_renamed_species_is_called_so_on_every_tile(client, db_session, estate):
+    """Renamed in Settings, a boar nobody could sex is the new name on the tiles,
+    the Animals classes and the class gallery; a title-case name keeps its capitals,
+    and Settings and the tiles write it alike."""
+    _, admin = _user(db_session, estate, "admin")
+    cam = _camera(db_session, estate)
+    plain = _photo(db_session, cam, NIGHT)
+    _photo(db_session, cam, NIGHT - timedelta(hours=1), sex="male")
+    r = client.patch("/api/species/wild_boar", headers=admin, json={"common_name": "jabalí"})
+    assert r.json()["common_name"] == "Jabalí"
+    feed = {p["image_id"]: p["label"] for p in client.get("/api/photos", headers=admin)
+            .json()["items"]}
+    assert feed[str(plain.id)] == "Jabalí"
+    boar = {s["id"]: s for s in client.get("/api/species/spotted", headers=admin).json()}
+    assert {c["label"] for c in boar["wild_boar"]["classes"]} == {"Jabalí", "Boar"}
+    gallery = client.get("/api/species/wild_boar/photos", headers=admin,
+                         params={"label": "Jabalí"}).json()["items"]
+    assert [p["image_id"] for p in gallery] == [str(plain.id)]
+
+    client.patch("/api/species/fox", headers=admin, json={"common_name": "Red Fox"})
+    choices = {c["id"]: c["name"] for c in client.get("/api/species/choices",
+                                                      headers=admin).json()}
+    assert choices["fox"] == "Red Fox"
+    listed = {s["id"]: s["common_name"] for s in client.get("/api/species",
+                                                            headers=admin).json()}
+    assert listed["fox"] == "Red Fox"
 
 
 # ── free disk space (E-24) ─────────────────────────────────────────────────
