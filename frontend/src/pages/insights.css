@@ -67,7 +67,9 @@
 .moon-day-date { font-size: 11px; color: var(--text-dim); }
 .moon-illustration { margin: 12px 0 7px; color: var(--sand); display: flex; justify-content: center; }
 .moon-day-lit { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.moon-day-phase { color: var(--text-dim); font-size: 11px; margin-top: 5px; min-height: 30px; text-transform: capitalize; }
+.moon-day-phase { color: var(--text-dim); font-size: 11px; margin-top: 5px; min-height: 30px; }
+/* The first letter only: Finnish writes "Vähenevä kuu", not "Vähenevä Kuu". */
+.moon-day-phase::first-letter { text-transform: uppercase; }
 .moon-last-light { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; font-size: 11px; color: var(--text-dim); }
 .moon-last-light strong { font-size: 13px; font-weight: 500; color: var(--text); }
 .insights-fine-print { margin: 10px 0 0; font-size: 12px; color: var(--text-dim); line-height: 1.5; }

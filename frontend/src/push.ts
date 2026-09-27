@@ -1,4 +1,5 @@
 import { api } from './api'
+import { t } from './i18n'
 
 /**
  * Web Push, browser side.
@@ -41,7 +42,7 @@ export function pushSupport(): Support {
   if (!window.isSecureContext) {
     return {
       ok: false,
-      reason: 'Notifications need an https connection. Open the app at its https address, not the LAN one.',
+      reason: t('push.needHttps'),
     }
   }
   const ios = iosDevice()
@@ -51,12 +52,11 @@ export function pushSupport(): Support {
   if (ios && !standalone) {
     return {
       ok: false,
-      reason:
-        'On iPhone, notifications only reach an installed app. In Safari, tap Share, then "Add to Home Screen", open GameSense from there and turn this on.',
+      reason: t('push.iphone'),
     }
   }
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
-    return { ok: false, reason: 'This browser does not support web push notifications.' }
+    return { ok: false, reason: t('push.unsupported') }
   }
   return { ok: true }
 }
@@ -134,9 +134,7 @@ export async function subscribeThisDevice(publicKey: string, asked?: Promise<Not
   const perm = await (asked ?? askPermission())
   if (perm !== 'granted') {
     throw new Error(
-      perm === 'denied'
-        ? 'Notifications are blocked for GameSense. Allow them in your browser or phone settings, then try again.'
-        : 'Permission was not given.',
+      perm === 'denied' ? t('push.blocked') : t('push.notGiven'),
     )
   }
   const reg = await registration()

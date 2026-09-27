@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { t } from '../i18n'
 
 export type Snap = 'peek' | 'half' | 'full'
 const ORDER: Snap[] = ['peek', 'half', 'full']
@@ -175,12 +176,12 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
 
   return <section ref={root} className="bsheet" role="dialog" aria-modal="false" aria-label={label} tabIndex={-1} data-snap={snap} data-closing={closing || undefined}>
     <div className="bsheet-top" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
-      <button type="button" className="bsheet-handle" aria-label={snap === 'full' ? 'Make the sheet smaller' : 'Make the sheet bigger'}
+      <button type="button" className="bsheet-handle" aria-label={snap === 'full' ? t('sheet.smaller') : t('sheet.bigger')}
         onKeyDown={e => { if (e.key === 'ArrowUp') { e.preventDefault(); step(1) } if (e.key === 'ArrowDown') { e.preventDefault(); step(-1) } }}
         onClick={e => { if (e.detail === 0) onSnap(snap === 'full' ? 'half' : ORDER[ORDER.indexOf(snap) + 1]) }}><span /></button>
       <div className="bsheet-head">
         <div className="bsheet-title">{header}</div>
-        <button type="button" className="bsheet-close" aria-label="Close" onClick={requestClose}>
+        <button type="button" className="bsheet-close" aria-label={t('common.close')} onClick={requestClose}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
         </button>
       </div>

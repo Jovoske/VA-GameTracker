@@ -2,6 +2,7 @@ import type { Map } from 'maplibre-gl'
 import { useEffect, useState } from 'react'
 import { areaM2, crossesItself, distanceM, formatArea, formatDistance, isNewCorner, nearFirstCorner, type LngLat } from './geometry'
 import { setSource } from './layers'
+import { t } from '../i18n'
 
 export type Editing = {
   kind: 'stand' | 'camera' | 'zone'
@@ -97,11 +98,11 @@ export default function CrosshairEditor({ map, editing, center, busy, err, onCha
   const crossed = zone && crossesItself(pts, false)
   const closeCrosses = zone && !crossed && crossesItself(pts)
   const closing = zone && editing.step === 'place' && nearFirstCorner(pts, center)
-  const hint = zone && editing.step === 'name' ? 'Give it a name the group will know.'
-    : crossed ? 'The outline crosses itself. Undo back to where it went wrong.'
-      : closeCrosses ? 'Closing it here would cross the outline. Add a corner or Undo.'
-        : closing ? 'Back at the first corner. Tap Finish shape.'
-          : `Move the map so the cross is ${zone ? 'on a corner' : editing.kind === 'stand' ? 'where you sit' : 'on the camera'}.`
+  const hint = zone && editing.step === 'name' ? t('edit.nameIt')
+    : crossed ? t('edit.crosses')
+      : closeCrosses ? t('edit.closeCrosses')
+        : closing ? t('edit.backAtFirst')
+          : zone ? t('edit.moveCorner') : editing.kind === 'stand' ? t('edit.moveStand') : t('edit.moveCamera')
 
   return <div className="map-editor" role="region" aria-label={title}>
     <div className="map-editor-head">
@@ -109,39 +110,39 @@ export default function CrosshairEditor({ map, editing, center, busy, err, onCha
         <strong>{title}</strong>
         <p className={crossed || closeCrosses ? 'map-editor-hint map-editor-hint--warn' : 'map-editor-hint'} aria-live="polite">{hint}</p>
       </div>
-      <button type="button" className="map-editor-x" aria-label="Cancel" onClick={cancel}>
+      <button type="button" className="map-editor-x" aria-label={t('common.cancel')} onClick={cancel}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
       </button>
     </div>
 
-    {confirmCancel ? <div className="map-editor-confirm" role="alertdialog" aria-label="Throw away this outline?">
-      <p>Throw away this outline?</p>
-      <div className="map-editor-row"><button type="button" className="map-button" onClick={onCancel}>Throw away</button><button type="button" className="map-button map-button--primary" onClick={() => setConfirmCancel(false)}>Keep drawing</button></div>
+    {confirmCancel ? <div className="map-editor-confirm" role="alertdialog" aria-label={t('edit.throwAway')}>
+      <p>{t('edit.throwAway')}</p>
+      <div className="map-editor-row"><button type="button" className="map-button" onClick={onCancel}>{t('notes.throwAwayBtn')}</button><button type="button" className="map-button map-button--primary" onClick={() => setConfirmCancel(false)}>{t('edit.keepDrawing')}</button></div>
     </div> : <>
       {zone && editing.step === 'place' && <>
         <p className="map-editor-status" aria-live="polite">
-          <span>{pts.length} {pts.length === 1 ? 'corner' : 'corners'}</span>
-          {gap && <span>{gap} from the last</span>}
+          <span>{t('edit.corners', { count: pts.length })}</span>
+          {gap && <span>{t('edit.fromLast', { gap })}</span>}
           {area && <span>{area}</span>}
         </p>
         <div className="map-editor-row">
-          <button type="button" className="map-button map-editor-side" disabled={!pts.length || busy} onClick={() => onChange({ ...editing, points: pts.slice(0, -1) })}>Undo</button>
-          <button type="button" className="map-button map-button--primary map-editor-main" disabled={!canAdd || busy} onClick={addCorner}>Add corner</button>
-          {pts.length >= 3 && <button type="button" className="map-button map-editor-side" disabled={busy || crossed || closeCrosses} onClick={() => onChange({ ...editing, step: 'name' })}>Finish shape</button>}
+          <button type="button" className="map-button map-editor-side" disabled={!pts.length || busy} onClick={() => onChange({ ...editing, points: pts.slice(0, -1) })}>{t('common.undo')}</button>
+          <button type="button" className="map-button map-button--primary map-editor-main" disabled={!canAdd || busy} onClick={addCorner}>{t('edit.addCorner')}</button>
+          {pts.length >= 3 && <button type="button" className="map-button map-editor-side" disabled={busy || crossed || closeCrosses} onClick={() => onChange({ ...editing, step: 'name' })}>{t('edit.finish')}</button>}
         </div>
       </>}
 
       {(!zone || editing.step === 'name') && <form className="map-editor-form" onSubmit={e => { e.preventDefault(); if (!nameMissing && !busy) onSave(center) }}>
-        {zone && <p className="map-editor-status"><span>{pts.length} corners</span>{area && <span>{area}</span>}</p>}
-        {editing.kind !== 'camera' && (zone || !editing.id) && <label className="map-field">Name
-          <input maxLength={80} value={editing.name} disabled={busy} placeholder={zone ? 'e.g. Monte bajo' : 'e.g. Encina grande'} onChange={e => onChange({ ...editing, name: e.target.value })} />
+        {zone && <p className="map-editor-status"><span>{t('edit.corners', { count: pts.length })}</span>{area && <span>{area}</span>}</p>}
+        {editing.kind !== 'camera' && (zone || !editing.id) && <label className="map-field">{t('animals.name')}
+          <input maxLength={80} value={editing.name} disabled={busy} placeholder={zone ? t('edit.zonePlaceholder') : t('edit.standPlaceholder')} onChange={e => onChange({ ...editing, name: e.target.value })} />
         </label>}
         <div className="map-editor-row">
-          {zone && <button type="button" className="map-button map-editor-side" disabled={busy} onClick={() => onChange({ ...editing, step: 'place' })}>Back</button>}
-          <button className="map-button map-button--primary map-editor-main" disabled={busy || nameMissing || (!zone && !center)}>{busy ? 'Saving…' : zone ? 'Save bedding' : 'Save here'}</button>
+          {zone && <button type="button" className="map-button map-editor-side" disabled={busy} onClick={() => onChange({ ...editing, step: 'place' })}>{t('common.back')}</button>}
+          <button className="map-button map-button--primary map-editor-main" disabled={busy || nameMissing || (!zone && !center)}>{busy ? t('common.saving') : zone ? t('edit.saveBedding') : t('edit.saveHere')}</button>
         </div>
       </form>}
-      {err && <p className="map-inline-error" role="alert">{err} <button type="button" className="map-link" disabled={busy} onClick={() => onSave(center)}>Try again</button></p>}
+      {err && <p className="map-inline-error" role="alert">{err} <button type="button" className="map-link" disabled={busy} onClick={() => onSave(center)}>{t('common.tryAgain')}</button></p>}
     </>}
   </div>
 }

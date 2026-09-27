@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type Failure, api, getToken, peek, plainWords } from '../api'
+import { type Key, cap, fmtDate, fmtNumber, t } from '../i18n'
 import { HarvestForm, type HarvestLine, lineWords } from './Harvest'
 import SettingsSection from './SettingsSection'
 
@@ -20,18 +21,14 @@ type Book = {
   can_export: boolean
 }
 
-const when = (iso: string) => new Date(iso).toLocaleString(undefined, {
-  weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
-})
-const day = (isoDate: string) => new Date(`${isoDate}T12:00:00Z`).toLocaleDateString(undefined, {
-  day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
-})
+const when = (iso: string) => fmtDate(iso, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+const day = (isoDate: string) => fmtDate(`${isoDate}T12:00:00Z`, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 
-function failed(e: unknown, what: string): string {
+function failed(e: unknown, what: Key): string {
   const x = e as Failure
-  if (x.offline) return `No signal, so ${what}. Try again when you have a connection.`
-  if (x.timeout) return `No answer from the server, so ${what}. Try again.`
-  return `${plainWords(x.message || 'Something went wrong.')} ${what[0].toUpperCase()}${what.slice(1)}.`
+  if (x.offline) return t('book.failNoSignal', { what: t(what) })
+  if (x.timeout) return t('book.failTimeout', { what: t(what) })
+  return t('harvest.failOther', { reason: plainWords(x.message || t('common.wentWrong')), what: cap(t(what)) })
 }
 
 /** Save the season's CSV. A plain link can't carry the sign-in, so it is fetched and
@@ -45,14 +42,14 @@ async function downloadSeason(season: number): Promise<void> {
       headers: { Authorization: `Bearer ${getToken() ?? ''}` }, signal: ctl.signal,
     })
   } catch {
-    throw Object.assign(new Error(ctl.signal.aborted ? 'No answer from the server.' : 'No signal.'),
+    throw Object.assign(new Error(ctl.signal.aborted ? t('api.noAnswer') : t('api.noSignalShort')),
       ctl.signal.aborted ? { timeout: true } : { offline: true })
   } finally {
     window.clearTimeout(timer)
   }
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}))
-    throw Object.assign(new Error(typeof body?.detail === 'string' ? body.detail : `Something went wrong (${resp.status})`),
+    throw Object.assign(new Error(typeof body?.detail === 'string' ? body.detail : t('api.wentWrong', { status: resp.status })),
       { status: resp.status })
   }
   const blob = await resp.blob()
@@ -85,7 +82,7 @@ export default function HarvestBook({ admin }: { admin: boolean }) {
     setErr('')
     api<Book>(path, { signal: c.signal, timeoutMs: 20_000 })
       .then((b) => { if (!c.signal.aborted) setBook(b) })
-      .catch((e) => { if (!c.signal.aborted && (e as Error).name !== 'AbortError') setErr(failed(e, 'the harvest book didn’t load')) })
+      .catch((e) => { if (!c.signal.aborted && (e as Error).name !== 'AbortError') setErr(failed(e, 'book.what.didntLoad')) })
   }, [path])
   useEffect(() => {
     load()
@@ -101,45 +98,45 @@ export default function HarvestBook({ admin }: { admin: boolean }) {
     setNote('')
     try {
       await downloadSeason(book.season)
-      setNote(`The ${book.label} season is downloading.`)
+      setNote(t('book.downloading', { season: book.label }))
     } catch (e) {
-      setNote(failed(e, 'the file didn’t download'))
+      setNote(failed(e, 'book.what.noDownload'))
     } finally {
       setBusy(false)
     }
   }
 
-  const title = admin ? 'Harvest book' : 'Your harvest'
+  const title = admin ? t('book.title') : t('book.yours')
   return (
-    <SettingsSection id="harvest" title={title} summary={book ? `${book.label} season` : undefined}>
+    <SettingsSection id="harvest" title={title} summary={book ? t('book.season', { season: book.label }) : undefined}>
       <div className="hv-book-tools">
         {book && book.seasons.length > 1 && (
-          <select className="input" aria-label="Season" value={book.season}
+          <select className="input" aria-label={t('book.seasonLabel')} value={book.season}
             onChange={(e) => setSeason(Number(e.target.value))}>
             {book.seasons.map((s) => <option key={s.season} value={s.season}>{s.label}</option>)}
           </select>
         )}
-        <button type="button" className="hv-tool" onClick={() => setOpen({})}>Log an animal</button>
+        <button type="button" className="hv-tool" onClick={() => setOpen({})}>{t('book.logOne')}</button>
         {book?.can_export && (
           <button type="button" className="hv-tool" onClick={exportCsv} disabled={busy}>
-            {busy ? 'Downloading…' : 'Download the season (CSV)'}
+            {busy ? t('book.downloadingShort') : t('book.download')}
           </button>
         )}
       </div>
       {note && <p className="hv-season-note" role="status">{note}</p>}
-      {err && <p className="hv-err" role="alert">{err} <button type="button" className="hv-link" onClick={load}>Try again</button></p>}
-      {!book && !err && <p className="hv-dim" role="status">Loading…</p>}
+      {err && <p className="hv-err" role="alert">{err} <button type="button" className="hv-link" onClick={load}>{t('common.tryAgain')}</button></p>}
+      {!book && !err && <p className="hv-dim" role="status">{t('common.loading')}</p>}
       {book && book.items.length === 0 && (
-        <p className="hv-dim">Nothing logged in the {book.label} season yet. The morning after a shot, Tonight asks.</p>
+        <p className="hv-dim">{t('book.empty', { season: book.label })}</p>
       )}
       {book && book.items.length > 0 && (
         <ul className="hv-lines">
           {book.items.map((h) => (
             <li key={h.id}>
               <button type="button" className="hv-line" disabled={!h.can_edit} onClick={() => setOpen({ line: h })}
-                aria-label={`${lineWords(h)}, ${when(h.taken_at)}${h.can_edit ? '. Change it' : ''}`}>
+                aria-label={`${lineWords(h)}, ${when(h.taken_at)}${h.can_edit ? `. ${t('harvest.changeIt')}` : ''}`}>
                 <b>{lineWords(h)}</b>
-                <span>{[when(h.taken_at), admin || !h.yours ? h.hunter : null, h.stand, h.weight_kg != null ? `${h.weight_kg} kg` : null]
+                <span>{[when(h.taken_at), admin || !h.yours ? h.hunter : null, h.stand, h.weight_kg != null ? `${fmtNumber(h.weight_kg)} kg` : null]
                   .filter(Boolean).join(' · ')}</span>
               </button>
             </li>
@@ -148,8 +145,8 @@ export default function HarvestBook({ admin }: { admin: boolean }) {
       )}
       {book && (
         <p className="hv-season-note">
-          The {book.label} season runs {day(book.from)} to {day(book.to)}.
-          {book.can_export ? ' The file opens as it is in Excel on a Spanish computer, for the annual return.' : ''}
+          {t('book.runs', { season: book.label, from: day(book.from), to: day(book.to) })}
+          {book.can_export ? ` ${t('book.excel')}` : ''}
         </p>
       )}
       {open && (

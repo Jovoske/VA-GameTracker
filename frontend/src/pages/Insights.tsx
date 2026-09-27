@@ -6,6 +6,7 @@ import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
 import WeatherPatterns, { type Patterns } from '../components/WeatherPatterns'
 import { useRefetchOnReturn, useReveal } from '../hooks'
+import { fmtDate, fmtNumber, fmtTime, fmtWeekday, t, tOr } from '../i18n'
 import './insights.css'
 
 type Insights = {
@@ -24,20 +25,20 @@ type Insights = {
 type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
 // A page of a class's photos, newest first; next_before (and _id) ask for the next.
 type ClassPage = { items: ClassImg[]; next_before: string | null; next_before_id: string | null }
-const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
+const dayName = (iso: string) => fmtWeekday(iso + 'T12:00:00')
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
-const clock = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '–'
+const clock = (iso: string | null) => (iso ? fmtTime(iso) : '–')
+/** "Full Moon" as the server names the phase, in the language on screen. */
+const moonWords = (phase: string) => tOr(`moon.${phase.toLowerCase().replace(/[\s_]+/g, '_')}`, phase.replace(/_/g, ' '))
 
 // The numbers behind a finding, for the "Show the numbers" fold.
 function backing(c: Insights['correlations'][number]) {
   const pct = Math.round(c.strength * 100)
-  const visits = `${c.sample.toLocaleString()} visits`
-  if (c.kind === 'time') return `${pct}% of ${visits} began in these hours.`
-  if (c.kind === 'location') return `${pct}% of ${visits} were at these two cameras.`
-  return `From ${visits}.`
+  const visits = t('insights.visitsN', { count: c.sample, n: fmtNumber(c.sample) })
+  if (c.kind === 'time') return t('insights.backTime', { pct, visits })
+  if (c.kind === 'location') return t('insights.backPlace', { pct, visits })
+  return t('insights.backFrom', { visits })
 }
-const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
 
 // The findings read every photo on the estate box: slower than a page, but never forever.
 const SLOW_MS = 30_000
@@ -120,7 +121,7 @@ export default function Insights() {
       setClassImgs(Array.isArray(page) ? page : page.items)
       setClassNext(nextOf(page))
     } catch {
-      if (request === classRequest.current) setClassErr('Could not load the photos. Check your connection and try again.')
+      if (request === classRequest.current) setClassErr(t('insights.couldntPhotos'))
     }
   }
   async function moreClassImages() {
@@ -135,7 +136,7 @@ export default function Insights() {
       setClassImgs((prev) => [...(prev ?? []), ...items])
       setClassNext(nextOf(page))
     } catch {
-      if (request === classRequest.current) setClassErr('Could not load older photos. Check your connection and try again.')
+      if (request === classRequest.current) setClassErr(t('insights.couldntOlder'))
     } finally {
       if (request === classRequest.current) setClassMore(false)
     }
@@ -154,19 +155,19 @@ export default function Insights() {
 
   return (
     <div className="insights-page">
-      <div className="insights-header"><div><h1 className="page-title">Insights</h1><p className="page-intro">What your cameras have seen.</p></div><Link to="/" className="insights-tonight">Plan tonight <span aria-hidden="true">↗</span></Link></div>
-      {err && <div className="status-panel" role="alert">{d ? 'Could not refresh the findings. Showing the last ones.' : 'Could not load the findings.'}<button className="text-action" onClick={load}>Retry</button></div>}
-      {!d && !err && <p role="status" className="page-intro">Reading the cameras…</p>}
+      <div className="insights-header"><div><h1 className="page-title">{t('nav.insights')}</h1><p className="page-intro">{t('insights.intro')}</p></div><Link to="/" className="insights-tonight">{t('insights.planTonight')} <span aria-hidden="true">↗</span></Link></div>
+      {err && <div className="status-panel" role="alert">{d ? t('insights.couldntRefresh') : t('insights.couldntLoad')}<button className="text-action" onClick={load}>{t('common.retry')}</button></div>}
+      {!d && !err && <p role="status" className="page-intro">{t('insights.reading')}</p>}
 
       {d && <div className="block insights-findings-block">
-        <h2 className="sect">What the cameras have seen</h2>
-        {findings.length === 0 && <p className="page-intro">Not enough sightings yet to say much. Keep the cameras running and the findings will come.</p>}
+        <h2 className="sect">{t('insights.seen')}</h2>
+        {findings.length === 0 && <p className="page-intro">{t('insights.notEnough')}</p>}
         {findings.length > 0 && <>
           <ul className="insights-findings">
             {findings.map((c, i) => <li key={i}>{c.statement}</li>)}
           </ul>
           <details className="insights-numbers">
-            <summary>Show the numbers</summary>
+            <summary>{t('weather.showNumbers')}</summary>
             <ul>{findings.map((c, i) => <li key={i}><span>{c.statement}</span> {backing(c)}</li>)}</ul>
           </details>
         </>}
@@ -174,8 +175,8 @@ export default function Insights() {
 
       {d && d.composition && d.composition.length > 0 && (
         <div className="block">
-          <h2 className="sect">Who is on the cameras</h2>
-          <p className="page-intro">Tap a row to see the photos.</p>
+          <h2 className="sect">{t('insights.who')}</h2>
+          <p className="page-intro">{t('insights.tapRow')}</p>
           <div className="insights-classes">
             {d.composition.slice(0, 8).map((x) => (
               <div
@@ -185,22 +186,24 @@ export default function Insights() {
                 tabIndex={0}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => openClassImages(x.label)}
-                title={`See the ${x.label} photos`}
+                title={t('insights.seePhotos', { label: x.label })}
               >
                 <div className="insights-class-main">
                   <span className="insights-class-label">{x.label}</span>
-                  <span className="insights-class-where">{plural(x.visits ?? x.count, 'visit')}{x.top_camera && `, mostly at ${x.top_camera}`}</span>
+                  <span className="insights-class-where">{x.top_camera
+                    ? t('insights.visitsMostly', { count: x.visits ?? x.count, n: fmtNumber(x.visits ?? x.count), camera: x.top_camera })
+                    : t('insights.visitsN', { count: x.visits ?? x.count, n: fmtNumber(x.visits ?? x.count) })}</span>
                 </div>
                 {showBars && <div className="insights-class-bar" aria-hidden="true">
                   <div className="bar-x" style={{ transform: `scaleX(${grown ? x.count / maxCount : 0})` }} />
                 </div>}
-                {showBars && x.photos != null && <span className="insights-class-photos">{plural(x.photos, 'photo')}</span>}
+                {showBars && x.photos != null && <span className="insights-class-photos">{t('insights.photosN', { count: x.photos, n: fmtNumber(x.photos) })}</span>}
                 <span className="insights-class-chevron" aria-hidden="true">›</span>
               </div>
             ))}
           </div>
           <button type="button" className="insights-toggle" aria-pressed={showBars} onClick={() => setShowBars(v => !v)}>
-            {showBars ? 'Hide the numbers' : 'Show the numbers'}
+            {showBars ? t('insights.hideNumbers') : t('weather.showNumbers')}
           </button>
         </div>
       )}
@@ -210,7 +213,7 @@ export default function Insights() {
       {(d || err) && <WeatherPatterns patterns={pat} scope={patScope} onScope={setPatScope} error={patErr} loading={patLoading} retry={loadPatterns} />}
 
       {d && <div className="block insights-calendar">
-        <h2 className="sect">Moon and last light this week</h2>
+        <h2 className="sect">{t('insights.moonWeek')}</h2>
         <div className="moon-week">
           {d.outlook.map((o) => (
             <div
@@ -224,27 +227,27 @@ export default function Insights() {
                 <MoonIcon size={26} weight={o.moon_illum > 65 ? 'fill' : 'regular'} />
               </div>
               <div className="moon-day-lit">
-                {Math.round(o.moon_illum)}% lit
+                {t('insights.lit', { pct: Math.round(o.moon_illum) })}
               </div>
-              <div className="moon-day-phase">{o.moon_phase.replace(/_/g, ' ')}</div>
+              <div className="moon-day-phase">{moonWords(o.moon_phase)}</div>
               <div className="moon-last-light">
-                <span>Last light</span><strong>{clock(o.civil_twilight_end)}</strong>
+                <span>{t('insights.lastLight')}</span><strong>{clock(o.civil_twilight_end)}</strong>
               </div>
             </div>
           ))}
         </div>
         <p className="insights-fine-print">
-          Last light is when the evening glow goes. Times are in your phone's time zone.
+          {t('insights.lastLightNote')}
         </p>
       </div>}
 
       {d && <details className="block insights-how">
-        <summary>How to read this</summary>
-        <p>A visit is one arrival at a camera: photos of the same animal less than half an hour apart count once, so a boar that sat in front of the camera for twenty minutes is one visit, not thirty photos. Only nights a camera was watching are counted; a night it was down or its photos weren't checked yet is left out, not counted as quiet. A weather or moon difference is only called a finding when it beats chance: the same nights shuffled 200 times rarely show one that big. Even then it shows what the conditions were on busy nights, not that the weather caused it.</p>
+        <summary>{t('insights.howToRead')}</summary>
+        <p>{t('insights.howToReadText')}</p>
       </details>}
 
       {openClass && (
-        <Overlay onClose={closeClass} label={`${openClass} photos`} backLabel="Back to insights">{(close) => (
+        <Overlay onClose={closeClass} label={t('insights.classPhotos', { label: openClass })} backLabel={t('insights.back')}>{(close) => (
           <div
             onClick={(e) => e.stopPropagation()}
             className="card ov-panel"
@@ -253,20 +256,20 @@ export default function Insights() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
               <span style={{ fontWeight: 700, fontSize: 15 }}>{openClass}</span>
               <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-                {classImgs ? `${classImgs.length}${classNext ? '+' : ''} photo${classImgs.length === 1 && !classNext ? '' : 's'}` : 'loading…'}
+                {classImgs ? t('insights.classCount', { count: classImgs.length === 1 && !classNext ? 1 : 2, n: `${classImgs.length}${classNext ? '+' : ''}` }) : t('insights.loadingLower')}
               </span>
               <button
                 onClick={close}
                 style={{ marginLeft: 'auto', background: 'none', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 'var(--r-ctl)', padding: '8px 14px', minHeight: 44, cursor: 'pointer', fontSize: 14 }}
               >
-                Close
+                {t('common.close')}
               </button>
             </div>
             <div style={{ overflowY: 'auto', padding: 12 }}>
-              {classErr && <div className="status-panel" role="alert">{classErr}<button className="text-action" onClick={() => openClassImages(openClass)}>Retry</button></div>}
-              {!classImgs && !classErr && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
+              {classErr && <div className="status-panel" role="alert">{classErr}<button className="text-action" onClick={() => openClassImages(openClass)}>{t('common.retry')}</button></div>}
+              {!classImgs && !classErr && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>{t('photos.loading')}</div>}
               {classImgs && classImgs.length === 0 && (
-                <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>No photos yet.</div>
+                <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>{t('cameras.noPhotos')}</div>
               )}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
                 {classImgs?.map((im, i) => (
@@ -282,14 +285,14 @@ export default function Insights() {
                     <img src={thumbUrl(im.image_id)} loading="lazy" alt={openClass} style={{ width: '100%', height: 104, objectFit: 'cover', display: 'block' }} />
                     <div style={{ padding: '4px 7px', fontSize: 11, color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{im.camera}</span>
-                      <span>{new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                      <span>{fmtDate(im.captured_at, { month: 'short', day: 'numeric' })}</span>
                     </div>
                   </div>
                 ))}
               </div>
               {classImgs && classNext && (
                 <button type="button" className="insights-more" onClick={() => void moreClassImages()} disabled={classMore} aria-busy={classMore}>
-                  {classMore ? 'Loading older photos…' : 'Show older photos'}
+                  {classMore ? t('lb.loadingOlder') : t('photos.older')}
                 </button>
               )}
             </div>
@@ -301,7 +304,7 @@ export default function Insights() {
         <PhotoLightbox
           photos={classImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: openClass }))}
           start={zoom}
-          backLabel="Back to gallery"
+          backLabel={t('insights.backGallery')}
           zIndex={60}
           onClose={() => setZoom(null)}
         />

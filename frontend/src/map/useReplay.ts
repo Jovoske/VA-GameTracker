@@ -1,6 +1,8 @@
 import maplibregl from 'maplibre-gl'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, thumbUrl } from '../api'
+// `t` here is the replay's minute of the night.
+import { type Key, t as tr } from '../i18n'
 import { clock, linkArrow, minutesInto, type Replay, type ReplayNight, type ReplayVisit } from './activity'
 import { validLngLat, type Camera, type LngLat } from './geometry'
 import { setSource } from './layers'
@@ -9,7 +11,8 @@ const LOAD_TIMEOUT_MS = 30_000
 const PRELOAD = 80
 const PAINT_MS = 50
 type Failure = Error & { offline?: boolean; timeout?: boolean }
-const words = (what: string, e: Failure) => e.offline ? `No signal, so ${what} didn’t load.` : e.timeout ? `No answer from the server, so ${what} didn’t load.` : `Couldn’t load ${what}. ${e.message}`
+const words = (what: Key, e: Failure) => e.offline ? tr('replay.noSignal', { what: tr(what) })
+  : e.timeout ? tr('replay.noAnswer', { what: tr(what) }) : tr('replay.couldnt', { what: tr(what), why: e.message })
 
 /**
  * How long a visit stays up, in minutes of the night: about a second and a half of
@@ -93,7 +96,7 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
       if (id !== nightsReq.current) return
       setNights(list)
       setNightState(current => current && list.some(n => n.night === current) ? current : list[0]?.night ?? null)
-    } catch (e) { if (id === nightsReq.current) setNightsErr(words('the nights', e as Failure)) }
+    } catch (e) { if (id === nightsReq.current) setNightsErr(words('replay.theNights', e as Failure)) }
   }, [])
   const loadNight = useCallback(async (which: string) => {
     const id = ++request.current
@@ -104,7 +107,7 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
       setData(next)
       // Ready at once when it plays: the photos are small copies, cached for a year.
       for (const v of next.visits.slice(0, PRELOAD)) { const im = new Image(); im.src = thumbUrl(v.image_id) }
-    } catch (e) { if (id === request.current) setErr(words('that night', e as Failure)) }
+    } catch (e) { if (id === request.current) setErr(words('replay.thatNight', e as Failure)) }
     finally { if (id === request.current) setLoading(false) }
   }, [])
 
@@ -195,7 +198,7 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
         pop.el.querySelector('img')!.src = thumbUrl(v.image_id)
         pop.el.querySelector('b')!.textContent = what
         pop.el.querySelector('small')!.textContent = clock(Date.parse(v.at))
-        pop.el.setAttribute('aria-label', `${what} at ${where.get(cam)?.name ?? 'a camera'}, ${clock(Date.parse(v.at))}. Open photo.`)
+        pop.el.setAttribute('aria-label', tr('replay.popLabel', { what, camera: where.get(cam)?.name ?? tr('replay.aCamera'), time: clock(Date.parse(v.at)) }))
         pop.card.classList.remove('is-new'); void pop.card.offsetWidth; pop.card.classList.add('is-new')
       }
       const fade = Math.max(0, (s.age - span * .6) / (span * .4))
@@ -262,11 +265,11 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
         const pa = map.project(a), pb = map.project(b), len = Math.hypot(pb.x - pa.x, pb.y - pa.y) || 1
         const el = document.createElement('span')
         el.className = 'map-link-tag'
-        el.title = `${x.l.label}: likely went this way. A guess.`
+        el.title = tr('replay.linkTitle', { label: x.l.label })
         // The tag names the animal: the photo at the arrow's start may be a different
         // one that came past that camera later. A long arrow gets the sentence; a short
         // one, or one with no room for it, the animal and that it is a guess.
-        const words = [`${x.l.label} likely went this way (a guess)`, `${x.l.label} (a guess)`]
+        const words = [tr('replay.linkLong', { label: x.l.label }), tr('replay.linkShort', { label: x.l.label })]
         const marker = new maplibregl.Marker({ element: el }).setLngLat(a).addTo(map)
         for (const text of len >= 110 ? words : words.slice(1)) {
           el.textContent = text

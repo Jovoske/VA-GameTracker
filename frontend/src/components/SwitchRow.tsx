@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react'
+import { t } from '../i18n'
 
 /**
  * A whole row that is the switch, so the target is the row and not a 26px pill:
  * glove-sized, and it says On or Off in words beside the knob. A real switch role,
  * so a screen reader says "on" or "off" too.
  */
-export default function SwitchRow({ label, note, on, onChange, disabled, words = ['On', 'Off'] }: {
+export default function SwitchRow({ label, note, on, onChange, disabled, words = [t('common.on'), t('common.off')] }: {
   label: ReactNode
   note?: ReactNode
   on: boolean

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type Got, type StaleWhy, fromEarlierNight, getFresh, nightOf, noAnswer, noAnswerWords, peek } from '../api'
+import { type Key, fmtTime, t, tOr } from '../i18n'
 import { compass, windColor } from '../map/geometry'
 import { hourGone, lineNow } from '../windline'
 import './windweek.css'
@@ -49,18 +50,15 @@ export type WindWeek = {
 const GLYPH: Record<string, string> = { clean: '✓', scent_carries: '✗', too_light: '~' }
 /** A verdict on the wind (right, wrong, too light), not the reason there is none. */
 export const judgedWind = (status: string | null | undefined) => !!status && status in GLYPH
-const WORD: Record<string, string> = {
-  clean: 'right wind', scent_carries: 'wrong wind, scent blows to them', too_light: 'too light to call',
-  no_wind_data: 'no forecast', no_bedding: 'no bedding drawn', no_position: 'not on the map', no_geometry: 'not judged',
-}
-const estateClock = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
+/** An hour's verdict in words ("right wind"), for a screen reader. */
+const word = (status: string) => tOr(`windWord.${status}`, status)
+const estateClock = (iso: string) => fmtTime(iso, { timeZone: 'Europe/Madrid' })
 
 /** What to do so a stand that can't be judged gets its hours. */
-const UNJUDGED_NOTE: Record<string, string> = {
-  no_position: 'Place it on the map to see its wind hour by hour.',
-  no_bedding: 'Draw where they lie up on the map to see its wind hour by hour.',
-  no_geometry: 'Set its approach directions on the map to see its wind hour by hour.',
+const UNJUDGED_NOTE: Record<string, Key> = {
+  no_position: 'week.placeIt',
+  no_bedding: 'week.drawBedding',
+  no_geometry: 'week.setApproach',
 }
 
 /** The week's line says why there are no hours (a stand that can't be judged, no
@@ -104,9 +102,9 @@ export function useWindWeek(path: string | null) {
     reload()
     return () => ctl.current?.abort()
   }, [path, reload])
-  const unknown = 'Wind not known yet.'
-  const wait = asked === 'asking' ? 'Checking the wind…'
-    : asked === 'error' ? `Couldn’t get the wind. ${unknown}`
+  const unknown = t('week.unknown')
+  const wait = asked === 'asking' ? t('week.checking')
+    : asked === 'error' ? `${t('week.couldnt')} ${unknown}`
       : asked !== 'done' ? `${noAnswerWords(asked)} ${unknown}`
         : got?.stale ? `${noAnswerWords(got.why)} ${unknown}` : unknown
   return { got, week: got?.data ?? null, wait, reload }
@@ -127,16 +125,16 @@ export function WindWeekStrip({ week, stand }: { week: WindWeek; stand: WeekStan
   const [open, setOpen] = useState<string | null>(null)
   const now = Date.now()
   // A stand that can't be judged has no hours to show: what to do instead, once.
-  if (stand.status !== 'ok') return <p className="ww-note">{UNJUDGED_NOTE[stand.status] ?? 'Its wind can’t be judged hour by hour yet.'}</p>
+  if (stand.status !== 'ok') return <p className="ww-note">{t(UNJUDGED_NOTE[stand.status] ?? 'week.cantJudge')}</p>
   const any = stand.evenings.some((e) => e.hours.some((h) => h.wind_dir_deg != null))
-  if (!any) return <p className="ww-note">No hour-by-hour forecast for this week yet.</p>
+  if (!any) return <p className="ww-note">{t('week.noForecast')}</p>
   return (
     <div className="ww">
       <table className="ww-table">
-        <caption className="sr-only">Wind at {stand.stand}, hour by hour, tonight and the next six evenings</caption>
+        <caption className="sr-only">{t('week.caption', { stand: stand.stand })}</caption>
         <thead>
           <tr>
-            <th scope="col"><span className="sr-only">Evening</span></th>
+            <th scope="col"><span className="sr-only">{t('week.evening')}</span></th>
             {week.hours.map((h) => <th key={h} scope="col">{h}</th>)}
           </tr>
         </thead>
@@ -149,11 +147,13 @@ export function WindWeekStrip({ week, stand }: { week: WindWeek; stand: WeekStan
                 onClick={() => setOpen(shown ? null : ev.night)}>
                 <th scope="row">
                   {/* The speeds are in each hour's words already; the row is for the eye. */}
-                  <button type="button" className="ww-day" aria-expanded={shown} aria-label={`${day}: wind speeds`}>{day}</button>
+                  <button type="button" className="ww-day" aria-expanded={shown} aria-label={t('week.speedsOf', { day })}>{day}</button>
                 </th>
                 {ev.hours.map((h) => {
                   const from = h.wind_dir_deg != null ? compass(h.wind_dir_deg) : null
-                  const said = `${h.at_local}: ${WORD[h.status] ?? h.status}${from ? `, from ${from} ${Math.round(h.wind_speed_kmh ?? 0)} km/h` : ''}`
+                  const said = from
+                    ? t('week.hourFrom', { time: h.at_local, verdict: word(h.status), from, kmh: Math.round(h.wind_speed_kmh ?? 0) })
+                    : t('week.hour', { time: h.at_local, verdict: word(h.status) })
                   return (
                     <td key={h.hour} data-status={h.status} data-gone={hourGone(h.at, now) || undefined}>
                       <span className="sr-only">{said}</span>
@@ -180,10 +180,9 @@ export function WindWeekStrip({ week, stand }: { week: WindWeek; stand: WeekStan
         </tbody>
       </table>
       <p className="ww-note">
-        ✓ right: scent goes away from where they lie up. ✗ wrong: it blows to them. ~ too light to call.
-        Letters: where the wind comes from. Tap an evening for its wind speeds.
-        {week.evenings[0]?.sunset_local ? ` Sunset ${week.evenings[0].tonight ? 'tonight' : week.evenings[0].day} ${week.evenings[0].sunset_local}.` : ''}
-        {week.forecast_stale && week.forecast_fetched_at ? ` No newer forecast: this one is from ${estateClock(week.forecast_fetched_at)}.` : ''}
+        {t('week.key')}
+        {week.evenings[0]?.sunset_local ? ` ${t('week.sunset', { day: week.evenings[0].tonight ? t('week.tonight') : week.evenings[0].day, time: week.evenings[0].sunset_local })}` : ''}
+        {week.forecast_stale && week.forecast_fetched_at ? ` ${t('week.oldForecast', { time: estateClock(week.forecast_fetched_at) })}` : ''}
       </p>
     </div>
   )

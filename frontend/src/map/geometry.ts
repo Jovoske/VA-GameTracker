@@ -1,3 +1,6 @@
+import { type Key, t } from '../i18n/core'
+import { fmtNumber } from '../i18n/format'
+
 // A camera as the map has it (GET /map/cameras): its newest photo worth showing,
 // how many photos are new to you, and last night in visits, never in frames.
 export type CameraHealth = {
@@ -35,7 +38,7 @@ const CALLED_AT = new Set(['clean', 'scent_carries', 'too_light', 'no_wind_data'
 export const isCall = (status: string | null | undefined) => !!status && CALLED_AT.has(status)
 /** When a stand's wind line is for: "for 20:39" or "now"; '' for a line that isn't a call. */
 export const windFor = (w: WindReport, status = w.status) =>
-  !isCall(status) ? '' : w.now ? 'now' : w.at_local ? `for ${w.at_local}` : ''
+  !isCall(status) ? '' : w.now ? t('wind.now') : w.at_local ? t('wind.forTime', { time: w.at_local }) : ''
 export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }
 export type MapData = {
   conditions: {
@@ -61,16 +64,23 @@ export type LikelyPath = {
   ways: { from_camera_id: string; to_camera_id: string; nights: number }[]
   species: { species_id: string; label: string; nights: number }[]
 }
-export const compass = (degrees: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((degrees % 360) + 360) % 360 / 45) % 8]
-// Compass words, not degrees. "From the north-west" reads at a glance.
-const DIRECTION: Record<string, string> = { N: 'north', NE: 'north-east', E: 'east', SE: 'south-east', S: 'south', SW: 'south-west', W: 'west', NW: 'north-west' }
-export const direction = (degrees: number) => DIRECTION[compass(degrees)]
+const POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const
+const point = (degrees: number) => POINTS[Math.round(((degrees % 360) + 360) % 360 / 45) % 8]
+/** "NW", in the language's own letters (Swedish "NV", Finnish "LU"). */
+export const compass = (degrees: number) => t(`compass.${point(degrees)}` as Key)
+// Compass words, not degrees. "From the north-west" reads at a glance. Each its own
+// phrase: Finnish says "from" and "towards" with the word's own ending.
+export const direction = (degrees: number) => t(`dir.${point(degrees)}` as Key)
+/** "From the north-west": where the wind comes from. */
+export const directionFrom = (degrees: number) => t(`dirFrom.${point(degrees)}` as Key)
+/** "Scent goes south-east": where the wind takes a hunter's scent. */
+export const scentTowards = (degrees: number) => t(`scentTo.${point(degrees)}` as Key)
 export const downwind = (from: number) => (from + 180) % 360
 export function offset(lat: number, lon: number, bearing: number, metres: number): [number, number] {
   const r = bearing * Math.PI / 180
   return [lon + metres * Math.sin(r) / (111320 * Math.cos(lat * Math.PI / 180)), lat + metres * Math.cos(r) / 111320]
 }
-export const windLabel = (status: string) => status === 'clean' ? 'Away from mapped bedding' : status === 'scent_carries' ? 'Toward mapped bedding' : 'Direction uncertain'
+export const windLabel = (status: string) => t(status === 'clean' ? 'wind.away' : status === 'scent_carries' ? 'wind.toward' : 'wind.uncertain')
 // Theme tokens, so the map and the Stands page share one palette. Amber, not red:
 // red is kept for safety, and a wrong wind is a reason to sit elsewhere, not a stop.
 export const windToken = (status: string) => status === 'clean' ? '--v-best' : status === 'scent_carries' ? '--marginal' : '--v-quiet'
@@ -128,8 +138,9 @@ export function areaM2(ring: LngLat[]): number {
   }
   return Math.abs(twice) / 2
 }
-export const formatDistance = (m: number) => m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
-export const formatArea = (m2: number) => m2 < 1000 ? `${Math.round(m2)} m²` : `${(m2 / 10_000).toFixed(1)} ha`
+const digits = (n: number) => ({ minimumFractionDigits: n, maximumFractionDigits: n })
+export const formatDistance = (m: number) => m < 1000 ? `${fmtNumber(Math.round(m))} m` : `${fmtNumber(m / 1000, digits(m < 10_000 ? 1 : 0))} km`
+export const formatArea = (m2: number) => m2 < 1000 ? `${fmtNumber(Math.round(m2))} m²` : `${fmtNumber(m2 / 10_000, digits(1))} ha`
 
 // ── drawing an outline ──
 // Closer than this to the last corner is the same corner pressed twice (a gloved

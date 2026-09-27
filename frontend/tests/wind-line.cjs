@@ -4,13 +4,14 @@
 // from the hours left, by the server's rule (backend forecasting/wind_week.py, and
 // tests/test_wind_week.py for its cases): the runs a sit fits in first, the longest
 // of them, then a single hour if there is room, two at most, in time order.
-// No browser: node tests/wind-line.cjs (esbuild, which Vite brings, reads the .ts).
-const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path')
-const { transformSync } = require('esbuild')
+// No browser: node tests/wind-line.cjs (esbuild, which Vite brings, bundles the .ts).
+const assert = require('node:assert/strict'), path = require('node:path')
+const { buildSync } = require('esbuild')
 
-const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'windline.ts'), 'utf8')
+// Bundled with what it imports (its words come from src/i18n, English here).
+const built = buildSync({ entryPoints: [path.join(__dirname, '..', 'src', 'windline.ts')], bundle: true, write: false, format: 'cjs', platform: 'node', logLevel: 'silent' })
 const mod = { exports: {} }
-new Function('module', 'exports', transformSync(src, { loader: 'ts', format: 'cjs' }).code)(mod, mod.exports)
+new Function('module', 'exports', 'require', built.outputFiles[0].text)(mod, mod.exports, require)
 const { lineNow, hourGone } = mod.exports
 
 // Thursday 24 September 2026, summer time: 19 h on the estate's clock is 17:00 UTC.

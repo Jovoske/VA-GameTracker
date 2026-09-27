@@ -9,9 +9,11 @@
  * as still to come is over, tonight's part is made again here from the hours left,
  * by the same rule. Otherwise the server's line stands.
  *
- * On its own, with nothing from the browser, so tests/wind-line.cjs can check it
- * against the server's cases.
+ * With nothing from the browser, so tests/wind-line.cjs can check it against the
+ * server's cases. In the language on screen, as the server writes it for this person.
  */
+import { t } from './i18n/core'
+import { fmtList } from './i18n/format'
 
 type Hour = { hour: number; at: string; gone?: boolean; status: string }
 type Stand = {
@@ -33,7 +35,7 @@ const NAMED = 2
 export const hourGone = (at: string, now: number) => Date.parse(at) + 3_600_000 <= now
 
 /** "19–21 h", or "21 h" for one hour. */
-const span = (run: number[]) => (run.length === 1 ? `${run[0]} h` : `${run[0]}–${run[run.length - 1]} h`)
+const span = (run: number[]) => (run.length === 1 ? t('wind.hour', { h: run[0] }) : t('wind.hours', { from: run[0], to: run[run.length - 1] }))
 
 /** The right hours in a row, among those still to come. */
 function runs(hours: Hour[], now: number): number[][] {
@@ -70,10 +72,10 @@ export function lineNow(stand: Stand, tonight: string, now: number): LineNow {
   const ev = stand.evenings.find((e) => e.night === tonight)
   if (stand.status !== 'ok' || !ev || !ev.hours.some((h) => !h.gone && hourGone(h.at, now))) return same
   if (stand.evenings.every((e) => e.hours.every((h) => h.status === 'no_wind_data'))) return same
-  const said = named(runs(ev.hours, now)).map(span).join(' and ') || null
-  const right = [...(said ? [`tonight ${said}`] : []), ...stand.right_days]
+  const said = fmtList(named(runs(ev.hours, now)).map(span)) || null
+  const right = [...(said ? [t('wind.tonightHours', { hours: said })] : []), ...stand.right_days]
   return {
-    line: right.length ? `Right wind for ${stand.stand}: ${right.join(', ')}` : `No right wind for ${stand.stand} this week.`,
+    line: right.length ? t('wind.rightFor', { stand: stand.stand, when: right.join(', ') }) : t('wind.noneFor', { stand: stand.stand }),
     right_tonight: said,
     right_days: stand.right_days,
   }

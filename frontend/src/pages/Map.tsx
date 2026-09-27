@@ -10,6 +10,7 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from 're
 import { Link, useBlocker, useSearchParams } from 'react-router-dom'
 import { ageLabel, api, fromEarlierNight, getFresh, noAnswer, noAnswerWords, peek, peekMe, savedCopy, thumbUrl, whenLabel, whoAmI, type Got, type StaleWhy } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { type Key, fmtTime, t } from '../i18n'
 import { isView, type View } from '../map/activity'
 import { ActivityBar, ActivityCard } from '../map/ActivityPanel'
 import { BASE_SOURCES, CALLOUT_ZOOM, CATASTRO, baseLabel, baseSource, mapStyle, readPrefs, retryBase, showBase, showCatastro, writePrefs, type BaseId, type MapPrefs } from '../map/basemaps'
@@ -17,7 +18,7 @@ import BottomSheet, { type Snap } from '../map/BottomSheet'
 import { CameraBody, CameraHeader } from '../map/CameraSheet'
 import CrosshairEditor, { Crosshair, useMapCenter, type Editing } from '../map/CrosshairEditor'
 import { confirmLeave, hasUnsavedDraft, setUnsavedDraft } from '../map/draftGuard'
-import { direction, downwind, isNewCorner, validLngLat, type Camera, type LikelyPath, type LngLat, type MapData } from '../map/geometry'
+import { directionFrom, downwind, scentTowards, isNewCorner, validLngLat, type Camera, type LikelyPath, type LngLat, type MapData } from '../map/geometry'
 import { addLayers, estateBounds, fitEstate, renderBox, renderLayers, renderPaths, roomFor } from '../map/layers'
 import MapFab from '../map/MapFab'
 import MapSheet, { type Unplaced } from '../map/MapSheet'
@@ -66,7 +67,7 @@ function withoutWind(d: MapData): MapData {
     ...d,
     conditions: { wind_dir_deg: null, wind_speed_kmh: null },
     airflow: { source: 'unknown', wind_dir_deg: null, wind_speed_kmh: null },
-    stands: d.stands.map(s => ({ ...s, wind: { status: 'no_wind_data', text: 'The wind saved on this phone was for an earlier night. Tonight’s comes with signal.' } })),
+    stands: d.stands.map(s => ({ ...s, wind: { status: 'no_wind_data', text: t('mapPage.earlierWind') } })),
     safe_ground: { status: 'no_wind_data', cells: [] },
   }
 }
@@ -74,11 +75,11 @@ const forTonight = (got: Got<MapData>) => fromEarlierNight(got.at) ? withoutWind
 
 /** Pictures failed with no signal: why, against the map saved on this phone. */
 function savedWords(saved: Saved, where: ReturnType<typeof coverage> | 'other' | null): string {
-  if (where === 'close') return 'This close needs signal. Zoom out a little for the map saved on this phone.'
-  if (where === 'partial') return 'No signal, and this part of the estate isn’t saved on this phone. Download again with signal to fill it in.'
-  if (where === 'other') return `No signal: the map saved on this phone is the ${baseLabel(saved.base)}. Choose it in the Map sheet.`
-  if (where === 'inside') return 'No signal, and part of the map picture didn’t load. Your stands and cameras are still on it.'
-  return 'No signal: past the estate saved on this phone the map needs signal.'
+  if (where === 'close') return t('mapPage.tooClose')
+  if (where === 'partial') return t('mapPage.partNotSaved')
+  if (where === 'other') return t('mapPage.otherBase', { base: baseLabel(saved.base) })
+  if (where === 'inside') return t('mapPage.pictureGap')
+  return t('mapPage.pastEstate')
 }
 
 const initialSelection = (params: URLSearchParams): Selection | null => {
@@ -199,8 +200,8 @@ export default function MapPage() {
     const failed = [tonight, cams].find((r): r is PromiseRejectedResult => r.status === 'rejected')
     if (failed) {
       const x = failed.reason as Failure
-      const what = tonight.status === 'rejected' && cams.status === 'rejected' ? 'the map' : tonight.status === 'rejected' ? 'the stands and bedding' : 'the cameras'
-      setErr(x.offline ? `No signal, so ${what} didn’t load.` : x.timeout ? `No answer from the server, so ${what} didn’t load.` : `Couldn’t load ${what}. ${x.message}`)
+      const what: Key = tonight.status === 'rejected' && cams.status === 'rejected' ? 'mapPage.theMap' : tonight.status === 'rejected' ? 'mapPage.theStands' : 'mapPage.theCameras'
+      setErr(x.offline ? t('replay.noSignal', { what: t(what) }) : x.timeout ? t('replay.noAnswer', { what: t(what) }) : t('replay.couldnt', { what: t(what), why: x.message }))
     }
     setLoading(false)
   }, [])
@@ -235,7 +236,7 @@ export default function MapPage() {
     const opening = start ? { bounds: start, fitBoundsOptions: { padding: 72, maxZoom: 16 } } : { center: ESTATE_CENTER, zoom: 14 }
     try {
       instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), ...opening, maxZoom: 20, maxPitch: 0, attributionControl: false })
-    } catch { setFatal('The map couldn’t start on this phone. Reload the page, or use Stands and Cameras meanwhile.'); return }
+    } catch { setFatal(t('mapPage.fatal')); return }
     map.current = instance
     // Browser checks read the live map in development builds only.
     if (import.meta.env.DEV) (window as unknown as { __gsMap?: maplibregl.Map }).__gsMap = instance
@@ -403,7 +404,7 @@ export default function MapPage() {
       .then(got => { answered = true; if (alive.current) setPaths(got.data.paths) })
       .catch((e: Failure) => {
         answered = true; pathsAsked.current = false
-        if (alive.current) setPathsErr(noAnswer(e) ? 'No signal, so the likely paths didn’t load.' : `Couldn’t load the likely paths. ${e.message}`)
+        if (alive.current) setPathsErr(noAnswer(e) ? t('mapPage.pathsNoSignal') : t('mapPage.pathsCouldnt', { why: e.message }))
       })
   }, [pathsOn])
   useEffect(() => { if (ready && map.current) renderPaths(map.current, pathsOn ? paths ?? [] : []) }, [ready, pathsOn, paths])
@@ -475,7 +476,7 @@ export default function MapPage() {
       const el = document.createElement('button')
       el.dataset.kind = pin.kind; el.dataset.id = pin.id
       el.type = 'button'; el.className = `map-pin map-pin--${pin.kind}`
-      el.setAttribute('aria-label', `${pin.kind === 'stand' ? 'Stand' : 'Camera'}: ${pin.name}`)
+      el.setAttribute('aria-label', pin.kind === 'stand' ? t('mapPage.standPin', { name: pin.name }) : t('pin.camera', { name: pin.name }))
       const icon = document.createElement('span'); icon.className = 'map-pin-icon'; icon.innerHTML = PIN_ICONS[pin.kind]
       const label = document.createElement('span'); label.className = 'map-pin-label'; label.textContent = pin.name
       el.append(icon, label)
@@ -585,7 +586,7 @@ export default function MapPage() {
     if (!instance) return
     if (editing) instance.doubleClickZoom.disable(); else instance.doubleClickZoom.enable()
   }, [editing != null])
-  const draftWhat = editing?.kind === 'zone' && editing.points.length ? 'this bedding outline' : editing && !editing.id && editing.name.trim() ? 'this stand' : ''
+  const draftWhat = editing?.kind === 'zone' && editing.points.length ? t('mapPage.thisOutline') : editing && !editing.id && editing.name.trim() ? t('mapPage.thisStand') : ''
   useEffect(() => {
     setUnsavedDraft(draftWhat)
     if (!draftWhat) return
@@ -601,7 +602,7 @@ export default function MapPage() {
     if (blocker.state !== 'blocked') return
     if (confirmLeave()) blocker.proceed(); else blocker.reset()
   }, [blocker])
-  useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 5000); return () => clearTimeout(t) }, [notice])
+  useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 5000); return () => clearTimeout(timer) }, [notice])
   // A download that ends with the Map sheet closed says how it went on the map.
   useEffect(() => {
     if (!job.outcome || job.outcome === lastOutcome.current) return
@@ -643,12 +644,12 @@ export default function MapPage() {
       setEditing(null)
       if (created?.id) choose({ kind: 'stand', id: created.id }, 'peek')
       else if (e.id) setSnap('peek')
-      setNotice(e.kind === 'zone' ? 'Bedding saved.' : 'Saved.')
+      setNotice(e.kind === 'zone' ? t('mapPage.beddingSaved') : t('common.saved'))
     } catch (x) {
       // Cancelled: the hunter has already left the drawing bar.
       if (ctl.signal.aborted) return
-      const kept = e.kind === 'zone' ? 'Your outline is kept.' : 'It isn’t saved yet.'
-      setEditErr((x as Failure).timeout ? `No answer from the server. ${kept}` : `That didn’t save. ${(x as Error).message}`)
+      const kept = e.kind === 'zone' ? t('mapPage.outlineKept') : t('mapPage.notSavedYet')
+      setEditErr((x as Failure).timeout ? `${t('api.noAnswer')} ${kept}` : t('common.notSaved', { why: (x as Error).message }))
     } finally {
       saving.current = false; setEditBusy(false)
       if (saveCtl.current === ctl) saveCtl.current = null
@@ -663,32 +664,32 @@ export default function MapPage() {
       await api(`/${kind === 'stand' ? 'stands' : 'zones'}/${id}`, { method: 'DELETE', timeoutMs: SAVE_TIMEOUT_MS })
     } catch (x) {
       const status = (x as Error & { status?: number }).status
-      if (kind === 'stand' && status === 409) throw Object.assign(new Error('This stand has sit history, so it can’t be removed. Rename it instead.'), { final: true })
-      throw new Error(`That didn’t remove. ${(x as Error).message}`)
+      if (kind === 'stand' && status === 409) throw Object.assign(new Error(t('mapPage.sitHistory')), { final: true })
+      throw new Error(t('mapPage.didntRemove', { why: (x as Error).message }))
     }
     // Said once the map shows it, so the pin never lingers under 'Removed'.
-    await load(); setSelected(null); setNotice('Removed from the map.')
+    await load(); setSelected(null); setNotice(t('mapPage.removed'))
   }
   async function rename(id: string, name: string) {
     try { await api(`/stands/${id}`, { method: 'PATCH', body: JSON.stringify({ name }), timeoutMs: SAVE_TIMEOUT_MS }) }
-    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
-    await load(); setNotice('Renamed.')
+    catch (x) { throw new Error(t('common.notSaved', { why: (x as Error).message })) }
+    await load(); setNotice(t('mapPage.renamed'))
   }
   async function renameCamera(id: string, name: string) {
     try { await api(`/cameras/${id}/name`, { method: 'PATCH', body: JSON.stringify({ name }), timeoutMs: SAVE_TIMEOUT_MS }) }
-    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
-    await load(); setNotice('Renamed.')
+    catch (x) { throw new Error(t('common.notSaved', { why: (x as Error).message })) }
+    await load(); setNotice(t('mapPage.renamed'))
   }
   async function renameZone(id: string, name: string) {
     try { await api(`/zones/${id}`, { method: 'PATCH', body: JSON.stringify({ name }), timeoutMs: SAVE_TIMEOUT_MS }) }
-    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
-    await load(); setNotice('Renamed.')
+    catch (x) { throw new Error(t('common.notSaved', { why: (x as Error).message })) }
+    await load(); setNotice(t('mapPage.renamed'))
   }
   /** Back to the position the camera itself reports, and following it again (B-09). */
   async function useOwnGps(id: string) {
     try { await api(`/cameras/${id}/location`, { method: 'DELETE', timeoutMs: SAVE_TIMEOUT_MS }) }
-    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
-    await load(); setNotice('Back at the camera’s own GPS position.')
+    catch (x) { throw new Error(t('common.notSaved', { why: (x as Error).message })) }
+    await load(); setNotice(t('mapPage.ownGps'))
   }
   /** The hill shape loads on the server in the background: start it, then ask how it
    *  went every few seconds. The map stays usable meanwhile (B-18). */
@@ -702,11 +703,11 @@ export default function MapPage() {
         s = await api<TerrainStatus>('/terrain/status', { timeoutMs: LOAD_TIMEOUT_MS })
       }
       if (!alive.current) return
-      if (s.state === 'loaded') { await load(); setNotice('Hill shape loaded.') }
-      else if (s.state === 'failed') setTerrainErr(`Couldn’t load the hill shape. ${s.error ?? 'Try again later.'}`)
-      else setTerrainErr('The hill shape is still loading. Look again in a few minutes.')
+      if (s.state === 'loaded') { await load(); setNotice(t('mapPage.terrainLoaded')) }
+      else if (s.state === 'failed') setTerrainErr(t('mapPage.terrainCouldnt', { why: s.error ?? t('mapPage.tryLater') }))
+      else setTerrainErr(t('mapPage.terrainStill'))
     } catch (x) {
-      setTerrainErr(noAnswer(x) ? 'No signal, so the hill shape didn’t load. Try again with signal.' : `Couldn’t load the hill shape. ${(x as Error).message}`)
+      setTerrainErr(noAnswer(x) ? t('mapPage.terrainNoSignal') : t('mapPage.terrainCouldnt', { why: (x as Error).message }))
     } finally { if (alive.current) setTerrainBusy(false) }
   }
 
@@ -717,13 +718,14 @@ export default function MapPage() {
   const from = air?.source !== 'unknown' ? air?.wind_dir_deg : null
   const speed = air?.wind_speed_kmh
   // Nothing loaded is not the same as calm air: never state a verdict without the forecast.
-  const windWord = !data ? (loading ? 'Checking…' : 'Wind not loaded') : from != null ? `From the ${direction(from)}` : speed == null ? 'No wind forecast' : 'Too light to call'
+  const windWord = !data ? (loading ? t('common.checking') : t('mapPage.windNotLoaded')) : from != null ? directionFrom(from) : speed == null ? t('sitWind.no_wind_data') : t('mapPage.tooLight')
   // Everything on the map is judged for the sit, 45 min after sunset, or now once dark.
   const cond = data?.conditions
-  const windAt = !cond ? '' : cond.wind_now ? 'now' : cond.wind_at_local ? `at ${cond.wind_at_local}` : ''
-  const windLabel = air?.source === 'katabatic' ? `Calm${windAt ? ` ${windAt}` : ''}. Cold air sliding downhill`
-    : air?.source === 'anabatic' ? `Calm${windAt ? ` ${windAt}` : ''}. Air drifting uphill`
-      : `Wind ${windAt || 'tonight'}`
+  const windAt = !cond ? '' : cond.wind_now ? t('wind.now') : cond.wind_at_local ? t('mapPage.atTime', { time: cond.wind_at_local }) : ''
+  const calm = windAt ? t('mapPage.calmAt', { when: windAt }) : t('mapPage.calm')
+  const windLabel = air?.source === 'katabatic' ? t('mapPage.katabatic', { calm })
+    : air?.source === 'anabatic' ? t('mapPage.anabatic', { calm })
+      : t('mapPage.windWhen', { when: windAt || t('week.tonight') })
   const unplaced: Unplaced[] = [
     ...(data?.stands ?? []).filter(s => !validLngLat(s.lon, s.lat)).map(s => ({ kind: 'stand' as const, id: s.id, name: s.name })),
     ...cameras.filter(c => !validLngLat(c.lon, c.lat)).map(c => ({ kind: 'camera' as const, id: c.id, name: c.name })),
@@ -753,13 +755,13 @@ export default function MapPage() {
     if (view !== 'activity' || !a || act.loading || act.err) return ''
     const checking = a.cameras.filter(c => c.checking_nights > 0).length, one = a.nights === 1
     if (a.cameras.every(c => !c.watched_nights)) {
-      if (checking) return `Still checking ${one ? 'last night’s' : 'the'} photos. Look again in a few minutes.`
-      if (a.cameras.some(c => c.unreadable_nights)) return `Nothing to show: ${one ? 'last night’s' : 'the'} photos couldn’t all be checked for animals.`
-      return `No camera was working ${one ? 'last night' : 'in this period'}, so there is nothing to show.`
+      if (checking) return one ? t('mapPage.stillCheckingLast') : t('mapPage.stillChecking')
+      if (a.cameras.some(c => c.unreadable_nights)) return one ? t('mapPage.unreadableLast') : t('mapPage.unreadable')
+      return one ? t('mapPage.noCameraLast') : t('mapPage.noCamera')
     }
     if (a.cameras.every(c => !c.visits)) {
-      if (checking) return `No visits so far. Still checking the photos from ${checking === 1 ? '1 camera' : `${checking} cameras`}.`
-      return one && a.so_far ? 'No visits last night so far.' : 'No visits in this period.'
+      if (checking) return t('mapPage.noVisitsChecking', { count: checking })
+      return one && a.so_far ? t('mapPage.noVisitsSoFar') : t('mapPage.noVisitsPeriod')
     }
     return ''
   })()
@@ -769,35 +771,42 @@ export default function MapPage() {
     stage.style.setProperty('--sheet-h', `${px}px`)
     stage.dataset.sheet = px > stage.clientHeight * .7 ? 'tall' : px > 0 ? 'open' : ''
   }, [])
-  const toWords = fallbackTo === savedEstate?.base ? `the ${baseLabel(fallbackTo)} saved on this phone` : baseLabel(fallbackTo)
-  const baseNote = fallbackFrom ? `${baseLabel(fallbackFrom)}${fallbackFrom === 'world' ? '' : ' from IGN'} isn’t loading here, so this is ${toWords} for now. Tap ${baseLabel(fallbackFrom)} to try it again.` : null
+  const toWords = fallbackTo === savedEstate?.base ? t('mapPage.savedBase', { base: baseLabel(fallbackTo) }) : baseLabel(fallbackTo)
+  const fromWords = fallbackFrom ? (fallbackFrom === 'world' ? baseLabel(fallbackFrom) : t('mapPage.fromIgn', { base: baseLabel(fallbackFrom) })) : ''
+  const baseNote = fallbackFrom ? t('mapPage.baseNote', { from: fromWords, to: toWords, base: baseLabel(fallbackFrom) }) : null
   // With no signal only what was saved can show: say that, not that something failed.
   const noSignal = dataAge?.why === 'offline' || !navigator.onLine
   const tileNotice = tileErr ? savedEstate && noSignal ? savedWords(savedEstate, tileWhere)
-    : 'Part of the map picture didn’t load. Your stands and cameras are still on it.'
-    : fallbackFrom && !fallbackNoted ? `${baseLabel(fallbackFrom)} isn’t loading, so this is ${toWords}.` : ''
+    : t('mapPage.pictureGapSignal')
+    : fallbackFrom && !fallbackNoted ? t('mapPage.fallback', { base: baseLabel(fallbackFrom), to: toWords }) : ''
   // A saved copy on screen: how old, and whether its wind is tonight's.
   // While the answer is on its way a saved copy says so only when it is old: one from a
   // minute ago is the map as it is.
   const waiting = dataAge && !dataAge.why
   const ageNotice = !dataAge || (waiting && (!loading || Date.now() - Date.parse(dataAge.at) < 10 * 60_000)) ? ''
     : `${waiting ? '' : `${noAnswerWords(dataAge.why)} `}${fromEarlierNight(dataAge.at)
-      ? `Map from ${whenLabel(dataAge.at)}. Its wind was for that night, so it isn’t shown.`
-      : `Map from ${ageLabel(dataAge.at)}.`}${waiting ? ' Checking for a newer one…' : ''}`
-  const editTitle = editing ? editing.kind === 'zone' ? editing.id ? `Redraw ${editing.name}` : 'Draw bedding' : editing.id ? `Move ${editing.name}` : 'New stand' : ''
+      ? t('mapPage.fromEarlier', { when: whenLabel(dataAge.at) })
+      : t('mapPage.from', { ago: ageLabel(dataAge.at) })}${waiting ? ` ${t('tonight.checkingNewer')}` : ''}`
+  const editTitle = editing ? editing.kind === 'zone' ? editing.id ? t('mapPage.redraw', { name: editing.name }) : t('msheet.drawBedding') : editing.id ? t('mapPage.move', { name: editing.name }) : t('mapPage.newStand') : ''
   const busiest = paths?.[0]
-  const pathsNote = !prefs.layers.routes ? null : pathsErr ? pathsErr : paths == null ? 'Loading the likely paths…'
-    : !busiest ? 'No path seen on 2 or more nights this month yet.'
-      : `${paths!.length === 1 ? 'One likely path' : `${paths!.length} likely paths`}. The busiest: ${busiest.cameras.join(' to ')}, ${busiest.species[0] ? `${busiest.species[0].label.toLowerCase()} on ${busiest.species[0].nights}` : `on ${busiest.nights}`} nights. A guess, not a track.`
+  const pathsNote = !prefs.layers.routes ? null : pathsErr ? pathsErr : paths == null ? t('mapPage.pathsLoading')
+    : !busiest ? t('mapPage.noPaths')
+      : t('mapPage.paths', {
+        count: paths!.length,
+        route: busiest.cameras.join(t('mapPage.pathTo')),
+        what: busiest.species[0]
+          ? t('mapPage.pathSpecies', { label: busiest.species[0].label.toLocaleLowerCase(), n: busiest.species[0].nights })
+          : t('mapPage.pathNights', { n: busiest.nights }),
+      })
 
   if (fatal) return <div className="map-page map-page--fatal">
-    <h1 className="page-title">Map</h1>
+    <h1 className="page-title">{t('nav.map')}</h1>
     <div className="map-message map-message--error" role="alert">{fatal}</div>
-    <div className="map-actions"><Link className="map-button" to="/stands">Stands</Link><Link className="map-button" to="/cameras">Cameras</Link></div>
+    <div className="map-actions"><Link className="map-button" to="/stands">{t('nav.stands')}</Link><Link className="map-button" to="/cameras">{t('nav.cameras')}</Link></div>
   </div>
 
   return <div className="map-page" style={{ '--pin-scale': prefs.bigPins ? 1.25 : 1 } as CSSProperties}>
-    <h1 className="sr-only">Map</h1>
+    <h1 className="sr-only">{t('nav.map')}</h1>
     {/* Tonight's wind says nothing about where the game was, and the views that show
         that turn the wind off: the map gets the room instead. */}
     {view === 'cameras' && <button type="button" className="map-windbar" aria-expanded={windOpen} aria-controls="map-wind-more" onClick={() => setWindOpen(v => !v)}>
@@ -805,7 +814,7 @@ export default function MapPage() {
       <span className="map-wind-reading">
         <span>{windLabel}</span>
         <strong>{windWord}</strong>
-        {from != null && <em>Scent goes {direction(downwind(from))}</em>}
+        {from != null && <em>{scentTowards(downwind(from))}</em>}
       </span>
       <span className="map-wind-speed"><strong>{speed == null || !data ? '—' : Math.round(speed)}</strong><span>km/h</span></span>
       <span className="map-wind-chevron" aria-hidden="true">{windOpen ? '▴' : '▾'}</span>
@@ -814,85 +823,85 @@ export default function MapPage() {
       data-view={view === 'cameras' ? undefined : view}
       data-callouts={!prefs.layers.photos || view !== 'cameras' ? undefined : zoom >= CALLOUT_ZOOM ? 'on' : 'dots'}>
       <div className="map-canvas-wrap">
-        <div ref={mapEl} className="map-canvas" aria-label="Estate map. Drag to move, pinch to zoom." />
+        <div ref={mapEl} className="map-canvas" aria-label={t('mapPage.canvas')} />
         {windOpen && view === 'cameras' && <div id="map-wind-more" className="map-wind-more">
-          {!data && <p>{loading ? 'Getting tonight’s wind…' : 'The wind comes with the map. It shows once the map loads.'}</p>}
+          {!data && <p>{loading ? t('mapPage.gettingWind') : t('mapPage.windWithMap')}</p>}
           {air?.text && <p>{air.text}</p>}
           {cond && (cond.wind_now
-            ? <p>Judged for now{cond.sunset_local && cond.sunset && Date.parse(cond.sunset) <= Date.now() ? ` (sunset was ${cond.sunset_local})` : ''}.</p>
-            : cond.wind_at_local && <p>Judged for {cond.wind_at_local}, 45 min after sunset{cond.sunset_local ? ` (${cond.sunset_local})` : ''}, when the evening air has settled. Stands and scent-safe ground too.</p>)}
-          {cond?.forecast_stale && cond.forecast_fetched_at && <p>No newer forecast could be had: this one is from {new Date(cond.forecast_fetched_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })}.</p>}
-          <p>Arrows show where scent goes from each stand. Tap a stand to see how far it carries.</p>
-          <p className="map-caveat">An indication only. Wind near the ground swirls.</p>
+            ? <p>{cond.sunset_local && cond.sunset && Date.parse(cond.sunset) <= Date.now() ? t('mapPage.judgedNowSunset', { time: cond.sunset_local }) : t('mapPage.judgedNow')}</p>
+            : cond.wind_at_local && <p>{cond.sunset_local ? t('mapPage.judgedForSunset', { time: cond.wind_at_local, sunset: cond.sunset_local }) : t('mapPage.judgedFor', { time: cond.wind_at_local })}</p>)}
+          {cond?.forecast_stale && cond.forecast_fetched_at && <p>{t('mapPage.oldForecast', { time: fmtTime(cond.forecast_fetched_at, { timeZone: 'Europe/Madrid' }) })}</p>}
+          <p>{t('mapPage.arrows')}</p>
+          <p className="map-caveat">{t('mapPage.indication')}</p>
         </div>}
         <ScalePill map={mapObj} />
         <div className="map-notices">
-          {err && <div className="map-pill map-pill--error" role="alert"><span>{err}</span><button type="button" onClick={load} disabled={loading}>Try again</button></div>}
-          {ageNotice && <div className="map-pill map-pill--age" role="status"><span>{ageNotice}</span>{!waiting && <button type="button" onClick={load} disabled={loading}>{loading ? 'Trying…' : 'Try again'}</button>}</div>}
-          {tileNotice && <div className="map-pill" role="status"><span>{tileNotice}</span><button type="button" onClick={retryTiles}>Try again</button>
-            {!tileErr && <button type="button" aria-label="OK, keep this map" onClick={() => setFallbackNoted(true)}>OK</button>}</div>}
+          {err && <div className="map-pill map-pill--error" role="alert"><span>{err}</span><button type="button" onClick={load} disabled={loading}>{t('common.tryAgain')}</button></div>}
+          {ageNotice && <div className="map-pill map-pill--age" role="status"><span>{ageNotice}</span>{!waiting && <button type="button" onClick={load} disabled={loading}>{loading ? t('mapPage.trying') : t('common.tryAgain')}</button>}</div>}
+          {tileNotice && <div className="map-pill" role="status"><span>{tileNotice}</span><button type="button" onClick={retryTiles}>{t('common.tryAgain')}</button>
+            {!tileErr && <button type="button" aria-label={t('mapPage.keepThisMap')} onClick={() => setFallbackNoted(true)}>{t('common.ok')}</button>}</div>}
           {emptyEstate && <div className="map-pill map-pill--empty" role="status">
             <span>{data.stands.length + cameras.length === 0
-              ? admin ? 'Nothing on the map yet. Add a stand here, and connect cameras in Settings.' : 'Nothing on the map yet. An admin adds stands here and connects cameras in Settings.'
-              : admin ? 'Your stands and cameras aren’t placed on the map yet.' : 'The stands and cameras aren’t placed on the map yet. An admin can place them.'}</span>
+              ? admin ? t('mapPage.emptyAdmin') : t('mapPage.empty')
+              : admin ? t('mapPage.unplacedAdmin') : t('mapPage.unplaced')}</span>
             {admin && <span className="map-pill-actions">
               {data.stands.length + cameras.length === 0
-                ? <><button type="button" onClick={() => startEdit({ kind: 'stand', name: '' })}>Add a stand</button><Link to="/settings">Settings</Link></>
-                : <button type="button" onClick={() => { choose(null); setSettingsOpen(true); setSnap('full') }}>Place them</button>}
+                ? <><button type="button" onClick={() => startEdit({ kind: 'stand', name: '' })}>{t('msheet.addStand')}</button><Link to="/settings">{t('nav.settings')}</Link></>
+                : <button type="button" onClick={() => { choose(null); setSettingsOpen(true); setSnap('full') }}>{t('mapPage.placeThem')}</button>}
             </span>}
           </div>}
           {measure.on && <div className="map-pill map-pill--measure" role="status">
-            <span>{measure.result ?? (measure.points.length ? 'Now tap the second point.' : 'Tap two points to measure.')}</span>
-            {measure.result && <button type="button" onClick={measure.clear}>Clear</button>}
-            <button type="button" onClick={measure.stop}>Done</button>
+            <span>{measure.result ?? (measure.points.length ? t('mapPage.secondPoint') : t('mapPage.twoPoints'))}</span>
+            {measure.result && <button type="button" onClick={measure.clear}>{t('animals.clear')}</button>}
+            <button type="button" onClick={measure.stop}>{t('common.done')}</button>
           </div>}
           {job.progress && sheet !== 'settings' && <div className="map-pill map-pill--saving" role="status">
-            <span>{progressWords(job.progress)}</span><button type="button" aria-label="Stop saving the map" onClick={stopDownload}>Stop</button>
+            <span>{progressWords(job.progress)}</span><button type="button" aria-label={t('mapPage.stopSaving')} onClick={stopDownload}>{t('offline.stop')}</button>
           </div>}
-          {notice && <div className="map-pill" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>OK</button></div>}
-          {view === 'activity' && act.err && <div className="map-pill map-pill--error" role="alert"><span>{act.err}</span><button type="button" onClick={act.reload} disabled={act.loading}>Try again</button></div>}
-          {view === 'activity' && act.loading && <div className="map-pill" role="status"><span>{act.data ? 'Updating the circles…' : 'Loading activity…'}</span></div>}
+          {notice && <div className="map-pill" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>{t('common.ok')}</button></div>}
+          {view === 'activity' && act.err && <div className="map-pill map-pill--error" role="alert"><span>{act.err}</span><button type="button" onClick={act.reload} disabled={act.loading}>{t('common.tryAgain')}</button></div>}
+          {view === 'activity' && act.loading && <div className="map-pill" role="status"><span>{act.data ? t('mapPage.updating') : t('mapPage.loadingActivity')}</span></div>}
           {activityEmpty && <div className="map-pill map-pill--empty" role="status"><span>{activityEmpty}</span></div>}
-          {view === 'replay' && replay.data && !replay.visits.length && <div className="map-pill map-pill--empty" role="status"><span>Nothing came past a camera that night.</span></div>}
+          {view === 'replay' && replay.data && !replay.visits.length && <div className="map-pill map-pill--empty" role="status"><span>{t('mapPage.nothingCame')}</span></div>}
         </div>
-        {!ready && <div className="map-loading" role="status">Loading map…</div>}
+        {!ready && <div className="map-loading" role="status">{t('mapPage.loadingMap')}</div>}
         {modeBar && view === 'activity' && act.picked && act.data && <ActivityCard camera={act.picked} data={act.data}
           onOpen={() => openCameraSheet(act.picked!.camera_id)} onClose={() => act.pick(null)} onHeight={onSheetHeight} />}
 
         {!editing && <div className="map-fabs map-fabs--right">
-          <MapFab label="Map type, layers and tools" pressed={settingsOpen} onClick={() => { setSelected(null); setPick(null); setSettingsOpen(v => !v); setSnap('half') }}><StackIcon size={22} /></MapFab>
-          <MapFab label="Point the map north" onClick={() => map.current?.easeTo({ bearing: 0, pitch: 0, duration: 300 })}>
+          <MapFab label={t('mapPage.fabSettings')} pressed={settingsOpen} onClick={() => { setSelected(null); setPick(null); setSettingsOpen(v => !v); setSnap('half') }}><StackIcon size={22} /></MapFab>
+          <MapFab label={t('mapPage.fabNorth')} onClick={() => map.current?.easeTo({ bearing: 0, pitch: 0, duration: 300 })}>
             <svg className="map-north" viewBox="0 0 24 24" aria-hidden="true" style={{ transform: `rotate(${-bearing}deg)` }}>
               <path className="map-north-n" d="M12 3.5 15 12H9z" /><path className="map-north-s" d="M12 20.5 9 12h6z" /><path className="map-north-tick" d="M12 1v3" />
             </svg>
           </MapFab>
-          <MapFab label="Fit the estate" disabled={!data || !ready} onClick={() => { if (map.current && data) fitEstate(map.current, data, cameras, 300, fitPadding()) }}><FrameCornersIcon size={22} /></MapFab>
+          <MapFab label={t('mapPage.fabFit')} disabled={!data || !ready} onClick={() => { if (map.current && data) fitEstate(map.current, data, cameras, 300, fitPadding()) }}><FrameCornersIcon size={22} /></MapFab>
           {/* Zoom with a glove on: pinching through a glove, or with one hand on a
               rifle, doesn't work. */}
-          <MapFab label="Zoom in" disabled={!ready} onClick={() => map.current?.zoomIn({ duration: 250 })}><PlusIcon size={22} weight="bold" /></MapFab>
-          <MapFab label="Zoom out" disabled={!ready} onClick={() => map.current?.zoomOut({ duration: 250 })}><MinusIcon size={22} weight="bold" /></MapFab>
+          <MapFab label={t('lb.zoomIn')} disabled={!ready} onClick={() => map.current?.zoomIn({ duration: 250 })}><PlusIcon size={22} weight="bold" /></MapFab>
+          <MapFab label={t('mapPage.zoomOut')} disabled={!ready} onClick={() => map.current?.zoomOut({ duration: 250 })}><MinusIcon size={22} weight="bold" /></MapFab>
         </div>}
         {!editing && <div className="map-fabs map-fabs--left">
-          {me.message && <div className="map-pill map-pill--side" role="status"><span>{me.message}</span><button type="button" aria-label="Dismiss" onClick={me.clearMessage}>OK</button></div>}
-          <MapFab label={measure.on ? 'Stop measuring' : 'Measure a distance'} pressed={measure.on} onClick={() => { measure.toggle(); closeSheet() }}><RulerIcon size={22} /></MapFab>
-          <MapFab label={me.on ? 'Hide where I am' : 'Show where I am'} pressed={me.on} onClick={me.toggle}><NavigationArrowIcon size={22} /></MapFab>
+          {me.message && <div className="map-pill map-pill--side" role="status"><span>{me.message}</span><button type="button" aria-label={t('mapPage.dismiss')} onClick={me.clearMessage}>{t('common.ok')}</button></div>}
+          <MapFab label={measure.on ? t('msheet.stopMeasure') : t('mapPage.measureDistance')} pressed={measure.on} onClick={() => { measure.toggle(); closeSheet() }}><RulerIcon size={22} /></MapFab>
+          <MapFab label={me.on ? t('msheet.hideMe') : t('msheet.showMe')} pressed={me.on} onClick={me.toggle}><NavigationArrowIcon size={22} /></MapFab>
         </div>}
         {editing && <Crosshair editing={editing} center={center} />}
 
         {sheet && <BottomSheet
-          label={sheet === 'settings' ? 'Map settings' : sheet === 'pick' ? 'Which one?' : stand ? `Stand: ${stand.name}` : camera ? `Camera: ${camera.name}` : `Bedding: ${zone?.name}`}
+          label={sheet === 'settings' ? t('mapPage.settingsSheet') : sheet === 'pick' ? t('map.whichOne') : stand ? t('mapPage.standPin', { name: stand.name }) : camera ? t('pin.camera', { name: camera.name }) : t('mapPage.beddingSheet', { name: zone?.name ?? '' })}
           snap={snap} onSnap={setSnap} onClose={closeSheet} onHeight={onSheetHeight}
           returnFocus={() => selected ? mapEl.current?.querySelector(`.map-pin[data-kind="${selected.kind}"][data-id="${selected.id}"]`) : null}
           focusKey={sheet === 'settings' ? 'settings' : `${sheet}-${selKey}`}
-          header={sheet === 'settings' ? <><span className="map-eyebrow">Map</span><h2 className="bsheet-name">How the map looks</h2></>
+          header={sheet === 'settings' ? <><span className="map-eyebrow">{t('nav.map')}</span><h2 className="bsheet-name">{t('mapPage.howLooks')}</h2></>
             : sheet === 'pick' ? <PickHeader count={pick!.length} />
               : stand ? <StandHeader stand={stand} /> : camera ? <CameraHeader camera={camera} /> : zone ? <ZoneHeader zone={zone} /> : null}>
           {sheet === 'settings' && <MapSheet view={view} onView={setView} prefs={prefs} onPrefs={setPrefs} onRetryBase={() => { if (fallbackFrom || tileErr) retryTiles() }} zoom={zoom} baseNote={baseNote}
-            catastroNote={catastroErr ? 'Property lines aren’t loading right now. Check the signal.' : null}
+            catastroNote={catastroErr ? t('mapPage.catastroErr') : null}
             admin={admin} measuring={measure.on} meOn={me.on}
             onMeasure={() => { measure.toggle(); closeSheet() }} onMe={() => { me.toggle(); closeSheet() }}
             onAddStand={() => startEdit({ kind: 'stand', name: '' })}
-            onDrawBedding={() => { setSelected(null); startEdit({ kind: 'zone', name: `Bedding ${(data?.zones.length ?? 0) + 1}` }) }}
+            onDrawBedding={() => { setSelected(null); startEdit({ kind: 'zone', name: t('mapPage.beddingN', { n: (data?.zones.length ?? 0) + 1 }) }) }}
             onPlace={u => { setSelected({ kind: u.kind, id: u.id }); startEdit({ kind: u.kind, id: u.id, name: u.name }) }}
             unplaced={unplaced}
             terrain={{ needed: !!data && !data.terrain_loaded, outside: data?.terrain_outside ?? [], busy: terrainBusy, err: terrainErr, onLoad: loadTerrain }}

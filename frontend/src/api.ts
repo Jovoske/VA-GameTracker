@@ -1,3 +1,4 @@
+import { type Lang, ago, fmtDate, fmtTime, fmtWeekday, isLang, lang, setLanguage, t } from './i18n'
 import { forgetThisDevice } from './push'
 
 const TOKEN_KEY = 'gs_token'
@@ -211,15 +212,16 @@ export function thumbUrl(imageId: string): string {
 }
 
 /** What a hunter reads instead of the browser's own "Failed to fetch" or "Load failed". */
-export const NO_SIGNAL = 'No signal. Try again when you have a connection.'
-export const NO_ANSWER = 'No answer from the server.'
-export const SERVER_DOWN = 'The server isn’t answering. Try again in a minute.'
+const noSignal = () => t('api.noSignal')
+const noAnswerYet = () => t('api.noAnswer')
 
 /** How long a page waits for a GET before it goes with what the phone has saved. */
 export const GET_TIMEOUT_MS = 15_000
 
 type Options = RequestInit & { timeoutMs?: number }
-export type Failure = Error & { status?: number; offline?: boolean; timeout?: boolean }
+/** `code`: the server's own name for a refusal, when it gives one: the words in the
+ *  message are in the hunter's language, so a page never tells refusals apart by them. */
+export type Failure = Error & { status?: number; offline?: boolean; timeout?: boolean; signedOut?: boolean; code?: string }
 
 /**
  * `timeoutMs` gives up on a request that never answers, which on a valley
@@ -232,6 +234,8 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
   const { timeoutMs, ...init } = options
   const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
+  // The server answers in the language on screen: its reasons, the plan's lines.
+  headers.set('Accept-Language', lang())
   // Signing in never carries the old sign-in: a wrong password there is a wrong
   // password, not a session that ran out (audit D-16).
   const token = path === LOGIN_PATH ? null : getToken()
@@ -249,13 +253,13 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
   // The body is read inside the same guard: a connection can stall halfway through it.
   const guard = async <R,>(work: () => Promise<R>): Promise<R> => {
     try { return await work() } catch (e) {
-      if (timedOut) throw Object.assign(new Error(NO_ANSWER), { timeout: true })
+      if (timedOut) throw Object.assign(new Error(noAnswerYet()), { timeout: true })
       if ((e as Error).name === 'AbortError' || outer?.aborted) throw e
       // fetch reports a dropped connection as a bare TypeError; anything else is real.
-      if (e instanceof TypeError) throw Object.assign(new Error(NO_SIGNAL), { offline: true })
+      if (e instanceof TypeError) throw Object.assign(new Error(noSignal()), { offline: true })
       // A 200 that isn't JSON is a page from something in the way (a hotspot's
       // sign-in page, an old app shell), not an answer.
-      if (e instanceof SyntaxError) throw new Error('The server’s answer didn’t make sense. Reload the app.')
+      if (e instanceof SyntaxError) throw new Error(t('api.nonsense'))
       throw e
     }
   }
@@ -280,14 +284,15 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
         // Back to this page after signing in again: the photo an alert opened, not Tonight (D-10).
         window.location.assign(loginPath(window.location.pathname + window.location.search, true))
       }
-      throw new Error('You were signed out. Sign in again.')
+      throw Object.assign(new Error(t('api.signedOut')), { signedOut: true })
     }
 
     if (!resp.ok) {
       const body = await guard(() => resp.json()).catch(() => ({}))
       // The service worker's "nothing saved for this yet" is no signal, not a server fault.
-      if (body?.offline) throw Object.assign(new Error(NO_SIGNAL), { offline: true, status: resp.status })
-      throw Object.assign(new Error(detailText(body?.detail, resp.status)), { status: resp.status })
+      if (body?.offline) throw Object.assign(new Error(noSignal()), { offline: true, status: resp.status })
+      const code = typeof body?.code === 'string' ? body.code : typeof body?.detail?.code === 'string' ? body.detail.code : undefined
+      throw Object.assign(new Error(detailText(body?.detail?.message ?? body?.detail, resp.status)), { status: resp.status, code })
     }
     // DELETEs answer 204 with no body — resp.json() on that rejects and the caller
     // never gets to refresh, which reads as "the button did nothing".
@@ -304,13 +309,13 @@ function detailText(detail: unknown, status: number): string {
   if (typeof detail === 'string' && detail) return detail
   if (Array.isArray(detail)) {
     const first = detail.find((d) => d && typeof d.msg === 'string')
-    if (first) return `That wasn’t accepted: ${String(first.msg).replace(/^Value error, /, '')}`
+    if (first) return t('api.notAccepted', { why: String(first.msg).replace(/^Value error, /, '') })
   }
-  if (status >= 500) return SERVER_DOWN
-  if (status === 403) return 'Only the estate admin can do that.'
-  if (status === 404) return 'That isn’t on the app any more. Go back and look again.'
+  if (status >= 500) return t('api.serverDown')
+  if (status === 403) return t('api.adminOnly')
+  if (status === 404) return t('api.gone')
   // The status rides along so a caller can say something specific about a 409.
-  return `Something went wrong (${status})`
+  return t('api.wentWrong', { status })
 }
 
 export async function api<T>(path: string, options: Options = {}): Promise<T> {
@@ -332,7 +337,7 @@ export function noAnswer(e: unknown): StaleWhy | null {
 
 /** The first words of a line about a saved copy: "No signal." */
 export function noAnswerWords(why: StaleWhy | null | undefined): string {
-  return why === 'server' ? 'Can’t reach the server.' : why === 'timeout' ? 'No answer from the server.' : 'No signal.'
+  return why === 'server' ? t('api.cantReach') : why === 'timeout' ? t('api.noAnswer') : t('api.noSignalShort')
 }
 
 /**
@@ -503,13 +508,9 @@ export async function getFresh<T>(
 
 export { fromEarlierNight, nightBefore, nightOf } from './night'
 
+/** "just now", "5 min ago", "3 h ago", "2 d ago", in the language on screen. */
 export function ageLabel(iso: string): string {
-  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))
-  if (mins < 2) return 'just now'
-  if (mins < 60) return `${mins} min ago`
-  const hrs = Math.round(mins / 60)
-  if (hrs < 24) return `${hrs} h ago`
-  return `${Math.round(hrs / 24)} d ago`
+  return ago(iso)
 }
 
 /** A server's reason without its technical detail: "The animal detector could not
@@ -524,17 +525,18 @@ export function plainWords(text: string): string {
   return t.replace(/\s+([.,;:])/g, '$1').trim()
 }
 
-/** "21:40" today, "Tue 21:40" this week, "4 Sep 21:40" before that. */
+/** "21:40" today, "Tue 21:40" this week, "4 Sept 21:40" before that. */
 export function whenLabel(iso: string): string {
   const d = new Date(iso)
-  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const time = fmtTime(d)
   const days = (Date.now() - d.getTime()) / 86_400_000
   if (d.toDateString() === new Date().toDateString()) return time
-  if (days < 6) return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
-  return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`
+  if (days < 6) return `${fmtWeekday(d)} ${time}`
+  return `${fmtDate(d, { day: 'numeric', month: 'short' })} ${time}`
 }
 
-export type Me = { id: string; email: string; role: 'admin' | 'member' | 'viewer' }
+/** `language`: what the person chose, on any phone; null before anyone chose. */
+export type Me = { id: string; email: string; role: 'admin' | 'member' | 'viewer'; language?: string | null }
 let meCache: { token: string | null; at: number; p: Promise<Me> } | null = null
 let meKnown: { token: string | null; me: Me } | null = null
 
@@ -552,6 +554,7 @@ export function whoAmI(): Promise<Me> {
     (me) => {
       meKnown = { token, me }
       try { localStorage.setItem(ME_KEY, JSON.stringify({ token, me })) } catch { /* private mode */ }
+      followLanguage(me)
       return me
     },
     (e) => {
@@ -637,4 +640,71 @@ export async function changePassword(current: string, next: string): Promise<str
   renewToken(r.access_token)
   setImagePass(r.image_token)
   return r.note
+}
+
+/**
+ * The language, chosen in Settings or on the sign-in page: on screen at once, kept
+ * on this phone, and saved to the person on the server so every phone they sign in
+ * on speaks it (and the server's own words come in it). With no signal, or before
+ * signing in, it waits on the phone and goes the next time the app hears who is
+ * signed in. 'saved' when the server has it, 'phone' when only this phone does.
+ */
+const LANG_PENDING_KEY = 'gs_lang_pending'
+
+/** The language this phone chose and the server hasn't confirmed yet, if any. */
+function pendingLanguage(): Lang | null {
+  try {
+    const code = localStorage.getItem(LANG_PENDING_KEY)
+    return isLang(code) ? code : null
+  } catch {
+    return null
+  }
+}
+
+function markPending(code: Lang | null): void {
+  try {
+    if (code) localStorage.setItem(LANG_PENDING_KEY, code)
+    else localStorage.removeItem(LANG_PENDING_KEY)
+  } catch {
+    /* private mode: the choice still shows, it just isn't retried */
+  }
+}
+
+// One at a time, in the order they were chosen, so the server keeps the last one
+// even when an earlier answer is slow.
+let sending: Promise<unknown> = Promise.resolve()
+
+function sendLanguage(code: Lang): Promise<boolean> {
+  if (!getToken()) return Promise.resolve(false)
+  const run = sending.then(async () => {
+    try {
+      await api('/auth/me', { method: 'PATCH', body: JSON.stringify({ language: code }), timeoutMs: 15_000 })
+    } catch {
+      return false
+    }
+    // Still the one wanted (a later choice waits its turn behind this one).
+    if (pendingLanguage() === code) markPending(null)
+    if (meKnown) meKnown = { ...meKnown, me: { ...meKnown.me, language: code } }
+    return true
+  })
+  sending = run.catch(() => false)
+  return run
+}
+
+export async function chooseLanguage(code: Lang): Promise<'saved' | 'phone'> {
+  markPending(code)
+  await setLanguage(code)
+  return (await sendLanguage(code)) ? 'saved' : 'phone'
+}
+
+/** Who is signed in said which language they chose: that one, unless this phone has
+ *  a choice of its own still to send, which goes now. */
+function followLanguage(me: Me): void {
+  const mine = pendingLanguage()
+  if (mine) {
+    if (me.language === mine) markPending(null)
+    else void sendLanguage(mine)
+    return
+  }
+  if (isLang(me.language) && me.language !== lang()) void setLanguage(me.language).catch(() => {})
 }

@@ -7,6 +7,7 @@ import type { PhotoFix } from '../components/PhotoFix'
 import PhotoLightbox, { morePhotosFailed } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
+import { type Key, cap, fmtDate, t, tn } from '../i18n'
 import { nightBefore, nightOf, whenSeen } from '../night'
 import './animals.css'
 
@@ -52,26 +53,28 @@ type Animal = {
   thumb_image_id: string | null
 }
 
-const fmt = (s: string | null) =>
-  s ? new Date(s).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'never'
+const fmt = (s: string | null) => (s ? fmtDate(s, { month: 'short', day: 'numeric' }) : t('cameras.never'))
 
 /** "Seen last night", "Seen Tuesday night", "Last seen 3 Sep": nights as Photos files
  *  them, not 24-hour spans (audit C-14). */
 function lastSeen(s: string | null): string {
-  if (!s) return 'Not seen yet'
+  if (!s) return t('animals.notSeen')
   const thisWeek = nightOf(s) > nightBefore(nightOf(Date.now()), 7)
-  return `${thisWeek ? 'Seen' : 'Last seen'} ${whenSeen(s)}`
+  return thisWeek ? t('animals.seen', { when: whenSeen(s) }) : t('animals.lastSeen', { when: whenSeen(s) })
 }
+
+/** "3 repeat visitors", the count in bold. */
+const tnRepeat = (n: number) => tn('animals.repeatVisitors', { n: <b className="an-strong">{n}</b> }, { count: n })
 
 /** "Wild boar #3": the name "Look for repeats" gives; anything else a hunter chose. */
 const autoName = (label: string) => /^.+ #\d+$/.test(label.trim())
 
 /** A refusal or a lost signal, in plain words, and what didn't happen. */
-function failedWords(e: unknown, what: string): string {
+function failedWords(e: unknown, what: Key): string {
   const x = e as Failure
-  if (x.offline) return `No signal, so ${what}. Try again when you have a connection.`
-  if (x.timeout) return `No answer from the server, so ${what}. Try again.`
-  return `${what[0].toUpperCase()}${what.slice(1)}. ${x.message}`
+  if (x.offline) return t('book.failNoSignal', { what: t(what) })
+  if (x.timeout) return t('book.failTimeout', { what: t(what) })
+  return t('animals.failed', { what: cap(t(what)), why: x.message })
 }
 
 // Counting every sighting is slower than a page on the estate box, but never forever.
@@ -170,7 +173,7 @@ export default function Animals() {
       setGalleryImgs(page.items)
       setGalleryNext(cursorOf(page))
     } catch {
-      if (request === galleryRequest.current) setGalleryErr('Photos did not load. Check your signal and try again.')
+      if (request === galleryRequest.current) setGalleryErr(t('animals.photosDidntLoad'))
     }
   }
 
@@ -274,7 +277,7 @@ export default function Animals() {
     if (!naming || naming.saving) return
     const name = naming.draft.replace(/\s+/g, ' ').trim()
     const a = items.find((x) => x.id === naming.id)
-    if (!name) { setNaming({ ...naming, err: 'Type a name first.' }); return }
+    if (!name) { setNaming({ ...naming, err: t('cameras.typeName') }); return }
     if (!a || name === a.label) { setNaming(null); return }
     setNaming({ ...naming, saving: true, err: '' })
     try {
@@ -282,7 +285,7 @@ export default function Animals() {
       setItems((xs) => xs.map((x) => (x.id === a.id ? { ...x, label: r.label, confirmed: true } : x)))
       setNaming(null)
     } catch (e) {
-      setNaming((n) => n && { ...n, saving: false, err: failedWords(e, 'the name wasn’t saved') })
+      setNaming((n) => n && { ...n, saving: false, err: failedWords(e, 'animals.what.name') })
     }
   }
 
@@ -298,7 +301,7 @@ export default function Animals() {
     setAskName(null)
     const pool = chosen.filter((a) => (keep ? a.label === keep : !autoName(a.label)))
     const target = (pool.length ? pool : chosen).reduce((a, b) => (b.sightings > a.sightings ? b : a))
-    setBusy('Merging…')
+    setBusy('merge')
     setErr('')
     try {
       await api('/animals/merge', {
@@ -313,20 +316,20 @@ export default function Animals() {
       setSel(new Set())
       load()
     } catch (e) {
-      setErr(failedWords(e, 'they weren’t merged'))
+      setErr(failedWords(e, 'animals.what.merged'))
     } finally {
       setBusy('')
     }
   }
 
   async function confirmSelected() {
-    setBusy('Confirming…')
+    setBusy('confirm')
     try {
       for (const id of sel) await api(`/animals/${id}/confirm`, { method: 'POST' })
       setSel(new Set())
       load()
     } catch (e) {
-      setErr(failedWords(e, 'they weren’t confirmed'))
+      setErr(failedWords(e, 'animals.what.confirmed'))
     } finally {
       setBusy('')
     }
@@ -351,21 +354,21 @@ export default function Animals() {
       } catch {
         continue // no signal for a moment: keep following it
       }
-      if (s.state === 'waiting') setRepeatMsg('Waiting for the photo check to finish, then looking…')
-      else if (s.state === 'queued' || s.state === 'running') setRepeatMsg('Looking for repeat visitors… This takes a few minutes.')
+      if (s.state === 'waiting') setRepeatMsg(t('animals.waitingCheck'))
+      else if (s.state === 'queued' || s.state === 'running') setRepeatMsg(t('animals.lookingFew'))
       else {
         following.current = false
         setBusy('')
         if (s.state === 'done') {
           const n = s.result?.new_candidates ?? 0
-          const more = s.result?.still_to_embed ? ' Some older photos are still to go: tap again later.' : ''
-          setRepeatMsg(`Done. ${n} possible repeat visitor${n === 1 ? '' : 's'} to look at.${more}`)
+          const more = s.result?.still_to_embed ? ` ${t('animals.olderToGo')}` : ''
+          setRepeatMsg(`${t('animals.done', { count: n })}${more}`)
           setSel(new Set())
           load()
         } else {
           // The technical detail (in brackets) is for the server's log, not this line.
           const why = (s.error ?? '').replace(/\s*\([^)]*\)/g, '')
-          setRepeatMsg(`It stopped before finishing. ${why} Try again later.`.replace(/\s+/g, ' ').trim())
+          setRepeatMsg(t('animals.stopped', { why }).replace(/\s+/g, ' ').trim())
         }
         return
       }
@@ -373,34 +376,34 @@ export default function Animals() {
     if (following.current) {
       following.current = false
       setBusy('')
-      setRepeatMsg('Still going on the server. Come back to this page later.')
+      setRepeatMsg(t('animals.stillGoing'))
     }
   }
 
   async function recompute() {
-    setBusy('Looking…')
+    setBusy('look')
     setErr('')
     try {
       const r = await api<{ status: string; note?: string }>('/animals/recompute', { method: 'POST' })
-      setRepeatMsg(r.note ?? 'Looking for repeat visitors…')
+      setRepeatMsg(r.note ?? t('animals.looking'))
       void followRepeats()
     } catch (e) {
-      setErr(failedWords(e, 'it didn’t start'))
+      setErr(failedWords(e, 'animals.what.start'))
       setBusy('')
     }
   }
 
   return (
     <div className="an-page">
-      <h1 className="page-title">Animals</h1>
+      <h1 className="page-title">{t('nav.animals')}</h1>
 
       {/* ── On your cameras ──────────────────────────────── */}
       <div className="card an-species-card">
-        <h2 className="sect">On your cameras</h2>
-        {spErr && <div role="alert" className="an-error">Animals did not load. {spErr}<button className="text-action" onClick={loadSpecies}>Try again</button></div>}
-        {spLoading && <div role="status" className="an-dim">Loading…</div>}
+        <h2 className="sect">{t('animals.onCameras')}</h2>
+        {spErr && <div role="alert" className="an-error">{t('animals.didntLoad', { why: spErr })}<button className="text-action" onClick={loadSpecies}>{t('common.tryAgain')}</button></div>}
+        {spLoading && <div role="status" className="an-dim">{t('common.loading')}</div>}
         {!spLoading && !spErr && species.length === 0 && (
-          <div className="an-dim">No animals on camera yet.</div>
+          <div className="an-dim">{t('animals.none')}</div>
         )}
         {species.map((sp) => (
           <div key={sp.id} className="an-species-row">
@@ -410,7 +413,7 @@ export default function Animals() {
               tabIndex={0}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
               onClick={() => openGallery(sp, null)}
-              title={`All ${sp.name} photos`}
+              title={t('animals.allPhotos', { name: sp.name })}
             >
               {sp.thumb_image_id && (
                 <img
@@ -424,11 +427,11 @@ export default function Animals() {
               <div
                 className="an-species-head"
                 onClick={() => openGallery(sp, null)}
-                title={`All ${sp.name} photos`}
+                title={t('animals.allPhotos', { name: sp.name })}
               >
                 <span className="an-species-name">{sp.name}</span>
                 <span className="an-species-meta">
-                  {lastSeen(sp.last_seen)} · {sp.count} photo{sp.count === 1 ? '' : 's'}
+                  {lastSeen(sp.last_seen)} · {t('common.photos', { count: sp.count })}
                 </span>
               </div>
               {sp.classes.length > 1 && (
@@ -438,7 +441,7 @@ export default function Animals() {
                       key={cl.label}
                       className="an-chip"
                       onClick={() => openGallery(sp, cl.label)}
-                      title={`${cl.label} photos`}
+                      title={t('insights.classPhotos', { label: cl.label })}
                     >
                       {cl.label} <span className="an-dim">{cl.count}</span>
                     </button>
@@ -459,27 +462,25 @@ export default function Animals() {
 
       {/* ── Named animals (experimental) ─────────────────── */}
       <details className="an-fold">
-        <summary>Named animals <span className="an-dim">(experimental)</span></summary>
+        <summary>{t('animals.named')} <span className="an-dim">{t('animals.experimental')}</span></summary>
 
         <div className="an-fold-body">
           <p className="an-fold-note">
-            {admin
-              ? 'Matching is rough. Pick the sightings you know are the same animal and tap Merge.'
-              : 'Matching is rough. Only an admin can merge or confirm them.'}
+            {admin ? t('animals.roughAdmin') : t('animals.rough')}
           </p>
 
           <div className="an-toolbar">
             <span className="an-dim">
-              <b className="an-strong">{grouped.length}</b> repeat visitor{grouped.length === 1 ? '' : 's'}
+              {tnRepeat(grouped.length)}
             </span>
             {items.length > 0 && (
               <button onClick={() => setShowAll((v) => !v)} className="an-btn" aria-pressed={showAll}>
-                {showAll ? 'Repeat visitors only' : `Show all ${items.length}`}
+                {showAll ? t('animals.repeatOnly') : t('animals.showAll', { n: items.length })}
               </button>
             )}
             {admin && (
-              <button onClick={recompute} disabled={!!busy} className="an-btn an-btn--right" title="Scan new photos for repeat visitors">
-                {busy === 'Looking…' ? 'Looking…' : 'Look for repeats'}
+              <button onClick={recompute} disabled={!!busy} className="an-btn an-btn--right" title={t('animals.scanTitle')}>
+                {busy === 'look' ? t('animals.lookingShort') : t('animals.lookRepeats')}
               </button>
             )}
           </div>
@@ -489,24 +490,24 @@ export default function Animals() {
 
           {admin && sel.size > 0 && (
             <div className="card an-selbar">
-              <span>{sel.size} picked</span>
+              <span>{t('animals.picked', { n: sel.size })}</span>
               <button onClick={() => mergeSelected()} disabled={sel.size < 2 || !!busy} className="an-btn" style={{ opacity: sel.size < 2 ? 0.4 : 1 }}>
-                Merge
+                {t('animals.merge')}
               </button>
-              <button onClick={confirmSelected} disabled={!!busy} className="an-btn">Confirm</button>
+              <button onClick={confirmSelected} disabled={!!busy} className="an-btn">{t('animals.confirm')}</button>
               {sel.size === 1 && (() => {
                 const one = items.find((a) => sel.has(a.id))
                 return one && (
                   <button className="an-btn" disabled={!!busy || naming?.id === one.id}
                     onClick={() => setNaming({ id: one.id, draft: one.label, saving: false, err: '' })}>
-                    Name
+                    {t('animals.name')}
                   </button>
                 )
               })()}
-              <button onClick={() => { setSel(new Set()); setAskName(null) }} className="an-btn an-btn--right">Clear</button>
+              <button onClick={() => { setSel(new Set()); setAskName(null) }} className="an-btn an-btn--right">{t('animals.clear')}</button>
               {askName && (
-                <div className="an-askname" role="group" aria-label="Which name to keep?">
-                  <span>They have different names. Keep which?</span>
+                <div className="an-askname" role="group" aria-label={t('animals.whichName')}>
+                  <span>{t('animals.differentNames')}</span>
                   {askName.map((n) => (
                     <button key={n} className="an-btn" disabled={!!busy} onClick={() => mergeSelected(n)}>{n}</button>
                   ))}
@@ -516,14 +517,14 @@ export default function Animals() {
           )}
 
           {loading ? (
-            <div className="an-dim">Loading…</div>
+            <div className="an-dim">{t('common.loading')}</div>
           ) : items.length === 0 ? (
             <div className="card an-empty">
-              {admin ? <>Nothing yet. Tap <b className="an-strong">Look for repeats</b>. It takes a few minutes.</> : 'Nothing yet. An admin looks for repeat visitors.'}
+              {admin ? tn('animals.nothingAdmin', { button: <b className="an-strong">{t('animals.lookRepeats')}</b> }) : t('animals.nothingMember')}
             </div>
           ) : shown.length === 0 ? (
             <div className="an-dim">
-              {admin ? 'No repeat visitors found. Tap Show all to browse single sightings and merge the ones you recognise.' : 'No repeat visitors found. Tap Show all to browse single sightings.'}
+              {admin ? t('animals.noRepeatsAdmin') : t('animals.noRepeats')}
             </div>
           ) : (
             <div className="an-grid">
@@ -547,21 +548,21 @@ export default function Animals() {
                       {admin && <div className="an-animal-check" style={{ background: on ? 'var(--teal)' : 'rgba(0,0,0,.5)' }}>
                         {on ? <CheckIcon size={13} weight="bold" /> : null}
                       </div>}
-                      {a.confirmed && <div className="an-animal-confirmed">confirmed</div>}
-                      {a.sightings >= 2 && <div className="an-animal-count">{a.sightings} visits</div>}
+                      {a.confirmed && <div className="an-animal-confirmed">{t('animals.confirmed')}</div>}
+                      {a.sightings >= 2 && <div className="an-animal-count">{t('common.visits', { count: a.sightings })}</div>}
                     </div>
                     <div className="an-animal-body">
                       {naming?.id === a.id ? (
                         <form className="an-name-form" onClick={(e) => e.stopPropagation()} aria-busy={naming.saving}
                           onSubmit={(e) => { e.preventDefault(); void saveName() }}
                           onKeyDown={(e) => { if (e.key === 'Escape' && !naming.saving) { e.stopPropagation(); setNaming(null) } }}>
-                          <label className="sr-only" htmlFor={`name-${a.id}`}>Name this animal</label>
+                          <label className="sr-only" htmlFor={`name-${a.id}`}>{t('animals.nameThis')}</label>
                           <input id={`name-${a.id}`} className="input" value={naming.draft} maxLength={60} autoFocus
                             disabled={naming.saving} aria-invalid={!!naming.err}
                             onChange={(e) => setNaming({ ...naming, draft: e.target.value, err: '' })} />
                           <div className="an-name-buttons">
-                            <button type="submit" className="an-btn" disabled={naming.saving}>{naming.saving ? 'Saving…' : 'Save'}</button>
-                            <button type="button" className="an-btn" disabled={naming.saving} onClick={() => setNaming(null)}>Cancel</button>
+                            <button type="submit" className="an-btn" disabled={naming.saving}>{naming.saving ? t('common.saving') : t('common.save')}</button>
+                            <button type="button" className="an-btn" disabled={naming.saving} onClick={() => setNaming(null)}>{t('common.cancel')}</button>
                           </div>
                           {naming.err && <p className="an-error" role="alert">{naming.err}</p>}
                         </form>
@@ -573,7 +574,7 @@ export default function Animals() {
                         <div className="an-animal-name">{a.label}</div>
                       )}
                       <div className="an-animal-meta">
-                        {fmt(a.first_seen)}{a.last_seen !== a.first_seen ? ` to ${fmt(a.last_seen)}` : ''} · {a.cameras} camera{a.cameras === 1 ? '' : 's'}
+                        {a.last_seen !== a.first_seen ? t('tonight.fromTo', { from: fmt(a.first_seen), to: fmt(a.last_seen) }) : fmt(a.first_seen)} · {t('animals.cameras', { count: a.cameras })}
                       </div>
                     </div>
                   </div>
@@ -586,7 +587,7 @@ export default function Animals() {
 
       {/* ── Species photo gallery ─────────────────────────── */}
       {gallery && (
-        <Overlay onClose={closeGallery} label={`${gallery.sp.name} photos`} backLabel="Back to animals">{(close) => (
+        <Overlay onClose={closeGallery} label={t('insights.classPhotos', { label: gallery.sp.name })} backLabel={t('animals.back')}>{(close) => (
           <div
             onClick={(e) => e.stopPropagation()}
             className="card ov-panel an-gallery"
@@ -597,11 +598,11 @@ export default function Animals() {
                 {(() => {
                   // The whole count, as the chip says it, not only what has loaded.
                   const n = gallery.label ? gallery.sp.classes.find((c) => c.label === gallery.label)?.count : gallery.sp.count
-                  return n != null ? `${n} photo${n === 1 ? '' : 's'}` : galleryImgs ? '' : 'loading…'
+                  return n != null ? t('common.photos', { count: n }) : galleryImgs ? '' : t('insights.loadingLower')
                 })()}
               </span>
               <button onClick={close} className="an-btn an-btn--right">
-                Close
+                {t('common.close')}
               </button>
               {gallery.sp.classes.length > 1 && (
                 <div className="an-chips an-chips--full">
@@ -609,7 +610,7 @@ export default function Animals() {
                     onClick={() => openGallery(gallery.sp, null)}
                     className={`an-chip${gallery.label === null ? ' an-chip--on' : ''}`}
                   >
-                    All {gallery.sp.count}
+                    {t('animals.allN', { n: gallery.sp.count })}
                   </button>
                   {gallery.sp.classes.map((cl) => (
                     <button
@@ -624,10 +625,10 @@ export default function Animals() {
               )}
             </div>
             <div className="an-gallery-body" ref={galleryBody}>
-              {galleryErr && <div className="status-panel" role="alert">{galleryErr}<button className="text-action" onClick={() => openGallery(gallery.sp, gallery.label)}>Try again</button></div>}
-              {!galleryImgs && !galleryErr && <div role="status" className="an-dim an-gallery-status">Loading photos…</div>}
+              {galleryErr && <div className="status-panel" role="alert">{galleryErr}<button className="text-action" onClick={() => openGallery(gallery.sp, gallery.label)}>{t('common.tryAgain')}</button></div>}
+              {!galleryImgs && !galleryErr && <div role="status" className="an-dim an-gallery-status">{t('photos.loading')}</div>}
               {galleryImgs && galleryImgs.length === 0 && (
-                <div className="an-dim an-gallery-status">No photos.</div>
+                <div className="an-dim an-gallery-status">{t('animals.noPhotos')}</div>
               )}
               <div className="an-gallery-grid">
                 {galleryImgs?.map((im, i) => (
@@ -644,7 +645,7 @@ export default function Animals() {
                     <div className="an-gallery-caption">
                       <span className="an-gallery-label">{im.label}</span>
                       <span className="an-gallery-date">
-                        {new Date(im.captured_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                        {fmtDate(im.captured_at, { month: 'short', day: 'numeric' })}
                       </span>
                     </div>
                   </div>
@@ -654,7 +655,7 @@ export default function Animals() {
               {galleryMoreErr && galleryNext && !galleryMore && <div className="status-panel" role="alert">{galleryMoreErr}</div>}
               {galleryNext && (
                 <button className="text-action an-gallery-more" onClick={moreGallery} disabled={galleryMore}>
-                  {galleryMore ? 'Loading…' : 'Show older photos'}
+                  {galleryMore ? t('common.loading') : t('photos.older')}
                 </button>
               )}
             </div>
@@ -670,7 +671,7 @@ export default function Animals() {
             notes_count: im.notes_count, species_id: im.species_id, fixed_by: im.fixed_by,
           }))}
           start={zoom}
-          backLabel="Back to gallery"
+          backLabel={t('insights.backGallery')}
           zIndex={60}
           onClose={closeViewer}
           onNotesChange={(id, n) => setGalleryImgs((imgs) => imgs && imgs.map((im) => (im.image_id === id ? { ...im, notes_count: n } : im)))}

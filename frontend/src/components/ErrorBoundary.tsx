@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode, useEffect, useState } from '
 import { Link, useRouteError } from 'react-router-dom'
 import { forgetSaved } from '../api'
 import { type ReloadResult, isChunkError, isReloading, reloadOnce, reportCrash } from '../crash'
+import { type Key, t, useLang } from '../i18n'
 
 /**
  * The app never goes blank.
@@ -51,6 +52,8 @@ export class PageBoundary extends Component<{ resetKey: string; children: ReactN
 /** For the router: a crash outside any page (the frame, the sign-in screen, Sit mode). */
 export function RouteCrash() {
   const error = useRouteError()
+  // Outside App, so it follows the language itself.
+  useLang()
   const [why, setWhy] = useState<Why>(() => (isChunkError(error) ? 'checking' : null))
   // The router caught it, so the window never saw it: report it here.
   useEffect(() => {
@@ -67,27 +70,27 @@ export function RouteCrash() {
   )
 }
 
-const CHUNK_WORDS: Record<string, string> = {
-  checking: 'Getting the latest version of the app…',
-  reloading: 'Getting the latest version of the app…',
-  'no-signal': 'No signal, and this page isn’t saved on the phone yet. It opens once you have signal.',
-  server: 'Can’t reach the server, and this page isn’t saved on the phone yet. It opens once the server is back.',
-  recent: 'The app was just updated and this page still didn’t load. Reload to try again.',
+const CHUNK_WORDS: Record<string, Key> = {
+  checking: 'crash.gettingLatest',
+  reloading: 'crash.gettingLatest',
+  'no-signal': 'crash.noSignal',
+  server: 'crash.server',
+  recent: 'crash.recent',
 }
 
 export function Crashed({ error, why = null, onRetry }: { error: unknown; why?: Why; onRetry?: () => void }) {
-  if (isReloading()) return <div className="status-panel" role="status">Opening the new version…</div>
+  if (isReloading()) return <div className="status-panel" role="status">{t('crash.opening')}</div>
   const chunk = isChunkError(error)
   return (
     <div className="crashed" role="alert">
-      <h1 className="crashed-title">{chunk ? 'This page didn’t load.' : 'Something broke.'}</h1>
+      <h1 className="crashed-title">{chunk ? t('crash.pageDidntLoad') : t('crash.broke')}</h1>
       <p className="crashed-text">
-        {chunk ? CHUNK_WORDS[why ?? 'recent'] : 'It has been reported. Reload to carry on.'}
+        {chunk ? t(CHUNK_WORDS[why ?? 'recent']) : t('crash.reported')}
       </p>
       <button type="button" className="btn crashed-reload" onClick={() => location.reload()}>
-        Reload
+        {t('common.reload')}
       </button>
-      <Link className="text-action crashed-home" to="/" onClick={onRetry}>Go to Tonight</Link>
+      <Link className="text-action crashed-home" to="/" onClick={onRetry}>{t('crash.goTonight')}</Link>
     </div>
   )
 }

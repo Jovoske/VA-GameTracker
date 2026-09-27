@@ -2,6 +2,7 @@ import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { XIcon } from '@phosphor-icons/react/dist/csr/X'
 import { useEffect, useRef, useState } from 'react'
 import { api, type Failure } from '../api'
+import { type Key, cap, t } from '../i18n'
 
 /**
  * "Wrong?" in the photo viewer: say what the animal really is, or that there is
@@ -62,11 +63,11 @@ export function resetChoices(): void {
   lastChoices = null
 }
 
-function failed(e: unknown, what: string): string {
+function failed(e: unknown, what: Key): string {
   const x = e as Failure
-  if (x.offline) return `No signal, so ${what}. Try again when you have a connection.`
-  if (x.timeout) return `No answer from the server, so ${what}. Try again.`
-  return `${x.message || 'Something went wrong.'} ${what[0].toUpperCase()}${what.slice(1)}.`
+  if (x.offline) return t('book.failNoSignal', { what: t(what) })
+  if (x.timeout) return t('book.failTimeout', { what: t(what) })
+  return t('harvest.failOther', { reason: x.message || t('common.wentWrong'), what: cap(t(what)) })
 }
 
 /** Say the photo shows `speciesId`. */
@@ -121,7 +122,7 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
     setLoadErr('')
     loadChoices()
       .then((c) => { if (live.current && !busyRef.current) setList(c) })
-      .catch((e) => { if (live.current && !lastChoices) setLoadErr(failed(e, 'the list of animals didn’t load')) })
+      .catch((e) => { if (live.current && !lastChoices) setLoadErr(failed(e, 'harvest.what.list')) })
   }
   useEffect(() => {
     live.current = true
@@ -193,7 +194,7 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
       let fix: Saved
       if (choice === 'nothing') {
         await markEmpty(imageId, true)
-        fix = { label: 'Nothing here', species_id: null, empty: true, hidden: false, fixed_by: null, visit: [] }
+        fix = { label: t('fix.nothingHere'), species_id: null, empty: true, hidden: false, fixed_by: null, visit: [] }
       } else {
         fix = await fixSpecies(imageId, choice)
       }
@@ -201,7 +202,7 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
       finish(() => onFixed(fix, choice))
     } catch (e) {
       if (!live.current) return
-      setErr(failed(e, 'it wasn’t changed'))
+      setErr(failed(e, 'fix.what.notChanged'))
       setBusy(null)
     }
   }
@@ -211,31 +212,31 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
   return (
     <>
       <div className="lb-scrim" aria-hidden="true" onClick={(e) => { e.stopPropagation(); leave() }} onPointerDown={(e) => e.stopPropagation()} />
-      <div ref={root} className="lb-sheet lb-fix" role="dialog" aria-modal="true" aria-label="What is in this photo?" tabIndex={-1}
+      <div ref={root} className="lb-sheet lb-fix" role="dialog" aria-modal="true" aria-label={t('fix.label')} tabIndex={-1}
         onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
         <div className="lb-sheet-head">
           <div className="lb-sheet-title">
-            <h2>What’s in this photo?</h2>
-            <p>Now: {label} · {camera}</p>
+            <h2>{t('fix.title')}</h2>
+            <p>{t('fix.now', { label, camera })}</p>
           </div>
-          <button type="button" className="lb-sheet-x" aria-label="Cancel" onClick={leave} disabled={!!busy}><XIcon size={20} /></button>
+          <button type="button" className="lb-sheet-x" aria-label={t('common.cancel')} onClick={leave} disabled={!!busy}><XIcon size={20} /></button>
         </div>
-        {!list && !loadErr && <p className="lb-sheet-keep" role="status">Loading the animals…</p>}
+        {!list && !loadErr && <p className="lb-sheet-keep" role="status">{t('harvest.loadingAnimals')}</p>}
         {loadErr && (
           <p className="lb-sheet-err" role="alert">{loadErr}{' '}
-            <button type="button" className="lb-notes-link lb-fix-link" onClick={load}>Try again</button>
+            <button type="button" className="lb-notes-link lb-fix-link" onClick={load}>{t('common.tryAgain')}</button>
           </p>
         )}
         {list && (
-          <div className="lb-fix-grid" role="group" aria-label="It’s a…">
+          <div className="lb-fix-grid" role="group" aria-label={t('fix.itsA')}>
             {shown.map((c) => {
               const now = c.id === speciesId && !empty
               return (
                 <button key={c.id} type="button" className="lb-fix-choice" aria-pressed={now} disabled={!!busy}
                   data-species={c.id} onClick={() => choose(c.id)}>
                   {now && <CheckIcon size={16} weight="bold" aria-hidden="true" />}
-                  <span>{busy === c.id ? 'Saving…' : c.name}</span>
-                  {c.hidden && <small>hidden</small>}
+                  <span>{busy === c.id ? t('common.saving') : c.name}</span>
+                  {c.hidden && <small>{t('fix.hidden')}</small>}
                 </button>
               )
             })}
@@ -243,13 +244,13 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
         )}
         {list && rest > 0 && (
           <button type="button" className="lb-fix-more" aria-expanded={more} onClick={() => setMore((m) => !m)} disabled={!!busy}>
-            {more ? 'Fewer animals' : `More animals (${rest})`}
+            {more ? t('harvest.fewer') : t('fix.moreN', { n: rest })}
           </button>
         )}
         <button type="button" className="lb-fix-choice lb-fix-nothing" aria-pressed={empty} disabled={!!busy}
           onClick={() => choose('nothing')}>
           {empty && <CheckIcon size={16} weight="bold" aria-hidden="true" />}
-          <span>{busy === 'nothing' ? 'Saving…' : 'Nothing here (a false alarm)'}</span>
+          <span>{busy === 'nothing' ? t('common.saving') : t('fix.nothingFalse')}</span>
         </button>
         {err && <p className="lb-sheet-err" role="alert">{err}</p>}
       </div>

@@ -2,6 +2,7 @@ import type maplibregl from 'maplibre-gl'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { t } from '../i18n'
 import { DEFAULT_FILTERS, PARTS, PERIODS, activityPath, drawActivity, type Activity, type ActivityFilters } from './activity'
 
 const KEY = 'gs_map_activity'
@@ -48,7 +49,7 @@ export function useActivity(map: maplibregl.Map | null, ready: boolean, on: bool
       const x = e as Failure
       // A species that has since been hidden: back to every animal.
       if (x.status === 404 && filters.species !== 'all') { setFilters({ ...filters, species: 'all' }); return }
-      setErr(x.offline ? 'No signal, so the activity didn’t load.' : x.timeout ? 'No answer from the server, so the activity didn’t load.' : `Couldn’t load the activity. ${x.message}`)
+      setErr(x.offline ? t('activity.noSignal') : x.timeout ? t('activity.noAnswer') : t('activity.couldnt', { why: x.message }))
     } finally { if (id === request.current) setLoading(false) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters])

@@ -1,4 +1,5 @@
 import { whenLabel } from './api'
+import { t } from './i18n'
 
 /**
  * Team notes on photos: "Worth a look", who said it and when.
@@ -63,7 +64,7 @@ export type Highlight = {
 
 /** "Pedro · 21:40 · Big boar, third night running", or "… · Worth a look" with nothing said. */
 export function noteLine(n: PhotoNote): string {
-  return `${n.name} · ${whenLabel(n.created_at)} · ${n.text ?? 'Worth a look'}`
+  return `${n.name} · ${whenLabel(n.created_at)} · ${n.text ?? t('notes.worthALook')}`
 }
 
 /**
@@ -74,6 +75,6 @@ export function noteLine(n: PhotoNote): string {
 export function noteSnippet(notes: PhotoNote[]): { said: string | null; who: string } {
   const said = [...notes].reverse().find((n) => n.text)
   const shown = said ?? notes[notes.length - 1]
-  if (!shown) return { said: null, who: 'Worth a look' }
+  if (!shown) return { said: null, who: t('notes.worthALook') }
   return { said: said?.text ?? null, who: `${shown.name} · ${whenLabel(shown.created_at)}` }
 }

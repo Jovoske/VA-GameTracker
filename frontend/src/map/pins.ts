@@ -1,4 +1,5 @@
 import type maplibregl from 'maplibre-gl'
+import { t } from '../i18n'
 
 /**
  * Stand and camera pins: what each one is, which ones a tap lands on, and which
@@ -48,7 +49,9 @@ function badge(variant: string) {
 export function paintBadge(el: HTMLElement, count: number, name: string) {
   const text = count >= 99 ? '99+' : String(count)
   el.querySelectorAll<HTMLElement>('.map-badge').forEach(b => { b.textContent = count > 0 ? text : ''; b.hidden = count <= 0 })
-  el.setAttribute('aria-label', `Camera: ${name}${count > 0 ? `, ${count >= 99 ? '99 or more' : count} new photo${count === 1 ? '' : 's'}` : ''}`)
+  el.setAttribute('aria-label', count > 0
+    ? t('pin.cameraNew', { name, count, n: count >= 99 ? t('pin.99') : count })
+    : t('pin.camera', { name }))
 }
 
 const within = (r: DOMRect, x: number, y: number) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom

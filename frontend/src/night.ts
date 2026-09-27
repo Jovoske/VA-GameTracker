@@ -4,9 +4,12 @@
  * night of 3 to 4 October. A plan or a reservation from another night is not
  * tonight's, however recent it looks.
  *
- * On its own, with nothing from the browser, so tests/night-rule.cjs can check it
- * across the clock changes.
+ * With nothing from the browser, so tests/night-rule.cjs can check it across the
+ * clock changes. The words are the language's on screen (i18n).
  */
+import { t } from './i18n/core'
+import { cap, fmtDate } from './i18n/format'
+
 const ESTATE_TZ = 'Europe/Madrid'
 const estateClock = new Intl.DateTimeFormat('en-GB', {
   timeZone: ESTATE_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
@@ -39,9 +42,12 @@ export function estateStamp(when: string | number | Date): string {
   return `${p.year}-${p.month}-${p.day}_${p.hour}-${p.minute}-${p.second}`
 }
 
-/** A night's date ("2026-09-24") as the phone writes dates, with `opts`. */
+/** How a night's heading names its day: "Thu night", but "torstaiyö" in Finnish. */
+const weekdayStyle = () => (t('night.weekday') === 'long' ? 'long' : 'short')
+
+/** A night's date ("2026-09-24") as the language writes dates, with `opts`. */
 function nightDate(night: string, opts: Intl.DateTimeFormatOptions): string {
-  return new Date(`${night}T12:00:00Z`).toLocaleDateString(undefined, { ...opts, timeZone: 'UTC' })
+  return fmtDate(`${night}T12:00:00Z`, { ...opts, timeZone: 'UTC' })
 }
 
 /**
@@ -51,14 +57,26 @@ function nightDate(night: string, opts: Intl.DateTimeFormatOptions): string {
  * under "Last night" with the rest of it, not under "Today" (audit I-27).
  */
 export function nightLabel(night: string, now: number = Date.now()): string {
+  const n = nightParts(night, now)
+  if (n.kind === 'tonight') return t('night.tonight')
+  if (n.kind === 'today') return t('night.today')
+  if (n.kind === 'last') return t('night.lastNight')
+  if (n.kind === 'week') return cap(t('night.dayNight', { day: n.day }))
+  return cap(t('night.nightOf', { date: n.date }))
+}
+
+/** Which night `night` is from `now`, and its day or date in words, for a sentence
+ *  that names it its own way ("You shot at Puente on Thu night"). */
+export function nightParts(night: string, now: number = Date.now()): { kind: 'tonight' | 'today' | 'last' | 'week' | 'older'; day: string; date: string } {
   const tonight = nightOf(now)
+  const day = nightDate(night, { weekday: weekdayStyle() })
+  const date = nightDate(night, { weekday: 'short', day: 'numeric', month: 'short' })
   if (night === tonight) {
     const h = estateHour(now)
-    return h >= 18 || h < 6 ? 'Tonight' : 'Today'
+    return { kind: h >= 18 || h < 6 ? 'tonight' : 'today', day, date }
   }
-  if (night === nightBefore(tonight)) return 'Last night'
-  if (night > nightBefore(tonight, 7)) return `${nightDate(night, { weekday: 'short' })} night`
-  return `Night of ${nightDate(night, { weekday: 'short', day: 'numeric', month: 'short' })}`
+  if (night === nightBefore(tonight)) return { kind: 'last', day, date }
+  return { kind: night > nightBefore(tonight, 7) ? 'week' : 'older', day, date }
 }
 
 /** 18:00 to 06:00 on the estate's clock: the dark part of a night. */
@@ -77,13 +95,13 @@ function dark(when: string | number | Date): boolean {
  */
 export function photoHeading(iso: string, now: number = Date.now()): { key: string; label: string } {
   const night = nightOf(iso)
-  if (dark(iso)) return { key: `${night}:night`, label: night === nightOf(now) ? 'Tonight' : nightLabel(night, now) }
+  if (dark(iso)) return { key: `${night}:night`, label: night === nightOf(now) ? t('night.tonight') : nightLabel(night, now) }
   const tonight = nightOf(now)
-  const label = night === tonight ? 'Today'
-    : night === nightBefore(tonight) ? 'Yesterday'
+  const label = night === tonight ? t('night.today')
+    : night === nightBefore(tonight) ? t('night.yesterday')
       : night > nightBefore(tonight, 7) ? nightDate(night, { weekday: 'long' })
         : nightDate(night, { weekday: 'short', day: 'numeric', month: 'short' })
-  return { key: `${night}:day`, label }
+  return { key: `${night}:day`, label: cap(label) }
 }
 
 /**
@@ -96,9 +114,12 @@ export function whenSeen(iso: string, now: number = Date.now()): string {
   const night = nightOf(iso)
   const tonight = nightOf(now)
   const inDark = dark(iso)
-  if (night === tonight) return inDark ? 'tonight' : 'today'
-  if (night === nightBefore(tonight)) return inDark ? 'last night' : 'yesterday'
-  if (night > nightBefore(tonight, 7)) return `${nightDate(night, { weekday: 'long' })}${inDark ? ' night' : ''}`
+  if (night === tonight) return inDark ? t('night.seenTonight') : t('night.seenToday')
+  if (night === nightBefore(tonight)) return inDark ? t('night.seenLastNight') : t('night.seenYesterday')
+  if (night > nightBefore(tonight, 7)) {
+    const day = nightDate(night, { weekday: 'long' })
+    return inDark ? t('night.seenDayNight', { day }) : t('night.seenDay', { day })
+  }
   return nightDate(night, { day: 'numeric', month: 'short' })
 }
 

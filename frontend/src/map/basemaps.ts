@@ -1,4 +1,5 @@
 import type { Map, StyleSpecification } from 'maplibre-gl'
+import { type Key, t } from '../i18n'
 import type { Layers } from './layers'
 
 /**
@@ -15,13 +16,13 @@ import type { Layers } from './layers'
  * and wind layers (B-01). A hidden raster layer requests no tiles.
  */
 export type BaseId = 'aerial' | 'topo' | 'world'
-export const BASES: { id: BaseId; label: string; source: string }[] = [
-  { id: 'aerial', label: 'Aerial', source: 'base-aerial' },
-  { id: 'topo', label: 'Topo', source: 'base-topo' },
-  { id: 'world', label: 'Aerial (world)', source: 'base-world' },
+export const BASES: { id: BaseId; label: Key; source: string }[] = [
+  { id: 'aerial', label: 'base.aerial', source: 'base-aerial' },
+  { id: 'topo', label: 'base.topo', source: 'base-topo' },
+  { id: 'world', label: 'base.world', source: 'base-world' },
 ]
 export const baseSource = (id: BaseId) => BASES.find(b => b.id === id)!.source
-export const baseLabel = (id: BaseId) => BASES.find(b => b.id === id)!.label
+export const baseLabel = (id: BaseId) => t(BASES.find(b => b.id === id)!.label)
 export const BASE_SOURCES = BASES.map(b => b.source)
 export const CATASTRO = 'catastro'
 // Catastro only draws parcels from about this zoom; further out it sends blank tiles.

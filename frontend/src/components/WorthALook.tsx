@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { getFresh, savedCopy, thumbUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { t } from '../i18n'
 import { noteSnippet, type Highlight } from '../notes'
 import type { PhotoFix } from './PhotoFix'
 import PhotoLightbox from './PhotoLightbox'
@@ -88,7 +89,7 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
       .catch((e: Failure) => {
         answered = true
         if (id !== request.current) return
-        setErr(e.offline ? 'No signal, so the team’s marked photos didn’t load.' : e.timeout ? 'No answer from the server, so the team’s marked photos didn’t load.' : `Couldn’t load the team’s marked photos. ${e.message}`)
+        setErr(e.offline ? t('wal.noSignal') : e.timeout ? t('wal.noAnswer') : t('wal.couldnt', { why: e.message }))
       })
   }, [cameraId, limit, key])
 
@@ -99,14 +100,14 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
   useRefetchOnReturn(() => { if (zoomRef.current == null) load() }, 120_000)
 
   // A failed refresh keeps the strip already shown; only a first load that fails says so.
-  if (err && !items) return quietErrors ? null : <p className={`wal-msg${className ? ` ${className}` : ''}`} role="alert">{err} <button type="button" className="wal-retry" onClick={load}>Try again</button></p>
+  if (err && !items) return quietErrors ? null : <p className={`wal-msg${className ? ` ${className}` : ''}`} role="alert">{err} <button type="button" className="wal-retry" onClick={load}>{t('common.tryAgain')}</button></p>
   if (!items) return hadMarks(key) ? <HeldPlace className={className} withCamera={!cameraId} /> : null
   if (items.length === 0) return null
   return (
-    <section className={`wal${className ? ` ${className}` : ''}`} aria-label="Worth a look">
+    <section className={`wal${className ? ` ${className}` : ''}`} aria-label={t('notes.worthALook')}>
       <h2 className="sect wal-head">
-        <BinocularsIcon size={16} aria-hidden="true" /> Worth a look
-        <span className="sect-note">marked by the team</span>
+        <BinocularsIcon size={16} aria-hidden="true" /> {t('notes.worthALook')}
+        <span className="sect-note">{t('wal.byTeam')}</span>
       </h2>
       <ul className="wal-row">
         {items.map((h, i) => {
@@ -116,13 +117,13 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
           return (
             <li key={h.image_id}>
               <button type="button" className="wal-tile" onClick={() => setZoom(i)}
-                aria-label={`${h.label}${cameraId ? '' : ` at ${h.camera}`}. ${said ? `“${said}”, ` : 'Marked, '}${who}. Open photo.`}>
+                aria-label={t(said ? 'wal.tileSaid' : 'wal.tileMarked', { what: cameraId ? h.label : t('wal.atCamera', { label: h.label, camera: h.camera }), said: said ?? '', who })}>
                 <span className="wal-img">
                   <img src={thumbUrl(h.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
                   <NoteMark count={h.notes_count} />
                   <span className="wal-tag" aria-hidden="true">{h.label}</span>
                 </span>
-                <span className={`wal-note${said ? '' : ' wal-note--bare'}`} aria-hidden="true">{said ?? 'Marked, no note'}</span>
+                <span className={`wal-note${said ? '' : ' wal-note--bare'}`} aria-hidden="true">{said ?? t('wal.noNote')}</span>
                 <span className="wal-who" aria-hidden="true">{who}</span>
                 {!cameraId && <span className="wal-meta" aria-hidden="true">{h.camera}</span>}
               </button>
@@ -158,8 +159,8 @@ function HeldPlace({ className, withCamera }: { className?: string; withCamera: 
   return (
     <section className={`wal wal--held${className ? ` ${className}` : ''}`} aria-hidden="true">
       <h2 className="sect wal-head">
-        <BinocularsIcon size={16} aria-hidden="true" /> Worth a look
-        <span className="sect-note">marked by the team</span>
+        <BinocularsIcon size={16} aria-hidden="true" /> {t('notes.worthALook')}
+        <span className="sect-note">{t('wal.byTeam')}</span>
       </h2>
       <ul className="wal-row">
         {[0, 1, 2].map((i) => (
@@ -181,10 +182,10 @@ function HeldPlace({ className, withCamera }: { className?: string; withCamera: 
 export function NoteMark({ count }: { count: number | undefined }) {
   if (!count) return null
   return (
-    <span className="note-mark" title={`${count} team note${count === 1 ? '' : 's'}`}>
+    <span className="note-mark" title={t('wal.teamNotes', { count })}>
       <BinocularsIcon size={12} weight="bold" aria-hidden="true" />
       {count > 1 && <b>{count}</b>}
-      <span className="sr-only">{count} team note{count === 1 ? '' : 's'}</span>
+      <span className="sr-only">{t('wal.teamNotes', { count })}</span>
     </span>
   )
 }

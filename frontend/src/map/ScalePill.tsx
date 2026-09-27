@@ -1,5 +1,6 @@
 import type { Map } from 'maplibre-gl'
 import { useEffect, useState } from 'react'
+import { t } from '../i18n'
 import { formatDistance } from './geometry'
 
 const MAX_PX = 84
@@ -26,7 +27,7 @@ export default function ScalePill({ map }: { map: Map | null }) {
     return () => { map.off('move', update); cancelAnimationFrame(frame) }
   }, [map])
   if (!scale) return null
-  return <div className="map-scale" aria-label={`Scale: this bar is ${scale.label}`} role="img">
+  return <div className="map-scale" aria-label={t('map.scale', { size: scale.label })} role="img">
     <span>{scale.label}</span><i style={{ width: scale.px }} />
   </div>
 }

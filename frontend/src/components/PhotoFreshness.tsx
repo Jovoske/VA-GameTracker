@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { ageLabel } from '../api'
+import { fmtList, t } from '../i18n'
 
 /** How current the photos behind the plan are (forecast_tonight's `freshness`). */
 export type Freshness = {
@@ -10,8 +11,6 @@ export type Freshness = {
   logins: string[]
 }
 
-const names = (xs: string[]) => xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`
-
 /**
  * One plain line when the plan rests on photos that have stopped coming in.
  *
@@ -21,14 +20,14 @@ const names = (xs: string[]) => xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1
  */
 export default function PhotoFreshness({ freshness }: { freshness?: Freshness | null }) {
   if (!freshness?.problem) return null
-  const newest = freshness.newest_photo_at ? ` Newest photo ${ageLabel(freshness.newest_photo_at)}.` : ''
+  const newest = freshness.newest_photo_at ? ` ${t('fresh.newest', { ago: ageLabel(freshness.newest_photo_at) })}` : ''
   const text = freshness.problem === 'stopped'
-    ? `Photos have stopped coming in${freshness.last_fetch_ok_at ? `: the last fetch that worked was ${ageLabel(freshness.last_fetch_ok_at)}` : ''}.`
-    : `Photos from ${names(freshness.logins)} aren't coming in.`
+    ? freshness.last_fetch_ok_at ? t('fresh.stoppedSince', { ago: ageLabel(freshness.last_fetch_ok_at) }) : t('fresh.stopped')
+    : t('fresh.loginsNot', { names: fmtList(freshness.logins) })
   return (
     <p className="tn-fresh tn-fresh--photos" data-stale="true" role="status">
       {text}{newest}{' '}
-      <Link to="/settings#accounts">Camera logins</Link>
+      <Link to="/settings#accounts">{t('fresh.cameraLogins')}</Link>
     </p>
   )
 }

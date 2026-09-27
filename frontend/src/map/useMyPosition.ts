@@ -1,5 +1,6 @@
 import maplibregl, { type Map } from 'maplibre-gl'
 import { useEffect, useRef, useState } from 'react'
+import { t } from '../i18n'
 import { circle } from './geometry'
 import { setSource } from './layers'
 
@@ -48,9 +49,9 @@ export function useMyPosition(map: Map | null, ready: boolean) {
 
   useEffect(() => {
     if (!on) { setFix(null); return }
-    if (!('geolocation' in navigator)) { setMessage('This browser can’t show where you are.'); setOn(false); return }
+    if (!('geolocation' in navigator)) { setMessage(t('me.noGeo')); setOn(false); return }
     centred.current = false
-    setMessage('Finding where you are…')
+    setMessage(t('me.finding'))
     const watch = navigator.geolocation.watchPosition(p => {
       const { heading, speed } = p.coords
       const moving = heading != null && Number.isFinite(heading) && speed != null && speed >= MOVING_MS
@@ -58,9 +59,9 @@ export function useMyPosition(map: Map | null, ready: boolean) {
       setMessage('')
     }, err => {
       if (err.code === err.PERMISSION_DENIED) {
-        setMessage('Location is off for GameSense. Allow it in your phone’s settings to see where you are.')
+        setMessage(t('me.off'))
         setOn(false)
-      } else setMessage('Your phone can’t find where you are right now. Try again in the open.')
+      } else setMessage(t('me.cantFind'))
     }, { enableHighAccuracy: true, maximumAge: 10_000, timeout: 20_000 })
 
     // Android sends true-north readings as their own event; iPhone adds a compass
@@ -94,7 +95,7 @@ export function useMyPosition(map: Map | null, ready: boolean) {
     if (!marker.current) {
       const el = document.createElement('div')
       el.className = 'me-dot'
-      el.setAttribute('role', 'img'); el.setAttribute('aria-label', 'You are here')
+      el.setAttribute('role', 'img'); el.setAttribute('aria-label', t('me.here'))
       el.innerHTML = '<span class="me-heading"></span><span class="me-core"></span>'
       marker.current = new maplibregl.Marker({ element: el, rotationAlignment: 'map' }).setLngLat([fix.lng, fix.lat]).addTo(map)
     }

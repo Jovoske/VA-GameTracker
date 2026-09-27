@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { ageLabel, plainWords, whenLabel } from '../api'
+import { fmtNumber, t } from '../i18n'
 
 /**
  * What the server's own upkeep last did, from the files its scheduled tasks leave
@@ -59,7 +60,6 @@ export type RestoreCheck = {
 export type Disk = { free_gb: number; total_gb: number; low: boolean; full?: boolean }
 
 const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : '')
-const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
 const line = { fontSize: 13, lineHeight: 1.5 } as const
 const dim = { ...line, color: 'var(--text-dim)' } as const
 const bad = { ...line, color: 'var(--skip)' } as const
@@ -69,7 +69,7 @@ export function UpdateStatus({ info }: { info: VersionInfo | null }) {
   const d = info?.deploy
   if (!info) return null
   if (!d) {
-    return <div style={dim}>This server doesn’t update itself.</div>
+    return <div style={dim}>{t('server.noUpdates')}</div>
   }
   const lookedAt = d.checked_at ? ageLabel(d.checked_at) : null
   const failed = d.failed && d.failed.commit !== d.running ? d.failed : null
@@ -77,48 +77,43 @@ export function UpdateStatus({ info }: { info: VersionInfo | null }) {
     <div data-deploy={d.late ? 'late' : failed ? 'failed' : 'ok'} style={{ display: 'grid', gap: 8 }}>
       {d.running && (
         <div style={line}>
-          Running {d.running_subject ? <>“{d.running_subject}”</> : short(d.running)}
-          {d.running_since ? `, live since ${whenLabel(d.running_since)}.` : '.'}
+          {d.running_since
+            ? t('server.runningSince', { what: d.running_subject ? `“${d.running_subject}”` : short(d.running), when: whenLabel(d.running_since) })
+            : t('server.running', { what: d.running_subject ? `“${d.running_subject}”` : short(d.running) })}
         </div>
       )}
       {failed && (
         <div role="alert" style={bad}>
-          An update didn’t go in{failed.subject ? <>: “{failed.subject}”</> : ''}. {failed.reason ? plainWords(failed.reason) : ''}{' '}
-          {failed.rolled_back ? 'The version before it was put back and is running.' : 'Nothing changed on the server.'}{' '}
-          {failed.gave_up
-            ? 'It tries again every 6 hours, or as soon as a newer change arrives.'
-            : 'It tries again in 10 minutes.'}
+          {failed.subject ? t('server.failedNamed', { subject: failed.subject }) : t('server.failed')} {failed.reason ? plainWords(failed.reason) : ''}{' '}
+          {failed.rolled_back ? t('server.rolledBack') : t('server.nothingChanged')}{' '}
+          {failed.gave_up ? t('server.gaveUp') : t('server.retrySoon')}
         </div>
       )}
       {d.late ? (
         <div role="alert" style={bad}>
-          {lookedAt
-            ? `The server last looked for updates ${lookedAt}.`
-            : 'The server has never looked for updates.'}{' '}
-          The GameSense-Update task on the server may have stopped.
+          {lookedAt ? t('server.lastLooked', { ago: lookedAt }) : t('server.neverLooked')}{' '}
+          {t('server.taskStopped')}
         </div>
       ) : (
         <div style={dim}>
-          {d.source === 'main'
-            ? 'Every change goes in as it is made: the tests aren’t set up to check them first yet.'
-            : 'Only changes that passed the tests go in.'}{' '}
-          The server looks every 10 minutes{lookedAt ? ` (last look ${lookedAt})` : ''}.
-          {d.offline ? ' It couldn’t reach GitHub at the last look.' : ''}
+          {d.source === 'main' ? t('server.everyChange') : t('server.onlyTested')}{' '}
+          {lookedAt ? t('server.looksEveryLast', { ago: lookedAt }) : t('server.looksEvery')}
+          {d.offline ? ` ${t('server.noGithub')}` : ''}
         </div>
       )}
       {!!d.waiting_for_tests && (
         <div style={dim}>
-          {d.waiting_for_tests === 1
-            ? 'One newer change is waiting for its tests to pass.'
-            : `${d.waiting_for_tests} newer changes are waiting for their tests to pass.`}
+          {t('server.waiting', { count: d.waiting_for_tests })}
         </div>
       )}
       {(info.commit || failed) && (
         <details style={{ ...dim, fontSize: 12 }}>
-          <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>The detail</summary>
+          <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>{t('common.detail')}</summary>
           <div style={{ overflowWrap: 'anywhere' }}>
-            This server runs commit {short(info.commit) || '?'}.
-            {failed ? ` The one that didn’t go in: ${short(failed.commit)}, at the ${failed.step ?? '?'} step, ${failed.attempts ?? 1} ${(failed.attempts ?? 1) === 1 ? 'try' : 'tries'}${failed.at ? `, last ${ageLabel(failed.at)}` : ''}. ${failed.reason ?? ''}` : ''}
+            {t('server.runsCommit', { commit: short(info.commit) || '?' })}
+            {failed ? ` ${t(failed.at ? 'server.failedDetailAt' : 'server.failedDetail', {
+              commit: short(failed.commit), step: failed.step ?? '?', count: failed.attempts ?? 1, ago: failed.at ? ageLabel(failed.at) : '',
+            })} ${failed.reason ?? ''}` : ''}
           </div>
         </details>
       )}
@@ -147,11 +142,9 @@ export function DiskRow({ disk }: { disk: Disk }) {
   const tone = disk.full ? 'bad' : disk.low ? 'warn' : undefined
   return (
     <div data-disk={disk.full ? 'full' : disk.low ? 'low' : 'ok'}>
-      <Row label="Space for photos" alert={!!tone} tone={tone}>
-        {disk.free_gb} GB free
-        {disk.full
-          ? '. Full: new photos aren’t fetched until some space is freed on the server.'
-          : disk.low ? '. Getting full: free some space on the server soon.' : ''}
+      <Row label={t('server.space')} alert={!!tone} tone={tone}>
+        {disk.full ? t('server.diskFull', { gb: fmtNumber(disk.free_gb) })
+          : disk.low ? t('server.diskLow', { gb: fmtNumber(disk.free_gb) }) : t('server.diskFree', { gb: fmtNumber(disk.free_gb) })}
       </Row>
     </div>
   )
@@ -163,40 +156,40 @@ export function BackupRows({ backup, restore }: { backup: BackupStatus | null; r
   let tone: 'bad' | undefined
   if (!backup) {
     tone = 'bad'
-    text = 'None on record. Set up the nightly backup on the server (deploy/register-tasks.ps1).'
+    text = t('server.noBackup')
   } else if (!backup.ok) {
     tone = 'bad'
-    text = `Failed ${backup.at ? ageLabel(backup.at) : ''}: ${backup.error ?? 'no reason given.'}${backup.last_ok_at ? ` The last good one is from ${ageLabel(backup.last_ok_at)}.` : ' There is no good one yet.'}`
+    text = `${t('server.failedAt', { ago: backup.at ? ageLabel(backup.at) : '', why: backup.error ?? t('server.noReason') })} ${backup.last_ok_at ? t('server.lastGood', { ago: ageLabel(backup.last_ok_at) }) : t('server.noGood')}`
   } else if (backup.late) {
     tone = 'bad'
-    text = `${backup.last_ok_at ? ageLabel(backup.last_ok_at) : 'Long ago'}. Check the GameSense-Backup task on the server.`
+    text = t('server.backupLate', { ago: backup.last_ok_at ? ageLabel(backup.last_ok_at) : t('server.longAgo') })
   } else {
-    text = backup.last_ok_at ? ageLabel(backup.last_ok_at) : 'Done'
+    text = backup.last_ok_at ? ageLabel(backup.last_ok_at) : t('common.done')
   }
   const detail = backup && backup.ok
-    ? [backup.dump_mb != null ? `database ${backup.dump_mb} MB` : null,
-       backup.photos_in_backup != null ? plural(backup.photos_in_backup, 'photo') : null,
-       backup.target_free_gb != null ? `${backup.target_free_gb} GB free there` : null].filter(Boolean).join(' · ')
+    ? [backup.dump_mb != null ? t('server.database', { mb: fmtNumber(backup.dump_mb) }) : null,
+       backup.photos_in_backup != null ? t('server.photos', { count: backup.photos_in_backup, n: fmtNumber(backup.photos_in_backup) }) : null,
+       backup.target_free_gb != null ? t('server.freeThere', { gb: fmtNumber(backup.target_free_gb) }) : null].filter(Boolean).join(' · ')
     : ''
-  let rText: ReactNode = 'Not run yet.'
+  let rText: ReactNode = t('server.notRun')
   let rTone: 'bad' | 'warn' | undefined
   if (restore) {
     if (!restore.ok) {
       rTone = 'bad'
-      rText = `Failed ${restore.at ? ageLabel(restore.at) : ''}: ${restore.error ?? 'no reason given.'}`
+      rText = t('server.failedAt', { ago: restore.at ? ageLabel(restore.at) : '', why: restore.error ?? t('server.noReason') })
     } else {
       rTone = restore.late ? 'warn' : undefined
-      rText = `Passed ${restore.at ? ageLabel(restore.at) : ''}${restore.late ? '. It runs every Sunday: check the GameSense-RestoreCheck task.' : ''}`
+      rText = restore.late ? t('server.passedLate', { ago: restore.at ? ageLabel(restore.at) : '' }) : t('server.passed', { ago: restore.at ? ageLabel(restore.at) : '' })
     }
   }
   return (
     <>
       <div data-backup={tone ? 'bad' : 'ok'}>
-        <Row label="Last backup" alert={!!tone} tone={tone}>{text}</Row>
+        <Row label={t('server.lastBackup')} alert={!!tone} tone={tone}>{text}</Row>
         {detail && <div style={{ ...dim, fontSize: 12, textAlign: 'right', marginTop: -2 }}>{detail}</div>}
       </div>
       <div data-restore={rTone ?? 'ok'}>
-        <Row label="Restore test" alert={rTone === 'bad'} tone={rTone}>{rText}</Row>
+        <Row label={t('server.restoreTest')} alert={rTone === 'bad'} tone={rTone}>{rText}</Row>
       </div>
     </>
   )
