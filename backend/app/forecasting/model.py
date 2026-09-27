@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, and_, case, cast, func, select
+from sqlalchemy import Integer, and_, case, cast, func, literal, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -279,26 +279,33 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
     return sentence_case(common_name) if common_name else (species_id or "Animal")
 
 
-# class_label's plain species, when the sex and group pass said nothing about it:
-# every other class of red deer and wild boar tells more.
-PLAIN_CLASSES = ("Red deer", "Wild boar")
+def sentence_case_sql(name):
+    """sentence_case in SQL, on a species' name column: what the tiles call it."""
+    return case(
+        (name.in_(sorted(_OLD_TITLE_CASE)),
+         func.concat(func.left(name, 1), func.lower(func.substr(name, 2)))),
+        else_=func.concat(func.upper(func.left(name, 1)), func.substr(name, 2)),
+    )
 
 
-def class_label_sql(species_id, sex, group_type):
+def class_label_sql(species_id, sex, group_type, common_name=None):
     """SQL for class_label's split of red deer and wild boar ("Stag", "Sow + piglets"),
-    NULL for every other species (which is its name). Mirrors class_label, so a visit
-    can be counted per class in the database: keep the two in step."""
+    NULL where the class is the species' own name (every other species, and a boar or
+    red deer the sex and group pass said nothing about), so that name is the one an
+    admin gave it in Settings. Mirrors class_label, so a visit can be counted per
+    class in the database: keep the two in step. `common_name` (the species' name
+    column) names a red deer herd as its tiles do."""
+    deer = literal("Red deer") if common_name is None else func.coalesce(
+        func.nullif(sentence_case_sql(common_name), ""), "Red deer")
     return case(
         (and_(species_id == "red_deer", group_type == "hind_with_calf"), "Hind + calf"),
         (and_(species_id == "red_deer", sex == "male"), "Stag"),
         (and_(species_id == "red_deer", sex == "female"), "Hind"),
-        (and_(species_id == "red_deer", group_type == "herd"), "Red deer (herd)"),
-        (species_id == "red_deer", "Red deer"),
+        (and_(species_id == "red_deer", group_type == "herd"), func.concat(deer, " (herd)")),
         (and_(species_id == "wild_boar", group_type == "sow_with_piglets"), "Sow + piglets"),
         (and_(species_id == "wild_boar", sex == "male"), "Boar"),
         (and_(species_id == "wild_boar", sex == "female"), "Sow"),
         (and_(species_id == "wild_boar", group_type == "sounder"), "Sounder"),
-        (species_id == "wild_boar", "Wild boar"),
         else_=None,
     )
 

@@ -11,7 +11,7 @@ from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.db import get_db
 from app.forecasting.insights import compute_insights
-from app.forecasting.model import class_label_sql
+from app.forecasting.model import class_label_sql, sentence_case_sql
 from app.forecasting.patterns import compute_patterns
 from app.models import Camera, Detection, Image, Species, User
 
@@ -34,10 +34,10 @@ def _in_class(label: str):
     piglets, Roe deer). The same split as model.class_label, so the photos are the
     ones labelled with the class the Insights makeup names (a visit it counted as
     "Sow + piglets" may have plain "Wild boar" frames too; those list under that)."""
-    split = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type)
-    name = func.concat(func.upper(func.left(Species.common_name, 1)),
-                       func.lower(func.substr(Species.common_name, 2)))
-    return or_(split == label, and_(split.is_(None), name == label))
+    split = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type,
+                            Species.common_name)
+    return or_(split == label,
+               and_(split.is_(None), sentence_case_sql(Species.common_name) == label))
 
 
 @router.get("/class")

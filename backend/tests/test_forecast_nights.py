@@ -411,6 +411,46 @@ def test_the_classes_of_an_animal_add_up_to_its_visits(db_session, estate):
     assert makeup == {"Sow + piglets": 10, "Sow": 10, "Wild boar": 5, "Boar": 1}
 
 
+@requires_db
+def test_a_renamed_animal_keeps_its_name_in_the_classes_and_their_photos(db_session, estate):
+    """An admin's name for an animal (Settings) is what its tiles call a boar nobody
+    sexed, capitals as typed. Tonight's classes, Insights' makeup and the photos
+    behind each makeup line must use it too, or tapping "Jabalí" finds nothing."""
+    from app.core.db import get_db
+    from app.forecasting.insights import compute_insights
+    from app.main import app
+
+    db_session.get(Species, "wild_boar").common_name = "Jabalí"
+    db_session.get(Species, "red_deer").common_name = "Ciervo Ibérico"
+    admin = User(estate_id=estate.id, email="owner@x.local", password_hash="x", role="admin")
+    db_session.add(admin)
+    cam = camera(db_session, estate, "PL19 Charca")
+    watched(db_session, cam, 20)
+    shots = [seen(db_session, cam, ago(n), 22) for n in range(1, 6)]
+    shots += [seen(db_session, cam, ago(n), 22, sex="male") for n in range(6, 9)]
+    shots += [seen(db_session, cam, ago(n), 23, species="red_deer", group="herd")
+              for n in range(1, 5)]
+    for img in shots:
+        img.original_path = f"/photos/{img.id}.jpg"
+    db_session.commit()
+    recompute_camera_nights(db_session)
+
+    rec = forecast_tonight(db_session)["recommended"]
+    assert [(c["label"], c["visits"]) for c in rec["classes"]] == [("Jabalí", 5), ("Boar", 3)]
+    makeup = {c["label"]: c["visits"] for c in compute_insights(db_session)["composition"]}
+    assert makeup == {"Jabalí": 5, "Boar": 3, "Ciervo Ibérico (herd)": 4}
+
+    headers = {"Authorization": f"Bearer {create_access_token(str(admin.id), {'role': 'admin'})}"}
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        with TestClient(app) as client:
+            for label, visits in makeup.items():
+                got = client.get("/api/insights/class", params={"label": label}, headers=headers)
+                assert len(got.json()["items"]) == visits, label
+    finally:
+        app.dependency_overrides.clear()
+
+
 # ── A-12 / G-18 / J-12: alerts don't work the plan out again ────────────────
 
 

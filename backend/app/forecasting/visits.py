@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.forecasting.exposure import VISIT_GAP, night_expr
-from app.forecasting.model import PLAIN_CLASSES, class_label, class_label_sql, sentence_case
+from app.forecasting.model import class_label, class_label_sql
 from app.models import Camera, Detection, Image, Species
 
 # A photo the detector has checked and kept, of something that is not a hidden species.
@@ -264,7 +264,8 @@ def class_visits(db: Session, *, start: datetime | None = None, end: datetime | 
     )
     # The labels each frame carries: a frame with a stag and a hind in it is a frame
     # of each, and the visit takes the one that tells most.
-    label = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type)
+    label = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type,
+                            n.c.common_name)
     frame_labels = (
         select(*visit, n.c.image_id, func.coalesce(label, literal("")).label("cls"))
         .select_from(n)
@@ -280,7 +281,7 @@ def class_visits(db: Session, *, start: datetime | None = None, end: datetime | 
         .subquery()
     )
     pl = per_label.c
-    plain = or_(pl.cls == "", pl.cls.in_(PLAIN_CLASSES))
+    plain = pl.cls == ""
     chosen = (
         select(pl.camera_id, pl.species_id, pl.visit_no, pl.cls)
         .distinct(pl.camera_id, pl.species_id, pl.visit_no)
@@ -302,7 +303,7 @@ def class_visits(db: Session, *, start: datetime | None = None, end: datetime | 
         {
             "camera_id": r.camera_id,
             "species_id": r.species_id,
-            "label": r.cls or sentence_case(r.common_name or r.species_id or "Animal"),
+            "label": r.cls or class_label(r.species_id, r.common_name, None, None),
             "night": r.night,
             "visits": int(r.visits),
             "photos": int(r.photos),
