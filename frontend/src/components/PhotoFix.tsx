@@ -9,9 +9,10 @@ import { api, type Failure } from '../api'
  *
  * The answer is the hunter's: the AI never changes it back, and every list and
  * count (Photos, Animals, the map, the forecast) reads the species from the photo,
- * so they all follow at once. The viewer shows the new name straight away with an
- * Undo, and the list under it drops a photo that no longer belongs there once the
- * viewer closes, never while it is open.
+ * so they all follow at once. A burst is one animal, so the other photos of the
+ * visit that read as the old name follow too (`visit`). The viewer shows the new
+ * name straight away with an Undo, and the list under it drops a photo that no
+ * longer belongs there once the viewer closes, never while it is open.
  */
 
 /** What a photo is after a fix, as the viewer and the lists under it show it. */
@@ -25,21 +26,40 @@ export type PhotoFix = {
   fixed_by: string | null
 }
 
+/** Another photo of the same visit, as it is after the fix. */
+export type VisitFix = { id: string; fix: PhotoFix }
+/** A fix, and the other photos of the burst that followed it (or went back with its Undo). */
+export type Saved = PhotoFix & { visit: VisitFix[] }
+
 /** What the server answers after a fix (routes_images.set_species / undo_species). */
-type Fixed = PhotoFix & { image_id: string; group_size: number | null }
+type Fixed = PhotoFix & { image_id: string; group_size: number | null; visit?: Fixed[] }
+
+const plain = (r: Fixed): PhotoFix =>
+  ({ label: r.label, species_id: r.species_id, empty: r.empty, hidden: r.hidden, fixed_by: r.fixed_by })
+const saved = (r: Fixed): Saved =>
+  ({ ...plain(r), visit: (r.visit ?? []).map((v) => ({ id: v.image_id, fix: plain(v) })) })
 
 export type Choice = { id: string; name: string; hidden: boolean; likely: boolean; big_game: boolean; seen: number }
 
 const TIMEOUT_MS = 20_000
-let choices: Promise<Choice[]> | null = null
+// The last list, shown at once when the sheet opens while it is asked again: an admin
+// may have renamed an animal since (Settings), here or on another phone.
+let lastChoices: Choice[] | null = null
+let asking: Promise<Choice[]> | null = null
 
-/** The animals a photo can be said to show, asked once a session (again after a failure). */
+/** The animals a photo can be said to show, as the server has them now. */
 export function loadChoices(): Promise<Choice[]> {
-  if (!choices) {
-    choices = api<Choice[]>('/species/choices', { timeoutMs: TIMEOUT_MS })
-    choices.catch(() => { choices = null })
+  if (!asking) {
+    asking = api<Choice[]>('/species/choices', { timeoutMs: TIMEOUT_MS })
+      .then((c) => { lastChoices = c; return c })
+      .finally(() => { asking = null })
   }
-  return choices
+  return asking
+}
+
+/** An animal was renamed or hidden in Settings: the saved list is out of date. */
+export function resetChoices(): void {
+  lastChoices = null
 }
 
 function failed(e: unknown, what: string): string {
@@ -50,11 +70,10 @@ function failed(e: unknown, what: string): string {
 }
 
 /** Say the photo shows `speciesId`. */
-export async function fixSpecies(imageId: string, speciesId: string): Promise<PhotoFix> {
-  const r = await api<Fixed>(`/images/${imageId}/species`, {
+export async function fixSpecies(imageId: string, speciesId: string): Promise<Saved> {
+  return saved(await api<Fixed>(`/images/${imageId}/species`, {
     method: 'POST', body: JSON.stringify({ species_id: speciesId }), timeoutMs: TIMEOUT_MS,
-  })
-  return { label: r.label, species_id: r.species_id, empty: r.empty, hidden: r.hidden, fixed_by: r.fixed_by }
+  }))
 }
 
 /** Mark it "nothing here", or keep it again (Undo). */
@@ -63,9 +82,8 @@ export async function markEmpty(imageId: string, empty: boolean): Promise<void> 
 }
 
 /** Put back what the AI said. */
-export async function undoFix(imageId: string): Promise<PhotoFix> {
-  const r = await api<Fixed>(`/images/${imageId}/species`, { method: 'DELETE', timeoutMs: TIMEOUT_MS })
-  return { label: r.label, species_id: r.species_id, empty: r.empty, hidden: r.hidden, fixed_by: r.fixed_by }
+export async function undoFix(imageId: string): Promise<Saved> {
+  return saved(await api<Fixed>(`/images/${imageId}/species`, { method: 'DELETE', timeoutMs: TIMEOUT_MS }))
 }
 
 /**
@@ -83,9 +101,9 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
   empty: boolean
   onClose: () => void
   /** Saved: what it is now, and the choice made ("nothing" for Nothing here). */
-  onFixed: (fix: PhotoFix, choice: string) => void
+  onFixed: (fix: Saved, choice: string) => void
 }) {
-  const [list, setList] = useState<Choice[] | null>(null)
+  const [list, setList] = useState<Choice[] | null>(lastChoices)
   const [loadErr, setLoadErr] = useState('')
   const [more, setMore] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
@@ -97,11 +115,13 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
   const busyRef = useRef(busy)
   busyRef.current = busy
 
+  // Asked again every time; the list from last time shows meanwhile, and stays if the
+  // signal is gone (it is a list of animals, not something that goes stale in a night).
   function load() {
     setLoadErr('')
     loadChoices()
-      .then((c) => { if (live.current) setList(c) })
-      .catch((e) => { if (live.current) setLoadErr(failed(e, 'the list of animals didn’t load')) })
+      .then((c) => { if (live.current && !busyRef.current) setList(c) })
+      .catch((e) => { if (live.current && !lastChoices) setLoadErr(failed(e, 'the list of animals didn’t load')) })
   }
   useEffect(() => {
     live.current = true
@@ -170,10 +190,10 @@ export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, on
     setBusy(choice)
     setErr('')
     try {
-      let fix: PhotoFix
+      let fix: Saved
       if (choice === 'nothing') {
         await markEmpty(imageId, true)
-        fix = { label: 'Nothing here', species_id: null, empty: true, hidden: false, fixed_by: null }
+        fix = { label: 'Nothing here', species_id: null, empty: true, hidden: false, fixed_by: null, visit: [] }
       } else {
         fix = await fixSpecies(imageId, choice)
       }

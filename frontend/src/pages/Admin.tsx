@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { ageLabel, api, plainWords, signOut } from '../api'
 import { confirmSignOut } from '../sits'
 import NotificationSettings from '../components/NotificationSettings'
+import { resetChoices } from '../components/PhotoFix'
 import PhoneProblems from '../components/PhoneProblems'
 import SettingsSection from '../components/SettingsSection'
 import Toggle from '../components/Toggle'
@@ -231,6 +232,8 @@ function SpeciesName({ sp, canEdit, onSaved }: { sp: Species; canEdit: boolean; 
     setErr('')
     try {
       const r = await api<Species>(`/species/${sp.id}`, { method: 'PATCH', body: JSON.stringify({ common_name: clean }), timeoutMs: 20_000 })
+      // The photo viewer's "Wrong?" list offers it by its new name from now on.
+      resetChoices()
       onSaved({ ...sp, common_name: r.common_name, default_name: r.default_name ?? sp.default_name })
       setEditing(false)
     } catch (e) {
@@ -522,6 +525,7 @@ export default function Admin() {
     setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, hidden, huntable: hidden ? false : x.huntable } : x)))
     try {
       await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ hidden }) })
+      resetChoices()
     } catch {
       setSpecies((list) => list.map((x) => (x.id === s.id ? before : x)))
     }

@@ -57,11 +57,14 @@ planning, collaboration and safety are parked for later.
 
 ### Photos, and putting the AI right (September 2026)
 
-Photos is filed by night ("Last night", "Thu night", 06:00 to 06:00 on the estate's clock) and pages on
-by the last photo's time and id, so no frame of a burst is lost at a page break; the photo viewer carries
-on into older photos as you swipe. In the viewer, members and admins have **Wrong?**: say what the animal
-really is, from the animals that can be on the estate, or "Nothing here" for a false alarm, with Undo. The
-fix is the hunter's: the AI never changes it back, and every list, count, the map and the forecast read it.
+Photos is filed by night ("Last night", "Thu night": 18:00 to 06:00 on the estate's clock, as the server
+counts nights) with the daytime ones under the day ("Today", "Yesterday"), and pages on by the last photo's
+time and id, so no frame of a burst is lost at a page break; the photo viewer carries on into older photos
+as you swipe (on Cameras too), and says so at once when there is no signal for them. In the viewer,
+members and admins have **Wrong?**: say what the animal really is, from the animals that can be on the
+estate, or "Nothing here" for a false alarm, with Undo. The fix is the hunter's: the AI never changes it
+back, a burst is one animal so the rest of the visit follows it, and every list, count, the map and the
+forecast read it. Undo puts the photo, and its visit, back exactly as the AI had them.
 Animals are called what hunters call them ("Hare or rabbit", "Mouse or rat", "Marten or weasel"), and an
 admin can rename any of them in Settings. A name given to an animal on Animals survives "Look for repeats"
 and merges, and its gallery pages to the oldest photo.

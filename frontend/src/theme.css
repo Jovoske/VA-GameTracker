@@ -384,6 +384,8 @@ main.page { padding: 16px; }
 .lb-toast > span { flex: 1; min-width: 0; }
 .lb-fixed-by { opacity: 0.75; font-style: italic; }
 .lb-status--more { bottom: 12px; }
+/* The next page failed: said at the top of the stage, clear of an Undo at the bottom. */
+.lb-more-err { top: 8px; bottom: auto; }
 
 /* ── overlays ──
    One implementation behind every full-screen panel: the photo lightbox, the

@@ -61,6 +61,31 @@ export function nightLabel(night: string, now: number = Date.now()): string {
   return `Night of ${nightDate(night, { weekday: 'short', day: 'numeric', month: 'short' })}`
 }
 
+/** 18:00 to 06:00 on the estate's clock: the dark part of a night. */
+function dark(when: string | number | Date): boolean {
+  const h = estateHour(when)
+  return h >= 18 || h < 6
+}
+
+/**
+ * The heading over a run of photos, by what the run holds, in the words whenSeen
+ * uses for the same photos. A night's dark hours (18:00 to 06:00) are "Tonight",
+ * "Last night", "Thu night", "Night of Thu 18 Sep"; its daytime (06:00 to 18:00) is
+ * "Today", "Yesterday", "Thursday", "Thu 18 Sep". At 19:30 this morning's deer used to
+ * be under "Tonight", and yesterday's under "Last night": a night runs 06:00 to 06:00.
+ * `key` groups the photos: one heading for each part of each night.
+ */
+export function photoHeading(iso: string, now: number = Date.now()): { key: string; label: string } {
+  const night = nightOf(iso)
+  if (dark(iso)) return { key: `${night}:night`, label: night === nightOf(now) ? 'Tonight' : nightLabel(night, now) }
+  const tonight = nightOf(now)
+  const label = night === tonight ? 'Today'
+    : night === nightBefore(tonight) ? 'Yesterday'
+      : night > nightBefore(tonight, 7) ? nightDate(night, { weekday: 'long' })
+        : nightDate(night, { weekday: 'short', day: 'numeric', month: 'short' })
+  return { key: `${night}:day`, label }
+}
+
 /**
  * When something was last on camera, as a hunter says it: "tonight", "today", "last
  * night", "yesterday", "Tuesday night", "Tuesday", or "3 Sep" before that. It used to
@@ -70,11 +95,10 @@ export function nightLabel(night: string, now: number = Date.now()): string {
 export function whenSeen(iso: string, now: number = Date.now()): string {
   const night = nightOf(iso)
   const tonight = nightOf(now)
-  const h = estateHour(iso)
-  const dark = h >= 18 || h < 6
-  if (night === tonight) return dark ? 'tonight' : 'today'
-  if (night === nightBefore(tonight)) return dark ? 'last night' : 'yesterday'
-  if (night > nightBefore(tonight, 7)) return `${nightDate(night, { weekday: 'long' })}${dark ? ' night' : ''}`
+  const inDark = dark(iso)
+  if (night === tonight) return inDark ? 'tonight' : 'today'
+  if (night === nightBefore(tonight)) return inDark ? 'last night' : 'yesterday'
+  if (night > nightBefore(tonight, 7)) return `${nightDate(night, { weekday: 'long' })}${inDark ? ' night' : ''}`
   return nightDate(night, { day: 'numeric', month: 'short' })
 }
 

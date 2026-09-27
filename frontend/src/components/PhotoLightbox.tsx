@@ -2,11 +2,11 @@ import { DownloadSimpleIcon } from '@phosphor-icons/react/dist/csr/DownloadSimpl
 import { MagnifyingGlassMinusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassMinus'
 import { MagnifyingGlassPlusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassPlus'
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
-import { type Failure, imageUrl, whoAmI } from '../api'
+import { type Failure, imageUrl, plainWords, whoAmI } from '../api'
 import { useReducedMotion } from '../hooks'
 import { estateStamp } from '../night'
 import Overlay from './Overlay'
-import { FixSheet, type PhotoFix, fixSpecies, markEmpty, undoFix } from './PhotoFix'
+import { FixSheet, type PhotoFix, type Saved, fixSpecies, markEmpty, undoFix } from './PhotoFix'
 import PhotoNotesPanel from './PhotoNotes'
 
 /**
@@ -22,13 +22,24 @@ import PhotoNotesPanel from './PhotoNotes'
  * where it costs width the photo has to spare rather than height it hasn't.
  *
  * Members and admins also have "Wrong?" (PhotoFix): say what the animal really is,
- * or that there's nothing in it. The viewer shows the new name at once, with Undo;
- * the list that opened it hears of it through `onFixed`.
+ * or that there's nothing in it. The viewer shows the new name at once, with Undo,
+ * on the photo and on the other photos of its visit that followed it; the list that
+ * opened it hears of each through `onFixed`.
  *
- * A list that has more photos than it has loaded (Photos, the species gallery) says
- * so with `hasMore`, and the viewer asks for the next page (`onNeedMore`) as you
- * swipe towards the end, rather than stopping at "Photo 60 of 60" (audit C-13).
+ * A list that has more photos than it has loaded (Photos, the species gallery, a
+ * camera's strip) says so with `hasMore`, and the viewer asks for the next page
+ * (`onNeedMore`) as you swipe towards the end, rather than stopping at "Photo 60 of
+ * 60" (audit C-13). When that page can't come, the list says why (`moreError`) and
+ * the viewer says so at the end, with Try again, rather than waiting on it.
  */
+
+/** Why the next page of photos didn't come, in words, for `moreError`. */
+export function morePhotosFailed(e: unknown): string {
+  const x = e as Failure
+  if (x.offline) return 'No signal, so older photos didn’t load.'
+  if (x.timeout) return 'No answer from the server, so older photos didn’t load.'
+  return `Older photos didn’t load. ${plainWords(x.message || '')}`.trim()
+}
 
 export type LightboxPhoto = {
   id: string
@@ -48,7 +59,7 @@ export type LightboxPhoto = {
 }
 
 /** A fix made in this viewer, and how to take it back. */
-type Change = { id: string; fix: PhotoFix; before: PhotoFix; choice: string }
+type Change = { id: string; fix: Saved; before: PhotoFix; choice: string }
 
 /**
  * Where the photo sits on the stage: scale, and offset from centre in px.
@@ -70,6 +81,12 @@ function downloadName(cam: string, capturedAt: string): string {
   return `${stem}_${estateStamp(capturedAt)}.jpg`
 }
 
+/** ", with the 2 other photos of this visit": the rest of a burst followed the fix. */
+function visitWords(n: number): string {
+  if (!n) return ''
+  return n === 1 ? ', with the other photo of this visit' : `, with the ${n} other photos of this visit`
+}
+
 /** A phone with a share sheet: that is where "Save image" lives. */
 const canShareFiles = () =>
   typeof navigator.share === 'function' && typeof navigator.canShare === 'function'
@@ -86,6 +103,7 @@ export default function PhotoLightbox({
   onFixed,
   hasMore = false,
   onNeedMore,
+  moreError,
 }: {
   photos: LightboxPhoto[]
   start?: number
@@ -102,6 +120,8 @@ export default function PhotoLightbox({
   /** The list has older photos than these; `onNeedMore` asks for the next page. */
   hasMore?: boolean
   onNeedMore?: () => void
+  /** The next page didn't come, in words (morePhotosFailed); empty while it is asked again. */
+  moreError?: string | null
 }) {
   // The photo on show, by id: a list refreshed underneath (a new photo on top, a page
   // dropped) keeps showing the same photo instead of whatever took its place. When it
@@ -166,7 +186,9 @@ export default function PhotoLightbox({
     if (idx < photos.length - 1) { setWaitingMore(false); step(1, true) } else if (!hasMore) setWaitingMore(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photos.length, hasMore, waitingMore])
-  // No page on a dead signal: Next works again (and asks again) rather than spinning.
+  // The page failed (no signal): stop waiting at once and say so at the end; the list
+  // also gives up on one that never answers (its timeout), so this is a last resort.
+  useEffect(() => { if (waitingMore && moreError) setWaitingMore(false) }, [waitingMore, moreError])
   useEffect(() => {
     if (!waitingMore) return
     const t = window.setTimeout(() => setWaitingMore(false), 25_000)
@@ -437,11 +459,18 @@ export default function PhotoLightbox({
     fixed_by: p.fixed_by ?? null,
   }
 
-  function fixed(id: string, fix: PhotoFix, before: PhotoFix, choice: string) {
-    setFixes((f) => ({ ...f, [id]: fix }))
+  /** The photo is `fix` now, and the other photos of its visit what `fix.visit` says. */
+  function apply(id: string, fix: Saved) {
+    const { visit, ...mine } = fix
+    setFixes((f) => ({ ...f, [id]: mine, ...Object.fromEntries(visit.map((v) => [v.id, v.fix])) }))
+    onFixed?.(id, mine)
+    for (const v of visit) onFixed?.(v.id, v.fix)
+  }
+
+  function fixed(id: string, fix: Saved, before: PhotoFix, choice: string) {
+    apply(id, fix)
     setChange({ id, fix, before, choice })
     setChangeErr('')
-    onFixed?.(id, fix)
   }
 
   /** Take the last fix back: "nothing here" is kept again; a species goes back to
@@ -452,18 +481,17 @@ export default function PhotoLightbox({
     setUndoing(true)
     setChangeErr('')
     try {
-      let back: PhotoFix
+      let back: Saved
       if (choice === 'nothing') {
         await markEmpty(id, false)
-        back = { ...before, empty: false }
+        back = { ...before, empty: false, visit: [] }
       } else if (!before.empty && before.fixed_by && before.species_id) {
         back = await fixSpecies(id, before.species_id)
       } else {
         back = await undoFix(id)
       }
-      setFixes((f) => ({ ...f, [id]: back }))
+      apply(id, back)
       setChange(null)
-      onFixed?.(id, back)
     } catch (e) {
       const x = e as Failure
       setChangeErr(x.offline ? 'No signal, so it wasn’t undone. Try again.' : x.timeout
@@ -541,12 +569,19 @@ export default function PhotoLightbox({
                   <span>
                     {changeErr || (shownChange.choice === 'nothing'
                       ? 'Marked: nothing here. It leaves the photo lists.'
-                      : `Changed to ${shownChange.fix.label}.${shownChange.fix.hidden ? ' That animal is hidden in Settings, so the photo leaves the lists.' : ''}`)}
+                      : `Changed to ${shownChange.fix.label}${visitWords(shownChange.fix.visit.length)}.${shownChange.fix.hidden ? ' That animal is hidden in Settings, so the photo leaves the lists.' : ''}`)}
                   </span>
                   <button type="button" className="lb-note-btn" onClick={undo} disabled={undoing}>{undoing ? 'Undoing…' : 'Undo'}</button>
                 </div>
               )}
               {waitingMore && <span role="status" className="lb-status lb-status--more">Loading older photos…</span>}
+              {!waitingMore && moreError && hasMore && idx === photos.length - 1 && (
+                <div className="lb-toast lb-more-err" role="alert"
+                  onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                  <span>{moreError}</span>
+                  <button type="button" className="lb-note-btn" onClick={() => step(1, true)}>Try again</button>
+                </div>
+              )}
               <img
                 ref={imgRef}
                 key={im.id}

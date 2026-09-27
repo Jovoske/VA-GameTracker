@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { type Failure, api, getFresh, peek, thumbUrl, whoAmI } from '../api'
 import Overlay from '../components/Overlay'
 import type { PhotoFix } from '../components/PhotoFix'
-import PhotoLightbox from '../components/PhotoLightbox'
+import PhotoLightbox, { morePhotosFailed } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
 import { nightBefore, nightOf, whenSeen } from '../night'
@@ -98,6 +98,8 @@ export default function Animals() {
   // Where the next page of the gallery starts; null when it is all here.
   const [galleryNext, setGalleryNext] = useState<Cursor | null>(null)
   const [galleryMore, setGalleryMore] = useState(false)
+  // Why the last older page didn't come: under "Show older photos", and in the viewer.
+  const [galleryMoreErr, setGalleryMoreErr] = useState('')
   const galleryInFlight = useRef<number | null>(null)
   const galleryEnd = useRef<HTMLDivElement>(null)
   const galleryBody = useRef<HTMLDivElement>(null)
@@ -157,6 +159,7 @@ export default function Animals() {
     const request = ++galleryRequest.current
     galleryInFlight.current = null
     setGalleryMore(false)
+    setGalleryMoreErr('')
     setGalleryErr('')
     setGallery({ sp, label })
     setGalleryImgs(null)
@@ -177,6 +180,7 @@ export default function Animals() {
     if (!gallery || !galleryNext || galleryInFlight.current === request) return
     galleryInFlight.current = request
     setGalleryMore(true)
+    setGalleryMoreErr('')
     api<SpPage>(galleryPath(gallery.sp, gallery.label, galleryNext), { signal: signal(), timeoutMs: SLOW_MS })
       .then((page) => {
         if (request !== galleryRequest.current) return
@@ -186,7 +190,7 @@ export default function Animals() {
         })
         setGalleryNext(cursorOf(page))
       })
-      .catch(() => { if (request === galleryRequest.current) setGalleryErr('Older photos did not load. Check your signal and try again.') })
+      .catch((e) => { if (request === galleryRequest.current && (e as Error).name !== 'AbortError') setGalleryMoreErr(morePhotosFailed(e)) })
       .finally(() => {
         if (galleryInFlight.current !== request) return
         galleryInFlight.current = null
@@ -636,6 +640,7 @@ export default function Animals() {
                 ))}
               </div>
               <div ref={galleryEnd} aria-hidden style={{ height: 1 }} />
+              {galleryMoreErr && galleryNext && !galleryMore && <div className="status-panel" role="alert">{galleryMoreErr}</div>}
               {galleryNext && (
                 <button className="text-action an-gallery-more" onClick={moreGallery} disabled={galleryMore}>
                   {galleryMore ? 'Loading…' : 'Show older photos'}
@@ -661,6 +666,7 @@ export default function Animals() {
           onFixed={photoFixed}
           hasMore={!!galleryNext}
           onNeedMore={moreGallery}
+          moreError={galleryMoreErr}
         />
       )}
     </div>
