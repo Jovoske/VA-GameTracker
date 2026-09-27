@@ -98,7 +98,7 @@ def part_hours(part: str) -> list[int]:
 
 def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
                camera_ids: list | None = None, species_id: str | None = None,
-               map_nights: bool = False):
+               map_nights: bool = False, species_ids=None):
     """One row per visit, as a subquery.
 
     Columns: camera_id, species_id, common_name, night (the app's night key of its
@@ -110,6 +110,9 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
     inside the map's nights (18:00-08:00) are, so however many nights the range
     spans, each visit is what reading its own night alone would give. A photo
     holding a hidden species and a visible one counts once, as the visible one.
+    `species_ids` (a list, or a subquery of ids) keeps only those species' visits,
+    read from their sightings rather than from every photo in the range: over a
+    season that is what keeps Tonight quick.
     """
     named = (
         select(Detection.image_id, Detection.species_id, Species.common_name, Detection.group_size)
@@ -128,6 +131,8 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
         conditions.append(Image.camera_id.in_(camera_ids))
     if species_id is not None:
         conditions.append(named.c.species_id == species_id)
+    if species_ids is not None:
+        conditions.append(named.c.species_id.in_(species_ids))
     # One row per photo and species: two boxes of the same boar are one frame.
     frames = (
         select(

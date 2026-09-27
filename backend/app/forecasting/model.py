@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import Integer, and_, case, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -122,27 +122,30 @@ def _evidence(
 
     # Frames up to 06:00 this morning: tonight's night is not over, so it is neither
     # a night seen nor one missed.
-    v = visit_rows(start=night_key_start(first - timedelta(days=1)),
-                   end=night_key_start(tonight), camera_ids=cam_ids)
     wanted = select(Species.id).where(Species.huntable.is_(True), Species.hidden.is_(False))
     if species_ids:
         wanted = wanted.where(Species.id.in_(species_ids))
+    v = visit_rows(start=night_key_start(first - timedelta(days=1)),
+                   end=night_key_start(tonight), camera_ids=cam_ids,
+                   species_ids=list(db.scalars(wanted).all()))
     hour = local_hour(v.c.first_at).label("h")
     rows = db.execute(
         select(
             v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, hour,
-            func.count().label("visits"), func.sum(v.c.frames).label("frames"),
+            func.count().label("visits"), cast(func.sum(v.c.frames), Integer).label("frames"),
         )
-        .where(v.c.species_id.in_(wanted), v.c.night >= first)
+        .where(v.c.night >= first)
         .group_by(v.c.camera_id, v.c.species_id, v.c.common_name, v.c.night, hour)
-    ).all()
-    for r in rows:
-        sp = ev[r.camera_id]["species"].setdefault(
-            r.species_id, {"name": r.common_name, "nights": {}, "by_hour": {}, "frames": {}}
-        )
-        sp["nights"][r.night] = sp["nights"].get(r.night, 0) + int(r.visits)
-        sp["frames"][r.night] = sp["frames"].get(r.night, 0) + int(r.frames)
-        sp["by_hour"][int(r.h)] = sp["by_hour"].get(int(r.h), 0) + int(r.visits)
+    ).tuples().all()
+    for cam_id, species_id, name, night, h, visits, frames in rows:
+        sp = ev[cam_id]["species"].get(species_id)
+        if sp is None:
+            sp = ev[cam_id]["species"][species_id] = {
+                "name": name, "nights": {}, "by_hour": {}, "frames": {}}
+        nights, by_hour = sp["nights"], sp["by_hour"]
+        nights[night] = nights.get(night, 0) + visits
+        sp["frames"][night] = sp["frames"].get(night, 0) + frames
+        by_hour[h] = by_hour.get(h, 0) + visits
 
     for cam_id, newest in db.execute(
         select(Image.camera_id, func.max(Image.captured_at))
