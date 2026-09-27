@@ -15,14 +15,15 @@ import {
   peekMe,
   whoAmI,
 } from '../api'
+import SitPrompts from '../components/SitPrompts'
 import { useRefetchOnReturn } from '../hooks'
 import { windColor, type MapData, type WindReport } from '../map/geometry'
-import { flushSitQueue } from './SitMode'
+import { flushSits, isOn, onSitSync, saveSit, withPending } from '../sits'
 import '../map/map.css'
 import './stands.css'
 
 type Stand = { id: string; name: string; lat: number | null; lon: number | null; claimed_tonight: boolean; claimed_by: string | null }
-type Sit = { id: string; stand_id: string; night: string; user_id: string | null; outcome: string; started_at: string | null; wind_text: string | null }
+type Sit = { id: string; stand_id: string; night: string; user_id: string | null; outcome: string; started_at: string | null; ended_at: string | null; wind_text: string | null }
 const OUTCOMES = [['nothing', 'Saw nothing'], ['seen', 'Saw animals'], ['shootable_no_shot', 'Had a chance, no shot'], ['shot', 'Shot']] as const
 const outcomeLabel = (value: string) => OUTCOMES.find(([key]) => key === value)?.[1] ?? 'Not reported'
 // One short line per stand. The full sentence from the forecast sits behind "Wind details".
@@ -37,6 +38,9 @@ const WIND_LINE: Record<string, string> = {
 
 // A write that never answers must not leave every button on "Reserving…".
 const WRITE_TIMEOUT_MS = 20_000
+// Start sit waits this long for the server, then opens Sit mode anyway: the start is
+// saved on the phone and goes with the next signal, and the seat works without it.
+const START_WAIT_MS = 4000
 
 export default function Stands() {
   const nav = useNavigate()
@@ -59,6 +63,8 @@ export default function Stands() {
   const [filter, setFilter] = useState('all')
   const focused = useRef(false)
   const ctl = useRef<AbortController | null>(null)
+  // Re-render when a report waiting on the phone goes out, so "Saved on this phone" clears.
+  const [, setSynced] = useState(0)
 
   function load() {
     ctl.current?.abort()
@@ -82,15 +88,19 @@ export default function Stands() {
   useEffect(() => {
     load()
     // Reports saved on the phone go at the same time, not before: a queue waiting on
-    // a thin link must not hold the list back (A-05).
-    flushSitQueue()
-      .then((n) => {
-        if (!n) return
-        setNotice(`${n} sit report${n === 1 ? '' : 's'} sent.`)
-        getFresh<Sit[]>('/sits', { save: true }).then(setSitsGot).catch(() => {})
-      })
-      .catch(() => setNotice('Some sit reports couldn’t send. They’re still saved on this phone.'))
-    return () => ctl.current?.abort()
+    // a thin link must not hold the list back (A-05). One sender for the whole app
+    // (sits.ts), so this joins a send already under way instead of racing it.
+    const off = onSitSync((r) => {
+      setSynced((n) => n + 1)
+      if (r.sent && !saving.current) getFresh<Sit[]>('/sits', { save: true }).then(setSitsGot).catch(() => {})
+    })
+    flushSits().then((r) => {
+      if (r.sent) setNotice(`${r.sent === 1 ? 'A sit report' : `${r.sent} sit reports`} saved on this phone went through.`)
+    })
+    return () => {
+      off()
+      ctl.current?.abort()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   useRefetchOnReturn(() => { if (!saving.current) load() })
@@ -102,9 +112,13 @@ export default function Stands() {
   const tonightKey = nightOf(Date.now())
   const standsOld = !!standsGot && fromEarlierNight(standsGot.at)
   const stands = standsGot && standsGot.data.map((s) => (standsOld ? { ...s, claimed_tonight: false, claimed_by: null } : s))
-  // /sits lists tonight's by default; each says its night, so a saved copy from an
-  // earlier one drops out here.
-  const sits = (sitsGot?.data ?? []).filter((s) => s.outcome !== 'cancelled' && (!s.night || s.night === tonightKey))
+  // /sits lists tonight's by default, and a sit still on from the night before (a
+  // dawn sit after 06:00, A-20); each says its night, so a saved copy from an earlier
+  // night drops out here. Each is shown as this phone knows it: with a report or
+  // END SIT still waiting for signal.
+  const sits = (sitsGot?.data ?? [])
+    .map(withPending)
+    .filter((s) => s.outcome !== 'cancelled' && (!s.night || s.night === tonightKey || isOn(s)))
   const reservationsUnknown = standsOld
   const staleGot = [standsGot, sitsGot].find((g) => g?.stale)
   // The copy on screen while the network is asked: how old it is, as Tonight says.
@@ -114,33 +128,47 @@ export default function Stands() {
     if (!stands || focused.current || !params.get('stand')) return
     document.getElementById(`stand-${params.get('stand')}`)?.scrollIntoView({ block: 'center' }); focused.current = true
   }, [stands, params])
-  async function run(id: string, action: () => Promise<unknown>, message: string, next?: string, goAnyway = false) {
+  async function run(id: string, action: () => Promise<unknown>, message: string, next?: string) {
     if (saving.current) return
     saving.current = true; setBusy(id); setErr(''); setNotice('')
-    try { await action(); setNotice(message); if (next) nav(next); else load() }
+    try { const said = await action(); setNotice(typeof said === 'string' ? said : message); if (next) nav(next); else load() }
     catch (e) {
-      // Sit mode works with no signal (reports wait on the phone), so a start that
-      // can't reach the server still opens it.
-      if (next && goAnyway && noAnswer(e)) nav(next)
-      else setErr(noAnswer(e) === 'timeout' ? 'No answer from the server. It may have saved: check again in a moment.' : `That didn’t save. ${(e as Error).message}`)
+      setErr(noAnswer(e) === 'timeout' ? 'No answer from the server. It may have saved: check again in a moment.' : `That didn’t save. ${(e as Error).message}`)
     }
     finally { saving.current = false; setBusy(null) }
   }
-  const sitFor = (id: string) => sits.find(s => s.stand_id === id)
+  // Sit mode works with no signal: the start goes onto the phone and out with the
+  // signal. Only a refusal (cancelled, not yours) keeps the hunter here.
+  async function start(sitId: string) {
+    const sent = saveSit(sitId, { start: true })
+    const slow = await Promise.race([sent.then(() => false), new Promise<boolean>((done) => window.setTimeout(() => done(true), START_WAIT_MS))])
+    if (slow) sent.catch(() => {})
+  }
+  // "What happened?" is the hunter saying so on purpose: it may lower what Sit mode
+  // saved (a correction), and it waits on the phone with no signal.
+  async function report(sitId: string, outcome: string) {
+    const how = await saveSit(sitId, { outcome, correct: true })
+    return how === 'queued' ? 'No signal. The report is saved on this phone and goes when there’s signal.' : undefined
+  }
+  // Your own sit first: a dawn sit still on and tonight's reservation can share a stand.
+  const sitFor = (id: string) => { const here = sits.filter(s => s.stand_id === id); return here.find(s => !!me && s.user_id === me.id) ?? here[0] }
   const owned = (s: Stand) => !!me && (sitFor(s.id)?.user_id === me.id || s.claimed_by === me.id)
   const occupied = (s: Stand) => s.claimed_tonight || !!sitFor(s.id)
   const shown = stands?.filter(s => filter === 'all' || (filter === 'mine' ? owned(s) : !occupied(s))) ?? []
   const free = stands?.filter(s => !occupied(s)) ?? []
   const yours = stands?.filter(owned) ?? []
-  const stateOf = (sit: Sit | undefined, mine: boolean, taken: boolean, active: boolean) => {
+  const stateOf = (sit: Sit | undefined, mine: boolean, taken: boolean) => {
     // An earlier night's copy can't say who has what tonight; "Free tonight" would be a guess.
     if (!mine && reservationsUnknown) return 'Tonight not known yet'
     // Until the phone knows who you are, a reserved stand may well be yours.
     if (!mine && taken && !me) return 'Reserved tonight'
     if (!mine) return taken ? 'Taken by another hunter' : 'Free tonight'
-    if (!active) return `Reported: ${outcomeLabel(sit?.outcome ?? '').toLowerCase()}`
-    return sit?.started_at ? 'Your sit is on' : 'Yours tonight'
+    const reported = !!sit && sit.outcome !== 'unreported'
+    if (sit && isOn(sit)) return 'Your sit is on'
+    if (sit?.ended_at && !reported) return 'Sit over. Nothing reported yet.'
+    return reported ? `Reported: ${outcomeLabel(sit!.outcome).toLowerCase()}` : 'Yours tonight'
   }
+  const canReserve = me?.role !== 'viewer'
 
   return <div className="stands-page estate-map">
     <div className="map-page-heading"><div><h1>Stands</h1><p>Who’s sitting where tonight.</p></div><Link className="map-button" to="/map">Map ↗</Link></div>
@@ -153,6 +181,7 @@ export default function Stands() {
     </p>}
     {err && <div className="map-message map-message--error" role="alert">{err}<button onClick={load} disabled={!!busy}>Try again</button></div>}
     {notice && <div className="map-message" role="status">{notice}</div>}
+    <SitPrompts page="stands" />
     {!stands && !err && <div className="status-panel" role="status">Loading stands…</div>}
     {stands && stands.length > 0 && !reservationsUnknown && <>
       <p className="stand-tonight" aria-label="Tonight's reservations">
@@ -164,17 +193,22 @@ export default function Stands() {
     {stands?.length === 0 && <div className="stand-empty"><h2>No stands yet</h2><p>Add the seats you actually sit in on the map. They show up here to reserve.</p><Link className="map-button map-button--primary" to="/map">{me?.role === 'admin' ? 'Add a stand on the map →' : 'Open the map →'}</Link></div>}
     {stands && stands.length > 0 && shown.length === 0 && <p className="status-panel">{filter === 'mine' ? 'You haven’t reserved a stand tonight.' : 'No stands free tonight.'}</p>}
     {shown.map(s => {
-      const sit = sitFor(s.id), mine = owned(s), taken = occupied(s), active = sit?.outcome === 'unreported'
+      const sit = sitFor(s.id), mine = owned(s), taken = occupied(s)
+      // In the stand now: "Back to sit" until END SIT, whatever was reported (A-06).
+      const on = !!sit && isOn(sit), fresh = !!sit && !sit.started_at && sit.outcome === 'unreported'
+      // Ended with nothing said: ask, instead of hiding the question behind a fold.
+      const ask = !!sit?.ended_at && sit.outcome === 'unreported'
       const wind = winds[s.id]
       const windLine = wind ? WIND_LINE[wind.status] ?? null : null
       const hasDetails = !!(wind?.text || (mine && sit?.wind_text))
       return <article key={s.id} id={`stand-${s.id}`} className={`stand-entry${params.get('stand') === s.id ? ' stand-entry--selected' : ''}`}>
-        <div className="stand-entry-top"><div><h2>{s.name}</h2><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{stateOf(sit, mine, taken, active)}</span></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Place on map ↗' : 'Map ↗'}</Link></div>
+        <div className="stand-entry-top"><div><h2>{s.name}</h2><span className={`stand-state${mine ? ' stand-state--mine' : ''}`}>{stateOf(sit, mine, taken)}</span></div><Link className="map-link" to={`/map?stand=${s.id}`}>{s.lat == null || s.lon == null ? 'Place on map ↗' : 'Map ↗'}</Link></div>
         {windLine && <p className="stand-wind-line" style={{ color: windColor(wind!.status) }}>{windLine}</p>}
-        {!taken && !reservationsUnknown && <button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : 'Reserve'}</button>}
-        {mine && sit && active && <>
-          <div className="map-actions"><button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => sit.started_at ? Promise.resolve() : api(`/sits/${sit.id}/start`, { method: 'POST', timeoutMs: WRITE_TIMEOUT_MS }), '', `/sit/${sit.id}`, true)}>{busy === s.id ? 'Saving…' : sit.started_at ? 'Back to sit' : 'Start sit'}</button>{!sit.started_at && <button className="map-link" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: 'cancelled' }), timeoutMs: WRITE_TIMEOUT_MS }), 'Reservation cancelled.')}>Cancel</button>}</div>
-          <details className="stand-outcome"><summary>What happened?</summary><div className="stand-outcome-buttons">{OUTCOMES.map(([value, label]) => <button key={value} className="map-button" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: value }), timeoutMs: WRITE_TIMEOUT_MS }), 'Sit report saved.')}>{label}</button>)}</div></details>
+        {!taken && !reservationsUnknown && canReserve && <button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => api('/sits', { method: 'POST', body: JSON.stringify({ stand_id: s.id }), timeoutMs: WRITE_TIMEOUT_MS }), `${s.name} is yours tonight.`)}>{busy === s.id ? 'Reserving…' : 'Reserve'}</button>}
+        {mine && sit && <>
+          {(on || fresh) && <div className="map-actions"><button className="map-button map-button--primary" disabled={!!busy} onClick={() => run(s.id, () => (on ? Promise.resolve() : start(sit.id)), '', `/sit/${sit.id}`)}>{busy === s.id ? 'Saving…' : on ? 'Back to sit' : 'Start sit'}</button>{fresh && <button className="map-link" disabled={!!busy} onClick={() => run(s.id, () => api(`/sits/${sit.id}`, { method: 'PATCH', body: JSON.stringify({ outcome: 'cancelled', at: new Date().toISOString() }), timeoutMs: WRITE_TIMEOUT_MS }), 'Reservation cancelled.')}>Cancel</button>}</div>}
+          {sit.unsent && <p className="stand-unsent">Saved on this phone. It goes when there’s signal.</p>}
+          <details className="stand-outcome" open={ask || undefined}><summary>What happened?</summary><div className="stand-outcome-buttons">{OUTCOMES.map(([value, label]) => <button key={value} className="map-button" aria-pressed={sit.outcome === value} disabled={!!busy} onClick={() => run(s.id, () => report(sit.id, value), 'Sit report saved.')}>{label}</button>)}</div></details>
         </>}
         {hasDetails && <details className="stand-wind"><summary>Wind details</summary>
           {wind?.text && <p>{wind.text}</p>}

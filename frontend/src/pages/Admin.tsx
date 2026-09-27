@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ageLabel, api, setToken } from '../api'
+import { ageLabel, api, signOut } from '../api'
+import { confirmSignOut } from '../sits'
 import NotificationSettings from '../components/NotificationSettings'
 import PhoneProblems from '../components/PhoneProblems'
 import SettingsSection from '../components/SettingsSection'
@@ -712,7 +713,8 @@ export default function Admin() {
           </div>
           <button
             onClick={() => {
-              setToken(null)
+              if (!confirmSignOut()) return
+              signOut()
               nav('/login')
             }}
             style={{ ...smallBtn, padding: '9px 16px', fontSize: 14 }}

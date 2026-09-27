@@ -13,6 +13,9 @@
 .stand-outcome[open] summary::before, .stand-wind[open] summary::before { content: '▾'; }
 .stand-outcome-buttons { margin-top: 6px; }
 .stand-outcome-buttons .map-button { min-height: 52px; }
+.stand-outcome-buttons .map-button[aria-pressed='true'] { border-color: var(--sand); color: var(--sand); }
+/* A report or END SIT still on the phone, waiting for signal. */
+.stand-unsent { margin: 10px 0 0; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
 .stand-wind p { margin: 6px 0 10px; }
 .stand-wind-when { display: block; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
 .stand-wind a { color: var(--sand); font-size: 13px; }

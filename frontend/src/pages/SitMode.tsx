@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api, getFresh, peek } from '../api'
+import { getFresh, peek } from '../api'
+import { flushSits, onSitSync, pendingFor, rank, saveSit } from '../sits'
 
 /**
  * Sit Mode: the screen that works in a high seat at midnight.
@@ -9,16 +10,17 @@ import { api, getFresh, peek } from '../api'
  *    headlamp, so colour never carries meaning here.
  *  - Big controls. Cold hands, gloves, one hand already busy.
  *  - No imagery. Nothing to load, nothing to light up the seat.
- *  - Writes queue locally if the tap fails; the valley has no signal.
+ *  - Every tap goes onto the phone first and out when there's signal (sits.ts).
+ *    The valley has no signal, and a later tap never undoes a better report.
  */
-
-const QUEUE_KEY = 'gs_sit_queue'
 
 type Sit = {
   id: string
+  stand_id: string
   stand: string | null
   outcome: string
   started_at: string | null
+  ended_at: string | null
   wind_status: string | null
   wind_text: string | null
 }
@@ -32,37 +34,18 @@ const WIND_HEAD: Record<string, string> = {
   no_geometry: 'Wind not set up for this stand',
 }
 
-function queueWrite(sitId: string, outcome: string) {
-  try {
-    const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]')
-    q.push({ sitId, outcome, at: new Date().toISOString() })
-    localStorage.setItem(QUEUE_KEY, JSON.stringify(q))
-  } catch {
-    /* nothing more we can do here */
-  }
+// What the flash says is still on record when a lower tap changes nothing.
+const KEPT: Record<string, string> = {
+  nothing: 'nothing so far',
+  seen: 'saw animals',
+  shootable_no_shot: 'had a chance, no shot',
+  shot: 'shot',
 }
 
-export async function flushSitQueue(): Promise<number> {
-  let queue: { sitId: string; outcome: string }[] = []
-  try {
-    queue = JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]')
-  } catch {
-    return 0
-  }
-  const left: typeof queue = []
-  for (const item of queue) {
-    try {
-      await api(`/sits/${item.sitId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ outcome: item.outcome }),
-      })
-    } catch {
-      left.push(item)
-    }
-  }
-  localStorage.setItem(QUEUE_KEY, JSON.stringify(left))
-  return queue.length - left.length
-}
+// END SIT waits this long for the server, then goes anyway. The end is on the
+// phone and goes out with the next signal; nobody should stand in the dark
+// watching a button.
+const END_WAIT_MS = 4000
 
 const AMBER = '#FFB000'
 
@@ -81,78 +64,134 @@ const footButton: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-/** This sit as the phone saved it (Stands keeps /sits), to paint before asking. */
-const savedSit = (sitId: string | undefined) => peek<Sit[]>('/sits')?.data.find((s) => s.id === sitId) ?? null
+/** This sit as the phone saved it (Stands keeps /sits, Tonight the sit you're on),
+ *  to paint before asking. */
+const savedSit = (sitId: string | undefined) =>
+  peek<Sit[]>('/sits')?.data.find((s) => s.id === sitId) ??
+  peek<{ live: Sit[] }>('/sits/mine')?.data.live?.find((s) => s.id === sitId) ??
+  null
 
 export default function SitMode() {
   const { sitId } = useParams()
   const nav = useNavigate()
   const [sit, setSit] = useState<Sit | null>(() => savedSit(sitId))
   const [clock, setClock] = useState(new Date())
-  const [pending, setPending] = useState(0)
+  // A report for this sit is on the phone and hasn't reached the server. Read from
+  // the phone, so it survives a reload or the app being killed (audit A-25).
+  const [pending, setPending] = useState(() => !!(sitId && pendingFor(sitId)))
+  const [ending, setEnding] = useState(false)
   const [flash, setFlash] = useState('')
   const [holding, setHolding] = useState(false)
   const holdTimer = useRef<number | null>(null)
   const flashTimer = useRef<number | null>(null)
+  const pendingRef = useRef(pending)
+  pendingRef.current = pending
+  // The best report so far, from the server, the phone and this visit's taps.
+  const best = useRef<string | undefined>(undefined)
   // A completed hold has already recorded "nothing". Lifting your finger then
   // fires the button's click, which must not record "seen" over the top of it.
   const holdFired = useRef(false)
+
+  function say(message: string, ms = 2500) {
+    setFlash(message)
+    if (flashTimer.current) window.clearTimeout(flashTimer.current)
+    flashTimer.current = window.setTimeout(() => setFlash(''), ms)
+  }
+  const know = (s: Sit | null) => {
+    if (s && rank(s.outcome) > rank(best.current)) best.current = s.outcome
+  }
 
   useEffect(() => {
     // The copy saved on the phone paints first, so the stand and the wind it was
     // reserved on show in the seat at once, with no signal too; the network then
     // replaces it. Nothing saved and no answer: the seat still works, unnamed.
-    setSit(savedSit(sitId))
+    const saved = savedSit(sitId)
+    setSit(saved)
+    best.current = sitId ? pendingFor(sitId)?.outcome : undefined
+    know(saved)
     const ctl = new AbortController()
     getFresh<Sit[]>('/sits', { save: true, timeoutMs: 20_000, signal: ctl.signal })
-      .then((got) => setSit(got.data.find((s) => s.id === sitId) ?? null))
+      .then((got) => {
+        const s = got.data.find((x) => x.id === sitId) ?? null
+        setSit((had) => s ?? had)
+        know(s)
+      })
       .catch(() => {})
     const t = setInterval(() => setClock(new Date()), 1000)
-
-    // Keep the screen on: a sit is hours long and re-waking a phone in the dark
-    // with gloves on is exactly the friction this screen exists to remove.
-    let lock: { release: () => void } | null = null
-    const nav0 = navigator as Navigator & { wakeLock?: { request: (t: string) => Promise<any> } }
-    nav0.wakeLock?.request('screen').then((l: any) => (lock = l)).catch(() => {})
-
     return () => {
       ctl.abort()
       clearInterval(t)
       if (flashTimer.current) window.clearTimeout(flashTimer.current)
-      try {
-        lock?.release()
-      } catch {
-        /* already gone */
-      }
     }
   }, [sitId])
 
-  // Signal often comes back mid-sit. Drain the queue there and then, and say so.
+  // Keep the screen on: a sit is hours long and re-waking a phone in the dark
+  // with gloves on is exactly the friction this screen exists to remove. The
+  // phone drops the lock whenever the app goes to the back (a glance at a
+  // message, the power button), so take it again each time Sit mode comes back
+  // to the front (audit A-17, I-23, J-15).
   useEffect(() => {
-    const onOnline = async () => {
-      const n = await flushSitQueue()
-      if (n <= 0) return
-      setPending((p) => Math.max(0, p - n))
-      setFlash(`Back online. ${n} report${n === 1 ? '' : 's'} sent.`)
-      if (flashTimer.current) window.clearTimeout(flashTimer.current)
-      flashTimer.current = window.setTimeout(() => setFlash(''), 3500)
+    type Lock = { release: () => Promise<void> }
+    const wake = (navigator as Navigator & { wakeLock?: { request: (t: 'screen') => Promise<Lock> } }).wakeLock
+    let lock: Lock | null = null
+    let gone = false
+    const take = () => {
+      if (!wake || document.visibilityState !== 'visible') return
+      wake.request('screen').then((l) => {
+        // Left Sit mode while the request was out: let it go at once, don't leak it.
+        if (gone) return void l.release().catch(() => {})
+        const old = lock
+        lock = l
+        old?.release().catch(() => {})
+      }).catch(() => {})
     }
-    window.addEventListener('online', onOnline)
-    return () => window.removeEventListener('online', onOnline)
+    take()
+    document.addEventListener('visibilitychange', take)
+    return () => {
+      gone = true
+      document.removeEventListener('visibilitychange', take)
+      lock?.release().catch(() => {})
+    }
   }, [])
 
-  async function record(outcome: string, message: string) {
+  // Anything left on the phone from before (a reload, the app killed) goes now;
+  // sits.ts keeps trying while it waits. Say so when signal comes back.
+  useEffect(() => {
     if (!sitId) return
-    setFlash(message)
+    const off = onSitSync((r) => {
+      const still = !!pendingFor(sitId)
+      if (pendingRef.current && !still && r.sent > 0) say('Signal’s back. Report sent.', 3500)
+      setPending(still)
+    })
+    void flushSits()
+    return off
+  }, [sitId])
+
+  function record(outcome: string, message: string) {
+    if (!sitId) return
     if (navigator.vibrate) navigator.vibrate(20)
-    if (flashTimer.current) window.clearTimeout(flashTimer.current)
-    flashTimer.current = window.setTimeout(() => setFlash(''), 2500)
-    try {
-      await api(`/sits/${sitId}`, { method: 'PATCH', body: JSON.stringify({ outcome }) })
-    } catch {
-      queueWrite(sitId, outcome)
-      setPending((n) => n + 1)
+    // A lower tap changes nothing. Say what's still on record rather than
+    // "Saved: saw animals" over a shot.
+    const kept = best.current
+    if (kept && rank(outcome) < rank(kept)) say(`Still saved: ${KEPT[kept] ?? kept}`)
+    else {
+      best.current = outcome
+      say(message)
     }
+    saveSit(sitId, { outcome })
+      .then((r) => setPending(r === 'queued'))
+      .catch((e: Error) => say(`Not saved. ${e.message}`, 5000))
+  }
+
+  async function endSit() {
+    if (!sitId || ending) return
+    setEnding(true)
+    await Promise.race([
+      saveSit(sitId, { end: true }).catch(() => {}),
+      new Promise((done) => window.setTimeout(done, END_WAIT_MS)),
+    ])
+    // Straight to this stand on Stands, which asks what happened if nothing was said.
+    nav(sit?.stand_id ? `/stands?stand=${sit.stand_id}` : '/stands')
   }
 
   function startHold() {
@@ -225,9 +264,9 @@ export default function SitMode() {
           <span style={{ opacity: flash ? 1 : 0, transition: 'opacity var(--d-fast) var(--ease-out)' }}>
             {flash || ' '}
           </span>
-          <span style={{ marginLeft: 'auto', fontSize: 12, opacity: pending > 0 ? 0.85 : 0 }}>
-            {/* Held space, not held text: an invisible "0 saved" would still be read out. */}
-            {pending > 0 ? `${pending} saved, no signal` : ''}
+          <span style={{ marginLeft: 'auto', fontSize: 12, opacity: pending ? 0.85 : 0 }}>
+            {/* Held space, not held text: an invisible line would still be read out. */}
+            {pending ? 'Saved on phone, no signal' : ''}
           </span>
         </div>
       </div>
@@ -286,14 +325,8 @@ export default function SitMode() {
         >
           SHOT
         </button>
-        <button
-          onClick={async () => {
-            await flushSitQueue()
-            nav('/stands')
-          }}
-          style={footButton}
-        >
-          END SIT
+        <button onClick={endSit} disabled={ending} aria-busy={ending} style={footButton}>
+          {ending ? 'ENDING…' : 'END SIT'}
         </button>
       </div>
     </div>

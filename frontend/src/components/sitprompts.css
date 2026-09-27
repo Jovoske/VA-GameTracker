@@ -1,0 +1,24 @@
+/* "Back to sit" and "What happened last night?" at the top of Tonight and Stands. */
+.sp { display: flex; flex-direction: column; gap: 12px; margin: 0 0 16px; }
+.sp .card { padding: 14px 16px 16px; }
+.sp p { margin: 0; font-size: 15px; line-height: 1.5; }
+.sp-live { display: flex; flex-direction: column; gap: 12px; }
+.sp-primary {
+  display: flex; align-items: center; justify-content: center; min-height: 56px; padding: 0 20px;
+  border-radius: var(--r-ctl); background: var(--go); color: var(--on-go); font-size: 16px; font-weight: 600;
+  text-decoration: none;
+}
+.sp-ask h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.sp-where { color: var(--text-dim); }
+.sp-answers { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.sp-answer {
+  min-height: 56px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl);
+  background: var(--surface-2); color: var(--text); font: inherit; font-size: 15px; font-weight: 500; cursor: pointer;
+}
+.sp-answer:disabled, .sp-didnt:disabled { opacity: .55; cursor: default; }
+.sp-didnt {
+  display: block; min-height: 44px; margin-top: 6px; padding: 8px 4px; border: 0; background: none;
+  color: var(--sand); font: inherit; font-size: 14px; text-decoration: underline; cursor: pointer;
+}
+.sp .sp-done { margin-top: 10px; color: var(--text); font-weight: 500; }
+.sp .sp-err { margin-top: 10px; color: var(--skip); font-size: 14px; }
