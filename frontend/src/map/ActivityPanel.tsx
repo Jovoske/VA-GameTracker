@@ -77,6 +77,7 @@ export function ActivityCard({ camera, data, onOpen, onClose, onHeight }: {
     `${plural(c.visits, 'visit')} over ${plural(c.watched_nights, 'night')} it was working${c.per_night ? `, ${rateWords(c.per_night).replace('1 every', 'one every')}` : ''}.`,
     c.blind_nights ? `Left out: ${plural(c.blind_nights, 'night')} it wasn’t working or was out of photo credits.` : null,
     c.checking_nights ? `Still checking the photos from ${plural(c.checking_nights, 'night')}.` : null,
+    c.unreadable_nights ? `Left out: ${plural(c.unreadable_nights, 'night')} whose photos couldn’t all be checked for animals.` : null,
     c.peak ? `Busiest ${c.peak} h.` : null,
     data.species === 'all' && c.by_species.length > 3 ? c.by_species.map(s => `${s.label} ${s.visits}`).join(' · ') : null,
   ].filter(Boolean)

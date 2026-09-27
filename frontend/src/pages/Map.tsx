@@ -568,6 +568,7 @@ export default function MapPage() {
     const checking = a.cameras.filter(c => c.checking_nights > 0).length, one = a.nights === 1
     if (a.cameras.every(c => !c.watched_nights)) {
       if (checking) return `Still checking ${one ? 'last night’s' : 'the'} photos. Look again in a few minutes.`
+      if (a.cameras.some(c => c.unreadable_nights)) return `Nothing to show: ${one ? 'last night’s' : 'the'} photos couldn’t all be checked for animals.`
       return `No camera was working ${one ? 'last night' : 'in this period'}, so there is nothing to show.`
     }
     if (a.cameras.every(c => !c.visits)) {

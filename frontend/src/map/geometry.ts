@@ -9,9 +9,10 @@ export type CameraHealth = {
 export type LatestPhoto = { image_id: string; captured_at: string; species_id: string | null; label: string }
 export type Visits = { species_id: string | null; label: string; visits: number }
 // How far to trust last night's list (routes_map.night_status): working, so an empty
-// list is a quiet night; frames still being checked; out of credits partway; or
-// nothing sent and maybe not working. null is no record either way.
-export type NightStatus = 'watched' | 'checking' | 'incomplete' | 'blind'
+// list is a quiet night; frames still being checked; frames the AI couldn't check at
+// all; out of credits partway; or nothing sent and maybe not working. null is no
+// record either way.
+export type NightStatus = 'watched' | 'checking' | 'unreadable' | 'incomplete' | 'blind'
 export type Camera = {
   id: string; name: string; lat: number | null; lon: number | null
   battery_pct: number | null; signal_pct: number | null; last_report_at: string | null

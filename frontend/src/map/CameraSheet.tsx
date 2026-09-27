@@ -46,10 +46,13 @@ export function lastNightLine(c: Camera): NightLine {
   const Night = night[0].toUpperCase() + night.slice(1)
   if (c.last_night.length) {
     const note = s === 'checking' ? 'Still checking the rest of last night’s photos.'
+      : s === 'unreadable' ? `Some photos from ${night} couldn’t be checked, so this may not be everything.`
       : s === 'incomplete' ? 'Out of photo credits last night, so this may not be everything.' : null
     return { text: `${Night}: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
   }
   if (s === 'checking') return { text: 'Still checking last night’s photos.', note: null, tone: 'quiet' }
+  // Photos the AI gave up on are not "nothing there": a broken AI read as a quiet night.
+  if (s === 'unreadable') return { text: `Nothing found ${night}, but some photos couldn’t be checked, so this may not be everything.`, note: null, tone: 'warn' }
   if (s === 'incomplete') return { text: `Nothing on camera ${night}, but it was out of photo credits, so this may not be everything.`, note: null, tone: 'warn' }
   // A camera that was down saw nothing because it couldn't, not because nothing came.
   const blind = s === 'blind' || (s == null && !c.health.producing)

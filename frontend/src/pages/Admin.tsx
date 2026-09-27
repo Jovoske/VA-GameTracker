@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ageLabel, api, setToken } from '../api'
+import { ageLabel, api, plainWords, setToken } from '../api'
 import NotificationSettings from '../components/NotificationSettings'
 import PhoneProblems from '../components/PhoneProblems'
 import SettingsSection from '../components/SettingsSection'
@@ -28,6 +28,8 @@ type AiStatus = {
   stopped: string | null
   last_error: string | null
   last_error_at: string | null
+  // Where the whole story is on the server (pipeline.log).
+  log_file?: string
 }
 /** The cloud stag/hind pass (app.ai.vision_sex). */
 type SexStatus = {
@@ -53,8 +55,9 @@ type Species = {
   huntable: boolean
   hidden: boolean
   is_priority: boolean
-  // Game on this estate: anything else in the advice was switched on by an older build.
-  game?: boolean
+  // The big game the evening advice is for (boar, deer, mouflon, ibex): anything else
+  // in the advice was switched on by an older build.
+  big_game?: boolean
   detections: number
 }
 type Me = { id: string; email: string; role: string }
@@ -110,6 +113,10 @@ const FETCH_WORDS: Record<string, string> = {
 const NUDGE_KEY = 'gs.settings.advice-nudge-done'
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 /** One short line on the AI pass for the folded section: what matters first. */
+/** "Fox, Rabbit and Badger". */
+const andList = (names: string[]) =>
+  names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] ?? ''
+
 function aiSummary(ai: AiStatus): { text: string; warn: boolean } {
   if (ai.stopped) return { text: 'Stopped', warn: true }
   if (ai.failed > 0) return { text: `${ai.failed} couldn’t be checked`, warn: true }
@@ -474,7 +481,7 @@ export default function Admin() {
     : []
 
   const shown = species.filter((s) => !s.hidden)
-  const notGame = shown.filter((s) => s.huntable && s.game === false)
+  const notGame = shown.filter((s) => s.huntable && s.big_game === false)
   const hiddenOnes = species.filter((s) => s.hidden)
   const onCount = shown.filter((s) => s.huntable).length
 
@@ -487,8 +494,8 @@ export default function Admin() {
         <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
         {!nudgeGone && me?.role === 'admin' && notGame.length > 0 && (
           <div className="status-panel" data-nudge style={{ marginBottom: 10 }}>
-            {notGame.map((sp) => sp.common_name).join(', ')} {notGame.length === 1 ? 'is' : 'are'} in the advice but
-            {notGame.length === 1 ? ' isn’t' : ' aren’t'} game here. New animals now start switched off.
+            {andList(notGame.map((sp) => sp.common_name))} {notGame.length === 1 ? 'is' : 'are'} in the evening
+            advice, which is meant for big game. Other animals new to the cameras now start switched off.
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
               <button type="button" style={loginBtn} disabled={savingId === 'nudge'} onClick={() => adviceGameOnly(notGame)}>
                 {savingId === 'nudge' ? 'Turning off…' : 'Turn them off'}
@@ -791,21 +798,23 @@ export default function Admin() {
             summary={<span style={{ color: sum.warn ? 'var(--skip)' : undefined }}>{sum.text}</span>}>
             {ai.stopped ? (
               <div role="alert" data-ai="stopped" style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--skip)' }}>
-                New photos aren’t being checked for animals. {ai.stopped} They show as “Not checked yet” until
-                this is fixed: ask whoever runs the server.
+                New photos aren’t being checked for animals. {plainWords(ai.stopped)} They show as “Not checked
+                yet” until it’s fixed. It tries again on every fetch. If it keeps happening, the detail is
+                below{ai.log_file ? <> and in <span style={{ overflowWrap: 'anywhere' }}>{ai.log_file}</span> on the server</> : null}.
               </div>
             ) : ai.waiting > 0 ? (
               <div data-ai="waiting" style={{ fontSize: 14, lineHeight: 1.5 }}>
                 {plural(ai.waiting, 'photo')} waiting to be checked for animals.{' '}
                 {ai.running_since ? 'Checking now.' : 'A few hundred go through on every fetch, newest first.'}
               </div>
-            ) : (
+            ) : ai.failed === 0 ? (
               <div data-ai="ok" style={{ fontSize: 14, lineHeight: 1.5 }}>
                 Every photo has been checked for animals{ai.last_run_at ? `. Last look ${ageLabel(ai.last_run_at)}.` : '.'}
               </div>
-            )}
+            ) : null}
             {ai.failed > 0 && (
-              <div style={{ marginTop: 10, fontSize: 13, lineHeight: 1.5 }}>
+              // The lead when nothing is waiting: never under "every photo has been checked".
+              <div data-ai="failed" style={{ marginTop: ai.stopped || ai.waiting > 0 ? 10 : 0, fontSize: ai.stopped || ai.waiting > 0 ? 13 : 14, lineHeight: 1.5 }}>
                 <div>
                   {plural(ai.failed, 'photo')} couldn’t be checked after 3 tries. They count as not checked, never as
                   empty nights.
@@ -816,10 +825,12 @@ export default function Admin() {
               </div>
             )}
             {retryMsg && <div role="status" style={{ marginTop: 8, fontSize: 13, color: 'var(--text-dim)' }}>{retryMsg}</div>}
-            {ai.last_error && !ai.stopped && ai.last_error_at && (
+            {(ai.stopped || ai.last_error) && (
               <details style={{ marginTop: 10, fontSize: 12, color: 'var(--text-dim)' }}>
-                <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>Last problem, {ageLabel(ai.last_error_at)}</summary>
-                <div style={{ overflowWrap: 'anywhere' }}>{ai.last_error}</div>
+                <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>
+                  {ai.stopped ? 'The detail' : 'Last problem'}{ai.last_error_at ? `, ${ageLabel(ai.last_error_at)}` : ''}
+                </summary>
+                <div style={{ overflowWrap: 'anywhere' }}>{ai.stopped ?? ai.last_error}</div>
               </details>
             )}
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, plainWords, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
@@ -181,7 +181,7 @@ function resultLine(s: SyncStatus): SyncLine {
   if (!ai || line.state === 'error') return line
   // The photos came in, but the animal check did not run: they show as not checked
   // yet. The technical detail (in brackets) is for Settings, not this line.
-  const why = ai.replace(/\s*\([^)]*\)/g, '')
+  const why = plainWords(ai)
   const which = (s.images_downloaded ?? 0) > 0 ? 'They' : 'Photos'
   return { ...line, state: 'warn', msg: `${line.msg} ${which} can’t be checked for animals just now. ${why}`.trim() }
 }
@@ -456,6 +456,8 @@ export default function Cameras() {
       const r = await api<{ status: string; since?: string | null; note?: string }>('/cameras/sync', { method: 'POST' })
       if (r.since) since = new Date(r.since).getTime() - 5000
       if (r.status === 'busy') setSync({ state: 'running', msg: 'Already checking. Waiting for it to finish…' })
+      // Another job (Look for repeats, tonight's plan) holds the fetch up: it runs next.
+      if (r.status === 'queued') setSync({ state: 'running', msg: r.note ?? 'Waiting for the server to finish another job…' })
     } catch (e) {
       setSync({ state: 'error', msg: `Could not start the check. ${(e as Error).message}` })
       setSyncing(false)
