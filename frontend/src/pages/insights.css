@@ -92,3 +92,7 @@
 @media (prefers-reduced-motion: reduce) {
   .weather-bar-fill { transition: none; }
 }
+
+.insights-class-photos { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.insights-more { display: block; width: 100%; min-height: 48px; margin-top: 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-ctl); font-size: 14px; cursor: pointer; }
+.insights-more:disabled { opacity: 0.6; cursor: default; }

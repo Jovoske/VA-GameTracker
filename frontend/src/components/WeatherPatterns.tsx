@@ -13,14 +13,23 @@ export type Driver = {
   key?: string
   sample_nights: number
   buckets: Bucket[]
+  // Held up against the same nights shuffled: a finding. False: could be chance.
+  beats_chance?: boolean
 }
+// Why a condition has no bars: too few nights, or the weather history couldn't be had.
+type VarStatus = 'ok' | 'insufficient' | 'unavailable'
 export type PatternScope = {
   key: string; label: string; drivers: Driver[]; total_nights: number; sightings: number
+  status?: Record<string, VarStatus>
 }
-export type Patterns = { scopes: PatternScope[]; nights: number; range?: [string, string] }
+export type Patterns = {
+  scopes: PatternScope[]; nights: number; range?: [string, string]
+  // Whether the differences were tested against chance, and against how many shuffles.
+  tested?: boolean; shuffles?: number
+}
 
 // `labels` name the three bars. `phrases` finish the sentence
-// "More sightings …" for the same three conditions.
+// "More wild boar …" for the same three conditions.
 const FACTORS = [
   { key: 'wind', title: 'Wind', Icon: WindIcon, labels: ['Light wind', 'In between', 'Strong wind'],
     phrases: ['when the wind is light', 'in middling wind', 'when it is windy'],
@@ -76,7 +85,7 @@ function bucketLabel(key: string, bucket: Bucket, labels: string[]) {
   return 'A mix of rises & falls'
 }
 
-// The plain-sentence version of bucketLabel: "More sightings …".
+// The plain-sentence version of bucketLabel: "More wild boar …".
 function bucketPhrase(factor: Factor, bucket: Bucket) {
   const pos = position(bucket)
   if (factor.key !== 'pressure_trend' || bucket.min == null || bucket.max == null) return factor.phrases[pos]
@@ -104,25 +113,36 @@ function compare(driver?: Driver) {
   return { buckets, max, complete, separated, leader }
 }
 
-function FactorCard({ factor, driver }: { factor: Factor; driver?: Driver }) {
+/** The one condition-group that stood out AND held up against chance, if any. */
+function finding(driver?: Driver) {
+  const { leader } = compare(driver)
+  return leader && driver?.beats_chance ? leader : null
+}
+
+function FactorCard({ factor, driver, status }: { factor: Factor; driver?: Driver; status?: VarStatus }) {
   const { key, title, Icon, labels, meaning } = factor
   const { buckets, max, complete, separated, leader } = compare(driver)
-  const takeaway = !complete ? 'Not enough nights to compare yet'
+  const found = finding(driver)
+  // Bars that did not beat chance are said to be what they are: a difference this
+  // size turns up in shuffled nights too, so it is not a finding (audit G-04, J-09).
+  const takeaway = status === 'unavailable' ? 'Weather history unavailable right now'
+    : !complete ? 'Not enough nights to compare yet'
     : !separated ? 'Too close to call'
-    : !leader ? 'No difference worth noting'
-    : `Most sightings: ${bucketLabel(key, leader, labels).toLowerCase()}`
+    : found ? `Most visits: ${bucketLabel(key, found, labels).toLowerCase()}`
+    : leader ? 'Could be chance'
+    : 'No difference'
 
   return <article className="weather-card" aria-labelledby={`factor-${key}`}>
     <div className="weather-card-heading"><Icon size={23} aria-hidden="true" /><h3 id={`factor-${key}`}>{title}</h3></div>
     <p className="weather-takeaway">{takeaway}</p>
     {complete && <>
-      <div className="weather-bars" role="img" aria-label={`${title}. Sightings a day. ${buckets.map(b => `${bucketLabel(key, b, labels)}: ${b.rate.toFixed(1)}`).join('. ')}`}>
+      <div className="weather-bars" role="img" aria-label={`${title}. Visits a night per camera. ${buckets.map(b => `${bucketLabel(key, b, labels)}: ${b.rate.toFixed(1)}`).join('. ')}`}>
         {buckets.map(b => <div className="weather-bar-row" key={b.label} aria-hidden="true">
           <div className="weather-bar-label"><span>{bucketLabel(key, b, labels)}</span><strong>{b.rate.toFixed(1)}</strong></div>
-          <div className="weather-bar-track"><div className={`weather-bar-fill${b === leader ? ' is-highest' : ''}`} style={{ width: `${max > 0 ? b.rate / max * 100 : 0}%` }} /></div>
+          <div className="weather-bar-track"><div className={`weather-bar-fill${b === found ? ' is-highest' : ''}`} style={{ width: `${max > 0 ? b.rate / max * 100 : 0}%` }} /></div>
         </div>)}
       </div>
-      <p className="weather-bar-caption">Sightings a day, over {driver?.sample_nights} nights</p>
+      <p className="weather-bar-caption">Visits a night per camera, over {driver?.sample_nights} watched nights</p>
     </>}
     <details className="weather-details">
       <summary>{complete ? 'What the bars measure' : `What ${title.toLowerCase()} measures`}</summary>
@@ -135,29 +155,35 @@ function FactorCard({ factor, driver }: { factor: Factor; driver?: Driver }) {
 export default function WeatherPatterns({ patterns, scope, onScope, error, loading, retry }: { patterns: Patterns | null; scope: string; onScope: (key: string) => void; error: string; loading: boolean; retry: () => void }) {
   const selected = patterns?.scopes.find(s => s.key === scope) || patterns?.scopes[0]
   const driverFor = (factor: Factor) => selected?.drivers.find(d => keyOf(d) === factor.key)
-  // One plain sentence per condition that clearly stood out.
-  const findings = FACTORS.flatMap(factor => {
-    const { leader } = compare(driverFor(factor))
-    return leader ? [{ key: factor.key, text: `More sightings ${bucketPhrase(factor, leader)}.` }] : []
-  })
   const subject = selected && selected.key !== 'all' ? selected.label.toLowerCase() : 'animals'
+  // A sentence only for a difference that held up against the same nights shuffled.
+  // An older server did no such test, so nothing it sends is stated as a finding.
+  const findings = FACTORS.flatMap(factor => {
+    const found = finding(driverFor(factor))
+    return found ? [{ key: factor.key, text: `More ${subject} ${bucketPhrase(factor, found)}.` }] : []
+  })
   return <section className="insights-weather block" aria-labelledby="weather-heading">
     <h2 id="weather-heading" className="sect">Weather and moon</h2>
-    <p className="page-intro">What the weather was doing on the nights the cameras were busiest.</p>
+    <p className="page-intro">Visits against the weather and the moon, on the nights the cameras were watching.</p>
     {error && <div className="status-panel" role="alert">{patterns ? 'Could not update the weather findings. Showing the previous ones.' : 'Could not load the weather findings.'}<button className="text-action" onClick={retry}>Retry</button></div>}
     {loading && !patterns && <p role="status" className="page-intro">Checking the weather on your busiest nights…</p>}
     {patterns && <>
       {patterns.scopes.length > 0 && <div className="weather-scopes" role="group" aria-label="Choose animals">{patterns.scopes.map(s => <button key={s.key} aria-pressed={s.key === selected?.key} onClick={() => onScope(s.key)}>{s.label}</button>)}</div>}
       {!selected && <p className="weather-empty">Not enough nights on the cameras yet. Findings appear as sightings build up.</p>}
-      {selected && findings.length === 0 && <p className="weather-empty">No weather or moon pattern stands out for {subject} yet. Keep the cameras running.</p>}
-      {selected && findings.length > 0 && <ul className="insights-findings" aria-label={`Weather findings for ${selected.label.toLowerCase()}`}>
-        {findings.map(f => <li key={f.key}>{f.text}</li>)}
-      </ul>}
+      {selected && findings.length === 0 && <p className="weather-empty">No weather or moon pattern stands out from chance for {subject} yet. Keep the cameras running.</p>}
+      {selected && findings.length > 0 && <>
+        <ul className="insights-findings" aria-label={`Weather findings for ${selected.label.toLowerCase()}`}>
+          {findings.map(f => <li key={f.key}>{f.text}</li>)}
+        </ul>
+        <p className="weather-bar-caption">These held up when the same nights were shuffled {patterns.shuffles ?? 200} times.</p>
+      </>}
       {selected && <details className="weather-more" key={selected.key}>
         <summary>Show the numbers</summary>
-        <p className="weather-reading-guide">Longer bar, more sightings a day. These are past counts, not tonight's odds.</p>
-        <div className="weather-grid">{FACTORS.map(factor => <FactorCard key={factor.key} factor={factor} driver={driverFor(factor)} />)}</div>
-        <p className="weather-bar-caption">{selected.label}: {selected.sightings.toLocaleString()} sightings over {selected.total_nights} nights{patterns.range && `, ${patterns.range[0]} to ${patterns.range[1]}`}.</p>
+        <p className="weather-reading-guide">Longer bar, more visits a night. {patterns.tested
+          ? '“Could be chance” means a gap that size turns up in shuffled nights too: it is not a finding.'
+          : 'Not tested against chance: read these as counts, not findings.'} These are past counts, not tonight's odds.</p>
+        <div className="weather-grid">{FACTORS.map(factor => <FactorCard key={factor.key} factor={factor} driver={driverFor(factor)} status={selected.status?.[factor.key]} />)}</div>
+        <p className="weather-bar-caption">{selected.label}: {selected.sightings.toLocaleString()} visits over {selected.total_nights} watched nights{patterns.range && `, ${patterns.range[0]} to ${patterns.range[1]}`}.</p>
       </details>}
     </>}
   </section>
