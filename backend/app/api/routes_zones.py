@@ -139,8 +139,9 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
     wdir, wspd = cond.get("wind_dir_deg"), cond.get("wind_speed_kmh")
     cloud = cond.get("cloud_cover_pct")
     # Everything on the map is judged for the sit: 45 minutes after tonight's
-    # sunset, or now once that has passed. At lunch the map used to show the midday
-    # upslope air under the evening's forecast, the opposite of the sit (B-04).
+    # sunset, or now once that has passed, until 06:00. At lunch the map used to
+    # show the midday upslope air under the evening's forecast, the opposite of the
+    # sit (B-04); from 06:00 to sunrise, the dawn air (R4BE-1).
     try:
         at, at_now = datetime.fromisoformat(cond["wind_at"]), bool(cond.get("wind_now"))
     except (KeyError, TypeError, ValueError):
@@ -178,6 +179,8 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
             "cloud_cover_pct": cloud,
             "moon_illum": cond.get("moon_illum"),
             "sunset_local": cond.get("sunset_local"),
+            # The instant, so the page says "sunset was" only once it has been.
+            "sunset": cond.get("sunset"),
             # The moment the wind bar, the stands and the shading are for.
             "wind_at": at.isoformat(),
             "wind_at_local": at.astimezone(ZoneInfo(_s.estate_timezone)).strftime("%H:%M"),

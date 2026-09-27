@@ -86,6 +86,39 @@ def test_nobody_is_sent_out_at_three_in_the_morning():
     assert w["start_hour"] in model.SITTABLE_HOURS
 
 
+def test_animals_never_seen_when_you_can_sit_get_no_best_hours():
+    """R4BE-5: roe deer seen only at 07:00 got "Best hours 21:15 to 00:15, from
+    1 h 15 min after sunset": every block tied at nothing and the middle one won."""
+    tonight = date(2026, 9, 27)
+    dawn = {(tonight - timedelta(days=k), 7 * 4): 2 for k in range(1, 20)}
+    assert _sunset_window(dawn, tonight) is None
+    # One evening visit is enough to have hours, with its small share.
+    w = _sunset_window({**dawn, **_slots([tonight - timedelta(days=3)], (60,))}, tonight)
+    assert w is not None and 0 < w["share_pct"] < 10
+
+
+def test_insights_hours_move_with_the_sun():
+    """G-05: Insights' "busiest between" was the season's clock hours, so in late
+    October it named the August hours, an hour or two after the animals."""
+    from app.forecasting.insights import _on_tonight
+
+    tonight = date(2026, 10, 26)
+    evening = _slots(_span(date(2026, 8, 1), date(2026, 8, 31)), (60,))
+    moved = {_on_tonight(n, sl, tonight) for n, sl in evening}
+    arrival = (_sunset(tonight) + timedelta(minutes=60)).astimezone(MADRID)
+    assert moved <= {arrival.hour, (arrival - timedelta(minutes=8)).hour,
+                     (arrival + timedelta(minutes=8)).hour}
+    assert 22 not in moved and 23 not in moved  # where the August clock put them
+    # A morning visit goes by the sunrise: half an hour before it, in August and now.
+    from app.forecasting.insights import _sun
+
+    aug = (_sun(date(2026, 8, 10))[0] - timedelta(minutes=30)).astimezone(MADRID)
+    slot = (aug.hour * 60 + aug.minute) // SLOT_MIN
+    want = (_sun(tonight + timedelta(days=1))[0] - timedelta(minutes=30)).astimezone(MADRID)
+    assert _on_tonight(date(2026, 8, 10), slot, tonight) in {
+        want.hour, (want - timedelta(minutes=8)).hour, (want + timedelta(minutes=8)).hour}
+
+
 def test_moon_names_are_centred_on_the_phase():
     """The full moon of 26 Sep 2026 (16:49 UTC) read "Waxing Gibbous" that morning and
     "Full Moon" three nights later (audit F-21)."""
@@ -145,6 +178,73 @@ def test_tonight_says_the_hours_from_sunset(db_session, offline):
     persist_tonight(db_session, out, target=tonight)
     saved = db_session.scalar(select(Forecast))
     assert saved.best_window_start.strftime("%H:%M") == w["start"]
+
+
+@requires_db
+def test_tonight_gives_no_hours_for_animals_only_seen_at_dawn(db_session, offline):
+    from sqlalchemy import select
+
+    from app.forecasting.exposure import current_night, recompute_camera_nights
+    from app.forecasting.scoring import persist_tonight
+    from app.models import Camera, Detection, Estate, Forecast, Image, Species
+
+    e = Estate(name="E", timezone="Europe/Madrid", lat=39.09, lon=-1.36)
+    db_session.add(e)
+    db_session.add(Species(id="roe_deer", common_name="Roe deer", huntable=True))
+    db_session.flush()
+    cam = Camera(estate_id=e.id, name="Loma", active=True, last_report_at=datetime.now(UTC))
+    db_session.add(cam)
+    db_session.flush()
+    tonight = current_night()
+    for n in range(1, 21):
+        day = tonight - timedelta(days=n)
+        img = Image(camera_id=cam.id,
+                    captured_at=datetime.combine(day, time(7, 5), tzinfo=MADRID),
+                    is_empty_frame=False, processed_at=datetime.now(UTC), reviewed=False)
+        db_session.add(img)
+        db_session.flush()
+        db_session.add(Detection(image_id=img.id, species_id="roe_deer", group_size=1))
+    db_session.commit()
+    recompute_camera_nights(db_session)
+
+    out = model.forecast_tonight(db_session)
+    assert out["recommended"]["best_window"] is None
+    assert out["where"][0]["best_window"] is None
+    why = out["factors"][-1]["text"]
+    assert "outside the hours you can sit" in why and "Best hours" not in why
+    persist_tonight(db_session, out, target=tonight)
+    saved = db_session.scalar(select(Forecast))
+    assert saved.best_window_start is None and saved.best_window_end is None
+
+
+@requires_db
+def test_insights_names_tonights_hours(db_session):
+    from app.forecasting.exposure import current_night
+    from app.forecasting.insights import compute_insights
+    from app.models import Camera, Detection, Estate, Image, Species
+
+    e = Estate(name="E", timezone="Europe/Madrid", lat=39.09, lon=-1.36)
+    db_session.add(e)
+    db_session.add(Species(id="wild_boar", common_name="Wild boar", huntable=True))
+    db_session.flush()
+    cam = Camera(estate_id=e.id, name="Puente", active=True)
+    db_session.add(cam)
+    db_session.flush()
+    tonight = current_night()
+    for n in range(20, 50):
+        night = tonight - timedelta(days=n)
+        img = Image(camera_id=cam.id, captured_at=_sunset(night) + timedelta(minutes=97),
+                    is_empty_frame=False, processed_at=datetime.now(UTC), reviewed=False)
+        db_session.add(img)
+        db_session.flush()
+        db_session.add(Detection(image_id=img.id, species_id="wild_boar", group_size=1))
+    db_session.commit()
+    busiest = compute_insights(db_session)["correlations"][0]
+    assert busiest["statement"].startswith("Your cameras are busiest between ")
+    start = int(busiest["statement"].split("between ")[1][:2])
+    arrival = _sunset(tonight) + timedelta(minutes=97)
+    for when in (arrival - timedelta(minutes=8), arrival + timedelta(minutes=8)):
+        assert (when.astimezone(MADRID).hour - start) % 24 < 3
 
 
 @requires_db

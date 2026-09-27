@@ -21,7 +21,7 @@ import tempfile
 import threading
 import uuid
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,9 +43,18 @@ CLOCK_SLACK = timedelta(minutes=10)
 # the photo is filed at its receipt time.
 MAX_CLOCK_HOURS = 2
 HOUR_FIT_EARLY = timedelta(minutes=20)
-# A photo received within this long of its (corrected) capture time came in straight
-# away, so it can vouch for the camera's clock either way.
-PROMPT_UPLOAD = timedelta(minutes=15)
+# A photo received within this long after its (corrected) capture time came in
+# straight away, so it can vouch for the camera's clock. A capture several minutes
+# after the receipt can't: a clock an hour fast with an upload 50-58 minutes late
+# reads just like that (R4BE-7).
+ON_TIME = timedelta(minutes=5)
+# A capture time up to this far after its receipt is a right clock a little fast (set
+# by hand from a phone, and drifting): it still vouches for the clock, and is never
+# taken for an hour-fast clock with a late upload.
+CLOCK_JITTER = timedelta(minutes=2)
+# A camera found fast is said to be right again only after this many photos in a row
+# came in on time: one late upload must not switch the camera card's warning off.
+ON_TIME_TO_CLEAR = 3
 # A full disk, a permission problem or a file another program holds open (antivirus
 # on Db01's media folder) passes: the package goes back to ready/ and is tried again
 # on the next pass, and only after this many tries is it parked in failed/.
@@ -171,10 +180,10 @@ def _timestamp(exif: dict, filename: str, received: datetime, tz: ZoneInfo):
 
     def clock(value):
         # Only a photo sent straight away can say the clock is right; a backlog
-        # uploaded later says nothing either way.
+        # uploaded later, or one stamped well after its receipt, says nothing.
         if ahead_min:
             return ahead_min[0]
-        return 0 if received - value <= PROMPT_UPLOAD else None
+        return 0 if -CLOCK_JITTER <= received - value <= ON_TIME else None
 
     original = exif.get(36867)
     if original:
@@ -310,6 +319,41 @@ def advisory_lock_key(camera_id: uuid.UUID, file_hash: str) -> int:
     return int.from_bytes(hashlib.sha256(key).digest()[:8], "big", signed=True)
 
 
+def _known_clock(camera, photo: Photo) -> Photo:
+    """A photo that can't vouch for the clock, from a camera known to run whole hours
+    fast (clock_ahead_min): stamped after it was received, it is that fast clock and
+    a late upload, not a right clock, and is put right by the camera's known hours.
+    It used to be filed an hour late (R4BE-7)."""
+    ahead = camera.clock_ahead_min
+    if (not ahead or photo.clock_ahead_min is not None
+            or photo.timestamp_source == "received_at_fallback"
+            or photo.captured_at <= photo.received_at + CLOCK_JITTER):
+        return photo
+    hours = round(ahead / 60)
+    note = (f"Camera clock known to be {hours} h ahead and this photo stamped after it "
+            f"arrived; capture time moved back {hours} h")
+    _logger().warning("ftp.clock_known_skew", hours_ahead=hours, filename=photo.original_filename,
+                      received_at=photo.received_at.isoformat())
+    return replace(photo, captured_at=photo.captured_at - timedelta(minutes=ahead),
+                   timestamp_notes=(*photo.timestamp_notes, note))
+
+
+def _check_clock(camera, photo: Photo) -> None:
+    """What this photo says about the camera's clock, onto the camera card: found fast
+    at once; right again only after ON_TIME_TO_CLEAR photos in a row on time."""
+    if photo.clock_ahead_min is None:
+        return
+    if photo.clock_ahead_min:
+        camera.clock_ahead_min = photo.clock_ahead_min
+        camera.clock_ok_photos = 0
+    elif camera.clock_ahead_min:
+        camera.clock_ok_photos = (camera.clock_ok_photos or 0) + 1
+        if camera.clock_ok_photos >= ON_TIME_TO_CLEAR:
+            camera.clock_ahead_min, camera.clock_ok_photos = 0, 0
+    else:
+        camera.clock_ahead_min = 0
+
+
 def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, enrich: bool):
     from sqlalchemy import select, text
 
@@ -337,11 +381,13 @@ def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, 
         db.commit()
         return result
 
+    photo = _known_clock(camera, photo)
     destination = media_root / str(camera.estate_id) / str(camera_id) / (
         photo.captured_at.strftime("%Y-%m-%d")
     ) / f"ftp_{photo.sha256}.jpg"
     _atomic_write(destination, photo.data)
     row = Image(camera_id=camera_id, captured_at=photo.captured_at,
+                received_at=photo.received_at,
                 original_path=str(destination), file_hash=photo.sha256,
                 width=photo.width, height=photo.height)
     db.add(row)
@@ -364,9 +410,8 @@ def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, 
             _logger().warning("ftp.enrichment_failed", image=str(row.id), error=str(exc))
     camera.last_sync_at = datetime.now(UTC)
     camera.last_report_at = max(camera.last_report_at or photo.received_at, photo.received_at)
-    if photo.clock_ahead_min is not None:
-        # The camera card says so while its photo times are being put right.
-        camera.clock_ahead_min = photo.clock_ahead_min
+    # The camera card says so while its photo times are being put right.
+    _check_clock(camera, photo)
     result = ImportResult(str(row.id), "imported", str(destination))
     db.commit()  # source package still exists; crash after commit is harmless on retry
     _logger().info("ftp.imported", image=result.image_id, camera=str(camera_id),

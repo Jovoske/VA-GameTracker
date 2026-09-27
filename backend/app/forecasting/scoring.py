@@ -146,13 +146,14 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
     return run
 
 
-def _clock_time(hhmm: str | None, hour) -> time:
-    """"20:45" as a time; a plan from before best hours followed sunset has only the hour."""
+def _clock_time(hhmm: str | None, hour) -> time | None:
+    """"20:45" as a time; a plan from before best hours followed sunset has only the
+    hour, and a claim with no best hours (animals never seen when you can sit) none."""
     try:
         h, m = (int(x) for x in str(hhmm).split(":"))
         return time(hour=h, minute=m)
     except (TypeError, ValueError):
-        return time(hour=int(hour or 0))
+        return time(hour=int(hour)) if hour is not None else None
 
 
 def night_window(night: date, claimed_at: datetime | None = None) -> tuple[datetime, datetime]:

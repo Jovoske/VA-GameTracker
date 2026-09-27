@@ -5,15 +5,17 @@ consistent comparison for each condition.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.enrichment.astro import moon_phase, solar
-from app.forecasting.exposure import current_night, local_hour, night_key_start
-from app.forecasting.model import _best_window, sentence_case
+from app.forecasting.exposure import current_night, night_key_start
+from app.forecasting.model import SLOT_MIN, _best_window, sentence_case
 from app.models import Camera
 
 _TZ = settings.estate_timezone
@@ -53,6 +55,34 @@ def _outlook(days: int = 7) -> list[dict]:
     return out
 
 
+@lru_cache(maxsize=1024)
+def _sun(day: date) -> tuple[datetime | None, datetime | None]:
+    s = solar(settings.estate_lat, settings.estate_lon, day)
+    return s.get("sunrise"), s.get("sunset")
+
+
+def _on_tonight(night: date, slot: int, tonight: date) -> int:
+    """The hour of tonight's clock a visit in quarter hour `slot` of `night` stands for.
+
+    Sunset in Alatoz moves about three hours between August and late October, the
+    clock change included, so a season of clock hours drifted away from the animals
+    ("busiest between 20:00 and 23:00" for boar now in by 19:00, audit G-05). An
+    afternoon or evening visit is put as long after tonight's sunset as it came
+    after its own day's; one after midnight or in the morning as long from
+    tomorrow's sunrise as it was from its own.
+    """
+    minute = slot * SLOT_MIN + SLOT_MIN // 2
+    day = night if minute >= 6 * 60 else night + timedelta(days=1)
+    at = datetime.combine(day, time(minute // 60, minute % 60), tzinfo=ZoneInfo(_TZ))
+    if minute >= 12 * 60:
+        theirs, ours = _sun(day)[1], _sun(tonight)[1]
+    else:
+        theirs, ours = _sun(day)[0], _sun(tonight + timedelta(days=1))[0]
+    if theirs is None or ours is None:
+        return minute // 60
+    return (ours + (at - theirs)).astimezone(ZoneInfo(_TZ)).hour
+
+
 def _clock(hour: int) -> str:
     """Plain clock time for a sentence: 0 reads as midnight, 21 as 21:00."""
     return "midnight" if hour == 0 else f"{hour:02d}:00"
@@ -60,8 +90,9 @@ def _clock(hour: int) -> str:
 
 def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     """The plain-sentence summaries, from visits per (camera, species id, species
-    name, local hour of arrival). Visits, not photos: one boar loitering for thirty
-    frames is one arrival, and a camera that fires often no longer counts for more.
+    name, hour of arrival on tonight's clock, _on_tonight). Visits, not photos: one
+    boar loitering for thirty frames is one arrival, and a camera that fires often
+    no longer counts for more.
 
     The camera is a key `names` turns into its name (the key itself without it): two
     cameras that share a name are still two cameras (audit I-26)."""
@@ -134,20 +165,29 @@ def _correlations(db: Session) -> list[dict]:
     from app.forecasting.visits import visit_rows
 
     v = visit_rows(start=_since())
-    hour = local_hour(v.c.first_at).label("h")
+    local = func.timezone(_TZ, v.c.first_at)
+    slot = cast(
+        func.floor((func.extract("hour", local) * 60 + func.extract("minute", local)) / SLOT_MIN),
+        Integer,
+    ).label("slot")
     # By camera id, named afterwards: two cameras called "SPYPOINT" are two cameras.
+    # By night and quarter hour, so each visit is put on tonight's clock by its own
+    # night's sun (_on_tonight).
     rows = db.execute(
-        select(Camera.id, v.c.species_id, v.c.common_name, hour, func.count())
+        select(Camera.id, v.c.species_id, v.c.common_name, v.c.night, slot, func.count())
         .select_from(v)
         .join(Camera, Camera.id == v.c.camera_id)
         .where(Camera.retired_at.is_(None))
-        .group_by(Camera.id, v.c.species_id, v.c.common_name, hour)
+        .group_by(Camera.id, v.c.species_id, v.c.common_name, v.c.night, slot)
     ).all()
     names = dict(db.execute(select(Camera.id, Camera.name)).all())
-    return _summaries([
-        (cam, sid, sentence_case(name) if name else None, int(h), int(n))
-        for cam, sid, name, h, n in rows
-    ], names)
+    tonight = current_night()
+    by_hour: dict[tuple, int] = {}
+    for cam, sid, name, night, sl, n in rows:
+        key = (cam, sid, sentence_case(name) if name else None,
+               _on_tonight(night, int(sl), tonight))
+        by_hour[key] = by_hour.get(key, 0) + int(n)
+    return _summaries([(*key, n) for key, n in by_hour.items()], names)
 
 
 def _composition(db: Session) -> list[dict]:

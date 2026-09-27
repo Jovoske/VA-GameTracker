@@ -56,6 +56,8 @@ type Camera = {
   health: Health | null
   // When an admin retired it (taken down): out of the plan and the numbers.
   retired_at?: string | null
+  /** Minutes its photos take to arrive (Suntek, by FTP or email), the middle of the last 50. */
+  upload_delay_min?: number | null
 }
 type Img = {
   id: string
@@ -169,6 +171,24 @@ function HealthNote({ c }: { c: Camera }) {
     return <p className="cam-health-note">It sends photos only, so a quiet spell and a flat battery look the same. Check it on your next visit.</p>
   }
   return null
+}
+
+/** How long a camera's photos take to reach the app, in words. */
+function delayWords(min: number): string {
+  if (min <= 1) return 'Within a minute of being taken'
+  if (min < 90) return `About ${min} min after they’re taken`
+  return `About ${Math.round(min / 60)} h after they’re taken`
+}
+
+/**
+ * Photos an hour late, every time, is a camera clock an hour slow: the import can't
+ * tell that from a slow upload, but a camera that sends at once doesn't wait an hour
+ * (audit H-17). One ahead is put right on import and said in the health line.
+ */
+function ClockNote({ c }: { c: Camera }) {
+  const d = c.upload_delay_min
+  if (d == null || d < 50 || d > 75 || c.health?.status === 'retired') return null
+  return <p className="cam-health-note cam-health-note--warn">Its photos reach the app about an hour after they’re taken. If it sends them straight away, its clock is probably an hour slow: set the time on the camera.</p>
 }
 
 /** What a finished fetch came to, count first, then what needs a look. */
@@ -706,6 +726,7 @@ export default function Cameras() {
               </div>
               <div className="cam-last-seen">{lastSeenLine(c, imgs)}</div>
               <HealthNote c={c} />
+              <ClockNote c={c} />
 
               <div
                 className="cam-strip"
@@ -796,6 +817,7 @@ export default function Cameras() {
                   )}
                   {c.sd_total_mb ? <div><dt>SD card</dt><dd>{Math.round(((c.sd_used_mb ?? 0) / c.sd_total_mb) * 100)}% full</dd></div> : null}
                   <div><dt>Photos</dt><dd>{animalPhotos} with animals{unchecked > 0 ? `, ${unchecked} not checked yet` : ''}{c.empty_count > 0 ? `, ${c.empty_count} empty` : ''}</dd></div>
+                  {c.upload_delay_min != null && <div><dt>Photos arrive</dt><dd>{delayWords(c.upload_delay_min)}</dd></div>}
                   {c.model ? <div><dt>Model</dt><dd>{c.model}</dd></div> : null}
                 </dl>
                 {admin && <RetireCamera camera={c} onSaved={(retiredAt) => { setCameras((cs) => cs.map((x) => (x.id === c.id ? { ...x, retired_at: retiredAt } : x))); void loadCameras() }} />}

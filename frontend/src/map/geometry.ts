@@ -26,12 +26,20 @@ export type Camera = {
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 // `at_local`: the moment it is judged for (45 min after sunset, or `now` once dark).
 export type WindReport = { status: string; text: string; scent_bearing?: number; speed_kmh?: number; range_m?: number; half_deg?: number; source?: string; at_local?: string; now?: boolean }
+// The verdicts that are a call at a time. "Not on the map yet" and "No bedding drawn
+// yet" are why there is none, and never say "for 20:39" as if they were one.
+const CALLED_AT = new Set(['clean', 'scent_carries', 'too_light', 'no_wind_data'])
+/** Whether a wind status is a call at a time, so the time it is for may be said. */
+export const isCall = (status: string | null | undefined) => !!status && CALLED_AT.has(status)
+/** When a stand's wind line is for: "for 20:39" or "now"; '' for a line that isn't a call. */
+export const windFor = (w: WindReport, status = w.status) =>
+  !isCall(status) ? '' : w.now ? 'now' : w.at_local ? `for ${w.at_local}` : ''
 export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }
 export type MapData = {
   conditions: {
     wind_dir_deg: number | null; wind_speed_kmh: number | null
     // What the wind bar, the stands and the shading are judged for, and tonight's sunset.
-    wind_at_local?: string; wind_now?: boolean; sunset_local?: string | null
+    wind_at_local?: string; wind_now?: boolean; sunset_local?: string | null; sunset?: string | null
     forecast_fetched_at?: string | null; forecast_stale?: boolean
   }
   airflow: { source: string; wind_dir_deg: number | null; wind_speed_kmh: number | null; text?: string; confidence?: string }

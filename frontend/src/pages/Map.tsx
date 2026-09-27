@@ -625,7 +625,7 @@ export default function MapPage() {
           {!data && <p>{loading ? 'Getting tonight’s wind…' : 'The wind comes with the map. It shows once the map loads.'}</p>}
           {air?.text && <p>{air.text}</p>}
           {cond && (cond.wind_now
-            ? <p>Judged for now{cond.sunset_local ? ` (sunset was ${cond.sunset_local})` : ''}.</p>
+            ? <p>Judged for now{cond.sunset_local && cond.sunset && Date.parse(cond.sunset) <= Date.now() ? ` (sunset was ${cond.sunset_local})` : ''}.</p>
             : cond.wind_at_local && <p>Judged for {cond.wind_at_local}, 45 min after sunset{cond.sunset_local ? ` (${cond.sunset_local})` : ''}, when the evening air has settled. Stands and scent-safe ground too.</p>)}
           {cond?.forecast_stale && cond.forecast_fetched_at && <p>No newer forecast could be had: this one is from {new Date(cond.forecast_fetched_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })}.</p>}
           <p>Arrows show where scent goes from each stand. Tap a stand to see how far it carries.</p>

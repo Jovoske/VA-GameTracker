@@ -97,7 +97,7 @@ def _hhmm(dt: datetime) -> str:
     return dt.astimezone(ZoneInfo(_TZ)).strftime("%H:%M")
 
 
-def _sunset_window(slots: dict, tonight: date) -> dict:
+def _sunset_window(slots: dict, tonight: date) -> dict | None:
     """Best three hours tonight, from when the animals came after each night's sunset.
 
     `slots` is visits per (night, SLOT_MIN slot of the clock). The block is searched
@@ -105,6 +105,10 @@ def _sunset_window(slots: dict, tonight: date) -> dict:
     could sit (SITTABLE_HOURS on tonight's clock), and returned as tonight's times,
     rounded to the quarter hour. `start_hour`/`end_hour` are the clock hours it
     covers; `after_sunset_min` is where it starts, counted from sunset.
+
+    None when no visit falls in any block somebody could sit: every block ties at
+    nothing, and the middle one read as "Best hours 21:15 to 00:15, from 1 h 15 min
+    after sunset" for animals only ever seen at dawn (R4BE-5).
     """
     sunset = _sunset(tonight)
     hist: dict[int, float] = {}
@@ -120,6 +124,8 @@ def _sunset_window(slots: dict, tonight: date) -> dict:
         for (_, slot), visits in slots.items():
             by_hour[slot * SLOT_MIN // 60] = by_hour.get(slot * SLOT_MIN // 60, 0) + visits
         w = _best_window(by_hour)
+        if not any(by_hour.get((h + d) % 24) for h in SITTABLE_HOURS for d in range(3)):
+            return None
         return {**w, "start": f"{w['start_hour']:02d}:00", "end": f"{w['end_hour']:02d}:00",
                 "after_sunset_min": None}
     total = sum(hist.values()) or 1.0
@@ -131,6 +137,8 @@ def _sunset_window(slots: dict, tonight: date) -> dict:
         if start.astimezone(ZoneInfo(_TZ)).hour in SITTABLE_HOURS:
             blocks[b] = sum(hist.get(b + d, 0.0) for d in range(WINDOW_SLOTS))
     best_sum = max(blocks.values(), default=0.0)
+    if best_sum <= 0:
+        return None
     # When the visits fit inside three hours, many starts hold them all: the middle
     # one puts them in the middle, with time to settle in before the first arrival
     # and cover after the last, rather than hours ahead of them.
@@ -174,7 +182,9 @@ def _verdict(prob: float, active_nights: int | None = None) -> str:
     return "QUIET"
 
 
-def _is_nocturnal(window: dict) -> bool:
+def _is_nocturnal(window: dict | None) -> bool:
+    if window is None:
+        return False
     h = window["start_hour"]
     return h >= 20 or h <= 5
 
@@ -477,10 +487,10 @@ def _expectations(
     return out, rows
 
 
-def _tonight_conditions(now: datetime) -> dict:
+def _tonight_conditions(now: datetime, *, night: date | None = None) -> dict:
     """Tonight's sun, moon and forecast at the sit time (conditions.py). Read through
-    this name, so a test can stand in for the weather."""
-    return tonight_conditions(now)
+    this name, so a test can stand in for the weather. `night`: a dawn sit's."""
+    return tonight_conditions(now, night=night)
 
 
 def _factors(top: dict, cond: dict) -> list[dict]:
@@ -517,6 +527,13 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     # Moon/weather are handled by the data-driven tonight drivers (condition_reasons),
     # so they're not hardcoded here — keeps the "why" consistent with the learned patterns.
     w = top["best_window"]
+    if w is None:
+        out.append({
+            "text": f"{top['species']} only seen here outside the hours you can sit, "
+                    "so there are no best hours to give",
+            "impact": "•",
+        })
+        return out
     after = w.get("after_sunset_min")
     out.append({
         "text": f"Best hours {w['start']} to {w['end']}"

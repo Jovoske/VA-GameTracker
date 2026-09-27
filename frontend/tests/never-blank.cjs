@@ -36,6 +36,8 @@ const cameras=[{id:'c1',name:'Charca',provider_name:null,name_is_custom:false,ca
 let feed=Array.from({length:200},(_,i)=>({image_id:`p${i}`,file_url:`/api/images/p${i}/file`,captured_at:ago(30+i*7),camera:'Charca',camera_id:'c1',label:'Wild boar',species_id:'wild_boar',group_size:1,notes_count:0}));
 const reports=[];
 // ── the server: dist/ plus fixtures, and the link's condition ──
+// brokenPlan: a plan no server sends (its classes a string), so Tonight throws. No best
+// hours (best_window null) is a real answer now: animals never seen when you can sit.
 const net={mode:'pass',only:null,missing:null,missingOnce:false,swBuild:null,brokenPlan:false,hangMe:false,entryMissing:false};
 const NEW_ENTRY='/assets/index-NEXTBUILD.js';
 const types={'.js':'text/javascript','.css':'text/css','.html':'text/html','.json':'application/json','.webmanifest':'application/manifest+json','.png':'image/png','.woff2':'font/woff2','.svg':'image/svg+xml'};
@@ -45,7 +47,7 @@ function answerApi(req,res,u){
  if(req.method==='POST'&&p==='/client-errors'){let b='';req.on('data',c=>b+=c);req.on('end',()=>{reports.push(JSON.parse(b));json(res,{status:'saved'},202)});return}
  if(/^\/images\/[^/]+\/(thumb|file)$/.test(p)){res.writeHead(200,{'Content-Type':'image/png'});return res.end(png)}
  if(p==='/auth/me')return json(res,{id:'me',email:'owner@estate.local',role:'admin'});
- if(p==='/forecast/tonight'){const sp=u.searchParams.get('species');return json(res,net.brokenPlan?{...plan('Wild Boar'),recommended:{...plan('Wild Boar').recommended,best_window:null}}:plan(sp?species.find(s=>s.id===sp)?.common_name??sp:'Wild Boar'))}
+ if(p==='/forecast/tonight'){const sp=u.searchParams.get('species');return json(res,net.brokenPlan?{...plan('Wild Boar'),recommended:{...plan('Wild Boar').recommended,classes:'broken'}}:plan(sp?species.find(s=>s.id===sp)?.common_name??sp:'Wild Boar'))}
  if(p==='/analytics/overview')return json(res,overview);
  if(p==='/alerts')return json(res,[]);
  if(p==='/species')return json(res,species);
@@ -192,7 +194,7 @@ const server=http.createServer((req,res)=>{
   assert.ok(!kept.some(k=>k.startsWith('gs_cache:/forecast/tonight')),'the saved plan that broke Tonight is dropped');
   assert.ok(kept.includes('gs_cache:/stands')&&kept.includes('gs_cache:/sits'),'Stands’ saved copies are not Tonight’s to drop');
   await page.waitForTimeout(500);
-  assert.ok(reports.some(r=>r.kind==='render'&&r.route==='/'&&/start/.test(r.message)&&r.at),'a page that throws is reported, with when');
+  assert.ok(reports.some(r=>r.kind==='render'&&r.route==='/'&&/classes/.test(r.message)&&r.at),'a page that throws is reported, with when');
   set({});await page.getByRole('link',{name:'Go to Tonight'}).click();await page.locator('.tn-verdict').waitFor();
   assert.equal(await page.locator('.crashed').count(),0,'“Go to Tonight” on Tonight tries it again');
   await ctx.close();

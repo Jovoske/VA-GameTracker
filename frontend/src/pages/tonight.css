@@ -31,6 +31,8 @@
 .tn-verdict-cam { font-size: 15px; font-weight: 600; color: var(--text-dim); margin-top: 2px; }
 .tn-hours { font-size: 20px; font-weight: 700; color: var(--go); margin-top: 12px; font-variant-numeric: tabular-nums; }
 .tn-hours small { font-size: 12px; font-weight: 400; color: var(--text-dim); margin-right: 8px; }
+/* No best hours: the animals were never seen when somebody could sit. Not a green promise. */
+.tn-hours[data-none] { font-size: 16px; font-weight: 600; color: var(--text-dim); }
 /* Best hours follow sunset; the sunset they follow is said beside them. */
 .tn-sunset { font-size: 13px; color: var(--text-dim); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .tn-species { font-size: 16px; font-weight: 600; margin-top: 10px; }

@@ -8,9 +8,11 @@ The same stand could be "Wind is right" on one screen and "Wind is wrong" on the
 next (audit A-09, J-04, G-09). Everything here answers once, for every screen:
 
 - **When.** The sit: 45 minutes after tonight's sunset, once the evening air has
-  settled, or now once that has passed, and now before dawn. "Tonight" is the night
-  key (06:00 to 06:00), so at 00:30 it is the night still under way, never the next
-  evening (A-11, G-10). Every verdict says the time it is for.
+  settled, or now once that has passed, until 06:00. "Tonight" is the night key
+  (06:00 to 06:00), so at 00:30 it is the night still under way, never the next
+  evening (A-11, G-10); and at 07:00 it is the coming evening, judged for its sit,
+  not for the dawn air. A dawn sit still on after 06:00 asks for the present
+  itself (tonight_conditions with its night). Every verdict says the time it is for.
 - **What.** The bedding and thermals model (bedding.stand_wind_report). A stand off
   the map or with no bedding drawn falls back to its approach arcs, if it has any;
   otherwise it says what it can't judge, never "calm".
@@ -21,6 +23,7 @@ next (audit A-09, J-04, G-09). Everything here answers once, for every screen:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -65,36 +68,55 @@ def sunset_of(night: date) -> datetime | None:
     return _sun(night).get("sunset")
 
 
+@lru_cache(maxsize=512)
+def sun_times(night: date) -> dict:
+    """"19:56" and "07:58": the sunset that starts `night` and the sunrise that ends
+    it, on the estate's clock. What a saved sit shows with no signal."""
+    return {"sunset_local": clock(sunset_of(night)),
+            "sunrise_local": clock(_sun(night + timedelta(days=1)).get("sunrise"))}
+
+
 def sit_time(now: datetime | None = None) -> tuple[datetime, bool]:
     """The moment tonight's wind is judged for, and whether that is now.
 
     45 minutes after tonight's sunset, when drainage has settled and most of an
-    evening sit is still to come; now once that has passed, and now before sunrise
-    (a dawn sit, or somebody still out after midnight).
+    evening sit is still to come; now once that has passed, until 06:00 (somebody
+    still out after midnight, or a dawn sit that started before then).
+
+    From 06:00 the night key is the coming evening, so the morning reads that
+    evening's sit: judging it by the dawn air told a hunter planning at 07:00 that
+    the evening's wind was the morning's (R4BE-1). A dawn sit still on after 06:00
+    is judged for now by asking with its own night (tonight_conditions).
     """
     now = now or datetime.now(UTC)
-    sunrise = _sun(now.astimezone(_tz()).date()).get("sunrise")
-    if sunrise is not None and now < sunrise:
-        return now, True
-    sunset = sunset_of(current_night(now))
+    night = current_night(now)
+    if night < now.astimezone(_tz()).date():
+        return now, True  # before 06:00: the night under way
+    sunset = sunset_of(night)
     if sunset is None:
         return now, True
     settled = sunset + SETTLING
     return (now, True) if now >= settled else (settled, False)
 
 
-def tonight_conditions(now: datetime | None = None) -> dict:
+def tonight_conditions(now: datetime | None = None, *, night: date | None = None) -> dict:
     """Tonight's sun, moon and forecast, the forecast at the sit time (sit_time).
+
+    `night` is for a sit whose night is already over and is still on (a dawn sit
+    after 06:00): that night's sun, and the air now. Any other night is ignored.
 
     No database: the caller ends its transaction first (release). A forecast that
     can't be had leaves the wind None, which every verdict reads as "no wind
     forecast", never as calm.
     """
     now = now or datetime.now(UTC)
-    night = current_night(now)
+    if night is not None and night < current_night(now):
+        at, is_now = now, True
+    else:
+        night = current_night(now)
+        at, is_now = sit_time(now)
     evening, morning = _sun(night), _sun(night + timedelta(days=1))
     sunset, sunrise = evening.get("sunset"), morning.get("sunrise")
-    at, is_now = sit_time(now)
     phase, illum = moon_phase(at)
     w: dict = {}
     try:
@@ -196,22 +218,28 @@ def wind_verdict(db: Session, stand: Stand, cond: dict, *, now: datetime | None 
 
 
 def stand_for_camera(db: Session, camera_id) -> Stand | None:
-    """The stand a hunter would sit for a camera: the one linked to it, else the
-    nearest placed stand within NEAR_STAND_M."""
-    linked = db.scalar(select(Stand).where(Stand.camera_id == camera_id).order_by(Stand.name))
-    if linked is not None:
-        return linked
+    """The stand a hunter would sit for a camera: the one linked to it if it is on
+    the map, else the nearest placed stand within NEAR_STAND_M, else a linked stand
+    nobody has placed yet (which says so).
+
+    A linked stand off the map used to win over a placed one 100 m away, so Tonight
+    said "isn't on the map yet" while the seat next to it could be judged."""
+    linked = db.scalars(
+        select(Stand).where(Stand.camera_id == camera_id).order_by(Stand.name)
+    ).all()
+    for s in linked:
+        if s.lat is not None and s.lon is not None:
+            return s
     cam = db.get(Camera, camera_id)
-    if cam is None or cam.lat is None or cam.lon is None:
-        return None
     best, best_d = None, NEAR_STAND_M
-    for s in db.scalars(select(Stand).order_by(Stand.name)).all():
-        if s.lat is None or s.lon is None:
-            continue
-        d = geo.distance_m(cam.lat, cam.lon, s.lat, s.lon)
-        if d <= best_d:
-            best, best_d = s, d
-    return best
+    if cam is not None and cam.lat is not None and cam.lon is not None:
+        for s in db.scalars(select(Stand).order_by(Stand.name)).all():
+            if s.lat is None or s.lon is None:
+                continue
+            d = geo.distance_m(cam.lat, cam.lon, s.lat, s.lon)
+            if d <= best_d:
+                best, best_d = s, d
+    return best or (linked[0] if linked else None)
 
 
 def no_stand_verdict(camera: str, cond: dict, *, now: datetime | None = None) -> dict:

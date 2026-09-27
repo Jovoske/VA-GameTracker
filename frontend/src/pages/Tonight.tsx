@@ -13,6 +13,7 @@ import {
 } from '../api'
 import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import SitPrompts from '../components/SitPrompts'
+import { isCall } from '../map/geometry'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
@@ -33,7 +34,8 @@ type Changed = { kind: string; camera: string | null; text: string }
 // (`at_local`: 45 min after sunset, or `now` once that has passed).
 type Wind = { status: string; text: string; is_advice: boolean; at_local?: string; now?: boolean; stand?: string | null }
 // Clock times on the estate's clock ("20:45"); the hours are what an older plan carries.
-type Window = { start_hour: number; end_hour: number; start?: string; end?: string }
+// None when the animals were never seen at an hour somebody can sit.
+type Window = { start_hour: number; end_hour: number; start?: string; end?: string } | null
 // How each verdict turned out: "When it said Best odds, animals came 7 of 9 nights."
 type Calibration = { available: boolean; n_evaluated: number; statement?: string; lines?: string[]; beats_baseline?: boolean | null }
 type Forecast = {
@@ -100,9 +102,10 @@ type Alert = { type: string; severity: string; title: string; text: string }
 type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detections: number }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
-const hours = (w: Window) => `${w.start ?? hh(w.start_hour)} to ${w.end ?? hh(w.end_hour)}`
-/** Which stand and when the wind line is for: "Puente, for 20:41" or "Puente, now". */
-const windFor = (w: Wind) => [w.stand, w.now ? 'now' : w.at_local && `for ${w.at_local}`].filter(Boolean).join(', ')
+const hours = (w: Window) => w ? `${w.start ?? hh(w.start_hour)} to ${w.end ?? hh(w.end_hour)}` : 'Not seen when you can sit'
+/** Which stand and when the wind line is for: "Puente, for 20:41" or "Puente, now".
+ *  Only a call has a time: "isn't on the map yet" is not a verdict for 20:41. */
+const windFor = (w: Wind) => [w.stand, isCall(w.status) && (w.now ? 'now' : w.at_local && `for ${w.at_local}`)].filter(Boolean).join(', ')
 const estateTime = (iso: string) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
 const visitsOf = (cl: ClassCount) => cl.visits ?? cl.count ?? 0
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
@@ -394,7 +397,7 @@ export default function Tonight() {
 
         {r && (
           <>
-            <div className="tn-hours"><small>Best hours</small>{hours(r.best_window)}</div>
+            <div className="tn-hours" data-none={!r.best_window || undefined}><small>Best hours</small>{hours(r.best_window)}</div>
             {c.sunset_local && <div className="tn-sunset">Sunset {c.sunset_local}</div>}
             <div className="tn-species">{r.species}</div>
             <div className="tn-reason">{r.reason}</div>

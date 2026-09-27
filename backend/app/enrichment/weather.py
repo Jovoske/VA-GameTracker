@@ -58,7 +58,15 @@ TIMEOUT_SECONDS = 5
 CONNECT_SECONDS = 3
 TIMEOUT = httpx.Timeout(TIMEOUT_SECONDS, connect=CONNECT_SECONDS)
 PAUSE_AFTER_FAILURE_SECONDS = 600
-_down_until = 0.0
+# The pauses, until when (monotonic), each for what failed: the archive and the
+# forecast are two services, and an old photo's archive lookup failing during a
+# backfill used to stop tonight's forecast too (R4BE-3). A refusal (4xx) is about
+# the day asked for, not the service, so it pauses that day only.
+_down_until: dict = {}
+# What the last fetch of each day's data came to, and each service's: a copy is
+# "stale" (no newer forecast could be had) only after a fetch failed, never just
+# because a refresh is on the wire.
+_FAILED: set = set()
 
 # One fetch per day's data at a time: sixteen phones opening Tonight at dusk as the
 # forecast expires make one call, not sixteen. The others serve the copy they have,
@@ -76,33 +84,49 @@ def _fresh(entry, recent: bool) -> bool:
     return not recent or time.monotonic() - entry[1] < FORECAST_TTL_SECONDS
 
 
+def _paused(*which) -> bool:
+    now = time.monotonic()
+    return any(now < _down_until.get(w, 0.0) for w in which)
+
+
+def _refused(e: Exception) -> bool:
+    """A 4xx other than "slow down": Open-Meteo answered, and said no to this day."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 429
+
+
 def _fetch_day_hourly(lat: float, lng: float, day: str, recent: bool, tz: str) -> tuple:
     """(hourly, fetched_at, stale) for one day; ({}, None, False) when there is none."""
-    global _down_until
     key = (lat, lng, day, recent, tz)
+    service = "forecast" if recent else "archive"
     had = _DAY_CACHE.get(key)
     if had is not None and _fresh(had, recent):
         return had[2], had[0], False
+    if had is not None and time.monotonic() - had[1] >= STALE_LIMIT_SECONDS:
+        had = None  # too old to serve, even for want of anything newer
 
     def fallback():
         # The last good forecast, marked stale, rather than no wind at all.
-        if had is not None and time.monotonic() - had[1] < STALE_LIMIT_SECONDS:
-            return had[2], had[0], True
-        return {}, None, False
+        return (had[2], had[0], True) if had is not None else ({}, None, False)
 
-    if time.monotonic() < _down_until:
+    if _paused(service, key):
         return fallback()
     lock = _lock_for(key)
     # Somebody else is fetching it: serve the copy there is, or wait for theirs.
     got = (lock.acquire(timeout=TIMEOUT_SECONDS + CONNECT_SECONDS + 1) if had is None
            else lock.acquire(blocking=False))
     if not got:
-        return fallback()
+        if had is None:
+            return {}, None, False
+        # At most one fetch older than a fresh copy: only an old copy if the last
+        # try failed. Several phones opening Tonight at dusk while the forecast is
+        # refreshed were all told "No newer forecast" while Open-Meteo was fine.
+        return had[2], had[0], key in _FAILED or service in _FAILED
     try:
         now_had = _DAY_CACHE.get(key)
         if now_had is not None and now_had is not had and _fresh(now_had, recent):
             return now_had[2], now_had[0], False  # fetched while this one waited
-        if time.monotonic() < _down_until:
+        if _paused(service, key):
             return fallback()
         url = FORECAST_URL if recent else ARCHIVE_URL
         params = {
@@ -117,15 +141,23 @@ def _fetch_day_hourly(lat: float, lng: float, day: str, recent: bool, tz: str) -
             resp.raise_for_status()
             hourly = resp.json().get("hourly", {})
         except Exception as e:
-            log.warning("weather.fetch_failed", error=str(e))
-            # The pause is the failure's cache: nobody waits on Open-Meteo again
-            # until it is over.
-            _down_until = time.monotonic() + PAUSE_AFTER_FAILURE_SECONDS
+            log.warning("weather.fetch_failed", service=service, error=str(e))
+            # The pause is the failure's cache: nobody waits on this service (or,
+            # for a refusal, this day) again until it is over.
+            which = key if _refused(e) else service
+            if len(_down_until) > 1024:
+                _down_until.clear()
+                _FAILED.clear()
+            _down_until[which] = time.monotonic() + PAUSE_AFTER_FAILURE_SECONDS
+            _FAILED.add(which)
             return fallback()
         if len(_DAY_CACHE) > 8192:
             _DAY_CACHE.clear()
+            _FAILED.clear()
         fetched_at = datetime.now(UTC)
         _DAY_CACHE[key] = (fetched_at, time.monotonic(), hourly)
+        _FAILED.discard(key)
+        _FAILED.discard(service)
         return hourly, fetched_at, False
     finally:
         lock.release()

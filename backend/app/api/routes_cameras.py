@@ -66,6 +66,36 @@ def _start(db: Session, mode: str, *args: str) -> None:
         raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
 
 
+# How long a camera's photos take to reach the app: the middle one of its last
+# UPLOAD_SAMPLE that say when they were received (FTP and email), with at least
+# UPLOAD_MIN_PHOTOS of them. A clock an hour slow shows as photos an hour late, which
+# the import can't tell from a slow upload; one ahead is put right there (audit H-17).
+UPLOAD_SAMPLE = 50
+UPLOAD_MIN_PHOTOS = 5
+
+
+def _upload_delays(db: Session, camera_ids: list) -> dict:
+    """Minutes from capture to receipt, per camera, the median of its recent photos."""
+    if not camera_ids:
+        return {}
+    lag = func.extract("epoch", Image.received_at - Image.captured_at) / 60
+    recent = (
+        select(Image.camera_id, lag.label("lag"), func.row_number().over(
+            partition_by=Image.camera_id, order_by=Image.received_at.desc()).label("n"))
+        # A photo filed at its receipt time (no camera time to go on) says nothing.
+        .where(Image.camera_id.in_(camera_ids), Image.received_at.is_not(None),
+               Image.received_at != Image.captured_at)
+        .subquery()
+    )
+    rows = db.execute(
+        select(recent.c.camera_id, func.percentile_cont(0.5).within_group(recent.c.lag),
+               func.count())
+        .where(recent.c.n <= UPLOAD_SAMPLE)
+        .group_by(recent.c.camera_id)
+    ).all()
+    return {cam: round(median) for cam, median, n in rows if n >= UPLOAD_MIN_PHOTOS}
+
+
 @router.get("")
 def list_cameras(
     user: User = Depends(get_current_user), db: Session = Depends(get_db)
@@ -100,6 +130,7 @@ def list_cameras(
         .where(Image.camera_id.in_([c.id for c in rows]))
         .group_by(Image.camera_id)
     ).all()}
+    delays = _upload_delays(db, [c.id for c in rows])
     out = []
     for c in rows:
         n = counts.get(c.id)
@@ -124,6 +155,8 @@ def list_cameras(
             "unchecked_count": unchecked,
             "sightings": animals,
             "lat": lat, "lng": lng,
+            # Minutes its photos take to arrive (FTP and email cameras), or None.
+            "upload_delay_min": delays.get(c.id),
             "health": camera_health(c, now, login_states.get(c.id)),
         })
     return out

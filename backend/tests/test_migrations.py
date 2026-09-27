@@ -147,7 +147,8 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "retired_at" in _columns(eng, "cameras")
         assert "corrected_by" in _columns(eng, "detections")
         assert "wind_at" in _columns(eng, "sits")
-        assert "clock_ahead_min" in _columns(eng, "cameras")
+        assert {"clock_ahead_min", "clock_ok_photos"} <= set(_columns(eng, "cameras"))
+        assert "received_at" in _columns(eng, "images")
     finally:
         eng.dispose()
 
@@ -1059,8 +1060,9 @@ def test_species_fixes_upgrade_down_and_up_again(fresh_db):
 @requires_db
 def test_wind_time_and_camera_clock_upgrade_down_and_up_again(fresh_db):
     """0026 on a real 0025 database: sits reserved before it keep their verdict and
-    say no time for it, cameras have no clock check yet, nothing else moves; down
-    drops only the two columns; up again is a no-op."""
+    say no time for it, cameras have no clock check yet, photos stored before it have
+    no receipt time, nothing else moves; down drops only the four columns; up again
+    is a no-op."""
     cfg = alembic_config(fresh_db)
     command.upgrade(cfg, "0025_species_fixes")
     eng = create_engine(fresh_db)
@@ -1069,12 +1071,19 @@ def test_wind_time_and_camera_clock_upgrade_down_and_up_again(fresh_db):
             # 0001 builds today's ORM; restore the 0025 shape first.
             c.execute(text("ALTER TABLE sits DROP COLUMN wind_at"))
             c.execute(text("ALTER TABLE cameras DROP COLUMN clock_ahead_min"))
+            c.execute(text("ALTER TABLE cameras DROP COLUMN clock_ok_photos"))
+            c.execute(text("ALTER TABLE images DROP COLUMN received_at"))
             estate = c.execute(text(
                 "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
                 "'Europe/Madrid') RETURNING id")).scalar_one()
-            c.execute(text(
+            cam = c.execute(text(
                 "INSERT INTO cameras (id,estate_id,name,name_is_custom,active,import_failures) "
-                "VALUES (gen_random_uuid(),:e,'Suntek',false,true,'{}')"), {"e": estate})
+                "VALUES (gen_random_uuid(),:e,'Suntek',false,true,'{}') RETURNING id"),
+                {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,download_attempts,reviewed,"
+                "ai_attempts) VALUES (gen_random_uuid(),:c,'2026-09-20 21:00+02',0,false,0)"),
+                {"c": cam})
             stand = c.execute(text(
                 "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,'Puente') "
                 "RETURNING id"), {"e": estate}).scalar_one()
@@ -1087,8 +1096,11 @@ def test_wind_time_and_camera_clock_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             sit = c.execute(text("SELECT outcome, wind_status, wind_text, wind_at FROM sits")).one()
             assert tuple(sit) == ("seen", "clean", "Wind S 15 km/h", None)
-            cam = c.execute(text("SELECT name, clock_ahead_min FROM cameras")).one()
-            assert tuple(cam) == ("Suntek", None)
+            cam = c.execute(text(
+                "SELECT name, clock_ahead_min, clock_ok_photos FROM cameras")).one()
+            assert tuple(cam) == ("Suntek", None, None)
+            img = c.execute(text("SELECT captured_at IS NOT NULL, received_at FROM images")).one()
+            assert tuple(img) == (True, None)
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
 
@@ -1099,18 +1111,22 @@ def test_wind_time_and_camera_clock_upgrade_down_and_up_again(fresh_db):
 
         with eng.begin() as c:
             c.execute(text("UPDATE sits SET wind_at = now()"))
-            c.execute(text("UPDATE cameras SET clock_ahead_min = 60"))
+            c.execute(text("UPDATE cameras SET clock_ahead_min = 60, clock_ok_photos = 1"))
+            c.execute(text("UPDATE images SET received_at = captured_at + interval '2 min'"))
         command.downgrade(cfg, "0025_species_fixes")
         assert "wind_at" not in _columns(eng, "sits")
-        assert "clock_ahead_min" not in _columns(eng, "cameras")
+        assert not {"clock_ahead_min", "clock_ok_photos"} & set(_columns(eng, "cameras"))
+        assert "received_at" not in _columns(eng, "images")
         with eng.connect() as c:
             assert c.execute(text("SELECT wind_status FROM sits")).scalar_one() == "clean"
             assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
 
         command.upgrade(cfg, "head")
         command.stamp(cfg, "0025_species_fixes")
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "wind_at" in _columns(eng, "sits")
-        assert "clock_ahead_min" in _columns(eng, "cameras")
+        assert {"clock_ahead_min", "clock_ok_photos"} <= set(_columns(eng, "cameras"))
+        assert "received_at" in _columns(eng, "images")
     finally:
         eng.dispose()

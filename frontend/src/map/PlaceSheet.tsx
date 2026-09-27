@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { validLngLat, windColor, windGeometry, type MapStand, type Zone } from './geometry'
+import { validLngLat, windColor, windFor, windGeometry, type MapStand, type Zone } from './geometry'
 
 // One short verdict per stand. The forecast's own sentence follows it.
 const WIND_HEAD: Record<string, string> = {
@@ -29,8 +29,11 @@ function Heading({ kind, name, children }: { kind: string; name: string; childre
 
 export function StandHeader({ stand }: { stand: MapStand }) {
   const status = validLngLat(stand.lon, stand.lat) ? stand.wind.status : 'no_position'
+  // The time the call is for, as on Stands and in Sit mode: "For 20:39", "Now".
+  const at = windFor(stand.wind, status)
   return <Heading kind="Stand" name={stand.name}>
     <p className="bsheet-verdict" style={{ color: windColor(status) }}>{WIND_HEAD[status] ?? 'Wind unknown.'}</p>
+    {at && <p className="bsheet-meta">{at[0].toUpperCase() + at.slice(1)}</p>}
   </Heading>
 }
 export function ZoneHeader({ zone }: { zone: Zone }) {
