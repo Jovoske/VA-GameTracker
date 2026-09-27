@@ -442,7 +442,6 @@ def test_camera_views_upgrade_down_and_up_again_keeping_the_photos(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -498,7 +497,6 @@ def test_image_arrivals_index_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -565,7 +563,6 @@ def test_camera_alerts_and_photo_notes_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -672,7 +669,6 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -734,7 +730,6 @@ def test_client_errors_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -829,7 +824,6 @@ def test_ai_checking_upgrade_puts_old_misreads_right_and_goes_down_and_up_again(
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -923,7 +917,6 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -983,7 +976,6 @@ def test_camera_retired_upgrade_down_and_up_again(fresh_db):
             assert c.execute(text("SELECT count(*) FROM camera_nights")).scalar_one() == 1
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1067,7 +1059,6 @@ def test_species_fixes_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1137,7 +1128,6 @@ def test_wind_time_and_camera_clock_upgrade_down_and_up_again(fresh_db):
             assert tuple(img) == (True, None)
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1201,7 +1191,6 @@ def test_camera_location_custom_upgrade_down_and_up_again(fresh_db):
             ]
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1281,7 +1270,6 @@ def test_access_security_upgrade_lets_a_person_go_and_goes_down_and_up_again(fre
             assert c.execute(text("SELECT token_version FROM users")).scalar_one() == 0
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1349,7 +1337,6 @@ def test_quiet_alerts_and_plan_push_upgrade_down_and_up_again(fresh_db):
                 "Wild boar at PL19", "sent", None)
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1425,7 +1412,6 @@ def test_harvest_and_people_upgrade_down_and_up_again(fresh_db):
             assert c.execute(text("SELECT count(*) FROM harvests")).scalar_one() == 0
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1466,10 +1452,9 @@ def test_harvest_and_people_upgrade_down_and_up_again(fresh_db):
 
 def _drift(dsn: str, metadata=None) -> list:
     """What autogenerate finds between the database at `dsn` and the models."""
+    import app.models  # noqa: F401
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
-
-    import app.models  # noqa: F401
     from app.core.db import Base
 
     eng = create_engine(dsn)
