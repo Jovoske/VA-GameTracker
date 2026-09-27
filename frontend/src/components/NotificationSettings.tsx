@@ -10,7 +10,7 @@ import {
 } from '../push'
 import CameraAlertRow from './CameraAlerts'
 import SettingsSection from './SettingsSection'
-import Toggle from './Toggle'
+import SwitchRow from './SwitchRow'
 
 type SpeciesPref = { id: string; common_name: string; selected: boolean; detections: number }
 type CameraPref = { id: string; name: string; alerts: boolean }
@@ -212,18 +212,8 @@ export default function NotificationSettings() {
         <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
       ) : (
         <>
-          <div style={row}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 14 }}>Alerts</div>
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>{deviceLine}</div>
-            </div>
-            <Toggle
-              on={s.enabled}
-              disabled={busy}
-              onChange={() => setEnabled(!s.enabled)}
-              label="Alerts"
-            />
-          </div>
+          {/* The same whole-row switch as the cameras below and the map's sheets. */}
+          <SwitchRow label="Alerts" note={deviceLine} on={s.enabled} disabled={busy} onChange={() => setEnabled(!s.enabled)} />
 
           {s.enabled && support.ok && perm !== 'denied' && device === 'not_subscribed' && (
             <div style={{ padding: '4px 0 8px' }}>
@@ -242,22 +232,8 @@ export default function NotificationSettings() {
             </div>
           ) : (
             s.species.map((sp) => (
-              <div key={sp.id} style={row}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, color: sp.selected ? 'var(--text)' : 'var(--text-dim)' }}>
-                    {sp.common_name}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                    {sp.detections} sighting{sp.detections === 1 ? '' : 's'}
-                  </div>
-                </div>
-                <Toggle
-                  on={sp.selected}
-                  disabled={savingId === sp.id}
-                  onChange={() => toggleSpecies(sp)}
-                  label={`Alerts about ${sp.common_name}`}
-                />
-              </div>
+              <SwitchRow key={sp.id} label={sp.common_name} on={sp.selected} disabled={savingId === sp.id}
+                note={`${sp.detections} sighting${sp.detections === 1 ? '' : 's'}`} onChange={() => toggleSpecies(sp)} />
             ))
           )}
 

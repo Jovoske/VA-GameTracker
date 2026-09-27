@@ -259,22 +259,25 @@ export function useReplay(map: maplibregl.Map | null, ready: boolean, on: boolea
       const taken = [...document.querySelectorAll('.map-pin .map-pin-icon, .map-pop-card')].map(el => el.getBoundingClientRect())
       tags.current = { key: tagKey, markers: fresh.slice(-2).flatMap(x => {
         const a = where.get(x.l.from_camera_id)!.at, b = where.get(x.l.to_camera_id)!.at
-        const pa = map.project(a), pb = map.project(b), len = Math.hypot(pb.x - pa.x, pb.y - pa.y)
-        if (len < 110) return []
+        const pa = map.project(a), pb = map.project(b), len = Math.hypot(pb.x - pa.x, pb.y - pa.y) || 1
         const el = document.createElement('span')
         el.className = 'map-link-tag'
-        // The photos at both ends already say which animal; this says it is a guess,
-        // which on a phone on its side is all there is room to say.
-        el.textContent = 'Likely went this way (a guess)'
         el.title = `${x.l.label}: likely went this way. A guess.`
+        // The tag names the animal: the photo at the arrow's start may be a different
+        // one that came past that camera later. A long arrow gets the sentence; a short
+        // one, or one with no room for it, the animal and that it is a guess.
+        const words = [`${x.l.label} likely went this way (a guess)`, `${x.l.label} (a guess)`]
         const marker = new maplibregl.Marker({ element: el }).setLngLat(a).addTo(map)
-        const half = el.getBoundingClientRect().width / 2 - 8
-        for (const f of [.5, .35, .65]) for (const side of [1, -1]) for (const shift of [0, -half, half]) {
-          marker.setLngLat([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f])
-          marker.setOffset([(pa.y - pb.y) / len * 24 * side + shift, (pb.x - pa.x) / len * 24 * side])
-          const box = el.getBoundingClientRect()
-          const inside = box.left >= frame.left && box.right <= frame.right && box.top >= frame.top && box.bottom <= frame.bottom
-          if (inside && !taken.some(r => overlaps(r, box))) { taken.push(box); return [marker] }
+        for (const text of len >= 110 ? words : words.slice(1)) {
+          el.textContent = text
+          const half = el.getBoundingClientRect().width / 2 - 8
+          for (const f of [.5, .35, .65]) for (const side of [1, -1]) for (const shift of [0, -half, half]) {
+            marker.setLngLat([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f])
+            marker.setOffset([(pa.y - pb.y) / len * 24 * side + shift, (pb.x - pa.x) / len * 24 * side])
+            const box = el.getBoundingClientRect()
+            const inside = box.left >= frame.left && box.right <= frame.right && box.top >= frame.top && box.bottom <= frame.bottom
+            if (inside && !taken.some(r => overlaps(r, box))) { taken.push(box); return [marker] }
+          }
         }
         marker.remove()
         return []

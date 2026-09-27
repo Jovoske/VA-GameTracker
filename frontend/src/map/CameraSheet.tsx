@@ -38,21 +38,24 @@ type NightLine = { text: string; note: string | null; tone: 'plain' | 'quiet' | 
  * "Last night: Wild boar · 2 visits, Red deer · 1 visit", or why there is nothing to
  * say, with a note when the list may not be everything. An empty list only reads as
  * a quiet night when the camera was working and its photos have all been checked.
+ * Last night runs to 08:00, as on Activity and Replay: before then it is "so far".
  */
 export function lastNightLine(c: Camera): NightLine {
   const s = c.last_night_status
+  const night = c.last_night_so_far ? 'last night so far' : 'last night'
+  const Night = night[0].toUpperCase() + night.slice(1)
   if (c.last_night.length) {
     const note = s === 'checking' ? 'Still checking the rest of last night’s photos.'
       : s === 'incomplete' ? 'Out of photo credits last night, so this may not be everything.' : null
-    return { text: `Last night: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
+    return { text: `${Night}: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
   }
   if (s === 'checking') return { text: 'Still checking last night’s photos.', note: null, tone: 'quiet' }
-  if (s === 'incomplete') return { text: 'Nothing on camera last night, but it was out of photo credits, so this may not be everything.', note: null, tone: 'warn' }
+  if (s === 'incomplete') return { text: `Nothing on camera ${night}, but it was out of photo credits, so this may not be everything.`, note: null, tone: 'warn' }
   // A camera that was down saw nothing because it couldn't, not because nothing came.
   const blind = s === 'blind' || (s == null && !c.health.producing)
   return blind
     ? { text: 'No photos from last night. The camera may not have been working, so that isn’t a quiet night.', note: null, tone: 'warn' }
-    : { text: 'Nothing on camera last night', note: null, tone: 'plain' }
+    : { text: `Nothing on camera ${night}`, note: null, tone: 'plain' }
 }
 
 /** What is wrong with the camera, in words, or null when it is working. */
@@ -72,8 +75,9 @@ export function CameraHeader({ camera }: { camera: Camera }) {
 }
 
 /** The camera's latest photos, newest first, each opening the photo viewer.
- * `notesTick` changes when a note is added or removed elsewhere on the sheet. */
-function PhotoStrip({ camera, notesTick, onNotes }: { camera: Camera; notesTick: number; onNotes: () => void }) {
+ * `notesTick` changes when a note is added or removed elsewhere on the sheet;
+ * `onRetry` is its Try again, which the sheet also uses to ask for the team's marks. */
+function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; notesTick: number; onNotes: () => void; onRetry: () => void }) {
   const [photos, setPhotos] = useState<Photo[] | null>(null)
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
@@ -96,7 +100,7 @@ function PhotoStrip({ camera, notesTick, onNotes }: { camera: Camera; notesTick:
   useEffect(() => { load(); return () => { request.current++ } }, [load, newest, notesTick])
 
   // A refresh that fails keeps the photos already shown; only an empty strip says so.
-  if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={load}>Try again</button></p>
+  if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={() => { load(); onRetry() }}>Try again</button></p>
   if (!photos) return <p className="cam-strip-msg" role="status">Loading photos…</p>
   if (!photos.length) return <p className="cam-strip-msg">No animal photos from this camera yet.</p>
   const viewer: LightboxPhoto[] = photos.map(p => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count }))
@@ -115,16 +119,18 @@ function PhotoStrip({ camera, notesTick, onNotes }: { camera: Camera; notesTick:
         // A note on any frame of the burst: often the second shows the animal best.
         const notes = photos.slice(at, at + frames).reduce((n, x) => n + (x.notes_count || 0), 0)
         return <li key={p.image_id}>
-          <button type="button" className="cam-strip-tile" aria-label={`${p.label}, ${whenLabel(p.captured_at)}${frames > 1 ? `, ${frames} frames` : ''}. Open photo.`} onClick={() => setZoom(at)}>
+          {/* No "×3" on the tile: everywhere else that means three animals. The viewer
+              pages through the burst's photos. */}
+          <button type="button" className="cam-strip-tile" aria-label={`${p.label}, ${whenLabel(p.captured_at)}${frames > 1 ? `, ${frames} photos` : ''}. Open photo.`} onClick={() => setZoom(at)}>
             <img src={thumbUrl(p.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
             <NoteMark count={notes} />
-            <span aria-hidden="true">{whenLabel(p.captured_at)}{frames > 1 && <b>×{frames}</b>}</span>
+            <span aria-hidden="true">{whenLabel(p.captured_at)}</span>
           </button>
         </li>
       })}
     </ul>
     {/* Over everything, the tab bar included: the sheet sits inside the map. */}
-    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel={`Back to ${camera.name}`} onClose={() => setZoom(null)}
+    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel="Back to the map" onClose={() => setZoom(null)}
       onNotesChange={(id, n) => { setPhotos(ps => ps && ps.map(p => p.image_id === id ? { ...p, notes_count: n } : p)); onNotes() }} />, document.body)}
   </>
 }
@@ -161,10 +167,7 @@ export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
       {night.text}
       {night.note && <span className="cam-sheet-night-note">{night.note}</span>}
     </p>
-    <PhotoStrip camera={camera} notesTick={stripTick} onNotes={() => setNotesTick(t => t + 1)} />
-    {/* Asked again with the photo strip: a note changed there, or the camera has a newer photo. */}
-    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={`${notesTick}:${camera.latest?.image_id ?? ''}`} backLabel={`Back to ${camera.name}`}
-      onChange={() => setStripTick(t => t + 1)} />
+    <PhotoStrip camera={camera} notesTick={stripTick} onNotes={() => setNotesTick(t => t + 1)} onRetry={() => setNotesTick(t => t + 1)} />
     <Link className="map-button map-button--primary map-button--big" to={`/photos?camera=${encodeURIComponent(camera.id)}`}>See all photos</Link>
     <div className="cam-sheet-alerts">
       <CameraAlertRow id={camera.id} name={camera.name} alerts={camera.alerts} label="Alerts from this camera"
@@ -178,5 +181,11 @@ export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
       {admin && <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>}
       {camera.can_rename && <RenameControl name={camera.name} onRename={onRename} maxLength={100} />}
     </div>}
+    {/* Last on the sheet: it arrives on its own answer, and arriving above the buttons
+        would move them under a thumb. Asked again with the photo strip (a note changed
+        there, its Try again) and when the camera has a newer photo. Quiet when it fails:
+        the photo strip already says there's no signal. */}
+    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={`${notesTick}:${camera.latest?.image_id ?? ''}`} backLabel="Back to the map"
+      quietErrors onChange={() => setStripTick(t => t + 1)} />
   </>
 }

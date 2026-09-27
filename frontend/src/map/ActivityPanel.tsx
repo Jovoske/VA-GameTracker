@@ -6,11 +6,13 @@ import { PARTS, PERIODS, circleRadius, legendSizes, rateWords, type Activity, ty
  * the night, which animal, and what the circles mean. Every control is a
  * glove-sized chip, and the answer is on the map, not in here.
  */
-export function ActivityBar({ filters, onFilters, data, onClose }: {
+export function ActivityBar({ filters, onFilters, data, onClose, cardOpen = false }: {
   filters: ActivityFilters
   onFilters: (next: ActivityFilters) => void
   data: Activity | null
   onClose: () => void
+  /** A camera's card is open over the map: on a short phone the filters step aside for it. */
+  cardOpen?: boolean
 }) {
   const options = data?.species_options ?? []
   // The chosen animal keeps its chip even in a period it wasn't seen in.
@@ -22,7 +24,7 @@ export function ActivityBar({ filters, onFilters, data, onClose }: {
   const [small, big] = legendSizes(top)
   const key = (rate: number, words: string) => { const r = circleRadius(rate), d = Math.ceil(r * 2 + 4)
     return <span className="mode-legend-key"><svg width={d} height={d} aria-hidden="true"><circle className="mode-legend-dot" cx={d / 2} cy={d / 2} r={r} /></svg>{words}</span> }
-  return <section className="mode-bar mode-bar--activity" aria-label="Activity">
+  return <section className={`mode-bar mode-bar--activity${cardOpen ? ' has-card' : ''}`} aria-label="Activity">
     <div className="mode-bar-row">
       <div className="mode-seg" role="radiogroup" aria-label="How far back">
         {PERIODS.map(p => <button key={p.id} type="button" role="radio" aria-checked={filters.nights === p.id} onClick={() => onFilters({ ...filters, nights: p.id })}>{p.label}</button>)}

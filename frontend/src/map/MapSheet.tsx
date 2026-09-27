@@ -5,20 +5,13 @@ import { NavigationArrowIcon } from '@phosphor-icons/react/dist/csr/NavigationAr
 import { PolygonIcon } from '@phosphor-icons/react/dist/csr/Polygon'
 import { RulerIcon } from '@phosphor-icons/react/dist/csr/Ruler'
 import type { ReactNode } from 'react'
+import SwitchRow from '../components/SwitchRow'
 import { VIEWS, type View } from './activity'
 import { BASES, CALLOUT_ZOOM, CATASTRO_MINZOOM, type BaseId, type MapPrefs } from './basemaps'
 import type { Layers } from './layers'
 
 export type Unplaced = { kind: 'stand' | 'camera'; id: string; name: string }
 
-/** A whole row that is the switch, so the target is the row and not a 26px pill. */
-function SwitchRow({ label, note, on, onChange, children }: { label: string; note?: ReactNode; on: boolean; onChange: (on: boolean) => void; children?: ReactNode }) {
-  return <button type="button" role="switch" aria-checked={on} className="msheet-row" onClick={() => onChange(!on)}>
-    {children && <span className="msheet-lead" aria-hidden="true">{children}</span>}
-    <span className="msheet-text"><span>{label}</span>{note && <small>{note}</small>}</span>
-    <span className="msheet-switch" aria-hidden="true"><span /></span>
-  </button>
-}
 function ToolRow({ icon, label, note, onClick, disabled }: { icon: ReactNode; label: string; note?: string; onClick: () => void; disabled?: boolean }) {
   return <button type="button" className="msheet-row" onClick={onClick} disabled={disabled}>
     <span className="msheet-lead" aria-hidden="true">{icon}</span>

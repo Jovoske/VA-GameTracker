@@ -91,6 +91,11 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const drag=async dy=>{const h=await page.locator('.bsheet-handle').boundingBox();await page.mouse.move(h.x+h.width/2,h.y+10);await page.mouse.down();await page.mouse.move(h.x+h.width/2,h.y+10+dy,{steps:10});await page.mouse.up();await page.waitForTimeout(450)};
  await drag(-300);assert.ok(Math.abs(await sheetH()-wrap.height*.9)<4,'full');
  await drag((await sheetH())-112);assert.ok(Math.abs(await sheetH()-112)<3,'peek');
+ // A plain tap on the handle steps the sheet up (peek, half, full) and from full back to half.
+ const tapHandle=async()=>{const h=await page.locator('.bsheet-handle').boundingBox();await page.mouse.click(h.x+h.width/2,h.y+h.height/2);await page.waitForTimeout(450)};
+ await tapHandle();assert.equal(await page.locator('.bsheet').getAttribute('data-snap'),'half','a tap on the handle goes up from the peek');
+ await tapHandle();assert.equal(await page.locator('.bsheet').getAttribute('data-snap'),'full');
+ await tapHandle();assert.equal(await page.locator('.bsheet').getAttribute('data-snap'),'half','and from full back to half');
  await page.keyboard.press('Escape');await page.waitForTimeout(400);assert.equal(await page.locator('.bsheet').count(),0);
  // S1-M1: a camera beside a stand is on top, and a tap on the pair asks which one.
  await page.getByRole('button',{name:'Fit the estate'}).click();await page.waitForTimeout(600);

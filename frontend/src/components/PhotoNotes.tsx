@@ -151,8 +151,7 @@ export default function PhotoNotesPanel({ imageId, label, camera, count, empty, 
         <NoteSheet imageId={imageId} label={label} camera={camera} empty={!!empty} onClose={() => openSheet(false)}
           onSaved={(r, tell, kept) => {
             if (kept) onKept?.(imageId)
-            const who = r.told === 1 ? '1 person' : `${r.told} people`
-            saved(r, `${kept ? 'Kept as an animal photo and marked' : 'Marked'} worth a look.${tell ? r.told ? ` Told ${who}.` : ' Nobody else has alerts on, so no one was told.' : ''}`)
+            saved(r, `${kept ? 'Kept as an animal photo and marked' : 'Marked'} worth a look.${tell ? ` ${toldWords(r.told, r.muted ?? 0, camera)}` : ''}`)
           }}
           onFound={(r, tell, kept) => {
             if (kept) onKept?.(imageId)
@@ -161,6 +160,14 @@ export default function PhotoNotesPanel({ imageId, label, camera, count, empty, 
       )}
     </div>
   )
+}
+
+/** Who "Tell the team" reached, and when nobody, why: nobody else has alerts on, or
+ * everyone who has muted this camera. */
+function toldWords(told: number, muted: number, camera: string): string {
+  if (told) return `Told ${told === 1 ? '1 person' : `${told} people`}.${muted ? ` ${muted === 1 ? '1 person has' : `${muted} have`} muted ${camera}.` : ''}`
+  if (muted) return `No one was told: everyone else with alerts on has muted ${camera}.`
+  return 'Nobody else has alerts on, so no one was told.'
 }
 
 /** How far the on-screen keyboard covers the bottom of the screen, and how much is left
@@ -356,7 +363,7 @@ function NoteSheet({ imageId, label, camera, empty, onClose, onSaved, onFound }:
           // The keyboard coming up can hide it inside a short sheet (a phone on its side).
           onFocus={(e) => { const el = e.currentTarget; window.setTimeout(() => el.scrollIntoView({ block: 'nearest' }), 300) }} />
         <p className={`lb-sheet-count${left <= 10 ? ' lb-sheet-count--low' : ''}`} aria-live="polite">{text.length} / {NOTE_MAX}</p>
-        <SwitchRow label="Tell the team" note="One alert to everyone who has alerts on" on={tell} onChange={setTell} disabled={!!busy} />
+        <SwitchRow label="Tell the team" note="One alert to everyone who has alerts on for this camera" on={tell} onChange={setTell} disabled={!!busy} />
         {err && <p className="lb-sheet-err" role="alert">{err}</p>}
         {asking ? (
           <div className="lb-sheet-ask" role="group" aria-label="Throw away this note?">

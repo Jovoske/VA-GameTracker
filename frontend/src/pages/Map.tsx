@@ -691,7 +691,8 @@ export default function MapPage() {
       </div>
       {editing && <CrosshairEditor map={mapObj} editing={editing} center={center} busy={editBusy} err={editErr} title={editTitle}
         onChange={setEditing} onSave={saveEdit} onCancel={cancelEdit} />}
-      {modeBar && view === 'activity' && <ActivityBar filters={act.filters} onFilters={f => { act.setFilters(f) }} data={act.data} onClose={() => setView('cameras')} />}
+      {modeBar && view === 'activity' && <ActivityBar filters={act.filters} onFilters={f => { act.setFilters(f) }} data={act.data} onClose={() => setView('cameras')}
+        cardOpen={!!(act.picked && act.data)} />}
       {modeBar && view === 'replay' && <ReplayBar replay={replay} cameras={cameras} photo={replayPhoto} onPhoto={setReplayPhoto} onClose={() => setView('cameras')} />}
     </div>
   </div>

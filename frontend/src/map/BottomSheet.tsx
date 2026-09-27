@@ -41,7 +41,7 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
   const [room, setRoom] = useState(0)
   const [shown, setShown] = useState(false)
   const [closing, setClosing] = useState(false)
-  const drag = useRef<{ id: number; y0: number; h0: number; moved: boolean; trail: { y: number; t: number }[] } | null>(null)
+  const drag = useRef<{ id: number; y0: number; h0: number; moved: boolean; onHandle: boolean; trail: { y: number; t: number }[] } | null>(null)
   const heightRef = useRef(0)
   const onHeightRef = useRef(onHeight); onHeightRef.current = onHeight
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose
@@ -134,7 +134,9 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
     if ((e.target as HTMLElement).closest('button:not(.bsheet-handle), a, input, label')) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-    drag.current = { id: e.pointerId, y0: e.clientY, h0: heightRef.current, moved: false, trail: [{ y: e.clientY, t: e.timeStamp }] }
+    // Noted now: once the row captures the pointer, the lift lands on the row, not the handle.
+    const onHandle = !!(e.target as HTMLElement).closest('.bsheet-handle')
+    drag.current = { id: e.pointerId, y0: e.clientY, h0: heightRef.current, moved: false, onHandle, trail: [{ y: e.clientY, t: e.timeStamp }] }
     root.current?.setAttribute('data-dragging', 'true')
   }
   function move(e: React.PointerEvent) {
@@ -155,7 +157,7 @@ export default function BottomSheet({ label, snap, onSnap, onClose, onHeight, he
     const h = heights()
     if (!d.moved) {
       // A tap on the handle steps up, and from the top back down to half.
-      if ((e.target as HTMLElement).closest('.bsheet-handle')) onSnap(snap === 'full' ? 'half' : ORDER[ORDER.indexOf(snap) + 1])
+      if (d.onHandle && e.type === 'pointerup') onSnap(snap === 'full' ? 'half' : ORDER[ORDER.indexOf(snap) + 1])
       apply(h[snap])
       return
     }

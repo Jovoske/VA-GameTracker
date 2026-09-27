@@ -8,6 +8,7 @@ import type { useReplay } from './useReplay'
 
 const STEP = 5
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+const nightCount = (visits: number) => visits ? plural(visits, 'visit') : 'nothing'
 
 /**
  * The replay's controls, docked under the map: which night, the timeline from
@@ -36,13 +37,21 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
   const status = r.err || r.nightsErr ? null : !r.data ? (r.nights && !r.nights.length ? 'No nights yet' : 'Loading…')
     : empty ? 'No visits' : `${r.soFar} of ${plural(r.visits.length, 'visit')}`
   const marks = r.data ? hourMarks(r.data.start, r.data.end) : []
+  const at = r.nights?.findIndex(n => n.night === r.night) ?? -1
+  const shown = r.nights && at >= 0 ? { date: nightLabel(r.nights[at].night, at === 0, r.nights[at].so_far), count: nightCount(r.nights[at].visits) } : null
   return <section className="mode-bar mode-bar--replay" aria-label="Replay a night">
     <div className="mode-bar-row">
       <label className="replay-night">
         <span className="sr-only">Night</span>
+        {/* What the closed picker shows, drawn over it so a narrow phone cuts the date
+            short and never the count. The real select is on top, and takes the tap. */}
+        <span className="replay-night-shown" aria-hidden="true">
+          <span className="replay-night-date">{shown ? shown.date : r.nightsErr ? 'Nights didn’t load' : 'Loading nights…'}</span>
+          {shown && <span className="replay-night-count">&nbsp;· {shown.count}</span>}
+        </span>
         <select value={r.night ?? ''} disabled={!r.nights?.length} onChange={e => r.setNight(e.target.value)}>
           {!r.nights && <option value="">{r.nightsErr ? 'Nights didn’t load' : 'Loading nights…'}</option>}
-          {r.nights?.map((n, i) => <option key={n.night} value={n.night}>{nightLabel(n.night, i === 0, n.so_far)} · {n.visits ? plural(n.visits, 'visit') : 'nothing'}</option>)}
+          {r.nights?.map((n, i) => <option key={n.night} value={n.night}>{nightLabel(n.night, i === 0, n.so_far)} · {nightCount(n.visits)}</option>)}
         </select>
       </label>
       <button type="button" className="mode-bar-x" aria-label="Close replay, back to the camera photos" onClick={onClose}>

@@ -12,7 +12,8 @@ export type Camera = {
   battery_pct: number | null; signal_pct: number | null; last_report_at: string | null
   health: CameraHealth; can_rename: boolean
   latest: LatestPhoto | null; new_count: number
-  last_night: Visits[]; last_night_status: NightStatus | null
+  // Last night runs 18:00 to 08:00, as Activity and Replay count it; until 08:00 it is still going.
+  last_night: Visits[]; last_night_status: NightStatus | null; last_night_so_far?: boolean
   // This camera's alert switch for you (false: muted), and whether your alerts are on at all.
   alerts: boolean; alerts_enabled: boolean
 }

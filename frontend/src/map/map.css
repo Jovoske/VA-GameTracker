@@ -164,8 +164,10 @@
 .map-stage[data-callouts='dots'] .map-badge--dot:not([hidden]),
 .map-stage[data-callouts='on'] .map-pin.photo-failed .map-badge--dot:not([hidden]) { display: block; }
 
-/* You. White dot, teal ring, a heading triangle when the phone knows it. */
-.me-dot { width: 22px; height: 22px; pointer-events: none; }
+/* You. White dot, teal ring, a heading triangle when the phone knows it. Above every
+   pin and photo (the chosen one too): standing by a camera, you still see yourself.
+   It takes no taps, so the pins under it still open. */
+.me-dot { z-index: 3; width: 22px; height: 22px; pointer-events: none; }
 .me-core { position: absolute; inset: 1px; border-radius: 50%; background: var(--text); border: 3px solid var(--teal); box-shadow: 0 0 0 2px rgb(0 0 0 / .35); }
 .me-heading { display: none; position: absolute; left: 50%; top: -10px; transform: translateX(-50%); border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid var(--teal); }
 .me-dot.has-heading .me-heading { display: block; }
@@ -233,10 +235,10 @@
 .msheet-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 15px; }
 .msheet-text small { font-size: 12px; line-height: 1.35; color: var(--text-dim); }
 .msheet-chevron { color: var(--text-dim); font-size: 22px; line-height: 1; }
-.msheet-switch { position: relative; width: 46px; height: 26px; flex-shrink: 0; border-radius: var(--r-pill); background: var(--surface-2); border: 1px solid var(--border); transition: background var(--d-base) var(--ease-out); }
-.msheet-switch span { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: var(--text-dim); transition: transform var(--d-base) var(--ease-out); }
-.msheet-row[aria-checked='true'] .msheet-switch { background: var(--go); border-color: var(--go); }
-.msheet-row[aria-checked='true'] .msheet-switch span { transform: translateX(20px); background: var(--text); }
+/* The sheet's switches are the app's one SwitchRow (knob, On/Off, the whole row), sized like the rows around them. */
+.msheet .switch-row { min-height: 56px; gap: 12px; border-top: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.msheet .switch-row:last-child { border-bottom: 0; }
+.msheet .switch-row-text { font-size: 15px; }
 .msheet-note { margin: 6px 0 8px; font-size: 12px; line-height: 1.45; color: var(--text-dim); }
 .msheet-note--warn { color: var(--marginal); }
 .msheet-key { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 0 8px; font-size: 12px; color: var(--text-dim); }
@@ -261,7 +263,8 @@
 .cam-sheet-night--warn { font-weight: 400; font-size: 14px; color: var(--marginal); }
 .cam-sheet-night--quiet { font-weight: 400; font-size: 14px; color: var(--text-dim); }
 .cam-sheet-night-note { display: block; margin-top: 2px; font-weight: 400; font-size: 13px; color: var(--text-dim); }
-.cam-strip-msg { margin: 0 0 14px; min-height: 44px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+/* As tall as the strip it stands for, so the photos arriving don't move the buttons below. */
+.cam-strip-msg { margin: 0 0 14px; min-height: 76px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
 .cam-strip-row { display: flex; gap: 8px; margin: 0 -16px 14px; padding: 0 16px 4px; scroll-padding: 0 16px; list-style: none; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; }
 .cam-strip-row::-webkit-scrollbar { display: none; }
 .cam-strip-row li { flex: 0 0 auto; scroll-snap-align: start; }
@@ -269,7 +272,6 @@
 .cam-strip-tile img { display: block; width: 100%; height: 100%; object-fit: cover; }
 /* The time bar only: the team-notes marker is a span in the tile too. */
 .cam-strip-tile > span[aria-hidden='true'] { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; padding: 10px 6px 3px; font-size: 11px; font-weight: 600; color: var(--text); text-align: left; background: linear-gradient(transparent, rgb(0 0 0 / .7)); }
-.cam-strip-tile > span[aria-hidden='true'] b { font-weight: 600; color: var(--text-dim); }
 .cam-strip-tile:not(:disabled):active { transform: scale(.97); }
 
 /* "Which one?": the pins under one tap, as rows with the pin's own mark. */
@@ -342,8 +344,10 @@
 .mode-legend small { flex: 1; min-width: 120px; font-size: 12px; line-height: 1.35; color: var(--text-dim); }
 
 /* A camera's circle, read in one line. The round buttons on the left ride above it. */
-.act-card { position: absolute; z-index: 5; left: 12px; right: 12px; bottom: 12px; max-width: 420px; padding: 6px 10px 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); box-shadow: 0 8px 24px rgb(0 0 0 / .45); }
-.act-card-head { display: flex; align-items: center; gap: 8px; }
+/* Never taller than the map it sits on: on a short phone it scrolls inside, with its
+   name and close button kept at the top. */
+.act-card { position: absolute; z-index: 5; left: 12px; right: 12px; bottom: 12px; max-width: 420px; max-height: calc(100% - 24px); overflow-y: auto; overscroll-behavior: contain; padding: 6px 10px 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); box-shadow: 0 8px 24px rgb(0 0 0 / .45); }
+.act-card-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; margin-top: -6px; padding-top: 6px; background: var(--surface); }
 .act-card-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .act-card-read { margin: 0 6px 4px 0; font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--text); }
 .act-card-mix { margin: 0 6px 2px 0; font-size: 13px; color: var(--text-dim); }
@@ -378,7 +382,15 @@
 /* Beside a fresh arrow: what it is, and that it is a guess. */
 .map-link-tag { z-index: 3; padding: 3px 9px; border-radius: var(--r-pill); border: 1px dashed color-mix(in srgb, var(--text) 50%, transparent); background: color-mix(in srgb, var(--surface) 88%, transparent); color: var(--text); font-size: 12px; font-weight: 600; white-space: nowrap; pointer-events: none; }
 
-.replay-night select { width: 100%; min-height: 48px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--bg); color: var(--text); font: inherit; font-size: 15px; }
+.replay-night { position: relative; display: block; }
+.replay-night select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font: inherit; font-size: 15px; }
+.replay-night select:disabled { cursor: default; }
+.replay-night-shown { display: flex; align-items: center; min-height: 48px; padding: 0 30px 0 12px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--bg); color: var(--text); font-size: 15px; white-space: nowrap; }
+.replay-night-shown::after { content: '▾'; position: absolute; right: 12px; font-size: 12px; color: var(--text-dim); }
+.replay-night-date { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.replay-night-count { flex-shrink: 0; }
+.replay-night:has(select:disabled) .replay-night-shown { color: var(--text-dim); }
+.replay-night:has(select:focus-visible) .replay-night-shown { outline: 2px solid var(--go); outline-offset: 2px; }
 /* The clock and the count, at the end of the controls. */
 .replay-now { display: flex; flex-direction: column; align-items: flex-end; margin: 0 0 0 auto; min-width: 0; text-align: right; line-height: 1.15; }
 .replay-now strong { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
@@ -416,6 +428,18 @@
   .mode-bar--activity .mode-bar-row > .mode-seg, .mode-bar--activity > .mode-seg { max-width: 560px; }
   .mode-bar--replay .mode-bar-row > .replay-night { flex: 0 1 420px; margin-right: auto; }
 }
+/* A short phone upright: the legend's circles go (its words stay), and while a
+   camera's card is open the filters step aside for it, so the card and the map above
+   it both fit. Closing the card brings them back. */
+@media (max-height: 740px) and (min-height: 501px) {
+  .mode-bar--activity .mode-legend-key { display: none; }
+  .mode-bar--activity .mode-legend small { min-width: 0; }
+}
+@media (max-height: 740px) {
+  .mode-bar--activity.has-card > .mode-seg--parts,
+  .mode-bar--activity.has-card > .mode-chips,
+  .mode-bar--activity.has-card > .mode-legend { display: none; }
+}
 /* A phone on its side: each bar in two rows, so the map keeps some height. What must
    stay is kept in one line: what the circles' size means, and that an arrow is a guess. */
 @media (max-height: 500px) {
@@ -451,4 +475,4 @@
 .cam-sheet-alerts-off a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; display: inline-flex; align-items: center; min-height: 44px; }
 /* The camera's "Worth a look" strip bleeds to the sheet's edges like its photo strip. */
 .cam-sheet-wal .wal-row { margin: 0 -16px; padding: 0 16px 4px; scroll-padding: 0 16px; }
-.cam-sheet-wal.wal { margin-bottom: 14px; }
+.cam-sheet-wal.wal { margin: 20px 0 14px; }

@@ -182,7 +182,7 @@ const assert=require('node:assert/strict');
  await page.goto(base+'/map?camera=c1');
  await page.locator('.bsheet[aria-label="Camera: Charca"]').waitFor();
  const burstTile=page.locator('.cam-strip-tile').first();await burstTile.waitFor();
- assert.match(await burstTile.getAttribute('aria-label'),/3 frames/);
+ assert.match(await burstTile.getAttribute('aria-label'),/3 photos/);
  assert.equal(await burstTile.locator('.note-mark').count(),1,'a note on the burst’s second frame marks its tile');
  const link=await page.getByRole('link',{name:'Turn them on in Settings'}).boundingBox();
  assert.ok(link.height>=44,`the Settings link is glove-sized (${link.height})`);

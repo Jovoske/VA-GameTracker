@@ -27,7 +27,7 @@ export type PhotoNotes = { image_id: string; can_add: boolean; notes: PhotoNote[
 
 /** What POST /images/{id}/notes answers on top: who was told, and whether this save
  * kept a photo marked "nothing in it" (or was the same note saved a second time). */
-export type NoteSaved = PhotoNotes & { told: number; kept: boolean; again: boolean }
+export type NoteSaved = PhotoNotes & { told: number; muted: number; kept: boolean; again: boolean }
 
 /**
  * A new note's id, made on the phone. Saving again after a weak signal swallowed the
