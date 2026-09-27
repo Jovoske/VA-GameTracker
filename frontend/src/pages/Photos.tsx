@@ -85,12 +85,16 @@ export default function Photos() {
   // The feed on screen is what this session saw earlier, because the network didn't answer.
   const [savedCopy, setSavedCopy] = useState<Got<Page> | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
-  // A photo a link named that isn't in the loaded pages: opened on its own.
-  const [single, setSingle] = useState<Photo | null>(null)
+  // A photo a link named that isn't in the loaded pages: opened with the frames
+  // taken just before it (its burst), or on its own.
+  const [single, setSingle] = useState<{ items: Photo[]; start: number } | null>(null)
   const [notice, setNotice] = useState('')
   // Bumped when a note changes from the grid, so the strip above asks again.
   const [notesTick, setNotesTick] = useState(0)
   const wantImage = useRef<string | null>(params.get('image'))
+  // When that photo was taken (an alert's link carries it), to find it however many
+  // newer photos came in since (audit K-07).
+  const wantAt = useRef<string | null>(params.get('at'))
   const request = useRef(0)
   // The older page being asked for, by the request it belongs to. A new choice of
   // chips drops it, so a slow page can neither hold "Loading…" for good nor land in
@@ -227,21 +231,36 @@ export default function Photos() {
   useRefetchOnReturn(() => { if (!viewing.current) loadNewer() }, 120_000)
 
   // Open the photo a notification pointed at: in the list when it is on the first
-  // page, otherwise asked for by itself (a push tapped the next morning can be
-  // many pages down by then).
+  // page; otherwise, by the time the alert carries, with the frames just before it
+  // (a push tapped the next morning can be many pages down by then); otherwise
+  // asked for by itself. A photo gone since (hidden, or deleted) says so.
   useEffect(() => {
     const want = wantImage.current
     if (!want || !photos) return
+    const taken = Date.parse(wantAt.current ?? '')
     wantImage.current = null
+    wantAt.current = null
     setParams({}, { replace: true })
     const at = photos.findIndex((p) => p.image_id === want)
     if (at >= 0) { setZoom(at); return }
-    api<Photo>(`/photos/${encodeURIComponent(want)}`, { timeoutMs: 20_000 })
-      .then(setSingle)
+    const alone = () => api<Photo>(`/photos/${encodeURIComponent(want)}`, { timeoutMs: 20_000 })
+      .then((p) => setSingle({ items: [p], start: 0 }))
+    const burst = () => {
+      const q = new URLSearchParams()
+      if (pick.species.length) q.set('species', pick.species.join(','))
+      q.set('before', new Date(taken + 1).toISOString())
+      q.set('limit', '6')
+      return api<Page>(`/photos?${q.toString()}`, { timeoutMs: 20_000 }).then((page) => {
+        const i = page.items.findIndex((p) => p.image_id === want)
+        if (i < 0) return alone()
+        setSingle({ items: page.items, start: i })
+      })
+    }
+    ;(Number.isFinite(taken) ? burst() : alone())
       .catch((e: Failure) => setNotice(e.status === 404 || e.status === 422
         ? 'That photo isn’t available any more.'
         : `Couldn’t open that photo. ${e.message}`))
-  }, [photos, setParams])
+  }, [photos, setParams, pick])
 
   /** A note was added or removed in a viewer: the tile's marker and the strip follow. */
   const notesChanged = useCallback((id: string, n: number) => {
@@ -431,11 +450,15 @@ export default function Photos() {
       )}
       {single && (
         <PhotoLightbox
-          photos={[toViewer(single)]}
+          photos={single.items.map(toViewer)}
+          start={single.start}
           backLabel="Back to photos"
           onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
-          onFixed={(id, fix) => { photoFixed(id, fix); setSingle((p) => p && { ...p, label: fix.label }) }}
+          onFixed={(id, fix) => {
+            photoFixed(id, fix)
+            setSingle((cur) => cur && { ...cur, items: cur.items.map((p) => (p.image_id === id ? { ...p, label: fix.label } : p)) })
+          }}
         />
       )}
     </div>

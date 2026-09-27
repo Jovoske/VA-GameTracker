@@ -315,10 +315,15 @@ self.addEventListener('fetch', (e) => {
 })
 
 // ── Web Push ──
-// The server sends a small JSON body: { title, body, url, tag, at }. Same `tag` per
-// species, so a second sounder an hour later replaces the first banner rather than
-// stacking under it. Anything unparseable still shows as a plain notification —
-// a push that arrived and was silently dropped is the worst outcome.
+// The server sends a small JSON body: { title, body, url, tag, renotify, silent, at }.
+// Same `tag` per species, so a second sounder an hour later replaces the first banner
+// rather than stacking under it. Whether the replacement buzzes again is the server's
+// call (`renotify`): once per animal per two hours, and a quiet update of the banner
+// in between (`silent`), so one sounder at the feeder no longer buzzes the phone every
+// 15 minutes all night (audit K-06). Safari ignores all three and sounds every push,
+// so the server sends an iPhone the buzz alone. Anything unparseable still shows as a
+// plain notification — a push that arrived and was silently dropped is the worst
+// outcome. frontend/tests/sw-push.cjs checks this side.
 self.addEventListener('push', (e) => {
   let data = {}
   try {
@@ -332,7 +337,9 @@ self.addEventListener('push', (e) => {
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     tag: data.tag || undefined,
-    renotify: Boolean(data.tag),
+    // renotify needs a tag; without one every banner is new anyway.
+    renotify: Boolean(data.tag) && data.renotify === true,
+    silent: data.silent === true,
     data: { url: data.url || '/' },
     timestamp: data.at ? Date.parse(data.at) || Date.now() : Date.now(),
   }
@@ -355,4 +362,20 @@ self.addEventListener('notificationclick', (e) => {
       return self.clients.openWindow(target)
     }),
   )
+})
+
+// The browser replaced this phone's push subscription (it expired, or the push
+// service rotated it). Subscribe again with the same options; the worker can't sign
+// in, so any open page is asked to send the new one to the server, and if none is
+// open the app does it the next time it opens (src/push.ts, checkThisDevice). The
+// old one's pushes are refused from now on, and the server drops it then.
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil((async () => {
+    const options = e.oldSubscription && e.oldSubscription.options
+    if (!e.newSubscription && options) {
+      await self.registration.pushManager.subscribe(options).catch(() => null)
+    }
+    const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    list.forEach((c) => c.postMessage({ type: 'gs-push-changed' }))
+  })())
 })

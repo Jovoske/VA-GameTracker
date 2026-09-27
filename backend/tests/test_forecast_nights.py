@@ -600,6 +600,40 @@ def test_a_real_shift_reads_in_plain_words(db_session, estate):
 
 
 @requires_db
+def test_tonight_never_says_nothing_changed_beside_a_quiet_camera(db_session, estate):
+    """G-23: the quiet alert went by a month's total, the Changed line by the usual
+    night, so a camera whose visits all came in one spell read "Nothing changed" on
+    one line and "Puente quiet ... usually sees more" under Alerts. One rule now."""
+    cam = camera(db_session, estate, "Puente")
+    watched(db_session, cam, 29)
+    for d in (10, 11, 12, 13):  # 16 visits, all in one spell
+        for hour in (19, 21, 23, 2):
+            seen(db_session, cam, ago(d), hour)
+    db_session.commit()
+    recompute_camera_nights(db_session)
+    assert whats_changed(db_session)["kind"] == "none"
+    assert not [a for a in alerts_mod.compute_alerts(db_session) if a["type"] == "quiet"]
+
+    # A camera that usually sees two a night and has had none for five: both say
+    # so, with the same numbers.
+    busy = camera(db_session, estate, "Charca")
+    watched(db_session, busy, 20)
+    for d in range(6, 21):
+        for hour in (21, 23):
+            seen(db_session, busy, ago(d), hour)
+    db_session.commit()
+    recompute_camera_nights(db_session)
+    assert whats_changed(db_session) == {
+        "kind": "gone_quiet", "camera": "Charca",
+        "text": "Charca has been quiet for 5 nights. It usually sees about 2 a night."}
+    quiet, = [a for a in alerts_mod.compute_alerts(db_session) if a["type"] == "quiet"]
+    assert quiet["camera"] == "Charca"
+    assert quiet["text"] == (
+        f"Nothing on its last 5 watched nights, since the night of {ago(6).day} "
+        f"{ago(6):%b}. It usually sees about 2 a night.")
+
+
+@requires_db
 def test_gone_quiet_counts_only_nights_the_camera_was_watching(db_session, estate):
     """Three unchecked nights and one watched empty one used to be "quiet for 4
     nights". Only the watched ones count, and the run is the real length."""

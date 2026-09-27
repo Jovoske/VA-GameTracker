@@ -98,6 +98,10 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert _columns(eng, "users")["token_version"] == "integer"
         assert "former_owner" in _columns(eng, "camera_accounts")
         assert {code for _, _, code in _user_keys(eng)} == {"n"}
+        prefs = _columns(eng, "notification_prefs")
+        assert prefs["quiet_start"] == "time without time zone"
+        assert prefs["plan_push"] == "boolean"
+        assert _columns(eng, "notifications")["detail"] == "jsonb"
     finally:
         eng.dispose()
 
@@ -167,6 +171,8 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "received_at" in _columns(eng, "images")
         assert "token_version" in _columns(eng, "users")
         assert {code for _, _, code in _user_keys(eng)} == {"n"}
+        assert {"quiet_start", "quiet_end", "plan_push"} <= set(_columns(eng, "notification_prefs"))
+        assert "detail" in _columns(eng, "notifications")
     finally:
         eng.dispose()
 
@@ -1290,5 +1296,70 @@ def test_access_security_upgrade_lets_a_person_go_and_goes_down_and_up_again(fre
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "token_version" in _columns(eng, "users")
         assert len(_user_keys(eng)) == 3
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_quiet_alerts_and_plan_push_upgrade_down_and_up_again(fresh_db):
+    """0029 on a real 0028 database: everyone's alert choices and past alerts are
+    kept, nobody has quiet hours or the plan push until they turn them on, and the
+    alerts survive going down and up again."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0028_access_security")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0028 shape first.
+            for col in ("quiet_start", "quiet_end", "plan_push"):
+                c.execute(text(f"ALTER TABLE notification_prefs DROP COLUMN {col}"))
+            c.execute(text("ALTER TABLE notifications DROP COLUMN detail"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            user = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'ana@x.local','h','member') RETURNING id"
+            ), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO notification_prefs (user_id,enabled,species_ids,muted_camera_ids) "
+                "VALUES (:u,true,'[\"wild_boar\"]'::jsonb,'[]'::jsonb)"), {"u": user})
+            c.execute(text(
+                "INSERT INTO notifications (id,user_id,kind,title,body,push_status,created_at) "
+                "VALUES (gen_random_uuid(),:u,'sighting','Wild boar at PL19','1 visit at 22:14.',"
+                "'sent',now())"), {"u": user})
+
+        command.upgrade(cfg, "0029_quiet_alerts_and_plan_push")
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT enabled, species_ids, quiet_start, quiet_end, plan_push "
+                "FROM notification_prefs")).one()) == (True, ["wild_boar"], None, None, False)
+            assert tuple(c.execute(text(
+                "SELECT title, push_status, detail FROM notifications")).one()) == (
+                "Wild boar at PL19", "sent", None)
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("UPDATE notification_prefs SET quiet_start='23:00', "
+                           "quiet_end='07:00', plan_push=true"))
+            c.execute(text("UPDATE notifications SET detail='{\"visits\": 1}'::jsonb"))
+
+        command.downgrade(cfg, "0028_access_security")
+        assert "plan_push" not in _columns(eng, "notification_prefs")
+        assert "detail" not in _columns(eng, "notifications")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM notifications")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0028_access_security")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"quiet_start", "quiet_end", "plan_push"} <= set(
+            _columns(eng, "notification_prefs"))
+        assert "detail" in _columns(eng, "notifications")
     finally:
         eng.dispose()

@@ -119,7 +119,7 @@ class _Recorder:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, db, user_id, payload):
+    def __call__(self, db, user_id, payload, quiet=False):
         self.calls.append((user_id, payload))
         return {"sent": 1, "failed": 0, "removed": 0, "subscriptions": 1}
 

@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +26,7 @@ from app.forecasting.conditions import sun_times
 from app.forecasting.inference import dark_exit, suggest_approach_arcs
 from app.forecasting.wind import shooting_arcs_conflict
 from app.models import Camera, Estate, Sit, Stand, User
+from app.notifications.hold import deliver_held_in_background, has_held
 
 router = APIRouter(tags=["stands"])
 
@@ -583,11 +584,17 @@ def start_sit(
 
 
 @router.post("/sits/{sit_id}/end")
-def end_sit(sit_id: uuid.UUID, user: CurrentUser, db: DB, body: TapIn | None = None) -> dict:
+def end_sit(
+    sit_id: uuid.UUID, user: CurrentUser, db: DB, background: BackgroundTasks,
+    body: TapIn | None = None,
+) -> dict:
     """END SIT. Idempotent: the first end the server hears is the one it keeps.
 
     The outcome is left alone. A sit ended with nothing reported stays
     'unreported' and the phone asks what happened; a blank sit is never assumed.
+
+    The alerts that waited while the hunter sat go out now, as one message, once
+    this has answered (app.notifications.hold).
     """
     sit = _own_sit(db, sit_id, user)
     if sit.outcome == "cancelled":
@@ -597,7 +604,10 @@ def end_sit(sit_id: uuid.UUID, user: CurrentUser, db: DB, body: TapIn | None = N
     if sit.ended_at is None:
         at = _client_time(body.at if body else None, datetime.now(UTC))
         sit.ended_at = max(at, sit.started_at)
-    return _done(db, sit)
+    out = _done(db, sit)
+    if sit.user_id is not None and has_held(db, sit.user_id):
+        background.add_task(deliver_held_in_background, sit.user_id)
+    return out
 
 
 @router.get("/stands/{stand_id}/suggested-arcs")

@@ -1,3 +1,5 @@
+import { forgetThisDevice } from './push'
+
 const TOKEN_KEY = 'gs_token'
 const ME_KEY = 'gs_me'
 const PASS_KEY = 'gs_img'
@@ -55,14 +57,18 @@ export const PHOTO_CACHES = ['gamesense-thumbs-v1', 'gamesense-photos-v1']
 export const SIT_QUEUE_KEY = 'gs_sit_queue'
 
 /**
- * Sign out, and take this person's unsent sit reports and saved sits with them.
+ * Sign out, and take this person's unsent sit reports, saved sits and alerts with them.
  *
  * A phone gets passed round a hunting party. Left behind, the next person to sign
  * in would find the last one's sits on screen, and an admin's login would be
- * allowed to send the last one's reports as their own. An expired sign-in (a 401)
- * keeps them: that is the same hunter signing in again.
+ * allowed to send the last one's reports as their own, and the phone would keep
+ * buzzing with the last one's sightings. An expired sign-in (a 401) keeps them:
+ * that is the same hunter signing in again.
  */
 export function signOut(): void {
+  // Before the token goes: the server's copy of this phone's subscription is
+  // removed in that person's name (push.ts).
+  forgetThisDevice(getToken())
   setToken(null)
   meCache = null
   meKnown = null

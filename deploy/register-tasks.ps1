@@ -11,6 +11,15 @@
 # Order matters. `plan` must run before dark or it is not a forecast, and `score`
 # must run after the night's photos have synced and been classified.
 #
+# And one for the phones:
+#
+#   GameSense-Notify  every 15 min  alerts that waited for a sit or quiet hours, and
+#                                   tonight's plan push about two hours before sunset
+#
+# Task Scheduler can't start anything at sunset, which moves by three hours over the
+# season, so `notify` runs every 15 minutes and sends the plan once it is due. It is
+# a few seconds long, loads no model and never waits for the photo check.
+#
 # Run once, elevated, on Db01:
 #     powershell -ExecutionPolicy Bypass -File C:\GameSense\app\deploy\register-tasks.ps1
 
@@ -43,10 +52,37 @@ function Register-GameSenseTask($name, $mode, $at, $description) {
     }
 }
 
+function Register-GameSenseRepeatingTask($name, $mode, $minutes, $description) {
+    $action  = New-ScheduledTaskAction -Execute $venv -Argument "pipeline.py $mode" -WorkingDirectory $work
+    # From midnight today, every $minutes minutes, for good: with no
+    # -RepetitionDuration the repetition never ends (a [TimeSpan]::MaxValue duration
+    # is refused on Windows Server 2016 and later).
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
+        -RepetitionInterval (New-TimeSpan -Minutes $minutes)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    # A run still going when the next is due is left to finish; the next one waits
+    # its turn 15 minutes later. It takes seconds, so ten minutes is a hung one.
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+        -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+
+    if (Get-ScheduledTask -TaskName $name -EA SilentlyContinue) {
+        Set-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
+            -Principal $principal -Settings $settings | Out-Null
+        Write-Host "updated  $name  (every $minutes min)"
+    } else {
+        Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
+            -Principal $principal -Settings $settings -Description $description | Out-Null
+        Write-Host "created  $name  (every $minutes min)"
+    }
+}
+
 Register-GameSenseTask 'GameSense-Plan'  'plan'  '17:00' `
     "Record tonight's forecast before the night, so it can be scored tomorrow."
 Register-GameSenseTask 'GameSense-Score' 'score' '11:00' `
     "Grade yesterday's forecast against what the cameras actually recorded."
+Register-GameSenseRepeatingTask 'GameSense-Notify' 'notify' 15 `
+    "Alerts that waited for a sit or quiet hours, and tonight's plan about two hours before sunset."
 
 Write-Host ''
 Write-Host 'Verifying the deploy backup path (update.ps1 refuses to migrate without it)...'

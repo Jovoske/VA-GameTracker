@@ -311,7 +311,7 @@ def test_hidden_and_marked_photos_send_no_push(db_session, estate_with_fox, monk
 
     sent = []
 
-    def send(db, user_id, payload):
+    def send(db, user_id, payload, quiet=False):
         sent.append(payload)
         return {"sent": 1, "failed": 0, "removed": 0, "subscriptions": 1}
 

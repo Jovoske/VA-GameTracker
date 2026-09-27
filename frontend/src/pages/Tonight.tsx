@@ -98,7 +98,7 @@ type Forecast = {
   freshness?: Freshness | null
 }
 
-type Alert = { type: string; severity: string; title: string; text: string }
+type Alert = { type: string; severity: string; title: string; text: string; camera?: string }
 type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detections: number }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
@@ -359,6 +359,12 @@ export default function Tonight() {
   const old = fromEarlierNight(plan!.at)
   const oldWords = nightOf(plan!.at) === nightOf(Date.now() - 86_400_000) ? 'last night' : 'an earlier night'
   const hasNumbers = !!(f.where && f.where.length > 0) || !!f.calibration?.statement || !!d
+  // A camera the Changed line is already about isn't said again under Alerts as
+  // "quiet" (audit G-23). The server uses one rule for both, so "Nothing changed"
+  // never has a quiet camera beside it; a plan kept from earlier (no signal) could,
+  // and then the line wins.
+  const nothingChanged = f.changed?.kind === 'none' && !!f.changed.text
+  const shownAlerts = alerts.filter((a) => !(a.type === 'quiet' && (nothingChanged || (a.camera && a.camera === f.changed?.camera))))
 
   return (
     <div className="tonight">
@@ -510,10 +516,10 @@ export default function Tonight() {
         </section>
       )}
 
-      {alerts.length > 0 && (
+      {shownAlerts.length > 0 && (
         <section className="card tn-card" aria-labelledby="tn-alerts-h">
           <h2 id="tn-alerts-h" className="sect">Alerts</h2>
-          {alerts.map((a, i) => {
+          {shownAlerts.map((a, i) => {
             const col =
               a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
             return (
