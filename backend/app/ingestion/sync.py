@@ -31,7 +31,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import geo, jobs
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
@@ -145,9 +145,14 @@ def upsert_camera(db: Session, estate_id, cam: SpypointCamera, account_id=KEEP) 
         row.signal_pct = cam.signal_pct
     if cam.model:
         row.model = cam.model
-    if cam.lat is not None and cam.lng is not None:
-        row.lat = cam.lat
-        row.lon = cam.lng
+    # The provider's position is kept as its own, and moves the map's only while
+    # nobody has placed the camera by hand: that is usually a cell-tower guess, and a
+    # hand placement snapped back to it every 15 minutes (audit B-09, E-16). A (0, 0)
+    # or impossible fix is a camera with no GPS lock, not a position.
+    if geo.plausible_position(cam.lat, cam.lng):
+        row.provider_lat, row.provider_lon = cam.lat, cam.lng
+        if not row.location_is_custom or row.lat is None or row.lon is None:
+            row.lat, row.lon = cam.lat, cam.lng
     if cam.last_report_at is not None:
         row.last_report_at = cam.last_report_at
     row.battery_level = cam.battery_level

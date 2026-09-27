@@ -5,7 +5,7 @@ arcs, and arcs never got entered because nobody thinks in bearings. Bedding does
 job instead: if they lie up over there, that is the direction they come from, and it
 is also the ground your scent must not reach.
 
-Three products, in decreasing order of how much they can be trusted:
+Two products, in decreasing order of how much they can be trusted:
 
 1. **Approach bearings per stand** — derived, not guessed: the bearing from the stand
    to each bedding area within range. This is plain geometry over ground the hunter
@@ -14,22 +14,21 @@ Three products, in decreasing order of how much they can be trusted:
    scent drifting into bedding. Also plain geometry, but it knows nothing about
    terrain, cover, access or safe backstops, so it narrows the choice rather than
    making it.
-3. **Routes** — which bedding areas feed which cameras, from detection history. The
-   weakest of the three and gated on evidence; a straight line between two points is
-   a cartoon of how an animal actually moves.
+
+The "routes" from each bedding area to every camera near it are gone: they encoded
+distance, not movement (audit G-25). The map's likely paths come from the cameras'
+own sequence of visits (activity.usual_paths).
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import geo
-from app.api.visibility import VISIBLE_SIGHTING
-from app.core.config import settings
 from app.forecasting.wind import SCENT_CONE_DEG
-from app.models import Camera, Detection, Image, Species, Zone
+from app.models import Zone
 
 # How far a hunter's scent stays concentrated enough for a deer to act on it. A
 # working figure, not a measurement: it varies with humidity, cover and the animal.
@@ -40,9 +39,6 @@ SCENT_RANGE_M = 800.0
 # including it would make every stand look compromised from every wind.
 BEDDING_RELEVANT_M = 1500.0
 
-# Route inference: a camera must have seen this much to be called a destination.
-MIN_ROUTE_DETECTIONS = 5
-_TZ = settings.estate_timezone
 
 
 def bedding_zones(db: Session) -> list[Zone]:
@@ -372,70 +368,3 @@ def safe_ground(
         "note": note,
     }
 
-
-def routes(db: Session) -> list[dict]:
-    """Which bedding areas feed which cameras, from detection history.
-
-    A straight line between a bedding outline and a camera is a cartoon of how an
-    animal moves - it will not follow the contour, the cover or the track. It is
-    shown because knowing *that* a link exists is useful even when the drawn line is
-    wrong, and it is gated on repeat evidence so a single wanderer is not a route.
-    """
-    zones = [z for z in bedding_zones(db) if _zone_point(z)]
-    if not zones:
-        return []
-    cams = [
-        c for c in db.scalars(select(Camera)).all() if c.lat is not None and c.lon is not None
-    ]
-    if not cams:
-        return []
-
-    # Hidden species and photos marked "nothing in it" are not evidence of a route.
-    counts = dict(
-        db.execute(
-            select(Image.camera_id, func.count(Detection.id))
-            .join(Detection, Detection.image_id == Image.id)
-            .join(Species, Species.id == Detection.species_id)
-            .where(VISIBLE_SIGHTING)
-            .group_by(Image.camera_id)
-        ).all()
-    )
-    # The hour animals show at a camera hints at how far along the move it sits:
-    # early evening near the bed, later further out.
-    hour_expr = func.avg(
-        func.extract("hour", func.timezone(_TZ, Image.captured_at))
-    )
-    hours = dict(
-        db.execute(
-            select(Image.camera_id, hour_expr)
-            .join(Detection, Detection.image_id == Image.id)
-            .join(Species, Species.id == Detection.species_id)
-            .where(VISIBLE_SIGHTING)
-            .group_by(Image.camera_id)
-        ).all()
-    )
-
-    out = []
-    for z in zones:
-        pt = _zone_point(z)
-        for c in cams:
-            n = int(counts.get(c.id, 0) or 0)
-            if n < MIN_ROUTE_DETECTIONS:
-                continue
-            dist = geo.distance_to_polygon_m(z.polygon, c.lat, c.lon)
-            if dist > BEDDING_RELEVANT_M:
-                continue
-            avg_hour = hours.get(c.id)
-            out.append({
-                "zone": z.name,
-                "zone_id": str(z.id),
-                "camera": c.name,
-                "camera_id": str(c.id),
-                "from": {"lat": pt[0], "lon": pt[1]},
-                "to": {"lat": c.lat, "lon": c.lon},
-                "detections": n,
-                "distance_m": round(dist),
-                "avg_hour": round(float(avg_hour)) if avg_hour is not None else None,
-                "confidence": "low",  # one month of data; never claim more than this
-            })
-    return sorted(out, key=lambda r: -r["detections"])

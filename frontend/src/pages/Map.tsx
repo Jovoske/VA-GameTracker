@@ -8,7 +8,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useBlocker, useSearchParams } from 'react-router-dom'
-import { api, peekMe, thumbUrl, whoAmI } from '../api'
+import { ageLabel, api, fromEarlierNight, getFresh, noAnswer, noAnswerWords, peek, peekMe, savedCopy, thumbUrl, whenLabel, whoAmI, type Got, type StaleWhy } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 import { isView, type View } from '../map/activity'
 import { ActivityBar, ActivityCard } from '../map/ActivityPanel'
@@ -17,10 +17,12 @@ import BottomSheet, { type Snap } from '../map/BottomSheet'
 import { CameraBody, CameraHeader } from '../map/CameraSheet'
 import CrosshairEditor, { Crosshair, useMapCenter, type Editing } from '../map/CrosshairEditor'
 import { confirmLeave, hasUnsavedDraft, setUnsavedDraft } from '../map/draftGuard'
-import { direction, downwind, isNewCorner, validLngLat, type Camera, type LngLat, type MapData } from '../map/geometry'
-import { addLayers, fitEstate, renderLayers, roomFor } from '../map/layers'
+import { direction, downwind, isNewCorner, validLngLat, type Camera, type LikelyPath, type LngLat, type MapData } from '../map/geometry'
+import { addLayers, estateBounds, fitEstate, renderBox, renderLayers, renderPaths, roomFor } from '../map/layers'
 import MapFab from '../map/MapFab'
 import MapSheet, { type Unplaced } from '../map/MapSheet'
+import { coverage, readSaved, stopDownload, useDownload, type Box, type Saved } from '../map/offline'
+import { progressWords } from '../map/OfflinePanel'
 import { PickBody, PickHeader } from '../map/PickSheet'
 import { PIN_ICONS, addCallout, declutterLabels, paintBadge, pinsAt, type Pin, type PinRef } from '../map/pins'
 import { StandBody, StandHeader, ZoneBody, ZoneHeader } from '../map/PlaceSheet'
@@ -39,6 +41,7 @@ const LABEL_ZOOM = 16
 // A base map that fails this many tiles with not one getting through is down (or
 // blocked on this network), not just slow. One timeout on weak signal is not this.
 const FALLBACK_AFTER = 4
+const FALLBACK_GRACE_MS = 1200
 // A save that hasn't answered by now isn't going to. The outline stays for Try again.
 const SAVE_TIMEOUT_MS = 20_000
 // How long a save waits for the map to reload before it lets the drawing bar go.
@@ -47,6 +50,36 @@ const LOAD_TIMEOUT_MS = 30_000
 const ESTATE_CENTER: LngLat = [-1.3608, 39.0947]
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const freshTiles = () => ({ fails: {} as Record<string, number>, loaded: {} as Record<string, number>, errSinceIdle: 0, okSinceErr: 0 })
+
+// How long the hill shape is waited for after the button, asking every few seconds.
+const TERRAIN_WAIT_MS = 3 * 60_000
+const TERRAIN_POLL_MS = 3_000
+type TerrainStatus = { state: 'none' | 'loading' | 'loaded' | 'failed'; error: string | null }
+
+/**
+ * A saved copy of the map from an earlier night (no signal since) keeps its stands,
+ * cameras and bedding, and loses its wind: that was the wind for that night, and a
+ * hunter reading "Wind is right" off it tonight would be misled.
+ */
+function withoutWind(d: MapData): MapData {
+  return {
+    ...d,
+    conditions: { wind_dir_deg: null, wind_speed_kmh: null },
+    airflow: { source: 'unknown', wind_dir_deg: null, wind_speed_kmh: null },
+    stands: d.stands.map(s => ({ ...s, wind: { status: 'no_wind_data', text: 'The wind saved on this phone was for an earlier night. Tonight’s comes with signal.' } })),
+    safe_ground: { status: 'no_wind_data', cells: [] },
+  }
+}
+const forTonight = (got: Got<MapData>) => fromEarlierNight(got.at) ? withoutWind(got.data) : got.data
+
+/** Pictures failed with no signal: why, against the map saved on this phone. */
+function savedWords(saved: Saved, where: ReturnType<typeof coverage> | 'other' | null): string {
+  if (where === 'close') return 'This close needs signal. Zoom out a little for the map saved on this phone.'
+  if (where === 'partial') return 'No signal, and this part of the estate isn’t saved on this phone. Download again with signal to fill it in.'
+  if (where === 'other') return `No signal: the map saved on this phone is the ${baseLabel(saved.base)}. Choose it in the Map sheet.`
+  if (where === 'inside') return 'No signal, and part of the map picture didn’t load. Your stands and cameras are still on it.'
+  return 'No signal: past the estate saved on this phone the map needs signal.'
+}
 
 const initialSelection = (params: URLSearchParams): Selection | null => {
   const kind = SELECTION_KINDS.find(k => params.get(k))
@@ -66,8 +99,15 @@ export default function MapPage() {
   const [pick, setPick] = useState<PinRef[] | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [snap, setSnap] = useState<Snap>('half')
-  const [data, setData] = useState<MapData | null>(null)
-  const [cameras, setCameras] = useState<Camera[]>([])
+  // What the phone has from before paints at once; the answer replaces it (B-06).
+  const [data, setData] = useState<MapData | null>(() => { const got = peek<MapData>('/map/tonight'); return got ? forTonight(got) : null })
+  const [cameras, setCameras] = useState<Camera[]>(() => peek<Camera[]>('/map/cameras')?.data ?? [])
+  // A saved copy on screen: when it is from, and why (none yet: the answer is on its way).
+  const [dataAge, setDataAge] = useState<{ at: string; why?: StaleWhy } | null>(() => { const got = peek<MapData>('/map/tonight'); return got ? { at: got.at } : null })
+  const [savedEstate, setSavedEstate] = useState<Saved | null>(null)
+  const [paths, setPaths] = useState<LikelyPath[] | null>(null)
+  const [pathsErr, setPathsErr] = useState('')
+  const [estateBox, setEstateBox] = useState<Box | null>(null)
   // Who you are, as the phone knows it, then the shared /auth/me answer (it has a
   // time limit and a saved copy; its own call here had neither).
   const [admin, setAdmin] = useState(() => peekMe()?.role === 'admin')
@@ -82,8 +122,13 @@ export default function MapPage() {
   const [prefs, setPrefsState] = useState<MapPrefs>(readPrefs)
   const [activeBase, setActiveBase] = useState<BaseId>(prefs.base)
   const [fallbackFrom, setFallbackFrom] = useState<BaseId | null>(null)
+  // What it fell back to: the base saved on this phone when there is one, else Esri's.
+  const [fallbackTo, setFallbackTo] = useState<BaseId>('world')
   const [fallbackNoted, setFallbackNoted] = useState(false)
   const [tileErr, setTileErr] = useState(false)
+  // Where the view is against the map saved on this phone when pictures failed:
+  // said instead of "didn't load" when there is no signal.
+  const [tileWhere, setTileWhere] = useState<ReturnType<typeof coverage> | 'other' | null>(null)
   const [catastroErr, setCatastroErr] = useState(false)
   const [windOpen, setWindOpen] = useState(false)
   const [editing, setEditing] = useState<Editing | null>(null)
@@ -99,6 +144,13 @@ export default function MapPage() {
   const editRef = useRef(editing); editRef.current = editing
   const busyRef = useRef(editBusy); busyRef.current = editBusy
   const activeBaseRef = useRef(activeBase); activeBaseRef.current = activeBase
+  const savedRef = useRef<Saved | null>(null); savedRef.current = savedEstate
+  // With no signal Esri's pictures can't come either, so the map never falls back to them.
+  const noSignalRef = useRef(false); noSignalRef.current = dataAge?.why === 'offline'
+  // Base maps given up on since a picture last loaded (or Try again). One is never gone
+  // back to, so two that both fail don't swap for ever (review R4FE-3).
+  const tried = useRef(new Set<BaseId>())
+  const alive = useRef(true)
   const paramsRef = useRef(params); paramsRef.current = params
   const viewRef = useRef(view); viewRef.current = view
   // Whether a sheet covers the map now (read by the map's own tap handlers).
@@ -112,9 +164,13 @@ export default function MapPage() {
   const saveCtl = useRef<AbortController | null>(null)
   const lastCorner = useRef({ t: 0, x: 0, y: 0 })
   const labelFrame = useRef(0)
+  const fallbackTimer = useRef(0)
   // Tile health, per source. Kept in a ref: tiles report far too often for state.
   const tiles = useRef(freshTiles())
 
+  // "Download the estate" runs on whatever the screen shows; the map says how far it is.
+  const job = useDownload()
+  const lastOutcome = useRef(job.outcome)
   const measure = useMeasure(mapObj, ready)
   const measureRef = useRef(measure); measureRef.current = measure
   const me = useMyPosition(mapObj, ready)
@@ -127,19 +183,38 @@ export default function MapPage() {
     const request = ++requestId.current
     const started = Date.now()
     setLoading(true); setErr('')
-    try {
-      const [next, cams] = await Promise.all([api<MapData>('/map/tonight', { timeoutMs: LOAD_TIMEOUT_MS }), api<Camera[]>('/map/cameras', { timeoutMs: LOAD_TIMEOUT_MS })])
-      if (request !== requestId.current) return
-      // A count asked for after the camera was marked seen already knows it.
-      for (const [id, at] of seen.current) if (at != null && at < started) seen.current.delete(id)
-      setData(next); setCameras(cams)
-    } catch (e) {
-      if (request !== requestId.current) return
-      const x = e as Failure
-      setErr(x.offline ? 'No signal, so the map didn’t load.' : x.timeout ? 'No answer from the server, so the map didn’t load.' : `Couldn’t load the map. ${x.message}`)
-    } finally { if (request === requestId.current) setLoading(false) }
+    // Each on its own, and each falling back to what the phone saved: the cameras
+    // failing must not take the stands down with them, nor no signal the whole map.
+    const [tonight, cams] = await Promise.allSettled([
+      getFresh<MapData>('/map/tonight', { timeoutMs: LOAD_TIMEOUT_MS, save: true }),
+      getFresh<Camera[]>('/map/cameras', { timeoutMs: LOAD_TIMEOUT_MS, save: true }),
+    ])
+    if (request !== requestId.current) return
+    // A count asked for after the camera was marked seen already knows it.
+    for (const [id, at] of seen.current) if (at != null && at < started) seen.current.delete(id)
+    if (tonight.status === 'fulfilled') setData(forTonight(tonight.value))
+    if (cams.status === 'fulfilled') setCameras(cams.value.data)
+    const stale = [tonight, cams].flatMap(r => r.status === 'fulfilled' && r.value.stale ? [r.value] : [])
+    setDataAge(stale.length ? { at: stale.map(g => g.at).sort()[0], why: stale[0].why } : null)
+    const failed = [tonight, cams].find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    if (failed) {
+      const x = failed.reason as Failure
+      const what = tonight.status === 'rejected' && cams.status === 'rejected' ? 'the map' : tonight.status === 'rejected' ? 'the stands and bedding' : 'the cameras'
+      setErr(x.offline ? `No signal, so ${what} didn’t load.` : x.timeout ? `No answer from the server, so ${what} didn’t load.` : `Couldn’t load ${what}. ${x.message}`)
+    }
+    setLoading(false)
   }, [])
-  useEffect(() => { load(); whoAmI().then(u => setAdmin(u.role === 'admin')).catch(() => {}) }, [load])
+  useEffect(() => {
+    alive.current = true
+    load(); whoAmI().then(u => setAdmin(u.role === 'admin')).catch(() => {})
+    return () => { alive.current = false }
+  }, [load])
+  // What is saved on the phone, read again whenever a download writes its note or ends.
+  useEffect(() => {
+    let live = true
+    readSaved().then(s => { if (live) setSavedEstate(s) })
+    return () => { live = false }
+  }, [job.version])
   useRefetchOnReturn(() => { if (!editRef.current && !busyRef.current) load() }, 120_000)
 
   function setPrefs(next: MapPrefs) { setPrefsState(next); writePrefs(next) }
@@ -152,8 +227,14 @@ export default function MapPage() {
   useEffect(() => {
     if (!mapEl.current) return
     let instance: maplibregl.Map
+    // Opened on the estate as the phone last saw it, so the first pictures asked for
+    // are the estate's (the ones a phone with no signal has saved), not a wider view's.
+    // Only with room for the padding: fitting a sliver of map asks for a camera at NaN.
+    const roomy = mapEl.current.clientWidth > 240 && mapEl.current.clientHeight > 240
+    const start = data && roomy ? estateBounds(data, cameras) : null
+    const opening = start ? { bounds: start, fitBoundsOptions: { padding: 72, maxZoom: 16 } } : { center: ESTATE_CENTER, zoom: 14 }
     try {
-      instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), center: ESTATE_CENTER, zoom: 14, maxZoom: 20, maxPitch: 0, attributionControl: false })
+      instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), ...opening, maxZoom: 20, maxPitch: 0, attributionControl: false })
     } catch { setFatal('The map couldn’t start on this phone. Reload the page, or use Stands and Cameras meanwhile.'); return }
     map.current = instance
     // Browser checks read the live map in development builds only.
@@ -165,6 +246,21 @@ export default function MapPage() {
     instance.on('zoomend', () => { setZoom(Math.round(instance.getZoom() * 10) / 10); declutterSoon() })
     instance.on('style.load', () => { addLayers(instance); setReady(true); setMapObj(instance) })
 
+    // Where to go when this base's pictures aren't coming: the map saved on this phone
+    // when this isn't it; else, with signal, Esri's world imagery. Never one already
+    // given up on.
+    const nextBase = (base: BaseId): BaseId | null => {
+      const noSignal = noSignalRef.current || !navigator.onLine
+      return [savedRef.current?.base, noSignal ? null : 'world' as const]
+        .find((b): b is BaseId => !!b && b !== base && !tried.current.has(b)) ?? null
+    }
+    // Pictures failed: where the view is against the map saved on this phone.
+    const trouble = () => {
+      const s = savedRef.current, b = instance.getBounds()
+      const view = { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() }
+      setTileErr(true)
+      setTileWhere(!s ? null : s.base !== activeBaseRef.current ? 'other' : coverage(s, view, instance.getZoom()))
+    }
     // Only the base picture raises the banner, and only its own tiles. A failed
     // property-lines tile is reported next to its switch instead (B-01).
     instance.on('error', (e: maplibregl.ErrorEvent & { sourceId?: string }) => {
@@ -177,7 +273,7 @@ export default function MapPage() {
       // Some of this picture got through, so this is a gap, not an outage: say so now.
       // With nothing through yet, wait for the map to settle before deciding which.
       // A failed tile doesn't repaint the map, so ask for one: 'idle' follows it.
-      if (t.loaded[source]) setTileErr(true)
+      if (t.loaded[source]) trouble()
       instance.triggerRepaint()
     })
     instance.on('sourcedata', (e: maplibregl.MapSourceDataEvent) => {
@@ -185,20 +281,34 @@ export default function MapPage() {
       const t = tiles.current
       t.loaded[e.sourceId] = (t.loaded[e.sourceId] ?? 0) + 1
       if (e.sourceId === CATASTRO) setCatastroErr(false)
-      if (e.sourceId === baseSource(activeBaseRef.current)) t.okSinceErr++
+      if (e.sourceId === baseSource(activeBaseRef.current)) { t.okSinceErr++; tried.current.clear() }
     })
     // Every tile asked for has answered or failed. Failed tiles report at once and good
     // ones only once decoded, so this is the first moment "none got through" is true.
     instance.on('idle', () => {
       const t = tiles.current, base = activeBaseRef.current, source = baseSource(base)
       if (t.errSinceIdle > 0) {
-        if (base !== 'world' && !t.loaded[source] && (t.fails[source] ?? 0) >= FALLBACK_AFTER) {
-          // The Spanish servers aren't answering here. Show the world imagery and say so.
-          setFallbackFrom(base); setFallbackNoted(false); setActiveBase('world'); setTileErr(false)
-          tiles.current = freshTiles()
+        const to = nextBase(base)
+        if (to && !t.loaded[source] && (t.fails[source] ?? 0) >= FALLBACK_AFTER) {
+          // A burst of failed pictures settles the map before the ones that did arrive
+          // are decoded (a failed tile marks its source loaded in MapLibre), so decide
+          // a moment later: some through is a gap, none is an outage.
+          t.errSinceIdle = 0
+          window.clearTimeout(fallbackTimer.current)
+          fallbackTimer.current = window.setTimeout(() => {
+            if (tiles.current !== t || activeBaseRef.current !== base) return
+            // Asked again: the answer saying there is no signal may have come meanwhile.
+            const to = nextBase(base)
+            if (t.loaded[source] || !to) { trouble(); return }
+            // The chosen picture isn't coming (the Spanish servers aren't answering, or
+            // there is no signal): show one that does and say so.
+            tried.current.add(base)
+            setFallbackFrom(base); setFallbackTo(to); setFallbackNoted(false); setActiveBase(to); setTileErr(false)
+            tiles.current = freshTiles()
+          }, FALLBACK_GRACE_MS)
           return
         }
-        setTileErr(true)
+        trouble()
       } else if (t.okSinceErr > 0) setTileErr(false) // the picture came back by itself
       t.errSinceIdle = 0
     })
@@ -240,13 +350,13 @@ export default function MapPage() {
     })
     const resize = new ResizeObserver(() => instance.resize())
     resize.observe(mapEl.current)
-    return () => { resize.disconnect(); cancelAnimationFrame(labelFrame.current); markers.current.forEach(m => m.marker.remove()); markers.current = []; instance.remove(); map.current = null; setMapObj(null); fitted.current = false }
+    return () => { resize.disconnect(); cancelAnimationFrame(labelFrame.current); window.clearTimeout(fallbackTimer.current); markers.current.forEach(m => m.marker.remove()); markers.current = []; instance.remove(); map.current = null; setMapObj(null); fitted.current = false }
     // The map is built once; later preference changes flip layers on the live style.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Base picture and property lines follow the choice without rebuilding the style.
-  useEffect(() => { setActiveBase(prefs.base); setFallbackFrom(null); setTileErr(false); tiles.current = freshTiles() }, [prefs.base])
+  useEffect(() => { setActiveBase(prefs.base); setFallbackFrom(null); setTileErr(false); tiles.current = freshTiles(); tried.current.clear() }, [prefs.base])
   useEffect(() => { if (ready && map.current) showBase(map.current, activeBase) }, [ready, activeBase])
   useEffect(() => { if (ready && map.current) showCatastro(map.current, prefs.catastro); if (!prefs.catastro) setCatastroErr(false) }, [ready, prefs.catastro])
 
@@ -255,6 +365,7 @@ export default function MapPage() {
     const instance = map.current
     if (!instance) return
     tiles.current = freshTiles()
+    tried.current.clear()
     setTileErr(false)
     // Back from the fallback: the Spanish layer was hidden, so its failed tiles are
     // already gone and showing it again asks for them afresh.
@@ -276,6 +387,40 @@ export default function MapPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, data, cameras, prefs.layers, selected, view])
+
+  // Likely paths: asked for when the layer is on, drawn only on the normal map. What
+  // the phone saved draws at once; the answer replaces it. Asked again after a failure
+  // when the layer is turned on again.
+  const pathsOn = prefs.layers.routes && view === 'cameras'
+  const pathsAsked = useRef(false)
+  useEffect(() => {
+    if (!pathsOn || pathsAsked.current) return
+    pathsAsked.current = true
+    let answered = false
+    setPathsErr('')
+    savedCopy<{ paths: LikelyPath[] }>('/map/paths').then(got => { if (got && !answered && alive.current) setPaths(p => p ?? got.data.paths) })
+    getFresh<{ paths: LikelyPath[] }>('/map/paths', { timeoutMs: LOAD_TIMEOUT_MS })
+      .then(got => { answered = true; if (alive.current) setPaths(got.data.paths) })
+      .catch((e: Failure) => {
+        answered = true; pathsAsked.current = false
+        if (alive.current) setPathsErr(noAnswer(e) ? 'No signal, so the likely paths didn’t load.' : `Couldn’t load the likely paths. ${e.message}`)
+      })
+  }, [pathsOn])
+  useEffect(() => { if (ready && map.current) renderPaths(map.current, pathsOn ? paths ?? [] : []) }, [ready, pathsOn, paths])
+  // The estate's box, while the Map sheet (where it is set and saved) is open.
+  useEffect(() => { if (ready && map.current) renderBox(map.current, settingsOpen ? estateBox : null) }, [ready, settingsOpen, estateBox])
+  /** The ground the map shows above (or beside) the sheet, whatever way it is turned. */
+  function viewBox(): Box | null {
+    const instance = map.current, wrap = mapEl.current
+    if (!instance || !wrap) return null
+    const r = wrap.getBoundingClientRect(), sheet = wrap.parentElement?.querySelector('.bsheet')?.getBoundingClientRect()
+    const beside = !!sheet?.height && sheet.width < r.width - 2
+    const left = beside ? Math.min(r.width - 80, sheet!.right - r.left) : 0
+    const bottom = sheet?.height && !beside ? Math.max(80, sheet.top - r.top) : r.height
+    const corners = [[left, 0], [r.width, 0], [left, bottom], [r.width, bottom]].map(([x, y]) => instance.unproject([x, y]))
+    const lats = corners.map(c => c.lat), lons = corners.map(c => c.lng)
+    return { south: Math.min(...lats), north: Math.max(...lats), west: Math.min(...lons), east: Math.max(...lons) }
+  }
 
   /** Bring a place into the part of the map the sheet doesn't cover. */
   function reveal(lon: number, lat: number, always = false) {
@@ -457,6 +602,12 @@ export default function MapPage() {
     if (confirmLeave()) blocker.proceed(); else blocker.reset()
   }, [blocker])
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 5000); return () => clearTimeout(t) }, [notice])
+  // A download that ends with the Map sheet closed says how it went on the map.
+  useEffect(() => {
+    if (!job.outcome || job.outcome === lastOutcome.current) return
+    lastOutcome.current = job.outcome
+    if (!settingsOpen) setNotice(job.outcome.text)
+  }, [job.outcome]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── placing and drawing ──
   function startEdit(next: Omit<Editing, 'step' | 'points'> & { at?: [number | null | undefined, number | null | undefined] }) {
@@ -479,7 +630,10 @@ export default function MapPage() {
     saving.current = true; setEditBusy(true); setEditErr('')
     try {
       let created: { id: string } | undefined
-      if (e.kind === 'zone') await api('/zones', send({ name: e.name.trim(), kind: 'bedding', polygon: { type: 'Polygon', coordinates: [[...e.points, e.points[0]]] } }, 'POST'))
+      const outline = { type: 'Polygon', coordinates: [[...e.points, e.points[0]]] }
+      // A new outline, or a redrawn one that keeps its place in the wind calls (B-22).
+      if (e.kind === 'zone' && e.id) await api(`/zones/${e.id}`, send({ name: e.name.trim(), polygon: outline }, 'PATCH'))
+      else if (e.kind === 'zone') await api('/zones', send({ name: e.name.trim(), kind: 'bedding', polygon: outline }, 'POST'))
       else if (e.kind === 'camera') await api(`/cameras/${e.id}/location`, send({ lat: point![1], lng: point![0] }, 'PUT'))
       else if (e.id) await api(`/stands/${e.id}`, send({ lat: point![1], lon: point![0] }, 'PATCH'))
       else created = await api<{ id: string }>('/stands', send({ name: e.name.trim(), lat: point![1], lon: point![0] }, 'POST'))
@@ -525,11 +679,35 @@ export default function MapPage() {
     catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
     await load(); setNotice('Renamed.')
   }
+  async function renameZone(id: string, name: string) {
+    try { await api(`/zones/${id}`, { method: 'PATCH', body: JSON.stringify({ name }), timeoutMs: SAVE_TIMEOUT_MS }) }
+    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
+    await load(); setNotice('Renamed.')
+  }
+  /** Back to the position the camera itself reports, and following it again (B-09). */
+  async function useOwnGps(id: string) {
+    try { await api(`/cameras/${id}/location`, { method: 'DELETE', timeoutMs: SAVE_TIMEOUT_MS }) }
+    catch (x) { throw new Error(`That didn’t save. ${(x as Error).message}`) }
+    await load(); setNotice('Back at the camera’s own GPS position.')
+  }
+  /** The hill shape loads on the server in the background: start it, then ask how it
+   *  went every few seconds. The map stays usable meanwhile (B-18). */
   async function loadTerrain() {
     setTerrainBusy(true); setTerrainErr('')
-    try { await api('/terrain/refresh', { method: 'POST' }); await load(); setNotice('Hill shape loaded.') }
-    catch (x) { console.warn('terrain', x); setTerrainErr('Couldn’t load the hill shape. Check the signal and try again later.') }
-    finally { setTerrainBusy(false) }
+    try {
+      let s = await api<TerrainStatus>('/terrain/refresh', { method: 'POST', timeoutMs: SAVE_TIMEOUT_MS })
+      const until = Date.now() + TERRAIN_WAIT_MS
+      while (s.state === 'loading' && Date.now() < until && alive.current) {
+        await wait(TERRAIN_POLL_MS)
+        s = await api<TerrainStatus>('/terrain/status', { timeoutMs: LOAD_TIMEOUT_MS })
+      }
+      if (!alive.current) return
+      if (s.state === 'loaded') { await load(); setNotice('Hill shape loaded.') }
+      else if (s.state === 'failed') setTerrainErr(`Couldn’t load the hill shape. ${s.error ?? 'Try again later.'}`)
+      else setTerrainErr('The hill shape is still loading. Look again in a few minutes.')
+    } catch (x) {
+      setTerrainErr(noAnswer(x) ? 'No signal, so the hill shape didn’t load. Try again with signal.' : `Couldn’t load the hill shape. ${(x as Error).message}`)
+    } finally { if (alive.current) setTerrainBusy(false) }
   }
 
   const stand = selected?.kind === 'stand' ? data?.stands.find(s => s.id === selected.id) : null
@@ -591,10 +769,26 @@ export default function MapPage() {
     stage.style.setProperty('--sheet-h', `${px}px`)
     stage.dataset.sheet = px > stage.clientHeight * .7 ? 'tall' : px > 0 ? 'open' : ''
   }, [])
-  const baseNote = fallbackFrom ? `${baseLabel(fallbackFrom)} from IGN isn’t loading here, so this is ${baseLabel('world')} for now. Tap ${baseLabel(fallbackFrom)} to try it again.` : null
-  const tileNotice = tileErr ? 'Part of the map picture didn’t load. Your stands and cameras are still on it.'
-    : fallbackFrom && !fallbackNoted ? `${baseLabel(fallbackFrom)} isn’t loading, so this is ${baseLabel('world')}.` : ''
-  const editTitle = editing ? editing.kind === 'zone' ? 'Draw bedding' : editing.id ? `Move ${editing.name}` : 'New stand' : ''
+  const toWords = fallbackTo === savedEstate?.base ? `the ${baseLabel(fallbackTo)} saved on this phone` : baseLabel(fallbackTo)
+  const baseNote = fallbackFrom ? `${baseLabel(fallbackFrom)}${fallbackFrom === 'world' ? '' : ' from IGN'} isn’t loading here, so this is ${toWords} for now. Tap ${baseLabel(fallbackFrom)} to try it again.` : null
+  // With no signal only what was saved can show: say that, not that something failed.
+  const noSignal = dataAge?.why === 'offline' || !navigator.onLine
+  const tileNotice = tileErr ? savedEstate && noSignal ? savedWords(savedEstate, tileWhere)
+    : 'Part of the map picture didn’t load. Your stands and cameras are still on it.'
+    : fallbackFrom && !fallbackNoted ? `${baseLabel(fallbackFrom)} isn’t loading, so this is ${toWords}.` : ''
+  // A saved copy on screen: how old, and whether its wind is tonight's.
+  // While the answer is on its way a saved copy says so only when it is old: one from a
+  // minute ago is the map as it is.
+  const waiting = dataAge && !dataAge.why
+  const ageNotice = !dataAge || (waiting && (!loading || Date.now() - Date.parse(dataAge.at) < 10 * 60_000)) ? ''
+    : `${waiting ? '' : `${noAnswerWords(dataAge.why)} `}${fromEarlierNight(dataAge.at)
+      ? `Map from ${whenLabel(dataAge.at)}. Its wind was for that night, so it isn’t shown.`
+      : `Map from ${ageLabel(dataAge.at)}.`}${waiting ? ' Checking for a newer one…' : ''}`
+  const editTitle = editing ? editing.kind === 'zone' ? editing.id ? `Redraw ${editing.name}` : 'Draw bedding' : editing.id ? `Move ${editing.name}` : 'New stand' : ''
+  const busiest = paths?.[0]
+  const pathsNote = !prefs.layers.routes ? null : pathsErr ? pathsErr : paths == null ? 'Loading the likely paths…'
+    : !busiest ? 'No path seen on 2 or more nights this month yet.'
+      : `${paths!.length === 1 ? 'One likely path' : `${paths!.length} likely paths`}. The busiest: ${busiest.cameras.join(' to ')}, ${busiest.species[0] ? `${busiest.species[0].label.toLowerCase()} on ${busiest.species[0].nights}` : `on ${busiest.nights}`} nights. A guess, not a track.`
 
   if (fatal) return <div className="map-page map-page--fatal">
     <h1 className="page-title">Map</h1>
@@ -634,6 +828,7 @@ export default function MapPage() {
         <ScalePill map={mapObj} />
         <div className="map-notices">
           {err && <div className="map-pill map-pill--error" role="alert"><span>{err}</span><button type="button" onClick={load} disabled={loading}>Try again</button></div>}
+          {ageNotice && <div className="map-pill map-pill--age" role="status"><span>{ageNotice}</span>{!waiting && <button type="button" onClick={load} disabled={loading}>{loading ? 'Trying…' : 'Try again'}</button>}</div>}
           {tileNotice && <div className="map-pill" role="status"><span>{tileNotice}</span><button type="button" onClick={retryTiles}>Try again</button>
             {!tileErr && <button type="button" aria-label="OK, keep this map" onClick={() => setFallbackNoted(true)}>OK</button>}</div>}
           {emptyEstate && <div className="map-pill map-pill--empty" role="status">
@@ -650,6 +845,9 @@ export default function MapPage() {
             <span>{measure.result ?? (measure.points.length ? 'Now tap the second point.' : 'Tap two points to measure.')}</span>
             {measure.result && <button type="button" onClick={measure.clear}>Clear</button>}
             <button type="button" onClick={measure.stop}>Done</button>
+          </div>}
+          {job.progress && sheet !== 'settings' && <div className="map-pill map-pill--saving" role="status">
+            <span>{progressWords(job.progress)}</span><button type="button" aria-label="Stop saving the map" onClick={stopDownload}>Stop</button>
           </div>}
           {notice && <div className="map-pill" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>OK</button></div>}
           {view === 'activity' && act.err && <div className="map-pill map-pill--error" role="alert"><span>{act.err}</span><button type="button" onClick={act.reload} disabled={act.loading}>Try again</button></div>}
@@ -697,15 +895,18 @@ export default function MapPage() {
             onDrawBedding={() => { setSelected(null); startEdit({ kind: 'zone', name: `Bedding ${(data?.zones.length ?? 0) + 1}` }) }}
             onPlace={u => { setSelected({ kind: u.kind, id: u.id }); startEdit({ kind: u.kind, id: u.id, name: u.name }) }}
             unplaced={unplaced}
-            terrain={{ needed: !!data && !data.terrain_loaded, busy: terrainBusy, err: terrainErr, onLoad: loadTerrain }} />}
+            terrain={{ needed: !!data && !data.terrain_loaded, outside: data?.terrain_outside ?? [], busy: terrainBusy, err: terrainErr, onLoad: loadTerrain }}
+            paths={pathsNote}
+            offline={{ cameras, viewBox, onBox: setEstateBox }} />}
           {sheet === 'pick' && <PickBody pins={pick!} onPick={select} />}
           {stand && <StandBody stand={stand} scentRange={data!.scent_range_m} admin={admin}
             onMove={() => startEdit({ kind: 'stand', id: stand.id, name: stand.name, at: [stand.lon, stand.lat] })}
             onRemove={() => remove('stand', stand.id)} onRename={name => rename(stand.id, name)} />}
-          {camera && <CameraBody camera={camera} admin={admin} onRename={name => renameCamera(camera.id, name)}
+          {camera && <CameraBody camera={camera} admin={admin} onRename={name => renameCamera(camera.id, name)} onUseOwnGps={() => useOwnGps(camera.id)}
             onAlerts={(alerts, enabled) => setCameras(cs => cs.map(c => c.id === camera.id ? { ...c, alerts, alerts_enabled: enabled } : c))}
             onMove={() => startEdit({ kind: 'camera', id: camera.id, name: camera.name, at: [camera.lon, camera.lat] })} />}
-          {zone && <ZoneBody zone={zone} admin={admin} onRemove={() => remove('zone', zone.id)} />}
+          {zone && <ZoneBody zone={zone} admin={admin} onRemove={() => remove('zone', zone.id)} onRename={name => renameZone(zone.id, name)}
+            onRedraw={() => { const ring = zone.polygon.coordinates[0]; startEdit({ kind: 'zone', id: zone.id, name: zone.name, at: ring.length ? [ring.reduce((a, p) => a + p[0], 0) / ring.length, ring.reduce((a, p) => a + p[1], 0) / ring.length] : undefined }) }} />}
         </BottomSheet>}
       </div>
       {editing && <CrosshairEditor map={mapObj} editing={editing} center={center} busy={editBusy} err={editErr} title={editTitle}

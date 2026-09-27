@@ -1,7 +1,7 @@
 import { BinocularsIcon } from '@phosphor-icons/react/dist/csr/Binoculars'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { api, thumbUrl } from '../api'
+import { getFresh, savedCopy, thumbUrl } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 import { noteSnippet, type Highlight } from '../notes'
 import type { PhotoFix } from './PhotoFix'
@@ -66,16 +66,27 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
   const load = useCallback(() => {
     const id = ++request.current
     setErr('')
+    // The same address "Download the estate" keeps a camera's under (offline.ts marksPath).
     const q = new URLSearchParams({ limit: String(limit) })
     if (cameraId) q.set('camera_id', cameraId)
-    api<{ items: Highlight[] }>(`/photos/highlights?${q}`, { timeoutMs: 20_000 })
-      .then((r) => {
+    const path = `/photos/highlights?${q}`
+    // What the phone saved paints at once when this visit has nothing yet: on a link
+    // that hangs the answer takes the whole timeout, then falls back to it anyway.
+    let answered = false
+    savedCopy<{ items: Highlight[] }>(path).then((got) => {
+      if (got && !answered && id === request.current) setItems((was) => was ?? got.data.items)
+    })
+    getFresh<{ items: Highlight[] }>(path, { timeoutMs: 20_000 })
+      .then(({ data: r, stale }) => {
+        answered = true
         if (id !== request.current) return
         setItems(r.items)
+        if (stale) return
         lastAnswer.set(key, r.items)
         rememberMarks(key, r.items.length > 0)
       })
       .catch((e: Failure) => {
+        answered = true
         if (id !== request.current) return
         setErr(e.offline ? 'No signal, so the team’s marked photos didn’t load.' : e.timeout ? 'No answer from the server, so the team’s marked photos didn’t load.' : `Couldn’t load the team’s marked photos. ${e.message}`)
       })

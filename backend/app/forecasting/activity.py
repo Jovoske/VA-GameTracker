@@ -374,6 +374,70 @@ def replay(db: Session, *, cameras: list[Camera], night: date) -> dict:
     }
 
 
+# ── the paths animals keep taking ───────────────────────────────────────────
+# The map's old "Animal routes" drew a line from every bedding outline to every
+# camera near it with five sightings of anything: a fan of confident lines that
+# encoded distance and nothing else (audit G-25). A likely path is the replay's
+# guess (the same species at another camera within three hours, at a walkable pace)
+# seen on more than one night: one night can be chance, several are a habit.
+
+PATH_NIGHTS = 30
+MIN_PATH_NIGHTS = 2
+
+
+def usual_paths(db: Session, *, cameras: list[Camera], last_night: date,
+                nights: int = PATH_NIGHTS, min_nights: int = MIN_PATH_NIGHTS) -> dict:
+    """Pairs of cameras the replay linked on at least `min_nights` of the last `nights`.
+
+    One line per pair of cameras, whichever way the animals went. Each has the nights
+    it was seen on, which way on how many, and the species by nights, most first.
+    """
+    placed = {c.id: c for c in cameras if c.lat is not None and c.lon is not None}
+    first = last_night - timedelta(days=nights - 1)
+    links = []
+    if placed:
+        start, end = map_night_window(first)[0], map_night_window(last_night)[1]
+        visits = list_visits(db, start=start, end=end, camera_ids=list(placed))
+        links = likely_paths(visits, placed)
+    pairs: dict = {}
+    for link in links:
+        night = map_night_of(link["from_at"])
+        if night is None:
+            continue
+        a, b = link["from_camera_id"], link["to_camera_id"]
+        key = tuple(sorted((a, b)))
+        p = pairs.setdefault(key, {"nights": set(), "ways": defaultdict(set),
+                                   "species": defaultdict(set), "labels": {}})
+        p["nights"].add(night)
+        p["ways"][(a, b)].add(night)
+        p["species"][link["species_id"]].add(night)
+        p["labels"][link["species_id"]] = link["label"]
+    by_id = {str(k): c for k, c in placed.items()}
+    out = []
+    for pair, p in pairs.items():
+        if len(p["nights"]) < min_nights:
+            continue
+        a, b = sorted(pair, key=lambda x: (by_id[x].name, x))
+        ca, cb = by_id[a], by_id[b]
+        species = sorted(
+            ({"species_id": sid, "label": p["labels"][sid], "nights": len(ns)}
+             for sid, ns in p["species"].items()),
+            key=lambda x: (-x["nights"], x["label"]),
+        )
+        out.append({
+            "camera_ids": [a, b],
+            "cameras": [ca.name, cb.name],
+            "from": {"lat": ca.lat, "lon": ca.lon},
+            "to": {"lat": cb.lat, "lon": cb.lon},
+            "nights": len(p["nights"]),
+            "ways": [{"from_camera_id": x, "to_camera_id": y, "nights": len(ns)}
+                     for (x, y), ns in sorted(p["ways"].items())],
+            "species": species,
+        })
+    out.sort(key=lambda x: (-x["nights"], x["cameras"]))
+    return {"nights": nights, "min_nights": min_nights, "paths": out}
+
+
 def replay_nights(db: Session, *, cameras: list[Camera], last_night: date,
                   limit: int, now: datetime | None = None) -> list[dict]:
     """The last `limit` nights, newest first, with how many visits each had.

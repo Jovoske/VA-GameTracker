@@ -3,29 +3,33 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app import geo
+from app.api.deps import get_current_admin, get_current_user
 from app.core.db import get_db
 from app.core.logging import get_logger
 from app.forecasting import bedding
 from app.models import Estate, Stand, User, Zone
-from app.terrain import get_grid
+from app.terrain import covers, get_grid, load_in_background, load_status, start_load
 
 router = APIRouter(tags=["zones"])
 log = get_logger(__name__)
 
 KINDS = ("bedding", "feeding", "water", "no_go")
+# Drawing, redrawing and removing areas, and loading the hill shape, are admin work,
+# as on the map: every wind call leans on them (audit B-08).
+Admin = Annotated[User, Depends(get_current_admin)]
+DB = Annotated[Session, Depends(get_db)]
 
 
 def _zone_out(z: Zone) -> dict:
-    from app import geo
-
     c = geo.centroid(z.polygon)
     return {
         "id": str(z.id),
@@ -37,31 +41,49 @@ def _zone_out(z: Zone) -> dict:
     }
 
 
+def _clean_name(value: object) -> object:
+    """Names are trimmed; one of only spaces is no name."""
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            raise ValueError("Give it a name the group will know.")
+    return value
+
+
 class ZoneIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     kind: str = "bedding"
     polygon: dict
     notes: str | None = None
 
+    _name = field_validator("name", mode="before")(_clean_name)
+
 
 class ZonePatch(BaseModel):
+    """Only what is sent changes. A name or outline can be changed, not taken away:
+    null for either is refused in words (it was a 500, audit B-10)."""
     name: str | None = Field(default=None, min_length=1, max_length=80)
     polygon: dict | None = None
     notes: str | None = None
 
+    _name = field_validator("name", mode="before")(_clean_name)
 
-def _validate_polygon(polygon: dict) -> None:
-    """A polygon that is not a closed ring of at least three points is not ground."""
-    from app import geo
+    @field_validator("name", "polygon")
+    @classmethod
+    def _not_null(cls, value: object, info) -> object:
+        if value is None:
+            raise ValueError(f"The {'name' if info.field_name == 'name' else 'outline'} "
+                             "can be changed, not left empty.")
+        return value
 
-    if (polygon or {}).get("type") != "Polygon":
-        raise HTTPException(422, "polygon must be a GeoJSON Polygon")
-    pts = geo.ring(polygon)
-    if len(pts) < 3:
-        raise HTTPException(422, "Tap at least three points around the area.")
-    for lat, lon in pts:
-        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
-            raise HTTPException(422, "Coordinates out of range (expected GeoJSON lon,lat order)")
+
+def _validate_polygon(polygon: dict) -> dict:
+    """The outline as it is kept (closed, no repeated corners), or a 422 in words:
+    too few corners, no area, crossing itself, or not numbers (audit B-10)."""
+    try:
+        return geo.clean_polygon(polygon)
+    except geo.ShapeError as e:
+        raise HTTPException(422, str(e)) from None
 
 
 @router.get("/zones")
@@ -70,18 +92,17 @@ def list_zones(_: User = Depends(get_current_user), db: Session = Depends(get_db
 
 
 @router.post("/zones", status_code=201)
-def create_zone(
-    body: ZoneIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> dict:
+def create_zone(body: ZoneIn, user: Admin, db: DB) -> dict:
+    """Draw an area (admins, as on the map). Every wind call leans on the bedding."""
     if body.kind not in KINDS:
         raise HTTPException(422, f"kind must be one of {', '.join(KINDS)}")
-    _validate_polygon(body.polygon)
+    polygon = _validate_polygon(body.polygon)
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
         raise HTTPException(400, "Set up the estate first.")
     z = Zone(
-        estate_id=estate.id, kind=body.kind, name=body.name.strip(),
-        polygon=body.polygon, notes=body.notes, created_by=user.id,
+        estate_id=estate.id, kind=body.kind, name=body.name,
+        polygon=polygon, notes=body.notes, created_by=user.id,
     )
     db.add(z)
     db.commit()
@@ -90,16 +111,15 @@ def create_zone(
 
 
 @router.patch("/zones/{zone_id}")
-def update_zone(
-    zone_id: uuid.UUID, body: ZonePatch,
-    _: User = Depends(get_current_user), db: Session = Depends(get_db),
-) -> dict:
+def update_zone(zone_id: uuid.UUID, body: ZonePatch, _: Admin, db: DB) -> dict:
+    """Rename an area or redraw its outline (admins): it keeps its place in every
+    wind call rather than being removed and drawn again (audit B-22)."""
     z = db.get(Zone, zone_id)
     if z is None:
         raise HTTPException(404, "That area isn't on the map.")
     data = body.model_dump(exclude_unset=True)
-    if "polygon" in data and data["polygon"] is not None:
-        _validate_polygon(data["polygon"])
+    if "polygon" in data:
+        data["polygon"] = _validate_polygon(data["polygon"])
     for k, v in data.items():
         setattr(z, k, v)
     db.commit()
@@ -107,9 +127,7 @@ def update_zone(
 
 
 @router.delete("/zones/{zone_id}", status_code=204, response_model=None)
-def delete_zone(
-    zone_id: uuid.UUID, _: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> None:
+def delete_zone(zone_id: uuid.UUID, _: Admin, db: DB) -> None:
     z = db.get(Zone, zone_id)
     if z is None:
         raise HTTPException(404, "That area isn't on the map.")
@@ -201,27 +219,41 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
         "safe_ground": bedding.safe_ground(
             db, wind_dir_deg=wdir, wind_speed_kmh=wspd, cloud_pct=cloud, when=at
         ),
-        "routes": bedding.routes(db),
+        # Straight lines from bedding to every camera near it said nothing about how
+        # animals move (audit G-25): the map's "Likely paths" come from /map/paths.
+        # Kept empty for an app from before that.
+        "routes": [],
         "scent_range_m": bedding.SCENT_RANGE_M,
-        "terrain_loaded": get_grid(db) is not None,
+        **_terrain(db, stands),
     }
 
 
-@router.post("/terrain/refresh")
-def refresh_terrain(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    """Download the elevation grid for the estate. One-off; the ground does not move."""
+def _terrain(db: Session, stands: list[dict]) -> dict:
+    """Whether the hill shape is loaded, and the placed stands it doesn't reach
+    (loading it again covers them: the box grows to take them in, audit B-20)."""
+    grid = get_grid(db)
+    outside = [s["name"] for s in stands if grid is not None
+               and geo.plausible_position(s["lat"], s["lon"])
+               and not covers(grid, s["lat"], s["lon"])]
+    return {"terrain_loaded": grid is not None, "terrain_outside": outside}
+
+
+@router.post("/terrain/refresh", status_code=202)
+def refresh_terrain(background: BackgroundTasks, _: Admin, db: DB) -> dict:
+    """Start downloading the hill shape (admins) and answer at once; GET
+    /terrain/status says how it went. The download used to hold this request for 20 s
+    or more, and a failure answered with kilobytes of the elevation service's URL
+    (audit B-18). A second press while it runs starts nothing new."""
     from app.core.config import settings as _s
-    from app.terrain import fetch_grid
 
-    try:
-        grid = fetch_grid(db, _s.estate_lat, _s.estate_lon, force=True)
-    except Exception as e:
-        raise HTTPException(502, f"Couldn't download the hill shape. {e}")
-    els = grid.elevations
-    return {
-        "points": len(els),
-        "min_m": round(min(els)),
-        "max_m": round(max(els)),
-        "relief_m": round(max(els) - min(els)),
-        "note": "Hill shape loaded. Wind advice now works on calm evenings.",
-    }
+    status, started = start_load(db)
+    if started:
+        background.add_task(load_in_background, _s.estate_lat, _s.estate_lon)
+    return status
+
+
+@router.get("/terrain/status")
+def terrain_status(_: Annotated[User, Depends(get_current_user)], db: DB) -> dict:
+    """{"state": "none" | "loading" | "loaded" | "failed", "error": a short line or null,
+    "loaded_at"}. Any role."""
+    return load_status(db)

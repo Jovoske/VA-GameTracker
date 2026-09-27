@@ -1,12 +1,13 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
-import { ageLabel, api, thumbUrl, whenLabel } from '../api'
+import { ageLabel, getFresh, noAnswerWords, savedCopy, thumbUrl, whenLabel, type StaleWhy } from '../api'
 import CameraAlertRow from '../components/CameraAlerts'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { validLngLat, type Camera } from './geometry'
-import { RenameControl } from './PlaceSheet'
+import { stripPath } from './offline'
+import { OwnGpsControl, RenameControl } from './PlaceSheet'
 
 /**
  * A camera's sheet on the map: what it saw, whether it is working, and its photos.
@@ -20,9 +21,9 @@ import { RenameControl } from './PlaceSheet'
  */
 
 // The strip is a glance, not the gallery: "See all photos" is the gallery. A burst
-// of three frames is one tile, so it asks for enough frames to fill about 12 tiles.
+// of three frames is one tile, so it asks for enough frames to fill about 12 tiles
+// (36: stripPath, the address "Download the estate" keeps it under).
 const STRIP = 12
-const FRAMES = 36
 const LOAD_TIMEOUT_MS = 20_000
 
 type Photo = {
@@ -95,9 +96,12 @@ export function CameraHeader({ camera }: { camera: Camera }) {
 
 /** The camera's latest photos, newest first, each opening the photo viewer.
  * `notesTick` changes when a note is added or removed elsewhere on the sheet;
- * `onRetry` is its Try again, which the sheet also uses to ask for the team's marks. */
+ * `onRetry` is its Try again, which the sheet also uses to ask for the team's marks.
+ * What the phone saved (the estate downloaded for no signal, or this visit) paints
+ * at once, and stays, with how old it is, when the answer doesn't come. */
 function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; notesTick: number; onNotes: () => void; onRetry: () => void }) {
   const [photos, setPhotos] = useState<Photo[] | null>(null)
+  const [stale, setStale] = useState<{ at: string; why?: StaleWhy } | null>(null)
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
   const request = useRef(0)
@@ -110,14 +114,24 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
     const id = ++request.current
     setErr('')
     // Checked frames only, like the map's photo: an unchecked one is most likely grass.
-    api<{ items: Photo[] }>(`/photos?cameras=${encodeURIComponent(camera.id)}&limit=${FRAMES}&checked=true`, { timeoutMs: LOAD_TIMEOUT_MS })
-      .then(page => { if (id === request.current) setPhotos(page.items) })
+    const path = stripPath(camera.id)
+    let answered = false
+    savedCopy<{ items: Photo[] }>(path).then(got => {
+      if (got && !answered && id === request.current) setPhotos(ps => ps ?? got.data.items)
+    })
+    getFresh<{ items: Photo[] }>(path, { timeoutMs: LOAD_TIMEOUT_MS })
+      .then(got => {
+        answered = true
+        if (id !== request.current) return
+        setPhotos(got.data.items); setStale(got.stale ? { at: got.at, why: got.why } : null)
+      })
       .catch((e: Failure) => {
+        answered = true
         if (id !== request.current) return
         setErr(e.offline ? 'No signal, so the photos didn’t load.' : e.timeout ? 'No answer from the server, so the photos didn’t load.' : `Couldn’t load the photos. ${e.message}`)
       })
   }, [camera.id])
-  useEffect(() => { setPhotos(null); setZoom(null) }, [camera.id])
+  useEffect(() => { setPhotos(null); setStale(null); setZoom(null) }, [camera.id])
   useEffect(() => { load(); return () => { request.current++ } }, [load, newest, notesTick])
 
   // A refresh that fails keeps the photos already shown; only an empty strip says so.
@@ -137,6 +151,7 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
     else tiles.push({ at: i, frames: 1 })
   })
   return <>
+    {stale && <p className="cam-strip-msg cam-strip-age" role="status">{noAnswerWords(stale.why)} These photos were saved on this phone {ageLabel(stale.at)}.</p>}
     <ul className="cam-strip-row" aria-label={`Latest photos from ${camera.name}`}>
       {tiles.slice(0, STRIP).map(({ at, frames }) => {
         const p = photos[at]
@@ -161,11 +176,13 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
   </>
 }
 
-export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
+export function CameraBody({ camera, admin, onMove, onRename, onUseOwnGps, onAlerts }: {
   camera: Camera
   admin: boolean
   onMove: () => void
   onRename: (name: string) => Promise<void>
+  /** Back to the position the camera itself reports. */
+  onUseOwnGps: () => Promise<void>
   /** The camera's alert switch saved: keep the map's copy in step. */
   onAlerts: (alerts: boolean, enabled: boolean) => void
 }) {
@@ -207,6 +224,7 @@ export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
       {admin && <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>}
       {camera.can_rename && <RenameControl name={camera.name} onRename={onRename} maxLength={100} />}
     </div>}
+    {admin && camera.location_is_custom && camera.provider_location && <OwnGpsControl onUse={onUseOwnGps} />}
     {/* Last on the sheet: it arrives on its own answer, and arriving above the buttons
         would move them under a thumb. Asked again with the photo strip (a note changed
         there, its Try again) and when the camera has a newer photo. Quiet when it fails:

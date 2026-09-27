@@ -121,6 +121,14 @@ class Camera(Base):
     )
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
+    # Someone placed it on the map: the provider's GPS (often a cell-tower guess) no
+    # longer moves it at the next sync. provider_lat/lon keep what the provider last
+    # reported, so the camera's own position is one tap away (like provider_name).
+    location_is_custom: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    provider_lat: Mapped[float | None] = mapped_column(Float)
+    provider_lon: Mapped[float | None] = mapped_column(Float)
     altitude_m: Mapped[float | None] = mapped_column(Float)
     model: Mapped[str | None] = mapped_column(String)
     battery_pct: Mapped[int | None] = mapped_column(Integer)

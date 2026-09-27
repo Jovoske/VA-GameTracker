@@ -32,16 +32,25 @@ export const CALLOUT_ZOOM = 13
 const WMTS = (service: string, layer: string, format: string) =>
   `https://www.ign.es/wmts/${service}?service=WMTS&request=GetTile&version=1.0.0&layer=${layer}&style=default&tilematrixset=GoogleMapsCompatible&tilematrix={z}&tilerow={y}&tilecol={x}&format=${format}`
 
+// The picture each base asks for, {z}/{x}/{y} filled in by MapLibre, or by
+// offline.ts for the copy a phone keeps (the saved key must be the same URL).
+export const TILES: Record<BaseId, string> = {
+  aerial: WMTS('pnoa-ma', 'OI.OrthoimageCoverage', 'image/jpeg'),
+  topo: WMTS('mapa-raster', 'MTN', 'image/jpeg'),
+  world: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+}
+// maxzoom is the deepest level each service really has. Past it MapLibre stretches
+// the last tiles instead of asking for ones that don't exist (B-24).
+export const MAX_ZOOM: Record<BaseId, number> = { aerial: 19, topo: 17, world: 19 }
+
 export function mapStyle(prefs: Pick<MapPrefs, 'base' | 'catastro'>): StyleSpecification {
   const visible = (on: boolean) => ({ visibility: on ? 'visible' as const : 'none' as const })
   return {
     version: 8,
     sources: {
-      // maxzoom is the deepest level each service really has. Past it MapLibre
-      // stretches the last tiles instead of asking for ones that don't exist (B-24).
-      'base-aerial': { type: 'raster', tiles: [WMTS('pnoa-ma', 'OI.OrthoimageCoverage', 'image/jpeg')], tileSize: 256, maxzoom: 19, attribution: '© IGN-PNOA' },
-      'base-topo': { type: 'raster', tiles: [WMTS('mapa-raster', 'MTN', 'image/jpeg')], tileSize: 256, maxzoom: 17, attribution: '© IGN' },
-      'base-world': { type: 'raster', tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19, attribution: 'Imagery © Esri' },
+      'base-aerial': { type: 'raster', tiles: [TILES.aerial], tileSize: 256, maxzoom: MAX_ZOOM.aerial, attribution: '© IGN-PNOA' },
+      'base-topo': { type: 'raster', tiles: [TILES.topo], tileSize: 256, maxzoom: MAX_ZOOM.topo, attribution: '© IGN' },
+      'base-world': { type: 'raster', tiles: [TILES.world], tileSize: 256, maxzoom: MAX_ZOOM.world, attribution: 'Imagery © Esri' },
       [CATASTRO]: { type: 'raster', tiles: ['https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=Catastro&STYLES=&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image/png&TRANSPARENT=TRUE'], tileSize: 256, minzoom: CATASTRO_MINZOOM, maxzoom: 20, attribution: '© Dirección General del Catastro' },
     },
     layers: [

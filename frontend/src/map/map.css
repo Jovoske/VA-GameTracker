@@ -105,6 +105,7 @@
 .map-pill > span { flex: 1; padding: 6px 4px 6px 0; }
 .map-pill button { flex-shrink: 0; min-height: 44px; min-width: 44px; padding: 0 12px; background: none; border: 0; border-radius: var(--r-ctl); color: var(--go); font: inherit; font-weight: 600; cursor: pointer; }
 .map-pill--error { border-color: color-mix(in srgb, var(--skip) 55%, var(--border)); }
+.map-pill--age { border-color: color-mix(in srgb, var(--marginal) 45%, var(--border)); }
 .map-pill--measure > span { font-size: 15px; font-weight: 600; }
 .map-pill--side { position: absolute; left: 60px; bottom: 0; width: min(290px, calc(100vw - 100px)); max-width: none; }
 /* An empty estate: the words, then what to do about it. */
@@ -241,6 +242,24 @@
 .msheet .switch-row-text { font-size: 15px; }
 .msheet-note { margin: 6px 0 8px; font-size: 12px; line-height: 1.45; color: var(--text-dim); }
 .msheet-note--warn { color: var(--marginal); }
+/* Offline: what is saved on this phone, one line first, the rest under it. */
+.msheet-status { margin: 0 0 4px; font-size: 15px; line-height: 1.4; color: var(--text); }
+.msheet-status--saved { font-weight: 600; }
+.msheet-segments--two { grid-template-columns: repeat(2, 1fr); margin-top: 8px; }
+.msheet-offline .map-button--big { margin-top: 8px; }
+.msheet-progress { display: flex; align-items: center; gap: 10px; min-height: 56px; margin-top: 8px; padding: 6px 6px 6px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-ctl); font-size: 14px; }
+.msheet-progress > span { flex: 1; font-variant-numeric: tabular-nums; }
+.msheet-numbers { margin: 4px 0 0; font-size: 12px; color: var(--text-dim); }
+.msheet-numbers summary { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 13px; color: var(--text-dim); cursor: pointer; list-style: none; }
+.msheet-numbers summary::-webkit-details-marker { display: none; }
+.msheet-numbers summary::after { content: '▾'; font-size: 12px; }
+.msheet-numbers[open] summary::after { content: '▴'; }
+.msheet-numbers p { margin: -4px 0 6px; line-height: 1.45; }
+.msheet-offline > .map-link { padding-left: 0; }
+.msheet-box { margin-top: 10px; padding-top: 6px; border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.msheet-box .map-actions { margin-top: 4px; }
+.map-own-gps { margin-top: 14px; }
+.map-own-gps .map-detail-copy { margin: 0 0 8px; }
 .msheet-key { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 0 8px; font-size: 12px; color: var(--text-dim); }
 .msheet-key span { display: inline-flex; align-items: center; gap: 6px; }
 .msheet-key i { display: inline-block; width: 10px; height: 10px; }
@@ -267,6 +286,7 @@
 .cam-sheet-night-note { display: block; margin-top: 2px; font-weight: 400; font-size: 13px; color: var(--text-dim); }
 /* As tall as the strip it stands for, so the photos arriving don't move the buttons below. */
 .cam-strip-msg { margin: 0 0 14px; min-height: 76px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+.cam-strip-msg.cam-strip-age { min-height: 0; margin-bottom: 8px; }
 .cam-strip-row { display: flex; gap: 8px; margin: 0 -16px 14px; padding: 0 16px 4px; scroll-padding: 0 16px; list-style: none; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; }
 .cam-strip-row::-webkit-scrollbar { display: none; }
 .cam-strip-row li { flex: 0 0 auto; scroll-snap-align: start; }

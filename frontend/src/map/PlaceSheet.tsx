@@ -107,9 +107,38 @@ export function StandBody({ stand, scentRange, admin, onMove, onRemove, onRename
   </>
 }
 
-export function ZoneBody({ zone, admin, onRemove }: { zone: Zone; admin: boolean; onRemove: () => Promise<void> }) {
+export function ZoneBody({ zone, admin, onRemove, onRename, onRedraw }: {
+  zone: Zone
+  admin: boolean
+  onRemove: () => Promise<void>
+  onRename: (name: string) => Promise<void>
+  /** Draw the outline again, keeping its name and its place in the wind calls (B-22). */
+  onRedraw: () => void
+}) {
   return <>
     <p className="map-detail-copy">Every wind call on this map is about keeping scent out of here.</p>
-    {admin && <div className="map-actions map-actions--admin"><RemoveControl name={zone.name} onRemove={onRemove} /></div>}
+    {admin && <div className="map-actions map-actions--admin">
+      <button type="button" className="map-button" onClick={onRedraw}>Redraw outline</button>
+      <RenameControl name={zone.name} onRename={onRename} />
+      <RemoveControl name={zone.name} onRemove={onRemove} />
+    </div>}
   </>
+}
+
+/**
+ * For a camera placed by hand that also reports a position of its own: say that the
+ * hand placement holds, and offer the camera's own back (B-09, E-16).
+ */
+export function OwnGpsControl({ onUse }: { onUse: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  async function run() {
+    setBusy(true); setErr('')
+    try { await onUse() } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+  return <div className="map-own-gps">
+    <p className="map-detail-copy">Placed by hand, so the camera’s own GPS doesn’t move it.</p>
+    <button type="button" className="map-button" disabled={busy} onClick={run}>{busy ? 'Saving…' : err ? 'Try again' : 'Use the camera’s own GPS position'}</button>
+    {err && <InlineError text={err} />}
+  </div>
 }

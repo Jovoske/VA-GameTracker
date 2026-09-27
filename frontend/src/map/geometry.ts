@@ -22,6 +22,8 @@ export type Camera = {
   last_night: Visits[]; last_night_status: NightStatus | null; last_night_so_far?: boolean
   // This camera's alert switch for you (false: muted), and whether your alerts are on at all.
   alerts: boolean; alerts_enabled: boolean
+  // Placed by hand (its own GPS doesn't move it), and whether it has reported a position.
+  location_is_custom?: boolean; provider_location?: boolean
 }
 export type Zone = { id: string; name: string; kind: string; polygon: GeoJSON.Polygon }
 // `at_local`: the moment it is judged for (45 min after sunset, or `now` once dark).
@@ -45,8 +47,19 @@ export type MapData = {
   airflow: { source: string; wind_dir_deg: number | null; wind_speed_kmh: number | null; text?: string; confidence?: string }
   zones: Zone[]; stands: MapStand[]
   safe_ground: { status: string; cells: { lat: number; lon: number; safe: boolean }[]; note?: string }
-  routes: { zone: string; camera: string; from: { lat: number; lon: number }; to: { lat: number; lon: number }; detections: number }[]
+  // Always empty now: the likely paths come from GET /map/paths (audit G-25).
+  routes: unknown[]
   scent_range_m: number; terrain_loaded: boolean
+  // Placed stands the hill shape doesn't reach (an older server leaves it out).
+  terrain_outside?: string[]
+}
+// GET /map/paths: two cameras the replay linked on `nights` of the last month.
+export type LikelyPath = {
+  camera_ids: [string, string]; cameras: [string, string]
+  from: { lat: number; lon: number }; to: { lat: number; lon: number }
+  nights: number
+  ways: { from_camera_id: string; to_camera_id: string; nights: number }[]
+  species: { species_id: string; label: string; nights: number }[]
 }
 export const compass = (degrees: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((degrees % 360) + 360) % 360 / 45) % 8]
 // Compass words, not degrees. "From the north-west" reads at a glance.
