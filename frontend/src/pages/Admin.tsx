@@ -15,6 +15,30 @@ type Status = {
   // Suntek (FTP or email) photos waiting to be imported and parked after failing;
   // null when this server has no Suntek spool.
   suntek: { ready: number | null; failed: number | null } | null
+  ai?: AiStatus
+  sex_pass?: SexStatus
+}
+/** The AI pass (app.ai.checking): its backlog, what it gave up on, why it stopped. */
+type AiStatus = {
+  waiting: number
+  failed: number
+  running_since: string | null
+  last_run_at: string | null
+  last_ok_at: string | null
+  stopped: string | null
+  last_error: string | null
+  last_error_at: string | null
+}
+/** The cloud stag/hind pass (app.ai.vision_sex). */
+type SexStatus = {
+  enabled: boolean
+  running: boolean
+  waiting: number
+  last_run_at: string | null
+  labelled: number | null
+  stopped: string | null
+  last_error: string | null
+  last_error_at: string | null
 }
 type Check = {
   current: string
@@ -29,6 +53,8 @@ type Species = {
   huntable: boolean
   hidden: boolean
   is_priority: boolean
+  // Game on this estate: anything else in the advice was switched on by an older build.
+  game?: boolean
   detections: number
 }
 type Me = { id: string; email: string; role: string }
@@ -80,6 +106,15 @@ type CamAccount = {
 const FETCH_WORDS: Record<string, string> = {
   ok: 'Worked', partial: 'Partly worked', error: 'Failed',
   skipped: 'No camera logins', running: 'Running', never: 'Never run',
+}
+const NUDGE_KEY = 'gs.settings.advice-nudge-done'
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+/** One short line on the AI pass for the folded section: what matters first. */
+function aiSummary(ai: AiStatus): { text: string; warn: boolean } {
+  if (ai.stopped) return { text: 'Stopped', warn: true }
+  if (ai.failed > 0) return { text: `${ai.failed} couldn’t be checked`, warn: true }
+  if (ai.waiting > 0) return { text: `${ai.waiting} waiting`, warn: false }
+  return { text: 'All checked', warn: false }
 }
 const providerName = (provider: CameraProvider) => provider === 'ubox' ? 'UBox Pro' : 'SPYPOINT'
 const needsLook = (a: CamAccount) => a.active
@@ -170,6 +205,11 @@ export default function Admin() {
   const [checking, setChecking] = useState(false)
   const [sexMsg, setSexMsg] = useState('')
   const [sexBusy, setSexBusy] = useState(false)
+  const [retryBusy, setRetryBusy] = useState(false)
+  const [retryMsg, setRetryMsg] = useState('')
+  const [nudgeGone, setNudgeGone] = useState(() => {
+    try { return localStorage.getItem(NUDGE_KEY) === '1' } catch { return false }
+  })
   const [species, setSpecies] = useState<Species[]>([])
   const [speciesErr, setSpeciesErr] = useState('')
   const [savingId, setSavingId] = useState<string | null>(null)
@@ -199,15 +239,52 @@ export default function Admin() {
     try {
       const r = await api<{ note?: string }>('/admin/sex-pass', { method: 'POST' })
       setSexMsg(r.note || 'Started.')
+      loadStatus()
     } catch (e) {
       setSexMsg((e as Error).message)
     }
     setSexBusy(false)
   }
 
+  function loadStatus() {
+    api<Status>('/admin/status').then(setStatus).catch(() => {})
+  }
+
+  async function retryFailed() {
+    setRetryBusy(true)
+    try {
+      const r = await api<{ note: string }>('/admin/ai/retry', { method: 'POST' })
+      setRetryMsg(r.note)
+      loadStatus()
+    } catch (e) {
+      setRetryMsg((e as Error).message)
+    }
+    setRetryBusy(false)
+  }
+
+  // Once, for the animals an older build put in the advice (dogs, sheep, birds…).
+  async function adviceGameOnly(list: Species[]) {
+    setSavingId('nudge')
+    try {
+      for (const sp of list) {
+        await api(`/species/${sp.id}`, { method: 'PATCH', body: JSON.stringify({ huntable: false }) })
+        setSpecies((all) => all.map((x) => (x.id === sp.id ? { ...x, huntable: false } : x)))
+      }
+      dismissNudge()
+    } catch (e) {
+      setSpeciesErr((e as Error).message)
+    }
+    setSavingId(null)
+  }
+
+  function dismissNudge() {
+    setNudgeGone(true)
+    try { localStorage.setItem(NUDGE_KEY, '1') } catch { /* private window: asks again next time */ }
+  }
+
   useEffect(() => {
     api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
-    api<Status>('/admin/status').then(setStatus).catch(() => {})
+    loadStatus()
     loadSpecies()
     api<Me>('/auth/me').then(setMe).catch(() => {})
     api<UserRow[]>('/users').then(setUsers).catch(() => {})
@@ -397,6 +474,7 @@ export default function Admin() {
     : []
 
   const shown = species.filter((s) => !s.hidden)
+  const notGame = shown.filter((s) => s.huntable && s.game === false)
   const hiddenOnes = species.filter((s) => s.hidden)
   const onCount = shown.filter((s) => s.huntable).length
 
@@ -407,6 +485,18 @@ export default function Admin() {
       <SettingsSection id="advice" title="Animals in the advice"
         summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
         <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
+        {!nudgeGone && me?.role === 'admin' && notGame.length > 0 && (
+          <div className="status-panel" data-nudge style={{ marginBottom: 10 }}>
+            {notGame.map((sp) => sp.common_name).join(', ')} {notGame.length === 1 ? 'is' : 'are'} in the advice but
+            {notGame.length === 1 ? ' isn’t' : ' aren’t'} game here. New animals now start switched off.
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+              <button type="button" style={loginBtn} disabled={savingId === 'nudge'} onClick={() => adviceGameOnly(notGame)}>
+                {savingId === 'nudge' ? 'Turning off…' : 'Turn them off'}
+              </button>
+              <button type="button" style={loginBtn} onClick={dismissNudge}>Keep them</button>
+            </div>
+          </div>
+        )}
         {species.length === 0 ? (
           speciesErr ? (
             <div role="alert" style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>
@@ -692,18 +782,72 @@ export default function Admin() {
         )}
       </SettingsSection>
 
-      <SettingsSection id="ai" title="Photo labelling">
-        <p className="settings-hint">Marks red deer as stag or hind, and wild boar as male or female, on photos not labelled yet.</p>
-        <button
-          className="btn"
-          style={{ width: 'auto', padding: '8px 14px' }}
-          onClick={runSexPass}
-          disabled={sexBusy}
-        >
-          {sexBusy ? 'Starting…' : 'Label stags, hinds and boar'}
-        </button>
-        {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
-      </SettingsSection>
+      {status?.ai && (() => {
+        const ai = status.ai
+        const sex = status.sex_pass
+        const sum = aiSummary(ai)
+        return (
+          <SettingsSection id="ai" title="Photo checking"
+            summary={<span style={{ color: sum.warn ? 'var(--skip)' : undefined }}>{sum.text}</span>}>
+            {ai.stopped ? (
+              <div role="alert" data-ai="stopped" style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--skip)' }}>
+                New photos aren’t being checked for animals. {ai.stopped} They show as “Not checked yet” until
+                this is fixed: ask whoever runs the server.
+              </div>
+            ) : ai.waiting > 0 ? (
+              <div data-ai="waiting" style={{ fontSize: 14, lineHeight: 1.5 }}>
+                {plural(ai.waiting, 'photo')} waiting to be checked for animals.{' '}
+                {ai.running_since ? 'Checking now.' : 'A few hundred go through on every fetch, newest first.'}
+              </div>
+            ) : (
+              <div data-ai="ok" style={{ fontSize: 14, lineHeight: 1.5 }}>
+                Every photo has been checked for animals{ai.last_run_at ? `. Last look ${ageLabel(ai.last_run_at)}.` : '.'}
+              </div>
+            )}
+            {ai.failed > 0 && (
+              <div style={{ marginTop: 10, fontSize: 13, lineHeight: 1.5 }}>
+                <div>
+                  {plural(ai.failed, 'photo')} couldn’t be checked after 3 tries. They count as not checked, never as
+                  empty nights.
+                </div>
+                <button type="button" style={{ ...loginBtn, marginTop: 8 }} onClick={retryFailed} disabled={retryBusy}>
+                  {retryBusy ? 'Starting…' : 'Try them again'}
+                </button>
+              </div>
+            )}
+            {retryMsg && <div role="status" style={{ marginTop: 8, fontSize: 13, color: 'var(--text-dim)' }}>{retryMsg}</div>}
+            {ai.last_error && !ai.stopped && ai.last_error_at && (
+              <details style={{ marginTop: 10, fontSize: 12, color: 'var(--text-dim)' }}>
+                <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>Last problem, {ageLabel(ai.last_error_at)}</summary>
+                <div style={{ overflowWrap: 'anywhere' }}>{ai.last_error}</div>
+              </details>
+            )}
+
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Stags, hinds and boar</div>
+              <p className="settings-hint" style={{ marginTop: 4 }}>Marks red deer as stag or hind, and wild boar as male or female, every hour.</p>
+              {sex && !sex.enabled ? (
+                <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>Needs an Anthropic key (ANTHROPIC_API_KEY) in the server’s .env.</div>
+              ) : sex?.stopped ? (
+                <div role="alert" data-sex="stopped" style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--skip)' }}>
+                  Labelling stopped{sex.last_run_at ? ` ${ageLabel(sex.last_run_at)}` : ''}: {sex.stopped}
+                </div>
+              ) : sex ? (
+                <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
+                  {sex.running ? 'Labelling now…' : sex.waiting > 0 ? `${plural(sex.waiting, 'photo')} to label.` : 'All labelled.'}
+                </div>
+              ) : null}
+              {sex?.enabled && (
+                <button className="btn" style={{ width: 'auto', padding: '8px 14px', marginTop: 10, minHeight: 44 }}
+                  onClick={runSexPass} disabled={sexBusy || sex.running}>
+                  {sexBusy ? 'Starting…' : sex.running ? 'Labelling…' : 'Label stags, hinds and boar now'}
+                </button>
+              )}
+              {sexMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
+            </div>
+          </SettingsSection>
+        )
+      })()}
 
       <SettingsSection id="account" title="Signed in as" defaultOpen>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
