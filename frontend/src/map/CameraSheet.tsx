@@ -6,7 +6,7 @@ import CameraAlertRow from '../components/CameraAlerts'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { validLngLat, type Camera } from './geometry'
-import { RenameControl } from './PlaceSheet'
+import { OwnGpsControl, RenameControl } from './PlaceSheet'
 
 /**
  * A camera's sheet on the map: what it saw, whether it is working, and its photos.
@@ -161,11 +161,13 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
   </>
 }
 
-export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
+export function CameraBody({ camera, admin, onMove, onRename, onUseOwnGps, onAlerts }: {
   camera: Camera
   admin: boolean
   onMove: () => void
   onRename: (name: string) => Promise<void>
+  /** Back to the position the camera itself reports. */
+  onUseOwnGps: () => Promise<void>
   /** The camera's alert switch saved: keep the map's copy in step. */
   onAlerts: (alerts: boolean, enabled: boolean) => void
 }) {
@@ -207,6 +209,7 @@ export function CameraBody({ camera, admin, onMove, onRename, onAlerts }: {
       {admin && <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>}
       {camera.can_rename && <RenameControl name={camera.name} onRename={onRename} maxLength={100} />}
     </div>}
+    {admin && camera.location_is_custom && camera.provider_location && <OwnGpsControl onUse={onUseOwnGps} />}
     {/* Last on the sheet: it arrives on its own answer, and arriving above the buttons
         would move them under a thumb. Asked again with the photo strip (a note changed
         there, its Try again) and when the camera has a newer photo. Quiet when it fails:

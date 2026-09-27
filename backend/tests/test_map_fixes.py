@@ -405,7 +405,7 @@ def test_the_estate_box_is_drawn_round_what_is_placed_until_an_admin_sets_one(
                         Zone(estate_id=estate.id, name="Z", kind="bedding", polygon=SQUARE)])
     db_session.commit()
     box = client.get("/api/estate", headers=member).json()["box"]
-    assert box["south"] < 39.09 - 400 / 111_320 and box["north"] > 39.11 + 400 / 111_320
+    assert box["south"] < 39.09 - 900 / 111_320 and box["north"] > 39.11 + 900 / 111_320
     assert box["west"] < -1.37 and box["east"] > -1.34
 
     mine = {"south": 39.08, "west": -1.38, "north": 39.12, "east": -1.33}

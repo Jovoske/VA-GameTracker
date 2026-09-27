@@ -55,6 +55,16 @@ photos never count. Each person can mute a busy camera, and anyone but a viewer 
 **Worth a look** with a short note, which the team finds on Photos and on that camera's sheet. Hunt
 planning, collaboration and safety are parked for later.
 
+### The map with no signal (September 2026)
+
+Map sheet → **Offline** → **Download the estate for offline** keeps the estate's map pictures (IGN aerial or
+topo, zoom 11 to 18, only the estate's box, within a size budget), the stands, cameras, bedding and each
+camera's sheet on the phone, and says what it has: "Estate map saved on this phone · 38 MB · 2 days ago".
+With no signal the map then opens with its pictures, every pin and the camera photos, and says how old
+they are. A camera placed by hand stays where it was put, bedding can be renamed and redrawn, the hill
+shape loads in the background and reaches every stand, and "Likely paths" come from the replay's links
+seen on more than one night ([details](docs/map-ux-update.md)).
+
 ### Photos, and putting the AI right (September 2026)
 
 Photos is filed by night ("Last night", "Thu night": 18:00 to 06:00 on the estate's clock, as the server

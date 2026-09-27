@@ -23,11 +23,28 @@
 //   * A small set of read-only API answers is kept and replayed when the network
 //     is gone or the server is down, tagged with when it was stored, so the page
 //     says how old it is. An /api/ request is never answered with HTML.
+//   * "Download the estate" (src/map/offline.ts) keeps the estate's map pictures,
+//     the likely paths and each camera's sheet (its photo strip, marked photos and
+//     small photos) in ESTATE_CACHE. Saved map pictures and small photos are served
+//     from there first: they don't change, and the valley has no signal. The rest is
+//     asked of the network first, kept fresh while there is signal, and replayed
+//     when there isn't (audit B-06, feature 24).
 const BUILD = '__GS_BUILD__'
 const ASSETS = /*__GS_ASSETS__*/[]
 const SHELL_PREFIX = 'gamesense-shell-'
 const SHELL_CACHE = SHELL_PREFIX + BUILD
 const API_CACHE = 'gamesense-api-v2'
+// What "Download the estate" saved. Never pruned on activate: a deploy must not
+// cost a hunter the map they saved for the valley.
+const ESTATE_CACHE = 'gamesense-estate-v1'
+// The base maps a phone may keep a copy of: IGN's public WMTS (PNOA aerial, MTN
+// topo), free to reuse with credit. Esri's terms don't allow offline copies of its
+// imagery, and Catastro's parcels are asked for as they are needed.
+const SAVED_TILES = ['https://www.ign.es/wmts/']
+// Same-site answers a saved estate may hold: the camera sheets (photo strip, marked
+// photos), the likely paths, the estate's box, and small photos.
+const SAVED_API = ['/api/photos', '/api/photos/highlights', '/api/map/paths', '/api/estate']
+const THUMB = /^\/api\/images\/[^/]+\/thumb$/
 // The one cache the worker before this one kept everything in.
 const LEGACY_CACHE = 'gamesense-v2'
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png']
@@ -35,7 +52,7 @@ const NAV_WAIT_MS = 3000
 
 // Endpoints worth replaying offline: the plan and the ground it describes. Writes
 // are never served from cache.
-const CACHEABLE_API = ['/api/forecast/tonight', '/api/stands', '/api/sits', '/api/alerts']
+const CACHEABLE_API = ['/api/forecast/tonight', '/api/stands', '/api/sits', '/api/alerts', '/api/map/tonight', '/api/map/cameras']
 
 self.addEventListener('install', (e) => {
   e.waitUntil(storeBuild().then(() => self.skipWaiting()))
@@ -79,7 +96,7 @@ self.addEventListener('activate', (e) => {
         const keepPrevious = older[older.length - 1]
         return Promise.all(
           keys
-            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== keepPrevious)
+            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== ESTATE_CACHE && k !== keepPrevious)
             .map((k) => caches.delete(k)),
         )
       })
@@ -142,6 +159,55 @@ async function apiWithFallback(req) {
   return res
 }
 
+// ── the estate saved on this phone ──
+
+/** A saved map picture first (it doesn't change), the network for the rest. A
+ *  download asking again (cache: 'reload') goes to the network. */
+async function savedTile(req) {
+  if (req.cache !== 'reload' && req.cache !== 'no-store') {
+    const hit = await caches.match(req.url, { cacheName: ESTATE_CACHE })
+    if (hit) return hit
+  }
+  return fetch(req)
+}
+
+/** A small photo: the saved copy first (a photo never changes; the saved key has no
+ *  sign-in token in it), else the network. */
+async function savedThumb(req) {
+  const hit = await caches.match(req.url, { cacheName: ESTATE_CACHE, ignoreSearch: true })
+  return hit || fetch(req)
+}
+
+/** The network first. An answer the estate keeps is kept fresh while there is
+ *  signal, and replayed, marked stale, when there isn't or the server is down. */
+async function savedApi(req) {
+  const cache = await caches.open(ESTATE_CACHE)
+  let res
+  try {
+    res = await fetch(req)
+  } catch (err) {
+    if (req.signal && req.signal.aborted) throw err
+    const hit = await replay(cache, req, 'offline')
+    if (hit) return hit
+    return new Response(
+      JSON.stringify({ detail: 'Offline, and nothing cached for this yet.', offline: true }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  if (res.ok) {
+    if (await cache.match(req)) {
+      const body = await res.clone().text()
+      cache.put(req, new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'X-GameSense-Cached-At': new Date().toISOString() },
+      }))
+    }
+    return res
+  }
+  if (serverDown(res)) return (await replay(cache, req, 'server')) || res
+  return res
+}
+
 async function storedShell() {
   return (await caches.match('/index.html', { cacheName: SHELL_CACHE })) || (await caches.match('/index.html'))
 }
@@ -197,11 +263,17 @@ self.addEventListener('fetch', (e) => {
   const req = e.request
   if (req.method !== 'GET') return
   const url = new URL(req.url)
-  // Map tiles and anything else from another site go straight to the network.
-  if (url.origin !== self.location.origin) return
+  // Anything else from another site goes straight to the network; IGN's map
+  // pictures come from the saved estate when they are in it.
+  if (url.origin !== self.location.origin) {
+    if (SAVED_TILES.some((p) => req.url.startsWith(p))) e.respondWith(savedTile(req))
+    return
+  }
 
   if (url.pathname.startsWith('/api/')) {
     if (isCacheableApi(url)) e.respondWith(apiWithFallback(req))
+    else if (THUMB.test(url.pathname)) e.respondWith(savedThumb(req))
+    else if (SAVED_API.includes(url.pathname)) e.respondWith(savedApi(req))
     return // other API calls pass through untouched
   }
   if (req.mode === 'navigate') return e.respondWith(navigate(req))

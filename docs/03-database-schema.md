@@ -77,6 +77,9 @@ CREATE TABLE cameras (
   provider_name varchar,                        -- latest imported/default name
   name_is_custom boolean NOT NULL DEFAULT false,-- keep app rename across provider sync
   location      geometry(Point,4326),           -- GPS (auto from SPYPOINT, draggable)
+  location_is_custom boolean NOT NULL DEFAULT false, -- placed by hand: the sync leaves it
+  provider_lat  double precision,               -- the position SPYPOINT last reported
+  provider_lon  double precision,
   altitude_m    real,
   model         text,
   battery_pct   int,

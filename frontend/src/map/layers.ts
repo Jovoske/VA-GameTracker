@@ -1,5 +1,6 @@
 import type { Map, GeoJSONSource, ExpressionSpecification, PaddingOptions } from 'maplibre-gl'
-import { validLngLat, windGeometry, windToken, type Camera, type MapData } from './geometry'
+import { validLngLat, windGeometry, windToken, type Camera, type LikelyPath, type MapData } from './geometry'
+import type { Box } from './offline'
 export type Layers = { bedding: boolean; wind: boolean; exposure: boolean; routes: boolean; photos: boolean }
 export const empty: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 
@@ -20,13 +21,18 @@ export function addLayers(map: Map) {
     clean: token(windToken('clean'), '#6FCB7F'), carries: token(windToken('scent_carries'), '#E3A008'), quiet: token(windToken(''), '#8A9A92'),
   }
   const wind: ExpressionSpecification = ['match', ['get', 'status'], 'clean', c.clean, 'scent_carries', c.carries, c.quiet]
-  for (const id of ['bedding', 'wind', 'cones', 'exposure', 'routes', 'activity', 'replay-links', 'me', 'measure', 'draft']) map.addSource(id, { type: 'geojson', data: empty })
+  for (const id of ['bedding', 'wind', 'cones', 'exposure', 'routes', 'activity', 'replay-links', 'me', 'measure', 'draft', 'estate-box']) map.addSource(id, { type: 'geojson', data: empty })
+  // The estate's box, while the Map sheet (where it is set and saved) is open.
+  map.addLayer({ id: 'estate-box', type: 'line', source: 'estate-box', paint: { 'line-color': c.text, 'line-width': 1.5, 'line-opacity': .55, 'line-dasharray': [4, 3] } })
   map.addLayer({ id: 'exposure', type: 'circle', source: 'exposure', paint: { 'circle-color': ['case', ['get', 'safe'], c.clean, c.carries], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 16, 14], 'circle-opacity': .18 } })
   map.addLayer({ id: 'bedding-fill', type: 'fill', source: 'bedding', paint: { 'fill-color': c.sand, 'fill-opacity': .12 } })
   map.addLayer({ id: 'bedding-line', type: 'line', source: 'bedding', paint: { 'line-color': c.sand, 'line-width': 1.5, 'line-dasharray': [3, 2] } })
   map.addLayer({ id: 'cones-fill', type: 'fill', source: 'cones', paint: { 'fill-color': wind, 'fill-opacity': .12 } })
   map.addLayer({ id: 'cones-line', type: 'line', source: 'cones', paint: { 'line-color': wind, 'line-width': 1, 'line-opacity': .5 } })
-  map.addLayer({ id: 'routes-line', type: 'line', source: 'routes', paint: { 'line-color': c.camera, 'line-width': 1.5, 'line-dasharray': [2, 3], 'line-opacity': .7 } })
+  // Likely paths: dashed (a guess), a little wider for a path seen on more nights.
+  map.addLayer({ id: 'routes-line', type: 'line', source: 'routes', layout: { 'line-cap': 'round' }, paint: {
+    'line-color': c.camera, 'line-width': ['interpolate', ['linear'], ['get', 'nights'], 2, 1.5, 8, 4], 'line-dasharray': [2, 2], 'line-opacity': .8,
+  } })
   // Activity: one colour, area for visits a night (activity.ts). A camera that was
   // watching and saw nothing is a small empty ring: a real zero, not a missing one.
   // One whose photos are still being checked is a fainter, wider ring: not yet known.
@@ -73,18 +79,31 @@ export function renderLayers(map: Map, data: MapData, layers: Layers, selectedSt
   }
   setSource(map, 'wind', winds); setSource(map, 'cones', cones)
   setSource(map, 'exposure', layers.exposure ? data.safe_ground.cells.map(c => ({ type: 'Feature', properties: { safe: c.safe }, geometry: { type: 'Point', coordinates: [c.lon, c.lat] } })) : [])
-  setSource(map, 'routes', layers.routes ? data.routes.map(r => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[r.from.lon, r.from.lat], [r.to.lon, r.to.lat]] } })) : [])
 }
-/** `padding` keeps the estate out from under an open sheet (a number is the same on every side). */
-export function fitEstate(map: Map, data: MapData, cameras: Camera[], duration = 0, padding: number | PaddingOptions = 72) {
+/** The likely paths (GET /map/paths), one line per pair of cameras. */
+export function renderPaths(map: Map, paths: LikelyPath[]) {
+  setSource(map, 'routes', paths.filter(p => validLngLat(p.from.lon, p.from.lat) && validLngLat(p.to.lon, p.to.lat))
+    .map(p => ({ type: 'Feature', properties: { nights: p.nights }, geometry: { type: 'LineString', coordinates: [[p.from.lon, p.from.lat], [p.to.lon, p.to.lat]] } })))
+}
+export function renderBox(map: Map, box: Box | null) {
+  setSource(map, 'estate-box', box ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [
+    [box.west, box.south], [box.east, box.south], [box.east, box.north], [box.west, box.north], [box.west, box.south]] } }] : [])
+}
+/** Round every placed camera, stand and bedding corner, or null with nothing placed. */
+export function estateBounds(data: MapData, cameras: Camera[]): [[number, number], [number, number]] | null {
   // A bad coordinate from the API must not throw here: fitBounds on lat 1000 blanks the page (B-08).
   const points: [number, number][] = [
     ...cameras.flatMap(c => validLngLat(c.lon, c.lat) ? [[c.lon!, c.lat!] as [number, number]] : []),
     ...data.stands.flatMap(s => validLngLat(s.lon, s.lat) ? [[s.lon!, s.lat!] as [number, number]] : []),
     ...data.zones.flatMap(z => z.polygon.coordinates[0].filter(p => validLngLat(p[0], p[1])).map(p => [p[0], p[1]] as [number, number])),
   ]
-  if (!points.length) return
-  map.fitBounds([[Math.min(...points.map(p => p[0])), Math.min(...points.map(p => p[1]))], [Math.max(...points.map(p => p[0])), Math.max(...points.map(p => p[1]))]], { padding: roomFor(map, padding), maxZoom: 16, duration })
+  if (!points.length) return null
+  return [[Math.min(...points.map(p => p[0])), Math.min(...points.map(p => p[1]))], [Math.max(...points.map(p => p[0])), Math.max(...points.map(p => p[1]))]]
+}
+/** `padding` keeps the estate out from under an open sheet (a number is the same on every side). */
+export function fitEstate(map: Map, data: MapData, cameras: Camera[], duration = 0, padding: number | PaddingOptions = 72) {
+  const bounds = estateBounds(data, cameras)
+  if (bounds) map.fitBounds(bounds, { padding: roomFor(map, padding), maxZoom: 16, duration })
 }
 /**
  * Padding the map has room for. A map squeezed to a sliver (a phone on its side with

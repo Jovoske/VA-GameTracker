@@ -24,11 +24,12 @@ from app.core.config import settings
 from app.models import AppSetting, Camera, Stand, Zone
 
 BOX_KEY = "estate_offline_box"
-# Round what is placed, so a stand on the edge has ground around it on the map.
-MARGIN_M = 500.0
+# Round what is placed, so a stand on the edge has ground around it on the map, and
+# a phone held upright, fitted to the estate, has its whole screen of it.
+MARGIN_M = 1_000.0
 # Nothing much smaller than this is worth saving, and nothing larger is one estate:
 # a phone keeps roughly a thousand map squares at the useful zooms for 15 km across.
-MIN_SIDE_M = 1_000.0
+MIN_SIDE_M = 2_000.0
 MAX_SIDE_M = 15_000.0
 # With nothing placed yet: a square this wide round the configured centre.
 DEFAULT_SIDE_M = 4_000.0
