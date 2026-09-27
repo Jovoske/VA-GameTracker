@@ -14,7 +14,7 @@ from app.ai.classifier import ESTATE_KEYS, default_name
 from app.ai.species import BIG_GAME
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_photos import after_cursor, fixed_names, next_cursor
-from app.api.visibility import VISIBLE_ANIMAL, VISIBLE_SIGHTING
+from app.api.visibility import NO_PEOPLE, VISIBLE_ANIMAL, VISIBLE_SIGHTING
 from app.core.db import get_db
 from app.forecasting.model import class_label, sentence_case
 from app.models import Camera, Detection, Image, Species, User
@@ -88,7 +88,7 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
             select(Image.id)
             .join(Detection, Detection.image_id == Image.id)
             .where(Detection.species_id == sid, Image.original_path.isnot(None),
-                   Image.is_empty_frame.isnot(True))
+                   Image.is_empty_frame.isnot(True), NO_PEOPLE)
             .order_by(Image.captured_at.desc())
             .limit(1)
         )

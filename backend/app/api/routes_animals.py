@@ -16,6 +16,7 @@ from sqlalchemy import delete, distinct, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
+from app.api.visibility import NO_PEOPLE
 from app.core.db import get_db
 from app.models import (
     Camera,
@@ -49,7 +50,8 @@ def _thumb_map(db: Session, ids: list[uuid.UUID]) -> dict:
         )
         .join(Detection, DetectionIndividual.detection_id == Detection.id)
         .join(Image, Detection.image_id == Image.id)
-        .where(DetectionIndividual.individual_id.in_(ids))
+        # A frame with a person or a vehicle in it is an admin's (visibility.PEOPLE).
+        .where(DetectionIndividual.individual_id.in_(ids), NO_PEOPLE)
         .subquery()
     )
     rows = db.execute(select(ranked.c.ind, ranked.c.image_id).where(ranked.c.rn == 1)).all()
@@ -81,7 +83,7 @@ def list_animals(
         # A hidden species (rabbits) is out of the app, its animals too; and a photo
         # marked "nothing in it" is not a sighting of anybody.
         .where(or_(Individual.species_id.is_(None), Species.hidden.is_(False)),
-               Image.is_empty_frame.isnot(True))
+               Image.is_empty_frame.isnot(True), NO_PEOPLE)
         .group_by(Individual.id, Species.common_name)
         .order_by(func.count(DetectionIndividual.detection_id).desc())
     ).all()
@@ -125,7 +127,7 @@ def get_animal(
         .join(Detection, DetectionIndividual.detection_id == Detection.id)
         .join(Image, Detection.image_id == Image.id)
         .join(Camera, Image.camera_id == Camera.id)
-        .where(DetectionIndividual.individual_id == individual_id)
+        .where(DetectionIndividual.individual_id == individual_id, NO_PEOPLE)
         .order_by(Image.captured_at.desc())
     ).all()
     sp = db.get(Species, ind.species_id) if ind.species_id else None

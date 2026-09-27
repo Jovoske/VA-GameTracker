@@ -106,7 +106,9 @@ def _photo(db, estate, tmp_path):
     db.flush()
     path = tmp_path / f"{uuid.uuid4().hex}.jpg"
     path.write_bytes(b"\xff\xd8\xff\xd9")
-    img = Image(camera_id=cam.id, captured_at=datetime.now(UTC), original_path=str(path))
+    # Checked by the AI: a frame it hasn't looked at yet is the admin's alone (R6BE-2).
+    img = Image(camera_id=cam.id, captured_at=datetime.now(UTC), original_path=str(path),
+                processed_at=datetime.now(UTC))
     db.add(img)
     db.commit()
     return cam, img

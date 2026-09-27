@@ -25,6 +25,7 @@ from sqlalchemy import delete, distinct, func, select, update
 from sqlalchemy.orm import Session
 
 from app import jobs
+from app.api.visibility import NO_PEOPLE
 from app.core.logging import get_logger
 from app.models import (
     Detection,
@@ -160,9 +161,10 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
         )
         .join(Image, Detection.image_id == Image.id)
         .join(Species, Species.id == Detection.species_id)
-        # Hidden species and photos marked "nothing in it" make no animals.
+        # Hidden species, photos marked "nothing in it" and frames with a person or a
+        # vehicle in them (the dog on a walk) make no animals.
         .where(Detection.embedding.isnot(None), Species.hidden.is_(False),
-               Image.is_empty_frame.isnot(True))
+               Image.is_empty_frame.isnot(True), NO_PEOPLE)
         .order_by(Detection.species_id, Image.captured_at)
     ).all()
 

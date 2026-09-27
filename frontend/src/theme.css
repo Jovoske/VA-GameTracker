@@ -383,6 +383,8 @@ main.page { padding: 16px; }
 .lb-toast { position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 1; display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; background: rgba(21, 26, 24, 0.94); border: 1px solid #69766e; border-radius: var(--r-ctl); color: #fff; font-size: 13px; line-height: 1.35; }
 .lb-toast > span { flex: 1; min-width: 0; }
 .lb-fixed-by { opacity: 0.75; font-style: italic; }
+/* A frame of people or vehicles: an admin's photo, said under it in place of the notes. */
+.lb-people-note { max-width: 94vw; margin: 8px auto 0; padding: 8px 12px; border-left: 3px solid var(--marginal); background: rgba(0, 0, 0, 0.55); border-radius: var(--r-ctl); color: #fff; font-size: 13px; line-height: 1.45; }
 .lb-status--more { bottom: 12px; }
 /* The next page failed: said at the top of the stage, clear of an Undo at the bottom. */
 .lb-more-err { top: 8px; bottom: auto; }

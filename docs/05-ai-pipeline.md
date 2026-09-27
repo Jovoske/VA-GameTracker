@@ -7,7 +7,7 @@
 ### Stage 1 — Detection (find the animals)
 - **MegaDetector v5** (via PytorchWildlife / Ultralytics export). Outputs bounding boxes for `animal / person / vehicle` + confidence.
 - **Empty-frame rejection:** no animal box above threshold → mark `images.is_empty_frame = true`, skip downstream work. Trail cameras fire on wind/vegetation constantly; this saves storage and compute early (spec requirement).
-- Person/vehicle boxes recorded but not classified as wildlife (useful for security/poaching awareness later).
+- **People and vehicles (feature 25):** the same look keeps MegaDetector's surest person and vehicle box per frame (`images.person_conf`, `vehicle_conf`; NULL = not looked for). A frame with a person (≥ 0.2) or a vehicle (≥ 0.4) is an admin's alone (`api/visibility.PEOPLE`): out of every shared list, gallery, note and push, and out of every count, whatever else is in it. Admins see them under Photos → "People & vehicles", and can say "Nobody in it" (`images.people_cleared`) when the detector misread a feeder or a rock. Photos checked before this are looked at again for people in daylight, all of them back to the first, newest first, a few a run (they show as they always have until then). A frame nobody has looked at yet (straight after a sync, or one the AI gave up on) is an admin's too until the AI pass has looked at it (`visibility.NOT_LOOKED_AT`): minutes after the fetch.
 
 ### Stage 2 — Species (what is it)
 - **DeepFaune** classifier on each animal crop. DeepFaune is purpose-built for **European** wildlife (boar, red/roe/fallow deer, fox, badger, mouflon, hare, etc.) — a direct fit for the spec's "Europe-only, don't load NA/African/Asian models."

@@ -30,6 +30,10 @@ What used to go wrong, and what happens now:
   photo rather than checking the same photos alongside the new owner.
 * A photo with an animal in it gets its small copy for the grids (app.thumbs) as soon
   as it is checked, so the Photos grid at dusk is quick from the first look (E-24).
+* The same look records the people and vehicles in the frame (feature 25). Photos
+  checked before that are looked at again for them, all of them back to the first,
+  newest first, a few a run in daylight, like the frames judged at the old cut-off
+  (those only the last RESCAN_DAYS).
 """
 from __future__ import annotations
 
@@ -39,12 +43,12 @@ import time
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app import jobs, thumbs
 from app.ai import empty_filter, species
-from app.ai.detector import DETECT_CONF, detect_animals
+from app.ai.detector import DETECT_CONF, detect, detect_animals, split
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.models import Detection, Image
@@ -59,8 +63,10 @@ RUN_LIMIT = int(os.environ.get("AI_LIMIT_PER_RUN", "300"))
 RUN_BUDGET = timedelta(minutes=int(os.environ.get("AI_MINUTES_PER_RUN", "10")))
 
 # Frames the detector judged empty at its old 0.25 cut-off (detector_conf NULL) are
-# looked at again at DETECT_CONF: a bounded window, a few a run, in daylight only, so
-# it never slows the photos that matter at dusk.
+# looked at again at DETECT_CONF, the last RESCAN_DAYS; frames checked before people
+# and vehicles were looked for (person_conf NULL) are looked at for them, however old:
+# a walker from last spring is in the team's feed until then (R6BE-4). Newest first,
+# a few a run, in daylight only, so it never slows the photos that matter at dusk.
 RESCAN_DAYS = 30
 RESCAN_PER_RUN = 100
 RESCAN_HOURS = range(8, 16)
@@ -80,6 +86,9 @@ AWAITING_SPECIES = and_(
     Image.ai_failed_at.is_(None),
 )
 WAITING = or_(AWAITING_DETECTOR, AWAITING_SPECIES)
+# Judged empty at the detector's old 0.25 cut-off (empty_filter.old_rule_empty).
+OLD_RULE_EMPTY = and_(Image.is_empty_frame.is_(True), Image.reviewed.is_(False),
+                      Image.detector_conf.is_(None))
 NOT_CHECKED = or_(
     Image.processed_at.is_(None), Image.ai_failed_at.isnot(None),
     and_(Image.is_empty_frame.is_(False), Image.original_path.isnot(None), ~_HAS_DETECTION),
@@ -142,14 +151,15 @@ def let_through_missing(db: Session) -> int:
 def check_image(db: Session, image: Image) -> str:
     """Detector, then species, for one photo. What came of it: "empty", "skipped"
     (a hunter got there first), the species named, or "animal" (none named)."""
-    boxes = None
+    animals = None
     if image.processed_at is None and not image.reviewed:
-        boxes = detect_animals(image.original_path)
+        boxes = detect(image.original_path)
         if not empty_filter.scan_image(db, image, boxes=boxes):
             return "empty"
+        animals = split(boxes)[0]
     if image.is_empty_frame is not False:
         return "skipped"
-    return species.classify_image(db, image, boxes=boxes) or "animal"
+    return species.classify_image(db, image, boxes=animals) or "animal"
 
 
 def hunter_decided(image: Image, *, keep: bool) -> None:
@@ -258,11 +268,15 @@ def _rescan_ids(db: Session, now: datetime, room: int) -> list:
     local = now.astimezone(ZoneInfo(settings.estate_timezone))
     if room <= 0 or local.hour not in RESCAN_HOURS:
         return []
+    # Checked (by the detector or a hunter) before people were looked for, at any
+    # age. One still waiting for the detector is looked at for them on its first look.
+    no_people_look = and_(Image.person_conf.is_(None),
+                          or_(Image.processed_at.isnot(None), Image.reviewed.is_(True)))
+    old_rule = and_(OLD_RULE_EMPTY, Image.captured_at >= now - timedelta(days=RESCAN_DAYS))
     return list(db.scalars(
         select(Image.id).where(
-            Image.is_empty_frame.is_(True), Image.reviewed.is_(False),
-            Image.detector_conf.is_(None), Image.original_path.isnot(None),
-            Image.captured_at >= now - timedelta(days=RESCAN_DAYS),
+            or_(old_rule, no_people_look), Image.original_path.isnot(None),
+            Image.ai_failed_at.is_(None),
         ).order_by(Image.captured_at.desc()).limit(min(room, RESCAN_PER_RUN))
     ).all())
 
@@ -364,14 +378,18 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
             if lost or time.monotonic() > deadline or jobs.lock_lost():
                 break
             image = db.get(Image, image_id, populate_existing=True)
-            if image is None or image.reviewed or image.is_empty_frame is not True:
+            if image is None or not image.original_path or (
+                image.person_conf is not None and not empty_filter.old_rule_empty(image)
+            ):
                 continue
+            # Older than the old cut-off's window: looked at for people only.
+            recent = image.captured_at >= now - timedelta(days=RESCAN_DAYS)
             try:
-                boxes = detect_animals(image.original_path)
-                if empty_filter.rescan_image(db, image, boxes):
+                boxes = detect(image.original_path)
+                if empty_filter.rescan_image(db, image, boxes, animals_too=recent):
                     result["found_on_rescan"] += 1
                     touched.append(image_id)
-                    species.classify_image(db, image, boxes=boxes)
+                    species.classify_image(db, image, boxes=split(boxes)[0])
                 db.commit()
                 result["rescanned"] += 1
             except Exception as e:
@@ -382,7 +400,10 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
                     raise _Stop(why) from e
                 # The photo is the problem: leave it as it was judged, and move on.
                 db.execute(update(Image).where(Image.id == image_id)
-                           .values(detector_conf=DETECT_CONF)
+                           .values(detector_conf=case((OLD_RULE_EMPTY, DETECT_CONF),
+                                                      else_=Image.detector_conf),
+                                   person_conf=func.coalesce(Image.person_conf, 0.0),
+                                   vehicle_conf=func.coalesce(Image.vehicle_conf, 0.0))
                            .execution_options(synchronize_session=False))
                 db.commit()
     except _Stop as e:

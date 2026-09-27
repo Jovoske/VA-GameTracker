@@ -56,14 +56,23 @@ export const PHOTO_CACHES = ['gamesense-thumbs-v1', 'gamesense-photos-v1']
 /** Sit reports waiting for signal. Written by sits.ts; named here so sign-out can clear it. */
 export const SIT_QUEUE_KEY = 'gs_sit_queue'
 
+/** The saved answers that are one person's: their sits, and their harvest card and
+ *  book ("You shot at Puente last night" is the hunter's, not the phone's). */
+const PERSONAL = ['/sits', '/harvests']
+/** What a harvest form holds until it is saved (Harvest.tsx), in sessionStorage. */
+export const HARVEST_DRAFT_KEY = 'gs.harvest.draft.'
+const personal = (path: string) => PERSONAL.some((p) => path === p || path.startsWith(p + '/') || path.startsWith(p + '?'))
+
 /**
- * Sign out, and take this person's unsent sit reports, saved sits and alerts with them.
+ * Sign out, and take this person's unsent sit reports, saved sits, harvest card and
+ * alerts with them.
  *
  * A phone gets passed round a hunting party. Left behind, the next person to sign
- * in would find the last one's sits on screen, and an admin's login would be
- * allowed to send the last one's reports as their own, and the phone would keep
- * buzzing with the last one's sightings. An expired sign-in (a 401) keeps them:
- * that is the same hunter signing in again.
+ * in would find the last one's sits on screen (and "You shot at Puente last night"
+ * with its buttons, R6BE-3), and an admin's login would be allowed to send the last
+ * one's reports as their own, and the phone would keep buzzing with the last one's
+ * sightings. An expired sign-in (a 401) keeps them: that is the same hunter signing
+ * in again.
  */
 export function signOut(): void {
   // Before the token goes: the server's copy of this phone's subscription is
@@ -72,16 +81,17 @@ export function signOut(): void {
   setToken(null)
   meCache = null
   meKnown = null
-  for (const path of [...memory.keys()]) if (path.startsWith('/sits')) memory.delete(path)
+  for (const path of [...memory.keys()]) if (personal(path)) memory.delete(path)
   try {
     localStorage.removeItem(SIT_QUEUE_KEY)
-    for (const key of Object.keys(localStorage)) if (key.startsWith(SAVED + '/sits')) localStorage.removeItem(key)
+    for (const key of Object.keys(localStorage)) if (key.startsWith(SAVED) && personal(key.slice(SAVED.length))) localStorage.removeItem(key)
+    for (const key of Object.keys(sessionStorage)) if (key.startsWith(HARVEST_DRAFT_KEY)) sessionStorage.removeItem(key)
   } catch {
     // Blocked storage: nothing was saved there either.
   }
   if ('caches' in window) {
     caches.open(WORKER_API_CACHE)
-      .then(async (c) => Promise.all((await c.keys()).filter((r) => new URL(r.url).pathname.startsWith('/api/sits')).map((r) => c.delete(r))))
+      .then(async (c) => Promise.all((await c.keys()).filter((r) => personal(new URL(r.url).pathname.slice(4))).map((r) => c.delete(r))))
       .catch(() => {})
     // The photos this phone kept open without a pass; the next person signs in for theirs.
     PHOTO_CACHES.forEach((name) => { caches.delete(name).catch(() => {}) })

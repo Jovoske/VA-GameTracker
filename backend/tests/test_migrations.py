@@ -102,6 +102,13 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert prefs["quiet_start"] == "time without time zone"
         assert prefs["plan_push"] == "boolean"
         assert _columns(eng, "notifications")["detail"] == "jsonb"
+        assert set(_columns(eng, "harvests")) == {
+            "id", "sit_id", "stand_id", "user_id", "hunter", "species_id", "sex", "age_class",
+            "seal", "weight_kg", "notes", "taken_at", "created_by", "created_at", "updated_at",
+        }
+        assert _index(eng, "harvests", "ix_harvests_taken_at") == ["taken_at"]
+        assert {"person_conf", "vehicle_conf", "people_cleared"} <= set(images)
+        assert _columns(eng, "sits")["no_harvest_at"] == "timestamp with time zone"
     finally:
         eng.dispose()
 
@@ -173,6 +180,9 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert {code for _, _, code in _user_keys(eng)} == {"n"}
         assert {"quiet_start", "quiet_end", "plan_push"} <= set(_columns(eng, "notification_prefs"))
         assert "detail" in _columns(eng, "notifications")
+        assert _columns(eng, "harvests")
+        assert "people_cleared" in _columns(eng, "images")
+        assert "no_harvest_at" in _columns(eng, "sits")
     finally:
         eng.dispose()
 
@@ -1361,5 +1371,94 @@ def test_quiet_alerts_and_plan_push_upgrade_down_and_up_again(fresh_db):
         assert {"quiet_start", "quiet_end", "plan_push"} <= set(
             _columns(eng, "notification_prefs"))
         assert "detail" in _columns(eng, "notifications")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_harvest_and_people_upgrade_down_and_up_again(fresh_db):
+    """0030 on a real 0029 database: the photos and sits are kept, nobody's photo is
+    one of people until the detector has looked (NULL, not cleared), no sit is marked
+    "nothing to log", and the harvest book starts empty. A line survives removing the
+    hunter; going down takes the book and the new columns, and keeps the rest."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0029_quiet_alerts_and_plan_push")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0029 shape first.
+            c.execute(text("DROP TABLE harvests"))
+            for col in ("person_conf", "vehicle_conf", "people_cleared"):
+                c.execute(text(f"ALTER TABLE images DROP COLUMN {col}"))
+            c.execute(text("ALTER TABLE sits DROP COLUMN no_harvest_at"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            hunter = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) VALUES "
+                "(gen_random_uuid(),:e,'pedro@e.local','x','member') RETURNING id"),
+                {"e": estate}).scalar_one()
+            stand = c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,'Puente') "
+                "RETURNING id"), {"e": estate}).scalar_one()
+            sit = c.execute(text(
+                "INSERT INTO sits (id,stand_id,user_id,night,outcome) VALUES "
+                "(gen_random_uuid(),:s,:u,'2026-09-20','shot') RETURNING id"),
+                {"s": stand, "u": hunter}).scalar_one()
+            cam = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,active) VALUES "
+                "(gen_random_uuid(),:e,'PL19',true) RETURNING id"), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,is_empty_frame,"
+                "animal_conf,reviewed) VALUES (gen_random_uuid(),:c,now(),'a.jpg',true,0.0,"
+                "false)"), {"c": cam})
+            c.execute(text("INSERT INTO species (id,common_name,is_priority) "
+                           "VALUES ('wild_boar','Wild boar',true)"))
+
+        command.upgrade(cfg, "0030_harvest_and_people")
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT is_empty_frame, person_conf, vehicle_conf, people_cleared FROM images"
+            )).one()) == (True, None, None, False)
+            assert tuple(c.execute(text("SELECT outcome, no_harvest_at FROM sits")).one()) == (
+                "shot", None)
+            assert c.execute(text("SELECT count(*) FROM harvests")).scalar_one() == 0
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text(
+                "INSERT INTO harvests (id,sit_id,stand_id,user_id,hunter,species_id,sex,"
+                "taken_at,created_by) VALUES (gen_random_uuid(),:s,:st,:u,'Pedro','wild_boar',"
+                "'male',now(),:u)"), {"s": sit, "st": stand, "u": hunter})
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE harvests SET weight_kg = -3"))
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE harvests SET age_class = 'ancient'"))
+        with eng.begin() as c:
+            c.execute(text("UPDATE sits SET user_id = NULL"))
+            c.execute(text("DELETE FROM users WHERE id = :u"), {"u": hunter})
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT hunter, user_id, created_by, sit_id IS NOT NULL FROM harvests")).one()) == (
+                "Pedro", None, None, True)
+
+        command.downgrade(cfg, "0029_quiet_alerts_and_plan_push")
+        assert not _columns(eng, "harvests")
+        assert "person_conf" not in _columns(eng, "images")
+        assert "no_harvest_at" not in _columns(eng, "sits")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0029_quiet_alerts_and_plan_push")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "people_cleared" in _columns(eng, "images")
+        assert _index(eng, "harvests", "ix_harvests_sit_id") == ["sit_id"]
     finally:
         eng.dispose()

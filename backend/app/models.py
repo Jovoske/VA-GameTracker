@@ -337,6 +337,18 @@ class Image(Base):
     ai_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The box confidence the detector ran at; NULL = an older build, at its 0.25.
     detector_conf: Mapped[float | None] = mapped_column(Float)
+    # MegaDetector's other two classes (app.ai.detector): the surest person box and
+    # the surest vehicle box in the frame, 0 for none; NULL = not looked for yet (an
+    # older build). Kept as confidences, like animal_conf, so the bar can be moved
+    # without looking again: api/visibility.PEOPLE says which frames are people, and
+    # keeps them out of every shared list and every count (feature 25).
+    person_conf: Mapped[float | None] = mapped_column(Float)
+    vehicle_conf: Mapped[float | None] = mapped_column(Float)
+    # An admin looked and nobody is in it (a feeder read as a vehicle): it is an
+    # animal photo like any other again, whatever the detector said.
+    people_cleared: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         Index("ix_images_camera_captured", "camera_id", "captured_at"),
@@ -596,6 +608,9 @@ class Sit(Base):
     # (45 min after sunset), or the reservation itself after dark.
     wind_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
+    # A SHOT that left nothing to log (a miss, or an animal not found): the hunter
+    # said so, and the morning's "Log what you shot" card stops asking (feature 23).
+    no_harvest_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         CheckConstraint(
             "outcome IN ('unreported','nothing','seen','shootable_no_shot','shot','cancelled')",
@@ -610,6 +625,62 @@ class Sit(Base):
             "uq_sits_stand_night_live", "stand_id", "night",
             unique=True, postgresql_where=text("outcome <> 'cancelled'"),
         ),
+    )
+
+
+class Harvest(Base):
+    """An animal taken on the estate: one line of the owner's harvest book.
+
+    Logged the morning after a SHOT, from the sit it came from, or later by hand (a
+    sit is optional: a driven hunt, or a sit nobody reserved). The season's lines are
+    the annual return, exported as a CSV from Settings (routes_harvests). Nothing on
+    screen counts or ranks them: no tallies and no leaderboards (redesign 03 §11).
+
+    `hunter` is the name the record carries, as written when it was logged: removing
+    the person keeps the line and its name (user_id goes NULL), and an admin can
+    write a guest's name. `seal` is the tag (precinto) number, where one is used.
+    """
+
+    __tablename__ = "harvests"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    sit_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sits.id", ondelete="SET NULL"))
+    stand_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("stands.id", ondelete="SET NULL")
+    )
+    # Who shot it, while they are on the app; `hunter` keeps the name either way.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    hunter: Mapped[str] = mapped_column(String(60), nullable=False)
+    species_id: Mapped[str] = mapped_column(ForeignKey("species.id"), nullable=False)
+    sex: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default=text("'unknown'")
+    )
+    age_class: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default=text("'unknown'")
+    )
+    seal: Mapped[str | None] = mapped_column(String(40))
+    weight_kg: Mapped[float | None] = mapped_column(Float)
+    notes: Mapped[str | None] = mapped_column(String(500))
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Who wrote it down (the hunter, or an admin for them).
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint("sex IN ('male','female','unknown')", name="sex_valid"),
+        CheckConstraint(
+            "age_class IN ('juvenile','young_adult','mature_adult','old','unknown')",
+            name="age_valid",
+        ),
+        CheckConstraint("weight_kg IS NULL OR (weight_kg > 0 AND weight_kg < 1000)",
+                        name="weight_valid"),
+        Index("ix_harvests_taken_at", "taken_at"),
+        Index("ix_harvests_sit_id", "sit_id"),
     )
 
 

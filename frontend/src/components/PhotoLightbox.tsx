@@ -2,7 +2,7 @@ import { DownloadSimpleIcon } from '@phosphor-icons/react/dist/csr/DownloadSimpl
 import { MagnifyingGlassMinusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassMinus'
 import { MagnifyingGlassPlusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassPlus'
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
-import { type Failure, imageUrl, plainWords, whoAmI } from '../api'
+import { type Failure, api, imageUrl, plainWords, whoAmI } from '../api'
 import { useReducedMotion } from '../hooks'
 import { estateStamp } from '../night'
 import Overlay from './Overlay'
@@ -20,6 +20,10 @@ import PhotoNotesPanel from './PhotoNotes'
  * keeps its place as you page between photos with and without notes. On a phone
  * turned on its side (and a wide screen) the band goes beside the photo instead,
  * where it costs width the photo has to spare rather than height it hasn't.
+ *
+ * A photo with a person or a vehicle in it (Photos' "People & vehicles", admins only)
+ * has neither notes nor "Wrong?": it never goes to the team. It has "Nobody in it?"
+ * instead, for a feeder or a rock the detector read as a vehicle, with Undo.
  *
  * Members and admins also have "Wrong?" (PhotoFix): say what the animal really is,
  * or that there's nothing in it. The viewer shows the new name at once, with Undo,
@@ -56,6 +60,8 @@ export type LightboxPhoto = {
   species_id?: string | null
   /** Who said what it is, when a hunter did ("Fixed by Pedro"). */
   fixed_by?: string | null
+  /** A frame of people or vehicles (Photos' admin-only "People & vehicles"). */
+  people?: { person: boolean; vehicle: boolean } | null
 }
 
 /** A fix made in this viewer, and how to take it back. */
@@ -101,6 +107,7 @@ export default function PhotoLightbox({
   onNotesChange,
   onKept,
   onFixed,
+  onPeopleCleared,
   hasMore = false,
   onNeedMore,
   moreError,
@@ -117,6 +124,8 @@ export default function PhotoLightbox({
   /** "Wrong?" (or its Undo) changed what the photo is. A list drops a photo that no
    *  longer belongs in it when the viewer closes, never under it. */
   onFixed?: (imageId: string, fix: PhotoFix) => void
+  /** An admin said nobody is in a frame of people (true), or took it back (false). */
+  onPeopleCleared?: (imageId: string, cleared: boolean) => void
   /** The list has older photos than these; `onNeedMore` asks for the next page. */
   hasMore?: boolean
   onNeedMore?: () => void
@@ -147,6 +156,13 @@ export default function PhotoLightbox({
   const [undoing, setUndoing] = useState(false)
   const [changeErr, setChangeErr] = useState('')
   const [writer, setWriter] = useState(false)
+  const [admin, setAdmin] = useState(false)
+  // "Nobody in it?" on a frame of people: what was said here, by photo, and the last
+  // one for its Undo.
+  const [cleared, setCleared] = useState<Record<string, boolean>>({})
+  const [peopleChange, setPeopleChange] = useState<{ id: string; cleared: boolean } | null>(null)
+  const [peopleBusy, setPeopleBusy] = useState(false)
+  const [peopleErr, setPeopleErr] = useState('')
   // Next was pressed at the end of what is loaded: go on once the next page is in.
   const [waitingMore, setWaitingMore] = useState(false)
   const holding = useRef(false)
@@ -170,7 +186,11 @@ export default function PhotoLightbox({
 
   useEffect(() => {
     let live = true
-    whoAmI().then((me) => { if (live) setWriter(me.role !== 'viewer') }).catch(() => {})
+    whoAmI().then((me) => {
+      if (!live) return
+      setWriter(me.role !== 'viewer')
+      setAdmin(me.role === 'admin')
+    }).catch(() => {})
     return () => { live = false }
   }, [])
 
@@ -201,6 +221,12 @@ export default function PhotoLightbox({
     const t = window.setTimeout(() => setChange(null), 10_000)
     return () => window.clearTimeout(t)
   }, [change, undoing, changeErr])
+
+  useEffect(() => {
+    if (!peopleChange || peopleBusy || peopleErr) return
+    const t = window.setTimeout(() => setPeopleChange(null), 10_000)
+    return () => window.clearTimeout(t)
+  }, [peopleChange, peopleBusy, peopleErr])
 
   // The photos either side load while this one is looked at, so a swipe on a weak
   // signal shows the next at once rather than "Loading photo…" (audit C-04).
@@ -501,12 +527,35 @@ export default function PhotoLightbox({
     }
   }
 
+  /** Say nobody is in this frame of people (a feeder read as a vehicle), or take it back. */
+  async function clearPeople(id: string, yes: boolean) {
+    if (peopleBusy) return
+    setPeopleBusy(true)
+    setPeopleErr('')
+    try {
+      await api(`/images/${id}/people`, { method: 'POST', body: JSON.stringify({ cleared: yes }), timeoutMs: 20_000 })
+      setCleared((c) => ({ ...c, [id]: yes }))
+      setPeopleChange({ id, cleared: yes })
+      onPeopleCleared?.(id, yes)
+    } catch (e) {
+      const x = e as Failure
+      setPeopleChange({ id, cleared: yes })  // what was asked for, for Try again
+      setPeopleErr(x.offline ? 'No signal, so it wasn’t saved. Try again.' : x.timeout
+        ? 'No answer from the server, so it wasn’t saved. Try again.' : `It wasn’t saved. ${x.message}`)
+    } finally {
+      setPeopleBusy(false)
+    }
+  }
+
   // Kept by a note here: no longer "No animal", and nothing for the sheet to keep.
   // A fix made here wins over what the list said.
   const now = current(im)
   const empty = now.empty
   const label = now.label
   const shownChange = change && change.id === im.id ? change : null
+  const peopleFrame = !!im.people
+  const nobody = !!cleared[im.id]
+  const shownPeople = peopleChange && peopleChange.id === im.id ? peopleChange : null
   const when = new Date(im.captured_at).toLocaleString(undefined, {
     weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   })
@@ -523,7 +572,13 @@ export default function PhotoLightbox({
         // The things you do with a photo once it is big: put its name right, get
         // closer, and keep it.
         <>
-          {writer && (
+          {peopleFrame && admin && !nobody && (
+            <button className="ov-tool ov-tool--text" onClick={() => clearPeople(im.id, true)} disabled={peopleBusy}
+              aria-label="Nobody in it? Make it an ordinary photo again" title="Nobody in it (a feeder or a rock read as a vehicle)? Make it an ordinary photo again">
+              Nobody in it?
+            </button>
+          )}
+          {writer && !peopleFrame && (
             <button className="ov-tool ov-tool--text" onClick={() => { setChange(null); setFixing(true) }}
               disabled={sheetOpen || fixing} aria-label="Wrong animal? Fix it" title="Wrong animal, or nothing in it? Fix it">
               Wrong?
@@ -574,6 +629,22 @@ export default function PhotoLightbox({
                   <button type="button" className="lb-note-btn" onClick={undo} disabled={undoing}>{undoing ? 'Undoing…' : 'Undo'}</button>
                 </div>
               )}
+              {shownPeople && (
+                <div className="lb-toast" role={peopleErr ? 'alert' : 'status'}
+                  onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                  <span>
+                    {peopleErr || (shownPeople.cleared
+                      ? 'Marked: nobody in it. It’s an ordinary photo again, for everyone.'
+                      : 'Back with the people and vehicles.')}
+                  </span>
+                  {(shownPeople.cleared || peopleErr) && (
+                    <button type="button" className="lb-note-btn" disabled={peopleBusy}
+                      onClick={() => clearPeople(im.id, peopleErr ? shownPeople.cleared : false)}>
+                      {peopleBusy ? 'Saving…' : peopleErr ? 'Try again' : 'Undo'}
+                    </button>
+                  )}
+                </div>
+              )}
               {waitingMore && <span role="status" className="lb-status lb-status--more">Loading older photos…</span>}
               {!waitingMore && moreError && hasMore && idx === photos.length - 1 && (
                 <div className="lb-toast lb-more-err" role="alert"
@@ -615,7 +686,13 @@ export default function PhotoLightbox({
                   {idx + 1} / {photos.length}{hasMore ? '+' : ''}
                 </span>
               </div>
-              <PhotoNotesPanel
+              {peopleFrame ? (
+                <p className="lb-people-note">
+                  {nobody
+                    ? 'Nobody in it: the team sees it like any other photo now.'
+                    : 'Only admins see this photo. It never goes in the team’s photos, counts or alerts.'}
+                </p>
+              ) : <PhotoNotesPanel
                 key={im.id}
                 imageId={im.id}
                 label={label}
@@ -636,7 +713,7 @@ export default function PhotoLightbox({
                   })
                   onKept?.(id)
                 }}
-              />
+              />}
             </div>
           </div>
           {fixing && (

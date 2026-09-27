@@ -58,7 +58,7 @@ def models(monkeypatch):
         return state["species"](path) if callable(state["species"]) else state["species"]
 
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", detect)
+    monkeypatch.setattr(checking, "detect", detect)
     monkeypatch.setattr(species, "detect_animals", detect)
     monkeypatch.setattr(species, "classify_crop", classify)
     monkeypatch.setattr(checking, "models_work", lambda: state["broken"])
@@ -240,12 +240,12 @@ def test_a_hunters_flag_while_the_detector_looks_is_never_overwritten(db_session
         return BOAR
 
     models["boxes"] = {}
-    checking_detect = checking.detect_animals
+    checking_detect = checking.detect
     try:
-        checking.detect_animals = detect_while_hunter_flags
+        checking.detect = detect_while_hunter_flags
         checking.check_photos(db_session)
     finally:
-        checking.detect_animals = checking_detect
+        checking.detect = checking_detect
         other.close()
     db_session.refresh(img)
     assert (img.reviewed, img.is_empty_frame) == (True, True)
@@ -263,7 +263,8 @@ def test_a_photo_flagged_before_the_detector_reached_it_does_not_blind_its_night
     from app.main import app
     from app.models import User
 
-    user = User(estate_id=cam.estate_id, email="m@x.local", password_hash="x", role="member")
+    # An admin: only they see a frame the detector hasn't reached (R6BE-2).
+    user = User(estate_id=cam.estate_id, email="m@x.local", password_hash="x", role="admin")
     db_session.add(user)
     img = _frame(db_session, cam, NIGHT)
     app.dependency_overrides[get_db] = lambda: db_session
