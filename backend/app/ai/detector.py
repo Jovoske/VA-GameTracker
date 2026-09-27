@@ -191,8 +191,11 @@ def detect(image_path: str, conf: float = DETECT_CONF) -> list[dict]:
     """Every box MegaDetector finds: [{category, confidence, bbox}], category 0 an
     animal, 1 a person, 2 a vehicle. People and vehicles used to be dropped here, so
     a walker or a truck at a stand was filed as an empty frame (audit F-25)."""
+    from app.media import resolve
+
     model = _get_model()
-    results = model.predict(image_path, device="cpu", verbose=False, conf=conf)
+    # The stored path, relative to MEDIA_ROOT for photos stored since audit H-21.
+    results = model.predict(resolve(image_path), device="cpu", verbose=False, conf=conf)
     out: list[dict] = []
     for r in results:
         boxes = getattr(r, "boxes", None)

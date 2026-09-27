@@ -10,6 +10,12 @@ The row is written as soon as the photos are in, with stage "identifying" while 
 detector looks at them, and finished once the AI pass and the night recount are done.
 So the Check button can say "7 new photos came in" without waiting for the detector,
 and a run killed during the AI pass still leaves a true count behind.
+
+With less than app.ops.FULL_DISK_BYTES free where the photos are kept, nothing is
+downloaded and the run says why (audit H-18): that disk is the database's too, and a
+full one stops Postgres and every import at once. The photos wait on the cameras'
+clouds and come in on the first fetch after room is made. The one-off imports (a new
+login's first, the history pull; pipeline.py) ask the same (room_to_fetch).
 """
 from __future__ import annotations
 
@@ -24,6 +30,9 @@ from app.models import SyncLog
 log = get_logger(__name__)
 
 PROVIDERS = {"spypoint": "SPYPOINT", "ubox": "UBox"}
+# Not a provider: the run stood down because the server's disk is nearly full.
+DISK = "disk"
+LABELS = {**PROVIDERS, DISK: "Server disk"}
 
 
 def summarize(results: dict) -> dict:
@@ -42,10 +51,10 @@ def summarize(results: dict) -> dict:
         accounts = result.get("accounts") or []
         for account in accounts:
             if account.get("error"):
-                problems.append({"label": account.get("label") or PROVIDERS[provider],
+                problems.append({"label": account.get("label") or LABELS[provider],
                                  "error": account["error"]})
         if status == "error" and not any(a.get("error") for a in accounts):
-            problems.append({"label": PROVIDERS[provider],
+            problems.append({"label": LABELS[provider],
                              "error": result.get("reason") or result.get("error")
                              or "The fetch failed. It tries again on the next one."})
     if statuses and all(s == "skipped" for s in statuses):
@@ -59,6 +68,36 @@ def summarize(results: dict) -> dict:
     return {"status": status, "downloaded": downloaded, "problems": problems}
 
 
+def disk_full() -> dict | None:
+    """The run's DISK result when the photos' disk is nearly full (nothing may be
+    downloaded), else None. Every run that downloads asks: the routine fetch, a new
+    login's first import and the history pull alike."""
+    from app import ops
+
+    free = ops.disk_free()
+    if free is None or free >= ops.FULL_DISK_BYTES:
+        return None
+    log.error("fetch.disk_full", free_gb=round(free / 1024**3, 1))
+    return {
+        "status": "error", "total": 0,
+        "reason": f"Nearly full ({free / 1024**3:.1f} GB free). The photos wait on the "
+                  "cameras and come in once there is room.",
+    }
+
+
+def _summary(db: Session, started: datetime, results: dict) -> SyncLog:
+    summary = summarize(results)
+    row = SyncLog(
+        status=summary["status"], started_at=started, images_downloaded=summary["downloaded"],
+        error="; ".join(f"{p['label']}: {p['error']}" for p in summary["problems"]) or None,
+        details={"provider": "pipeline", "stage": "identifying",
+                 "problems": summary["problems"], "results": results},
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
 def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
     """Fetch from every provider; returns the summary row (stage "identifying")."""
     from app import jobs
@@ -67,7 +106,11 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
 
     started = datetime.now(UTC)
     results: dict = {}
-    for provider, run in (("spypoint", sync_all), ("ubox", sync_ubox_all)):
+    full = disk_full()
+    if full is not None:
+        results[DISK] = full
+    runs = () if DISK in results else (("spypoint", sync_all), ("ubox", sync_ubox_all))
+    for provider, run in runs:
         if jobs.lock_lost():
             break  # another run took the lock over and fetches now
         try:
@@ -80,16 +123,18 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
                 "reason": f"The {PROVIDERS[provider]} fetch failed ({type(exc).__name__}). "
                           "It tries again on the next one.",
             }
-    summary = summarize(results)
-    row = SyncLog(
-        status=summary["status"], started_at=started, images_downloaded=summary["downloaded"],
-        error="; ".join(f"{p['label']}: {p['error']}" for p in summary["problems"]) or None,
-        details={"provider": "pipeline", "stage": "identifying",
-                 "problems": summary["problems"], "results": results},
-    )
-    db.add(row)
-    db.commit()
-    return row, results
+    return _summary(db, started, results), results
+
+
+def room_to_fetch(db: Session) -> bool:
+    """For a one-off import (a new login's first, the history pull): False when the
+    photos' disk is nearly full, with the reason left where the Check button and
+    Settings read the last fetch, so they say why nothing came in."""
+    full = disk_full()
+    if full is None:
+        return True
+    finish(db, _summary(db, datetime.now(UTC), {DISK: full}))
+    return False
 
 
 def finish(db: Session, row: SyncLog, error: str | None = None) -> None:

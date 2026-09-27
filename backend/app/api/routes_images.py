@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import media
 from app.ai import species as species_ai
 from app.ai.checking import hunter_decided
 from app.ai.classifier import ESTATE_KEYS
@@ -107,19 +108,19 @@ def image_file(
     db: Session = Depends(get_db),
 ) -> FileResponse:
     image, cam = _estate_image(db, image_id, _require_user(db, creds, token))
-    if not image.original_path or not os.path.exists(image.original_path):
+    source = media.resolve(image.original_path)
+    if not source or not os.path.exists(source):
         raise HTTPException(404, "Photo not found.")
     if download:
         # Content-Disposition: attachment, so the lightbox's Download button saves
         # a file instead of opening the photo in a tab the user then has to leave.
         return FileResponse(
-            image.original_path,
+            source,
             media_type="image/jpeg",
             filename=download_name(cam.name, image.captured_at),
             headers={"Cache-Control": PHOTO_CACHE},
         )
-    return FileResponse(image.original_path, media_type="image/jpeg",
-                        headers={"Cache-Control": PHOTO_CACHE})
+    return FileResponse(source, media_type="image/jpeg", headers={"Cache-Control": PHOTO_CACHE})
 
 
 @router.get("/{image_id}/thumb")
@@ -137,26 +138,26 @@ def image_thumb(
     tile still shows and the next request tries again.
     """
     image, _ = _estate_image(db, image_id, _require_user(db, creds, token))
-    cached = Path(image.thumbnail_path) if image.thumbnail_path else thumb_path(image.id)
+    cached = Path(media.resolve(image.thumbnail_path) or thumb_path(image.id))
     # The small copy may outlive the original (originals are pruned after a while).
     if cached.is_file():
         return FileResponse(
             cached, media_type="image/webp", headers={"Cache-Control": PHOTO_CACHE}
         )
-    if not image.original_path or not os.path.exists(image.original_path):
+    source = media.resolve(image.original_path)
+    if not source or not os.path.exists(source):
         raise HTTPException(404, "Photo not found.")
 
     dest = thumb_path(image.id)
     try:
-        make_thumb(image.original_path, dest)
+        make_thumb(source, dest)
     except Exception as e:  # a corrupt upload, an odd format, a full disk
         log.warning("thumb.failed", image_id=str(image.id), error=f"{type(e).__name__}: {e}")
         return FileResponse(
-            image.original_path, media_type="image/jpeg",
-            headers={"Cache-Control": "private, no-cache"},
+            source, media_type="image/jpeg", headers={"Cache-Control": "private, no-cache"},
         )
-    if image.thumbnail_path != str(dest):
-        image.thumbnail_path = str(dest)
+    if image.thumbnail_path != media.stored(dest):
+        image.thumbnail_path = media.stored(dest)
         db.commit()
     return FileResponse(dest, media_type="image/webp", headers={"Cache-Control": PHOTO_CACHE})
 

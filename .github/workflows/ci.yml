@@ -1,0 +1,193 @@
+# The test gate in front of the server (plan item 3, audit K-09).
+#
+# Every push and pull request: the backend tests against a real PostgreSQL (the same
+# PostGIS + pgvector image as the Docker stack), ruff, the frontend build, and the UI
+# scripts against a started stack (API with demo data, Vite in front of it).
+#
+# When all of that passes on a push to main, the `deploy` branch is moved to that
+# commit. Db01 deploys the `deploy` branch (deploy/update.ps1), so a commit that fails
+# here never reaches the server; until this has run once and made the branch, the
+# server deploys main as before. docs/09-deployment.md has the rest.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  PLAYWRIGHT_VERSION: "1.56.1"
+  # tests/conftest.py makes a database per test on this server (dsn_for).
+  GAMESENSE_TEST_DSN: postgresql+psycopg://postgres:postgres@localhost:5432/postgres?sslmode=disable
+
+jobs:
+  backend:
+    name: Backend tests and ruff
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: PostgreSQL (PostGIS + pgvector, as docker/postgres builds it)
+        run: |
+          docker build -t gamesense-postgres docker/postgres
+          docker run -d --name pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 gamesense-postgres
+          for i in $(seq 1 60); do docker exec pg pg_isready -U postgres -q && break; sleep 1; done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Python packages (all but the AI models' heavy ones, which no test loads)
+        working-directory: backend
+        run: |
+          grep -vE '^(ultralytics|timm)\b' requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt pytest==8.3.4 ruff==0.8.4
+      - name: pytest (a missing database fails, never skips)
+        working-directory: backend
+        env:
+          GAMESENSE_REQUIRE_DB: "1"
+        run: python -m pytest -q
+      - name: The Suntek camera receivers' tests (a deploy restarts them too)
+        # update.ps1 restarts GameSenseFTP, GameSenseFTPImport and GameSenseMail on
+        # every deploy. Two of these files share a name, hence importlib mode.
+        run: |
+          pip install -r ftp-receiver/requirements.txt
+          python -m pytest -q -p no:cacheprovider --import-mode=importlib \
+            ftp-receiver/tests mail-receiver/tests integration-tests
+      - name: ruff - errors anywhere
+        working-directory: backend
+        run: ruff check --select E9,F63,F7,F82 .
+      - name: ruff - no new findings in the files this change touches
+        working-directory: backend
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then base="HEAD~1"; fi
+          python scripts/ruff_ratchet.py "$base"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  ui:
+    name: UI scripts against a started stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/gamesense
+      MEDIA_ROOT: /tmp/gamesense/media
+      MODELS_ROOT: /tmp/gamesense/models
+      APP_ENV: development
+    steps:
+      - uses: actions/checkout@v4
+      - name: PostgreSQL
+        run: |
+          docker build -t gamesense-postgres docker/postgres
+          docker run -d --name pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=gamesense -p 5432:5432 gamesense-postgres
+          for i in $(seq 1 60); do docker exec pg pg_isready -U postgres -q && break; sleep 1; done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: The API, migrated, with demo data
+        working-directory: backend
+        run: |
+          grep -vE '^(ultralytics|timm)\b' requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt
+          mkdir -p "$MEDIA_ROOT" "$MODELS_ROOT"
+          alembic upgrade head
+          python -m app.seed
+          python scripts/demo_data.py
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/api.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8000/api/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8000/api/ready
+      - name: The app (built, for the scripts that serve it; and Vite in front of the API)
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          VITE_API_PROXY=http://127.0.0.1:8000 nohup npx vite --port 5173 --strictPort > /tmp/vite.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:5173/ > /dev/null && break; sleep 1; done
+      - name: Playwright's Chromium
+        run: |
+          npm install --prefix /tmp/pw --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"
+          npx --prefix /tmp/pw playwright install --with-deps chromium
+      - name: UI scripts
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_MODULE: /tmp/pw/node_modules/playwright
+          BASE_URL: http://127.0.0.1:5173
+          API_URL: http://127.0.0.1:8000
+          PW_CHANNEL: ""
+          UI_LOGS: /tmp/ui-logs
+        run: bash tests/run.sh
+      - name: Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-logs
+          path: |
+            /tmp/ui-logs
+            /tmp/api.log
+            /tmp/vite.log
+
+  # Green on main: this commit may go live. Only ever forward along main's history, so
+  # an older run finishing late never takes the server back.
+  promote:
+    name: Move the deploy branch
+    needs: [backend, frontend, ui]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git fetch origin +refs/heads/deploy:refs/remotes/origin/deploy || true
+          if ! git rev-parse -q --verify refs/remotes/origin/deploy > /dev/null; then
+            echo "No deploy branch yet: making it at ${GITHUB_SHA}."
+          elif git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/deploy; then
+            echo "deploy is already at or past ${GITHUB_SHA}: nothing to do."; exit 0
+          elif ! git merge-base --is-ancestor refs/remotes/origin/deploy "$GITHUB_SHA"; then
+            echo "::warning::main was rewritten; deploy follows it to ${GITHUB_SHA}."
+          fi
+          git push --force origin "${GITHUB_SHA}:refs/heads/deploy"

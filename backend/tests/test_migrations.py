@@ -1462,3 +1462,61 @@ def test_harvest_and_people_upgrade_down_and_up_again(fresh_db):
         assert _index(eng, "harvests", "ix_harvests_sit_id") == ["sit_id"]
     finally:
         eng.dispose()
+
+
+def _drift(dsn: str, metadata=None) -> list:
+    """What autogenerate finds between the database at `dsn` and the models."""
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    import app.models  # noqa: F401
+    from app.core.db import Base
+
+    eng = create_engine(dsn)
+    try:
+        with eng.connect() as conn:
+            diff = compare_metadata(MigrationContext.configure(conn), metadata or Base.metadata)
+    finally:
+        eng.dispose()
+    return [d for d in diff if "alembic_version" not in repr(d)]
+
+
+@requires_db
+def test_a_database_migrated_long_ago_upgrades_to_exactly_the_models(fresh_db):
+    """The guard the create_all convention lacked (audit H-08): start from the schema a
+    real, migrated database had (tests/fixtures/schema/snapshot.sql), not from
+    create_all(), and upgrade it. A model change that no migration carries is a
+    difference here, as it would be on the server."""
+    from . import schema_snapshot
+
+    schema_snapshot.load(fresh_db)
+    eng = create_engine(fresh_db)
+    try:
+        with eng.connect() as c:
+            at = c.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert at == schema_snapshot.revision()
+    finally:
+        eng.dispose()
+    command.upgrade(alembic_config(fresh_db), "head")
+    assert _drift(fresh_db) == [], "models.py has a change no migration makes"
+
+
+@requires_db
+def test_the_snapshot_guard_catches_a_column_added_with_no_migration(fresh_db):
+    """Proof that the check above can fail: a column on a copy of the models, with no
+    migration, is found, where the fresh-install test cannot see it."""
+    from sqlalchemy import Column, MetaData, String
+
+    from app.core.db import Base
+
+    from . import schema_snapshot
+
+    schema_snapshot.load(fresh_db)
+    command.upgrade(alembic_config(fresh_db), "head")
+    copy = MetaData(naming_convention=Base.metadata.naming_convention)
+    for table in Base.metadata.sorted_tables:
+        table.to_metadata(copy)
+    copy.tables["images"].append_column(Column("forgotten", String))
+    found = _drift(fresh_db, copy)
+    assert [(d[0], d[2], d[3].name) for d in found if isinstance(d, tuple)] == [
+        ("add_column", "images", "forgotten")]

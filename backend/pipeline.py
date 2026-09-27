@@ -16,6 +16,8 @@ the AI models never load into the web server. Modes:
     python pipeline.py notify     # alerts that waited for a sit or quiet hours, and
                                   # tonight's plan ~2 h before sunset — every 15 min
     python pipeline.py busy       # exit 3 while a run is working (deploy/update.ps1)
+    python pipeline.py hold       # deploy/update.ps1: every job's lock, held until the
+                                  # deploy closes this process's input (it is done)
 
 Every mode but `sex` and `notify` shares the "pipeline" lock (app.jobs): they load
 the CPU models or rebuild the exposure table, so they must never run on top of each
@@ -31,33 +33,43 @@ seconds.
 
 Everything a run logs also goes to pipeline.log (app.jobs.log_dir): Task Scheduler
 throws a scheduled run's output away.
+
+A deploy holds every one of those locks (`hold`) from before it swaps the code until
+the new version answers, so no job runs new code on the old schema, or has its rows
+moved by a data migration halfway through (audit H-09). A run that waited for a lock
+(plan, score, a queued Check) and finds the code changed under it meanwhile starts
+again on the new code rather than finish on a mix of the two.
 """
 import os
 import sys
+import threading
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# --- load .env into the process environment (same rationale as serve.py) ---
-_env = Path(__file__).with_name(".env")
-if _env.exists():
-    for _line in _env.read_text(encoding="utf-8").splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
+# --- load .env into the process environment (same rationale and rules as serve.py) ---
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(Path(__file__).with_name(".env"), override=False, encoding="utf-8")
 
 from app import jobs  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.db import SessionLocal  # noqa: E402
 from app.core.logging import configure_logging, get_logger  # noqa: E402
+from app.version import read_commit  # noqa: E402
 
 log = get_logger("pipeline")
 
-MODES = ("sync", "backfill", "scan", "login", "sex", "plan", "score", "reid", "notify", "busy")
+MODES = ("sync", "backfill", "scan", "login", "sex", "plan", "score", "reid", "notify", "busy",
+         "hold")
 # The modes that don't take the "pipeline" lock, and the lock each takes instead.
 OWN_LOCK = {"sex": "sexpass", "notify": "notify"}
+# What a deploy holds while the code and the schema change: every job's lock.
+DEPLOY_LOCKS = ("pipeline", *OWN_LOCK.values())
+# A deploy that never says it is done lets go after this long: a hung migration must
+# not stop the photos for good.
+HOLD_MAX_SECONDS = int(os.environ.get("DEPLOY_HOLD_MAX_SECONDS", str(90 * 60)))
 # plan and score wait this long for a running job (inside the tasks' 1 h limit).
 WAIT_SECONDS = int(os.environ.get("PIPELINE_WAIT_SECONDS", str(40 * 60)))
 POLL_SECONDS = 30
@@ -141,10 +153,12 @@ def _run(mode: str, args: list[str], db) -> int:
         log.info("pipeline.sync", result=run_fetch(db))
         _catch_up(db)
     elif mode == "backfill":
+        from app.ingestion.fetch import room_to_fetch
         from app.ingestion.sync import backfill_all
 
         months = int(args[0]) if args else int(os.environ.get("BACKFILL_MONTHS", "1"))
-        log.info("pipeline.backfill", result=backfill_all(db, months=months))
+        if room_to_fetch(db):
+            log.info("pipeline.backfill", result=backfill_all(db, months=months))
         _checked(db)
         _catch_up(db)
     elif mode == "scan":
@@ -154,13 +168,18 @@ def _run(mode: str, args: list[str], db) -> int:
         if not args:
             log.error("pipeline.login_needs_id")
             return 2
+        from app.ingestion.fetch import room_to_fetch
         from app.models import CameraAccount
 
         account = db.get(CameraAccount, uuid.UUID(args[0]))
         if account is None:
             log.warning("pipeline.login_gone", account=args[0])
             return 0
-        if account.provider == "ubox":
+        if not room_to_fetch(db):
+            # Its history waits: the routine fetch imports a login never imported yet,
+            # once there is room.
+            log.warning("pipeline.login_waits_for_room", account=args[0])
+        elif account.provider == "ubox":
             from app.ingestion.ubox_sync import backfill_ubox_account
 
             log.info("pipeline.login", result=backfill_ubox_account(db, args[0]))
@@ -250,6 +269,52 @@ def _sex(db) -> int:
     return 0
 
 
+def _busy_line(h: jobs.Holder) -> str:
+    return f"busy: {h.owner} (pid {h.pid} on {h.host}) since {h.started.isoformat()}"
+
+
+def hold(stream=None) -> int:
+    """`pipeline.py hold`, for deploy/update.ps1: take every job's lock, print "held",
+    and keep them until the deploy closes this process's input (it is done, or it
+    died, which closes it too), or HOLD_MAX_SECONDS pass. A job holding one: "busy:
+    ..." and exit 3, holding nothing."""
+    stream = sys.stdin if stream is None else stream
+    held: list[jobs.JobLock] = []
+    for name in DEPLOY_LOCKS:
+        lock = jobs.try_acquire(name, "deploy")
+        if lock is None:
+            for mine in held:
+                mine.release()
+            h = jobs.holder(name)
+            print(_busy_line(h) if h else f"busy: {name}", flush=True)
+            return BUSY_EXIT
+        held.append(lock)
+    print("held", flush=True)
+    done = threading.Event()
+
+    def until_closed() -> None:
+        try:
+            while stream.read(1024):
+                pass
+        except (OSError, ValueError):
+            pass
+        done.set()
+
+    threading.Thread(target=until_closed, name="deploy-hold", daemon=True).start()
+    if not done.wait(HOLD_MAX_SECONDS):
+        log.warning("pipeline.hold_timed_out", seconds=HOLD_MAX_SECONDS)
+    for lock in held:
+        lock.release()
+    print("released", flush=True)
+    return 0
+
+
+def again(argv: list[str]) -> int:
+    """Start this run over on the code now on disk (the process is replaced)."""
+    os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *argv])
+    return 0  # not reached
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode = argv[0] if argv else "sync"
@@ -260,15 +325,18 @@ def main(argv: list[str] | None = None) -> int:
         # The deploy stands down while any of the locks is held, as it did when the
         # cloud stag/hind pass shared the pipeline lock: a migration or a code swap
         # must not land under a running pass (or a notify run, a few seconds long).
-        for name in ("pipeline", *OWN_LOCK.values()):
+        for name in DEPLOY_LOCKS:
             h = jobs.holder(name)
             if h is not None:
-                print(f"busy: {h.owner} (pid {h.pid} on {h.host}) since {h.started.isoformat()}")
+                print(_busy_line(h))
                 return BUSY_EXIT
         print("free")
         return 0
+    if mode == "hold":
+        return hold()
 
     configure_logging(log_file=jobs.log_dir() / "pipeline.log")
+    started_on = read_commit()
     name = OWN_LOCK.get(mode, "pipeline")
     marker = QUEUES.get((mode, tuple(argv[1:])))
     queued = None
@@ -292,6 +360,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         log.info("pipeline.skip_locked", mode=mode, held_by=holder.owner if holder else None)
         return 0
+    if wait and read_commit() != started_on:
+        # A deploy swapped the code while this run waited for it: the modules not
+        # imported yet would come from the new code, the rest from the old.
+        log.info("pipeline.code_changed_while_waiting", mode=mode, was=started_on)
+        lock.release()
+        if queued is not None:
+            queued.release()
+        return again(argv)
     jobs.run_under(lock)
     try:
         with SessionLocal() as db:

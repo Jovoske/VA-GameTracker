@@ -357,6 +357,7 @@ def _check_clock(camera, photo: Photo) -> None:
 def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, enrich: bool):
     from sqlalchemy import select, text
 
+    from app import media
     from app.models import Camera, Image
 
     if db.get_bind().dialect.name != "postgresql":
@@ -372,12 +373,13 @@ def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, 
         Image.camera_id == camera_id, Image.file_hash == photo.sha256
     ))
     if existing is not None:
-        if not existing.original_path or not Path(existing.original_path).is_file():
+        kept = media.resolve(existing.original_path)
+        if not kept or not Path(kept).is_file():
             raise RuntimeError("Duplicate image has no media file; retained package needs repair")
-        stored = _read_regular(Path(existing.original_path), len(photo.data))
+        stored = _read_regular(Path(kept), len(photo.data))
         if hashlib.sha256(stored).hexdigest() != photo.sha256:
             raise RuntimeError("Duplicate image media hash mismatch; retained package needs repair")
-        result = ImportResult(str(existing.id), "duplicate", existing.original_path)
+        result = ImportResult(str(existing.id), "duplicate", kept)
         db.commit()
         return result
 
@@ -388,7 +390,7 @@ def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, 
     _atomic_write(destination, photo.data)
     row = Image(camera_id=camera_id, captured_at=photo.captured_at,
                 received_at=photo.received_at,
-                original_path=str(destination), file_hash=photo.sha256,
+                original_path=media.stored(destination), file_hash=photo.sha256,
                 width=photo.width, height=photo.height)
     db.add(row)
     db.flush()

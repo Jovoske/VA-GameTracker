@@ -12,6 +12,7 @@ from app.health import camera_health
 from app.ingestion import logins
 from app.ingestion import ubox_sync as sync
 from app.ingestion.ubox import UboxDevice, UboxError, UboxEvent, UboxPageLimitError
+from app.media import resolve
 from app.models import Camera, CameraAccount, Estate, Image, SyncLog, User
 
 from .conftest import requires_db
@@ -354,7 +355,9 @@ def test_ubox_enters_normal_classification_and_animals_gallery(db_session, setup
     gallery = species_images("fox", limit=200, label=None, _=user, db=db_session)
     assert len(gallery) == 1 and gallery[0]["file_url"].endswith("/file")
     image = db_session.scalar(select(Image))
-    assert str(image.id) in gallery[0]["file_url"] and Path(image.original_path).is_file()
+    assert str(image.id) in gallery[0]["file_url"] and Path(resolve(image.original_path)).is_file()
+    # Stored under MEDIA_ROOT, not absolute: moving the media folder moves nothing else.
+    assert not Path(image.original_path).is_absolute()
 
 
 @requires_db

@@ -459,9 +459,9 @@ def test_the_ai_pass_makes_the_small_copy_of_each_animal_photo(db_session, estat
     db_session.expire_all()
     boar, grass = (db_session.get(Image, photos[k].id) for k in ("boar", "grass"))
     assert grass.is_empty_frame is True and grass.thumbnail_path is None
-    assert boar.thumbnail_path == str(tmp_path / "media" / "thumbs" / str(boar.id)[:2]
-                                      / f"{boar.id}.webp")
-    with PImage.open(boar.thumbnail_path) as thumb:
+    # Written under MEDIA_ROOT (audit H-21), where thumbs.thumb_path puts it.
+    assert boar.thumbnail_path == f"thumbs/{str(boar.id)[:2]}/{boar.id}.webp"
+    with PImage.open(tmp_path / "media" / boar.thumbnail_path) as thumb:
         assert thumb.size == (320, 180)
 
     # A file the thumbnail can't be made from never holds the pass up.
@@ -905,6 +905,10 @@ def test_settings_is_told_when_the_photo_disk_runs_low(client, db_session, estat
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * 1024**3, 0, 1024**3))
     disk = client.get("/api/admin/status", headers=admin).json()["disk"]
-    assert disk == {"free_gb": 1.0, "total_gb": 100.0, "low": True}
+    assert disk == {"free_gb": 1.0, "total_gb": 100.0, "low": True, "full": True}
+    # Under 20 GB is worth saying (amber); under 5 GB the fetch stops downloading (red).
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * 1024**3, 0, 12 * 1024**3))
+    disk = client.get("/api/admin/status", headers=admin).json()["disk"]
+    assert disk["low"] is True and disk["full"] is False
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * 1024**3, 0, 40 * 1024**3))
     assert client.get("/api/admin/status", headers=admin).json()["disk"]["low"] is False

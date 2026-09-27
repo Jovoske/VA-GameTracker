@@ -201,7 +201,11 @@ def test_a_camera_silent_for_over_a_week_is_not_ranked_on_its_history(db_session
     assert [w["camera"] for w in out["where"]] == ["PL19"]
     [gone] = out["alerts"]
     assert gone["camera"] == "PL07" and gone["ranked"] is False
-    assert gone["detail"].endswith("No photos for 20 days, so it is left out of tonight's ranking")
+    # Its last photo was at 22:00 on the night 21 nights ago: 20 whole days until then,
+    # 21 after (the day count must not depend on the hour the tests run at).
+    days = (datetime.now(UTC) - at(ago(21), 22)).days
+    assert gone["detail"].endswith(
+        f"No photos for {days} days, so it is left out of tonight's ranking")
 
 
 @requires_db

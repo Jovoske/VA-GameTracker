@@ -130,7 +130,7 @@ def test_thumb_is_a_small_upright_webp_made_once_and_cached(
         assert thumb.format == "WEBP"
         assert thumb.size == (320, 427)  # upright, 320 wide
     db_session.refresh(img)
-    assert img.thumbnail_path and img.thumbnail_path.startswith(str(media / "thumbs"))
+    assert img.thumbnail_path == f"thumbs/{str(img.id)[:2]}/{img.id}.webp"  # under MEDIA_ROOT
 
     # The second request is served from disk, not made again.
     monkeypatch.setattr(routes_images, "make_thumb", lambda *a: pytest.fail("made twice"))
