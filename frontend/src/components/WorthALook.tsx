@@ -114,7 +114,10 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
       </ul>
       {zoom != null && createPortal(
         <PhotoLightbox
-          photos={items.map((h) => ({ id: h.image_id, file_url: h.file_url, captured_at: h.captured_at, camera: h.camera, label: h.label, notes_count: h.notes_count }))}
+          photos={items.map((h) => ({
+            id: h.image_id, file_url: h.file_url, captured_at: h.captured_at, camera: h.camera, label: h.label,
+            notes_count: h.notes_count, species_id: h.species_id, fixed_by: h.fixed_by,
+          }))}
           start={zoom}
           backLabel={backLabel}
           zIndex={70}
@@ -123,6 +126,7 @@ export default function HighlightStrip({ cameraId, refreshKey = 0, backLabel, li
             if (changed.current) { changed.current = false; load() }
           }}
           onNotesChange={(id, n) => { changed.current = true; onChange?.(id, n) }}
+          onFixed={() => { changed.current = true }}
         />,
         document.body,
       )}

@@ -18,6 +18,8 @@ type Status = {
   suntek: { ready: number | null; failed: number | null } | null
   ai?: AiStatus
   sex_pass?: SexStatus
+  // Free space where the photos are kept; `low` under 2 GB. Null when unreadable.
+  disk?: { free_gb: number; total_gb: number; low: boolean } | null
 }
 /** The AI pass (app.ai.checking): its backlog, what it gave up on, why it stopped. */
 type AiStatus = {
@@ -53,6 +55,8 @@ type Check = {
 type Species = {
   id: string
   common_name: string
+  /** What the app calls it unless an admin names it otherwise. */
+  default_name?: string
   huntable: boolean
   hidden: boolean
   is_priority: boolean
@@ -204,6 +208,68 @@ const smallBtn = {
 } as const
 // Glove-sized: the buttons a hunter needs when a login breaks.
 const loginBtn = { ...smallBtn, minHeight: 44, padding: '8px 14px', fontSize: 13, color: 'var(--text)' } as const
+
+/**
+ * An animal's name in the app, which an admin can change: "Hare" for the hares and
+ * rabbits the model can't tell apart, on an estate that has no rabbits. Every list,
+ * chip, alert and gallery uses it. Tap the name to change it; "Use the app's name"
+ * goes back to the one it started with.
+ */
+function SpeciesName({ sp, canEdit, onSaved }: { sp: Species; canEdit: boolean; onSaved: (s: Species) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(sp.common_name)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const field = `species-name-${sp.id}`
+
+  async function save(name: string | null) {
+    if (saving) return
+    const clean = name === null ? null : name.replace(/\s+/g, ' ').trim()
+    if (clean !== null && !clean) { setErr('Type a name first.'); return }
+    if (clean === sp.common_name) { setEditing(false); return }
+    setSaving(true)
+    setErr('')
+    try {
+      const r = await api<Species>(`/species/${sp.id}`, { method: 'PATCH', body: JSON.stringify({ common_name: clean }), timeoutMs: 20_000 })
+      onSaved({ ...sp, common_name: r.common_name, default_name: r.default_name ?? sp.default_name })
+      setEditing(false)
+    } catch (e) {
+      const x = e as Error & { offline?: boolean; timeout?: boolean }
+      setErr(x.offline ? 'No signal, so the name wasn’t saved.' : x.timeout ? 'No answer from the server, so the name wasn’t saved.' : `The name wasn’t saved. ${x.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const style = { fontSize: 14, color: sp.huntable ? 'var(--text)' : 'var(--text-dim)' }
+  if (!canEdit) return <div style={style}>{sp.common_name}</div>
+  if (!editing) {
+    return (
+      <button type="button" className="species-name" style={style} aria-label={`Rename ${sp.common_name}`}
+        onClick={() => { setDraft(sp.common_name); setErr(''); setEditing(true) }}>
+        {sp.common_name}
+      </button>
+    )
+  }
+  return (
+    <form className="species-name-form" aria-busy={saving} onSubmit={(e) => { e.preventDefault(); void save(draft) }}
+      onKeyDown={(e) => { if (e.key === 'Escape' && !saving) { e.preventDefault(); setEditing(false) } }}>
+      <label htmlFor={field} className="sr-only">Name for {sp.common_name}</label>
+      <input id={field} className="input" value={draft} maxLength={40} autoFocus disabled={saving}
+        aria-invalid={!!err} onChange={(e) => { setDraft(e.target.value); setErr('') }} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <button type="submit" style={loginBtn} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+        <button type="button" style={loginBtn} disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
+        {sp.default_name && sp.default_name !== sp.common_name && (
+          <button type="button" style={loginBtn} disabled={saving} onClick={() => void save(null)}>
+            Use the app’s name ({sp.default_name})
+          </button>
+        )}
+      </div>
+      {err && <p role="alert" style={{ margin: 0, fontSize: 13, color: 'var(--skip)' }}>{err}</p>}
+    </form>
+  )
+}
 
 export default function Admin() {
   const nav = useNavigate()
@@ -492,7 +558,7 @@ export default function Admin() {
 
       <SettingsSection id="advice" title="Animals in the advice"
         summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
-        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
+        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.{me?.role === 'admin' ? ' Tap a name to change what the app calls it.' : ''}</p>
         {!nudgeGone && me?.role === 'admin' && notGame.length > 0 && (
           <div className="status-panel" data-nudge style={{ marginBottom: 10 }}>
             {andList(notGame.map((sp) => sp.common_name))} {notGame.length === 1 ? 'is' : 'are'} in the evening
@@ -526,10 +592,9 @@ export default function Admin() {
                 borderTop: '1px solid var(--border)',
               }}
             >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 14, color: s.huntable ? 'var(--text)' : 'var(--text-dim)' }}>
-                  {s.common_name}
-                </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <SpeciesName sp={s} canEdit={me?.role === 'admin'}
+                  onSaved={(next) => setSpecies((list) => list.map((x) => (x.id === next.id ? next : x)))} />
                 <div style={{ fontSize: 11, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
                   {s.detections} sighting{s.detections === 1 ? '' : 's'}
                 </div>
@@ -893,6 +958,16 @@ export default function Admin() {
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>Last photo fetch</span>
               <span>{FETCH_WORDS[status.last_sync.status] ?? status.last_sync.status}{status.last_sync.at ? `, ${ageLabel(status.last_sync.at)}` : ''}</span>
+            </div>
+          )}
+          {status.disk && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, padding: '4px 0' }}
+              role={status.disk.low ? 'alert' : undefined} data-disk={status.disk.low ? 'low' : 'ok'}>
+              <span style={{ color: 'var(--text-dim)' }}>Space for photos</span>
+              <span style={{ textAlign: 'right', color: status.disk.low ? 'var(--skip)' : undefined }}>
+                {status.disk.free_gb} GB free{status.disk.low
+                  ? '. Nearly full: new photos can’t be saved once it is. Ask whoever runs the server to free some space.' : ''}
+              </span>
             </div>
           )}
           {status.suntek && (

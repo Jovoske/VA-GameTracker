@@ -25,7 +25,10 @@ const STRIP = 12
 const FRAMES = 36
 const LOAD_TIMEOUT_MS = 20_000
 
-type Photo = { image_id: string; file_url: string; captured_at: string; camera: string; label: string; notes_count: number }
+type Photo = {
+  image_id: string; file_url: string; captured_at: string; camera: string; label: string; notes_count: number
+  species_id?: string | null; fixed_by?: string | null
+}
 type Failure = Error & { offline?: boolean; timeout?: boolean }
 
 const batteryWords = (pct: number | null) => pct == null ? 'Battery unknown' : pct < 20 ? 'Battery low' : pct < 50 ? 'Battery half' : 'Battery good'
@@ -97,6 +100,8 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
   const request = useRef(0)
+  // A fix in the viewer ("Wrong?"): the strip is asked again once the viewer closes.
+  const fixed = useRef(false)
   // Asked again when a newer photo arrives, not on every map refresh.
   const newest = camera.latest?.image_id
 
@@ -118,7 +123,10 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
   if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={() => { load(); onRetry() }}>Try again</button></p>
   if (!photos) return <p className="cam-strip-msg" role="status">Loading photos…</p>
   if (!photos.length) return <p className="cam-strip-msg">No animal photos from this camera yet.</p>
-  const viewer: LightboxPhoto[] = photos.map(p => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count }))
+  const viewer: LightboxPhoto[] = photos.map(p => ({
+    id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label,
+    notes_count: p.notes_count, species_id: p.species_id, fixed_by: p.fixed_by,
+  }))
   // One tile per burst (frames stamped the same second), opening on its first frame;
   // the viewer still pages through every frame.
   const tiles: { at: number; frames: number }[] = []
@@ -145,7 +153,9 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
       })}
     </ul>
     {/* Over everything, the tab bar included: the sheet sits inside the map. */}
-    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel="Back to the map" onClose={() => setZoom(null)}
+    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel="Back to the map"
+      onClose={() => { setZoom(null); if (fixed.current) { fixed.current = false; load() } }}
+      onFixed={() => { fixed.current = true }}
       onNotesChange={(id, n) => { setPhotos(ps => ps && ps.map(p => p.image_id === id ? { ...p, notes_count: n } : p)); onNotes() }} />, document.body)}
   </>
 }

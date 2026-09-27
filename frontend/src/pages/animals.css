@@ -91,3 +91,19 @@
 .an-gallery-caption { padding: 4px 7px; font-size: 11px; color: var(--text-dim); display: flex; justify-content: space-between; gap: 6px; }
 .an-gallery-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .an-gallery-date { flex-shrink: 0; }
+.an-gallery-more { width: 100%; margin-top: 12px; }
+
+/* Naming an animal, on its card (admins). The name is a button, big enough to hit. */
+.an-animal-name--edit {
+  display: block; width: 100%; min-height: 44px; margin: -8px 0 0; padding: 8px 0 4px; text-align: left;
+  background: none; border: 0; color: var(--text); font: inherit; font-size: 13px; font-weight: 600;
+  text-decoration: underline dotted var(--text-dim); text-underline-offset: 3px; cursor: pointer;
+}
+.an-name-form { display: flex; flex-direction: column; gap: 6px; }
+.an-name-form .input { font-size: 16px; min-height: 44px; }
+.an-name-buttons { display: flex; gap: 6px; }
+.an-name-buttons .an-btn { flex: 1; min-height: 44px; }
+.an-name-form .an-error { margin: 0; }
+.an-askname { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.an-askname .an-btn { min-height: 44px; }
+.an-selbar { flex-wrap: wrap; }

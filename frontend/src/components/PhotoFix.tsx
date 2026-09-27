@@ -1,0 +1,238 @@
+import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
+import { XIcon } from '@phosphor-icons/react/dist/csr/X'
+import { useEffect, useRef, useState } from 'react'
+import { api, type Failure } from '../api'
+
+/**
+ * "Wrong?" in the photo viewer: say what the animal really is, or that there is
+ * nothing in the photo (a false alarm). Members and admins; viewers never see it.
+ *
+ * The answer is the hunter's: the AI never changes it back, and every list and
+ * count (Photos, Animals, the map, the forecast) reads the species from the photo,
+ * so they all follow at once. The viewer shows the new name straight away with an
+ * Undo, and the list under it drops a photo that no longer belongs there once the
+ * viewer closes, never while it is open.
+ */
+
+/** What a photo is after a fix, as the viewer and the lists under it show it. */
+export type PhotoFix = {
+  label: string
+  species_id: string | null
+  /** Marked "nothing here": it leaves the photo lists. */
+  empty: boolean
+  /** One of the animals hidden in Settings: it leaves the photo lists too. */
+  hidden: boolean
+  fixed_by: string | null
+}
+
+/** What the server answers after a fix (routes_images.set_species / undo_species). */
+type Fixed = PhotoFix & { image_id: string; group_size: number | null }
+
+export type Choice = { id: string; name: string; hidden: boolean; likely: boolean; big_game: boolean; seen: number }
+
+const TIMEOUT_MS = 20_000
+let choices: Promise<Choice[]> | null = null
+
+/** The animals a photo can be said to show, asked once a session (again after a failure). */
+export function loadChoices(): Promise<Choice[]> {
+  if (!choices) {
+    choices = api<Choice[]>('/species/choices', { timeoutMs: TIMEOUT_MS })
+    choices.catch(() => { choices = null })
+  }
+  return choices
+}
+
+function failed(e: unknown, what: string): string {
+  const x = e as Failure
+  if (x.offline) return `No signal, so ${what}. Try again when you have a connection.`
+  if (x.timeout) return `No answer from the server, so ${what}. Try again.`
+  return `${x.message || 'Something went wrong.'} ${what[0].toUpperCase()}${what.slice(1)}.`
+}
+
+/** Say the photo shows `speciesId`. */
+export async function fixSpecies(imageId: string, speciesId: string): Promise<PhotoFix> {
+  const r = await api<Fixed>(`/images/${imageId}/species`, {
+    method: 'POST', body: JSON.stringify({ species_id: speciesId }), timeoutMs: TIMEOUT_MS,
+  })
+  return { label: r.label, species_id: r.species_id, empty: r.empty, hidden: r.hidden, fixed_by: r.fixed_by }
+}
+
+/** Mark it "nothing here", or keep it again (Undo). */
+export async function markEmpty(imageId: string, empty: boolean): Promise<void> {
+  await api(`/images/${imageId}/flag`, { method: 'POST', body: JSON.stringify({ is_empty: empty }), timeoutMs: TIMEOUT_MS })
+}
+
+/** Put back what the AI said. */
+export async function undoFix(imageId: string): Promise<PhotoFix> {
+  const r = await api<Fixed>(`/images/${imageId}/species`, { method: 'DELETE', timeoutMs: TIMEOUT_MS })
+  return { label: r.label, species_id: r.species_id, empty: r.empty, hidden: r.hidden, fixed_by: r.fixed_by }
+}
+
+/**
+ * The sheet: the likely animals as big buttons (the big game, then what the cameras
+ * have seen), the rest behind "More animals", and "Nothing here" on its own at the
+ * bottom. One tap saves. It holds the viewer still while it is open, and the phone's
+ * Back, Escape and the dim layer close it, not the photo.
+ */
+export function FixSheet({ imageId, label, camera, speciesId, empty, onClose, onFixed }: {
+  imageId: string
+  label: string
+  camera: string
+  /** What the photo is now, to mark it on the list. */
+  speciesId: string | null
+  empty: boolean
+  onClose: () => void
+  /** Saved: what it is now, and the choice made ("nothing" for Nothing here). */
+  onFixed: (fix: PhotoFix, choice: string) => void
+}) {
+  const [list, setList] = useState<Choice[] | null>(null)
+  const [loadErr, setLoadErr] = useState('')
+  const [more, setMore] = useState(false)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState('')
+  const root = useRef<HTMLDivElement>(null)
+  const live = useRef(true)
+  const done = useRef(false)
+  const mark = useRef(`fix-${imageId}-${Date.now()}`)
+  const busyRef = useRef(busy)
+  busyRef.current = busy
+
+  function load() {
+    setLoadErr('')
+    loadChoices()
+      .then((c) => { if (live.current) setList(c) })
+      .catch((e) => { if (live.current) setLoadErr(failed(e, 'the list of animals didn’t load')) })
+  }
+  useEffect(() => {
+    live.current = true
+    load()
+    root.current?.focus({ preventScroll: true })
+    return () => { live.current = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** Gone (saved, or closed): take this sheet's step off the history too. */
+  function finish(after: () => void) {
+    done.current = true
+    if (window.history.state?.lbFix === mark.current) window.history.back()
+    after()
+  }
+  const leave = () => { if (!busyRef.current) finish(onClose) }
+  const leaveRef = useRef(leave)
+  leaveRef.current = leave
+
+  // The phone's Back closes this sheet, not the photo under it (as the note sheet does).
+  useEffect(() => {
+    const me = mark.current
+    if (window.history.state?.lbFix !== me) window.history.pushState({ ...(window.history.state ?? {}), lbFix: me }, '')
+    const onPop = () => {
+      if (done.current || window.history.state?.lbFix === me) return
+      if (busyRef.current) {
+        window.history.pushState({ ...(window.history.state ?? {}), lbFix: me }, '')
+        return
+      }
+      done.current = true
+      onClose()
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Escape and Tab belong to the sheet while it is open, before the viewer hears them.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        leaveRef.current()
+      } else if (e.key === 'Tab') {
+        const controls = Array.from(root.current?.querySelectorAll<HTMLElement>('button:not(:disabled)') ?? [])
+          .filter((el) => el.getClientRects().length > 0)
+        if (!controls.length) return
+        e.preventDefault()
+        e.stopPropagation()
+        const at = controls.indexOf(document.activeElement as HTMLElement)
+        const next = at < 0 ? (e.shiftKey ? controls.length - 1 : 0) : (at + (e.shiftKey ? -1 : 1) + controls.length) % controls.length
+        controls[next]?.focus()
+      } else {
+        // Arrows and + - 0 are not the viewer's while the sheet is open.
+        e.stopPropagation()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
+
+  async function choose(choice: string) {
+    if (busy) return
+    if (choice === 'nothing' ? empty : choice === speciesId && !empty) { leave(); return }
+    setBusy(choice)
+    setErr('')
+    try {
+      let fix: PhotoFix
+      if (choice === 'nothing') {
+        await markEmpty(imageId, true)
+        fix = { label: 'Nothing here', species_id: null, empty: true, hidden: false, fixed_by: null }
+      } else {
+        fix = await fixSpecies(imageId, choice)
+      }
+      if (!live.current) return
+      finish(() => onFixed(fix, choice))
+    } catch (e) {
+      if (!live.current) return
+      setErr(failed(e, 'it wasn’t changed'))
+      setBusy(null)
+    }
+  }
+
+  const shown = list ? (more ? list : list.filter((c) => c.likely || c.id === speciesId)) : []
+  const rest = list ? list.length - list.filter((c) => c.likely || c.id === speciesId).length : 0
+  return (
+    <>
+      <div className="lb-scrim" aria-hidden="true" onClick={(e) => { e.stopPropagation(); leave() }} onPointerDown={(e) => e.stopPropagation()} />
+      <div ref={root} className="lb-sheet lb-fix" role="dialog" aria-modal="true" aria-label="What is in this photo?" tabIndex={-1}
+        onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+        <div className="lb-sheet-head">
+          <div className="lb-sheet-title">
+            <h2>What’s in this photo?</h2>
+            <p>Now: {label} · {camera}</p>
+          </div>
+          <button type="button" className="lb-sheet-x" aria-label="Cancel" onClick={leave} disabled={!!busy}><XIcon size={20} /></button>
+        </div>
+        {!list && !loadErr && <p className="lb-sheet-keep" role="status">Loading the animals…</p>}
+        {loadErr && (
+          <p className="lb-sheet-err" role="alert">{loadErr}{' '}
+            <button type="button" className="lb-notes-link lb-fix-link" onClick={load}>Try again</button>
+          </p>
+        )}
+        {list && (
+          <div className="lb-fix-grid" role="group" aria-label="It’s a…">
+            {shown.map((c) => {
+              const now = c.id === speciesId && !empty
+              return (
+                <button key={c.id} type="button" className="lb-fix-choice" aria-pressed={now} disabled={!!busy}
+                  data-species={c.id} onClick={() => choose(c.id)}>
+                  {now && <CheckIcon size={16} weight="bold" aria-hidden="true" />}
+                  <span>{busy === c.id ? 'Saving…' : c.name}</span>
+                  {c.hidden && <small>hidden</small>}
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {list && rest > 0 && (
+          <button type="button" className="lb-fix-more" aria-expanded={more} onClick={() => setMore((m) => !m)} disabled={!!busy}>
+            {more ? 'Fewer animals' : `More animals (${rest})`}
+          </button>
+        )}
+        <button type="button" className="lb-fix-choice lb-fix-nothing" aria-pressed={empty} disabled={!!busy}
+          onClick={() => choose('nothing')}>
+          {empty && <CheckIcon size={16} weight="bold" aria-hidden="true" />}
+          <span>{busy === 'nothing' ? 'Saving…' : 'Nothing here (a false alarm)'}</span>
+        </button>
+        {err && <p className="lb-sheet-err" role="alert">{err}</p>}
+      </div>
+    </>
+  )
+}

@@ -13,7 +13,7 @@ const { transformSync } = require('esbuild')
 const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'night.ts'), 'utf8')
 const mod = { exports: {} }
 new Function('module', 'exports', transformSync(src, { loader: 'ts', format: 'cjs' }).code)(mod, mod.exports)
-const { nightOf, fromEarlierNight, nightBefore, startedSitIsOn } = mod.exports
+const { nightOf, fromEarlierNight, nightBefore, startedSitIsOn, nightLabel, whenSeen, estateStamp } = mod.exports
 
 // On each clock-change morning, 05:59 is still the night before and 06:00 is the new one.
 const cases = [
@@ -84,4 +84,24 @@ const sits = [
 ]
 for (const [night, started, now, on, what] of sits) assert.equal(startedSitIsOn(night, started, Date.parse(now)), on, what)
 
-console.log(`PASS: the night turns at 06:00 Madrid time on both clock-change mornings (${cases.length} named moments, ${checked} five-minute steps), a copy made before 06:00 is last night's after it, and a sit nobody ended is over at 06:00 unless it is a dawn sit (${sits.length} sits).`)
+// Photos are filed by night, and Animals and Cameras say when in the same words: at
+// 08:00 on Sat 26 Sep, a boar at 21:30 or 00:40 was "last night", not "today" (C-14).
+const sat8 = Date.parse('2026-09-26T06:00:00Z')
+const weekday = (night, style) => new Date(`${night}T12:00:00Z`).toLocaleDateString(undefined, { weekday: style, timeZone: 'UTC' })
+assert.equal(nightLabel(nightOf('2026-09-25T19:30:00Z'), sat8), 'Last night')
+assert.equal(nightLabel(nightOf('2026-09-25T22:40:00Z'), sat8), 'Last night', '00:40 is still last night')
+assert.equal(nightLabel(nightOf('2026-09-26T05:00:00Z'), sat8), 'Today', '07:00 this morning')
+assert.equal(nightLabel(nightOf('2026-09-26T05:00:00Z'), Date.parse('2026-09-26T17:00:00Z')), 'Tonight')
+assert.equal(nightLabel('2026-09-24', sat8), `${weekday('2026-09-24', 'short')} night`)
+assert.match(nightLabel('2026-09-10', sat8), /^Night of /)
+assert.equal(whenSeen('2026-09-25T19:30:00Z', sat8), 'last night')
+assert.equal(whenSeen('2026-09-25T22:40:00Z', sat8), 'last night')
+assert.equal(whenSeen('2026-09-25T12:00:00Z', sat8), 'yesterday')
+assert.equal(whenSeen('2026-09-26T05:00:00Z', sat8), 'today')
+assert.equal(whenSeen('2026-09-24T19:30:00Z', sat8), `${weekday('2026-09-24', 'long')} night`)
+assert.equal(whenSeen('2026-09-26T19:30:00Z', Date.parse('2026-09-26T20:00:00Z')), 'tonight')
+// Saved photos are named on the estate's clock, to the second, like the server's.
+assert.equal(estateStamp('2026-09-25T20:05:07Z'), '2026-09-25_22-05-07')
+assert.equal(estateStamp('2026-11-25T20:05:00Z'), '2026-11-25_21-05-00')
+
+console.log(`PASS: the night turns at 06:00 Madrid time on both clock-change mornings (${cases.length} named moments, ${checked} five-minute steps), a copy made before 06:00 is last night's after it, a sit nobody ended is over at 06:00 unless it is a dawn sit (${sits.length} sits), and photos are filed and dated by night.`)

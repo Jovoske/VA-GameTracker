@@ -1,11 +1,13 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, getFresh, peek, thumbUrl } from '../api'
+import { type Failure, api, getFresh, peek, thumbUrl, whoAmI } from '../api'
 import Overlay from '../components/Overlay'
+import type { PhotoFix } from '../components/PhotoFix'
 import PhotoLightbox from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
+import { nightBefore, nightOf, whenSeen } from '../night'
 import './animals.css'
 
 type SpeciesRow = {
@@ -22,9 +24,15 @@ type SpImg = {
   captured_at: string
   camera: string
   label: string
+  species_id?: string | null
   group_size: number | null
   notes_count: number
+  fixed_by?: string | null
 }
+/** A page of a species' photos; the next starts after the last photo (time and id). */
+type SpPage = { items: SpImg[]; next_before: string | null; next_before_id: string | null }
+type Cursor = { before: string; before_id: string | null }
+const GALLERY_PAGE = 60
 type RepeatStatus = {
   state: 'never' | 'queued' | 'waiting' | 'running' | 'done' | 'failed'
   result: { new_candidates?: number; still_to_embed?: number } | null
@@ -47,15 +55,23 @@ type Animal = {
 const fmt = (s: string | null) =>
   s ? new Date(s).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'never'
 
-/** "today", "yesterday", "Tuesday" or "3 Sep": when this animal was last on camera. */
+/** "Seen last night", "Seen Tuesday night", "Last seen 3 Sep": nights as Photos files
+ *  them, not 24-hour spans (audit C-14). */
 function lastSeen(s: string | null): string {
   if (!s) return 'Not seen yet'
-  const d = new Date(s)
-  const days = Math.floor((Date.now() - d.getTime()) / 86400000)
-  if (days < 1) return 'Seen today'
-  if (days === 1) return 'Seen yesterday'
-  if (days < 7) return `Seen ${d.toLocaleDateString(undefined, { weekday: 'long' })}`
-  return `Last seen ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+  const thisWeek = nightOf(s) > nightBefore(nightOf(Date.now()), 7)
+  return `${thisWeek ? 'Seen' : 'Last seen'} ${whenSeen(s)}`
+}
+
+/** "Wild boar #3": the name "Look for repeats" gives; anything else a hunter chose. */
+const autoName = (label: string) => /^.+ #\d+$/.test(label.trim())
+
+/** A refusal or a lost signal, in plain words, and what didn't happen. */
+function failedWords(e: unknown, what: string): string {
+  const x = e as Failure
+  if (x.offline) return `No signal, so ${what}. Try again when you have a connection.`
+  if (x.timeout) return `No answer from the server, so ${what}. Try again.`
+  return `${what[0].toUpperCase()}${what.slice(1)}. ${x.message}`
 }
 
 // Counting every sighting is slower than a page on the estate box, but never forever.
@@ -79,8 +95,19 @@ export default function Animals() {
   const galleryRequest = useRef(0)
   const [gallery, setGallery] = useState<{ sp: SpeciesRow; label: string | null } | null>(null)
   const [galleryImgs, setGalleryImgs] = useState<SpImg[] | null>(null)
+  // Where the next page of the gallery starts; null when it is all here.
+  const [galleryNext, setGalleryNext] = useState<Cursor | null>(null)
+  const [galleryMore, setGalleryMore] = useState(false)
+  const galleryInFlight = useRef<number | null>(null)
+  const galleryEnd = useRef<HTMLDivElement>(null)
+  const galleryBody = useRef<HTMLDivElement>(null)
   // Index into galleryImgs of the photo open in the viewer.
   const [zoom, setZoom] = useState<number | null>(null)
+  // Photos a fix in the viewer took out of this gallery: they go when it closes.
+  const leaving = useRef(new Set<string>())
+  const [me, setMe] = useState<{ role: string } | null>(null)
+  useEffect(() => { whoAmI().then(setMe).catch(() => {}) }, [])
+  const admin = me?.role === 'admin'
 
   // A sighting notification lands here as /animals?species=…&image=…: open that
   // species' gallery on that photo, then drop the query so closing the viewer or
@@ -115,23 +142,94 @@ export default function Animals() {
   }, [galleryImgs, setParams])
   useRefetchOnReturn(loadSpecies, 120_000)
 
+  const galleryPath = (sp: SpeciesRow, label: string | null, after: Cursor | null) => {
+    const q = new URLSearchParams({ limit: String(GALLERY_PAGE) })
+    if (label) q.set('label', label)
+    if (after) {
+      q.set('before', after.before)
+      if (after.before_id) q.set('before_id', after.before_id)
+    }
+    return `/species/${sp.id}/photos?${q.toString()}`
+  }
+  const cursorOf = (p: SpPage): Cursor | null => (p.next_before ? { before: p.next_before, before_id: p.next_before_id } : null)
+
   async function openGallery(sp: SpeciesRow, label: string | null) {
     const request = ++galleryRequest.current
+    galleryInFlight.current = null
+    setGalleryMore(false)
     setGalleryErr('')
     setGallery({ sp, label })
     setGalleryImgs(null)
+    setGalleryNext(null)
     try {
-      const q = label ? `?label=${encodeURIComponent(label)}` : ''
-      const photos = await api<SpImg[]>(`/species/${sp.id}/images${q}`, { signal: signal(), timeoutMs: SLOW_MS })
-      if (request === galleryRequest.current) setGalleryImgs(photos)
+      const page = await api<SpPage>(galleryPath(sp, label, null), { signal: signal(), timeoutMs: SLOW_MS })
+      if (request !== galleryRequest.current) return
+      setGalleryImgs(page.items)
+      setGalleryNext(cursorOf(page))
     } catch {
       if (request === galleryRequest.current) setGalleryErr('Photos did not load. Check your signal and try again.')
     }
   }
+
+  /** The next page of the gallery: it used to stop at 300 while the chip said 684. */
+  function moreGallery() {
+    const request = galleryRequest.current
+    if (!gallery || !galleryNext || galleryInFlight.current === request) return
+    galleryInFlight.current = request
+    setGalleryMore(true)
+    api<SpPage>(galleryPath(gallery.sp, gallery.label, galleryNext), { signal: signal(), timeoutMs: SLOW_MS })
+      .then((page) => {
+        if (request !== galleryRequest.current) return
+        setGalleryImgs((prev) => {
+          const have = new Set((prev ?? []).map((p) => p.image_id))
+          return [...(prev ?? []), ...page.items.filter((p) => !have.has(p.image_id))]
+        })
+        setGalleryNext(cursorOf(page))
+      })
+      .catch(() => { if (request === galleryRequest.current) setGalleryErr('Older photos did not load. Check your signal and try again.') })
+      .finally(() => {
+        if (galleryInFlight.current !== request) return
+        galleryInFlight.current = null
+        setGalleryMore(false)
+      })
+  }
+  const moreRef = useRef(moreGallery)
+  moreRef.current = moreGallery
+  // Keep filling as the gallery scrolls; the button is there for when that is not wanted.
+  useEffect(() => {
+    const el = galleryEnd.current
+    if (!el || !galleryNext || !('IntersectionObserver' in window)) return
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) moreRef.current() },
+      { root: galleryBody.current, rootMargin: '400px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [galleryNext, galleryImgs])
+
   function closeGallery() {
     galleryRequest.current++
+    galleryInFlight.current = null
     setGallery(null)
     setGalleryImgs(null)
+    setGalleryNext(null)
+  }
+
+  /** "Wrong?" in the viewer: the tile takes the new name now; a photo that isn't this
+   *  animal any more (or has nothing in it) leaves when the viewer closes. */
+  function photoFixed(id: string, fix: PhotoFix) {
+    setGalleryImgs((imgs) => imgs && imgs.map((im) => (im.image_id === id
+      ? { ...im, label: fix.empty ? im.label : fix.label, species_id: fix.species_id, fixed_by: fix.fixed_by } : im)))
+    const off = fix.empty || fix.hidden || (!!gallery && fix.species_id !== gallery.sp.id)
+      || (!!gallery?.label && fix.label !== gallery.label)
+    if (off) leaving.current.add(id)
+    else leaving.current.delete(id)
+  }
+  function closeViewer() {
+    setZoom(null)
+    if (!leaving.current.size) return
+    const gone = new Set(leaving.current)
+    leaving.current.clear()
+    setGalleryImgs((imgs) => imgs && imgs.filter((im) => !gone.has(im.image_id)))
+    loadSpecies()
   }
 
   // ── named animals (experimental) ────────────────────────
@@ -164,30 +262,54 @@ export default function Animals() {
     })
   }
 
-  async function rename(a: Animal) {
-    const name = window.prompt('Name this animal', a.label)
-    if (!name || name === a.label) return
-    await api(`/animals/${a.id}`, { method: 'PATCH', body: JSON.stringify({ label: name }) })
-    setItems((xs) => xs.map((x) => (x.id === a.id ? { ...x, label: name } : x)))
+  // Naming an animal (admins): an inline field on its card, not a browser prompt.
+  // Naming it confirms it, so "Look for repeats" keeps it as it is (audit C-10).
+  const [naming, setNaming] = useState<{ id: string; draft: string; saving: boolean; err: string } | null>(null)
+
+  async function saveName() {
+    if (!naming || naming.saving) return
+    const name = naming.draft.replace(/\s+/g, ' ').trim()
+    const a = items.find((x) => x.id === naming.id)
+    if (!name) { setNaming({ ...naming, err: 'Type a name first.' }); return }
+    if (!a || name === a.label) { setNaming(null); return }
+    setNaming({ ...naming, saving: true, err: '' })
+    try {
+      const r = await api<{ label: string }>(`/animals/${a.id}`, { method: 'PATCH', body: JSON.stringify({ label: name }), timeoutMs: 20_000 })
+      setItems((xs) => xs.map((x) => (x.id === a.id ? { ...x, label: r.label, confirmed: true } : x)))
+      setNaming(null)
+    } catch (e) {
+      setNaming((n) => n && { ...n, saving: false, err: failedWords(e, 'the name wasn’t saved') })
+    }
   }
 
-  async function mergeSelected() {
+  // Merging keeps a name a hunter gave (audit C-11): the named one is the one merged
+  // into, and with two or more names on the chosen animals the app asks which to keep.
+  const [askName, setAskName] = useState<string[] | null>(null)
+
+  async function mergeSelected(keep?: string) {
     const chosen = items.filter((a) => sel.has(a.id))
     if (chosen.length < 2) return
-    const target = chosen.reduce((a, b) => (b.sightings > a.sightings ? b : a))
+    const named = [...new Set(chosen.filter((a) => !autoName(a.label)).map((a) => a.label))]
+    if (keep === undefined && named.length > 1) { setAskName(named); return }
+    setAskName(null)
+    const pool = chosen.filter((a) => (keep ? a.label === keep : !autoName(a.label)))
+    const target = (pool.length ? pool : chosen).reduce((a, b) => (b.sightings > a.sightings ? b : a))
     setBusy('Merging…')
+    setErr('')
     try {
       await api('/animals/merge', {
         method: 'POST',
         body: JSON.stringify({
           target_id: target.id,
           source_ids: chosen.filter((a) => a.id !== target.id).map((a) => a.id),
+          ...(keep ? { label: keep } : {}),
         }),
+        timeoutMs: 20_000,
       })
       setSel(new Set())
       load()
     } catch (e) {
-      setErr((e as Error).message)
+      setErr(failedWords(e, 'they weren’t merged'))
     } finally {
       setBusy('')
     }
@@ -200,7 +322,7 @@ export default function Animals() {
       setSel(new Set())
       load()
     } catch (e) {
-      setErr((e as Error).message)
+      setErr(failedWords(e, 'they weren’t confirmed'))
     } finally {
       setBusy('')
     }
@@ -259,7 +381,7 @@ export default function Animals() {
       setRepeatMsg(r.note ?? 'Looking for repeat visitors…')
       void followRepeats()
     } catch (e) {
-      setErr((e as Error).message)
+      setErr(failedWords(e, 'it didn’t start'))
       setBusy('')
     }
   }
@@ -360,11 +482,19 @@ export default function Animals() {
           {sel.size > 0 && (
             <div className="card an-selbar">
               <span>{sel.size} picked</span>
-              <button onClick={mergeSelected} disabled={sel.size < 2 || !!busy} className="an-btn" style={{ opacity: sel.size < 2 ? 0.4 : 1 }}>
+              <button onClick={() => mergeSelected()} disabled={sel.size < 2 || !!busy} className="an-btn" style={{ opacity: sel.size < 2 ? 0.4 : 1 }}>
                 Merge
               </button>
               <button onClick={confirmSelected} disabled={!!busy} className="an-btn">Confirm</button>
-              <button onClick={() => setSel(new Set())} className="an-btn an-btn--right">Clear</button>
+              <button onClick={() => { setSel(new Set()); setAskName(null) }} className="an-btn an-btn--right">Clear</button>
+              {askName && (
+                <div className="an-askname" role="group" aria-label="Which name to keep?">
+                  <span>They have different names. Keep which?</span>
+                  {askName.map((n) => (
+                    <button key={n} className="an-btn" disabled={!!busy} onClick={() => mergeSelected(n)}>{n}</button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -404,13 +534,29 @@ export default function Animals() {
                       {a.sightings >= 2 && <div className="an-animal-count">{a.sightings} visits</div>}
                     </div>
                     <div className="an-animal-body">
-                      <div
-                        className="an-animal-name"
-                        onClick={(e) => { e.stopPropagation(); rename(a) }}
-                        title="Tap to name"
-                      >
-                        {a.label}
-                      </div>
+                      {naming?.id === a.id ? (
+                        <form className="an-name-form" onClick={(e) => e.stopPropagation()} aria-busy={naming.saving}
+                          onSubmit={(e) => { e.preventDefault(); void saveName() }}
+                          onKeyDown={(e) => { if (e.key === 'Escape' && !naming.saving) { e.stopPropagation(); setNaming(null) } }}>
+                          <label className="sr-only" htmlFor={`name-${a.id}`}>Name this animal</label>
+                          <input id={`name-${a.id}`} className="input" value={naming.draft} maxLength={60} autoFocus
+                            disabled={naming.saving} aria-invalid={!!naming.err}
+                            onChange={(e) => setNaming({ ...naming, draft: e.target.value, err: '' })} />
+                          <div className="an-name-buttons">
+                            <button type="submit" className="an-btn" disabled={naming.saving}>{naming.saving ? 'Saving…' : 'Save'}</button>
+                            <button type="button" className="an-btn" disabled={naming.saving} onClick={() => setNaming(null)}>Cancel</button>
+                          </div>
+                          {naming.err && <p className="an-error" role="alert">{naming.err}</p>}
+                        </form>
+                      ) : admin ? (
+                        <button type="button" className="an-animal-name an-animal-name--edit"
+                          onClick={(e) => { e.stopPropagation(); setNaming({ id: a.id, draft: a.label, saving: false, err: '' }) }}
+                          aria-label={`Name ${a.label}`} title="Tap to name">
+                          {a.label}
+                        </button>
+                      ) : (
+                        <div className="an-animal-name">{a.label}</div>
+                      )}
                       <div className="an-animal-meta">
                         {fmt(a.first_seen)}{a.last_seen !== a.first_seen ? ` to ${fmt(a.last_seen)}` : ''} · {a.cameras} camera{a.cameras === 1 ? '' : 's'}
                       </div>
@@ -433,7 +579,11 @@ export default function Animals() {
             <div className="an-gallery-head">
               <span className="an-gallery-title">{gallery.sp.name}</span>
               <span className="an-dim">
-                {galleryImgs ? `${galleryImgs.length} photo${galleryImgs.length === 1 ? '' : 's'}` : 'loading…'}
+                {(() => {
+                  // The whole count, as the chip says it, not only what has loaded.
+                  const n = gallery.label ? gallery.sp.classes.find((c) => c.label === gallery.label)?.count : gallery.sp.count
+                  return n != null ? `${n} photo${n === 1 ? '' : 's'}` : galleryImgs ? '' : 'loading…'
+                })()}
               </span>
               <button onClick={close} className="an-btn an-btn--right">
                 Close
@@ -458,7 +608,7 @@ export default function Animals() {
                 </div>
               )}
             </div>
-            <div className="an-gallery-body">
+            <div className="an-gallery-body" ref={galleryBody}>
               {galleryErr && <div className="status-panel" role="alert">{galleryErr}<button className="text-action" onClick={() => openGallery(gallery.sp, gallery.label)}>Try again</button></div>}
               {!galleryImgs && !galleryErr && <div role="status" className="an-dim an-gallery-status">Loading photos…</div>}
               {galleryImgs && galleryImgs.length === 0 && (
@@ -485,6 +635,12 @@ export default function Animals() {
                   </div>
                 ))}
               </div>
+              <div ref={galleryEnd} aria-hidden style={{ height: 1 }} />
+              {galleryNext && (
+                <button className="text-action an-gallery-more" onClick={moreGallery} disabled={galleryMore}>
+                  {galleryMore ? 'Loading…' : 'Show older photos'}
+                </button>
+              )}
             </div>
           </div>
         )}</Overlay>
@@ -493,12 +649,18 @@ export default function Animals() {
       {/* ── Fullscreen photo ──────────────────────────────── */}
       {zoom != null && galleryImgs && (
         <PhotoLightbox
-          photos={galleryImgs.map((im) => ({ id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label, notes_count: im.notes_count }))}
+          photos={galleryImgs.map((im) => ({
+            id: im.image_id, file_url: im.file_url, captured_at: im.captured_at, camera: im.camera, label: im.label,
+            notes_count: im.notes_count, species_id: im.species_id, fixed_by: im.fixed_by,
+          }))}
           start={zoom}
           backLabel="Back to gallery"
           zIndex={60}
-          onClose={() => setZoom(null)}
+          onClose={closeViewer}
           onNotesChange={(id, n) => setGalleryImgs((imgs) => imgs && imgs.map((im) => (im.image_id === id ? { ...im, notes_count: n } : im)))}
+          onFixed={photoFixed}
+          hasMore={!!galleryNext}
+          onNeedMore={moreGallery}
         />
       )}
     </div>

@@ -12,12 +12,70 @@ const estateClock = new Intl.DateTimeFormat('en-GB', {
   timeZone: ESTATE_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
 })
 
+const wallClock = new Intl.DateTimeFormat('en-GB', {
+  timeZone: ESTATE_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  second: '2-digit', hourCycle: 'h23',
+})
+const parts = (when: string | number | Date, clock = estateClock) =>
+  Object.fromEntries(clock.formatToParts(new Date(when)).map((x) => [x.type, x.value]))
+
 /** The estate's calendar day of `when`, with the hours before `hour` o'clock still
  *  counted as the day before. On the wall clock, not the UTC one, as the server does. */
 function dayFrom(when: string | number | Date, hour: number): string {
-  const p = Object.fromEntries(estateClock.formatToParts(new Date(when)).map((x) => [x.type, x.value]))
+  const p = parts(when)
   const wall = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute) - hour * 3600e3
   return new Date(wall).toISOString().slice(0, 10)
+}
+
+/** The hour on the estate's clock, 0 to 23. */
+function estateHour(when: string | number | Date): number {
+  return +parts(when).hour
+}
+
+/** `2026-09-25_22-05-07`: the moment on the estate's clock, for a saved photo's name,
+ *  as the server names its downloads (routes_images.download_name). */
+export function estateStamp(when: string | number | Date): string {
+  const p = parts(when, wallClock)
+  return `${p.year}-${p.month}-${p.day}_${p.hour}-${p.minute}-${p.second}`
+}
+
+/** A night's date ("2026-09-24") as the phone writes dates, with `opts`. */
+function nightDate(night: string, opts: Intl.DateTimeFormatOptions): string {
+  return new Date(`${night}T12:00:00Z`).toLocaleDateString(undefined, { ...opts, timeZone: 'UTC' })
+}
+
+/**
+ * The heading over a night's photos: "Tonight" (or "Today" before 18:00), "Last night",
+ * "Thu night" this past week, then "Night of Thu 18 Sep". A night is the server's:
+ * 06:00 to 06:00 on the estate's clock, so last night's photos after midnight are
+ * under "Last night" with the rest of it, not under "Today" (audit I-27).
+ */
+export function nightLabel(night: string, now: number = Date.now()): string {
+  const tonight = nightOf(now)
+  if (night === tonight) {
+    const h = estateHour(now)
+    return h >= 18 || h < 6 ? 'Tonight' : 'Today'
+  }
+  if (night === nightBefore(tonight)) return 'Last night'
+  if (night > nightBefore(tonight, 7)) return `${nightDate(night, { weekday: 'short' })} night`
+  return `Night of ${nightDate(night, { weekday: 'short', day: 'numeric', month: 'short' })}`
+}
+
+/**
+ * When something was last on camera, as a hunter says it: "tonight", "today", "last
+ * night", "yesterday", "Tuesday night", "Tuesday", or "3 Sep" before that. It used to
+ * count 24-hour spans, so at 08:00 a boar from 21:30 last night was "seen today"
+ * while Photos filed it under yesterday (audit C-14).
+ */
+export function whenSeen(iso: string, now: number = Date.now()): string {
+  const night = nightOf(iso)
+  const tonight = nightOf(now)
+  const h = estateHour(iso)
+  const dark = h >= 18 || h < 6
+  if (night === tonight) return dark ? 'tonight' : 'today'
+  if (night === nightBefore(tonight)) return dark ? 'last night' : 'yesterday'
+  if (night > nightBefore(tonight, 7)) return `${nightDate(night, { weekday: 'long' })}${dark ? ' night' : ''}`
+  return nightDate(night, { day: 'numeric', month: 'short' })
 }
 
 export function nightOf(when: string | number | Date): string {
