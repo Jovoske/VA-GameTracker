@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
@@ -318,9 +318,14 @@ function lastSeenLine(c: Camera, imgs: Img[]): string {
   return 'No photos yet'
 }
 
+const imagesPath = (camId: string, includeEmpty: boolean) => `/cameras/${camId}/images?limit=80&include_empty=${includeEmpty}`
+
 export default function Cameras() {
-  const [cameras, setCameras] = useState<Camera[]>([])
-  const [images, setImages] = useState<Record<string, Img[]>>({})
+  // What this session last saw paints at once; the network replaces it (audit K-08).
+  const [cameras, setCameras] = useState<Camera[]>(() => peek<Camera[]>('/cameras')?.data ?? [])
+  const [images, setImages] = useState<Record<string, Img[]>>(() => Object.fromEntries(
+    cameras.flatMap((c) => { const hit = peek<Img[]>(imagesPath(c.id, false)); return hit ? [[c.id, hit.data]] : [] }),
+  ))
   const [showHidden, setShowHidden] = useState<Record<string, boolean>>({})
   const [syncing, setSyncing] = useState(false)
   // What the last check came to, so the line under the button reads as a
@@ -334,6 +339,8 @@ export default function Cameras() {
     return () => clearTimeout(t)
   }, [sync])
   const [err, setErr] = useState('')
+  // The list on screen is what this session saw earlier, because the network didn't answer.
+  const [savedCopy, setSavedCopy] = useState<Got<Camera[]> | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionErr, setActionErr] = useState('')
   const [zoom, setZoom] = useState<Zoom | null>(null)
@@ -343,20 +350,30 @@ export default function Cameras() {
   // The strip a moment before it changes shape. See toggleHidden.
   const [swapping, setSwapping] = useState<string | null>(null)
 
+  // Leaving the page drops the lists it was still asking for, so the next tab on a
+  // thin link isn't queued behind them.
+  const ctl = useRef<AbortController | null>(null)
+  const signal = () => {
+    if (!ctl.current || ctl.current.signal.aborted) ctl.current = new AbortController()
+    return ctl.current.signal
+  }
+
   async function loadImages(camId: string, includeEmpty: boolean) {
-    const imgs = await api<Img[]>(`/cameras/${camId}/images?limit=80&include_empty=${includeEmpty}`)
+    const { data: imgs } = await getFresh<Img[]>(imagesPath(camId, includeEmpty), { signal: signal() })
     setImages((prev) => ({ ...prev, [camId]: imgs }))
   }
 
   async function loadCameras() {
     setLoading(true)
     try {
-      const cams = await api<Camera[]>('/cameras')
+      const got = await getFresh<Camera[]>('/cameras', { signal: signal() })
+      const cams = got.data
       setCameras(cams)
+      setSavedCopy(got.stale ? got : null)
       setErr('')
       await Promise.all(cams.map((c) => loadImages(c.id, !!showHidden[c.id])))
     } catch (e) {
-      setErr((e as Error).message)
+      if ((e as Error).name !== 'AbortError') setErr((e as Error).message)
     } finally {
       setLoading(false)
     }
@@ -364,6 +381,7 @@ export default function Cameras() {
 
   useEffect(() => {
     loadCameras()
+    return () => ctl.current?.abort()
   }, [])
   useRefetchOnReturn(loadCameras)
 
@@ -478,6 +496,12 @@ export default function Cameras() {
       {err && (
         <div className="card cam-error">
           Cameras did not load. {err}
+          <button className="text-action" onClick={loadCameras}>Try again</button>
+        </div>
+      )}
+      {savedCopy && !err && (
+        <div className="status-panel" role="status">
+          {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
           <button className="text-action" onClick={loadCameras}>Try again</button>
         </div>
       )}

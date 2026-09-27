@@ -1,4 +1,6 @@
 """Tonight forecast — what the ground has been doing, and where to sit."""
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -21,4 +23,7 @@ def tonight(
     db: Session = Depends(get_db),
 ) -> dict:
     ids = [s.strip() for s in species.split(",") if s.strip()] if species else None
-    return forecast_tonight(db, species_ids=ids)
+    plan = forecast_tonight(db, species_ids=ids)
+    # When it was worked out. A copy replayed with no signal still carries this, so
+    # the phone can say "Plan from 14 h ago" instead of "just now" (audit J-05).
+    return {**plan, "generated_at": datetime.now(UTC).isoformat()}

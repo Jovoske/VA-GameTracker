@@ -1,7 +1,7 @@
 import { MoonIcon } from '@phosphor-icons/react/dist/csr/Moon'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, thumbUrl } from '../api'
+import { api, getFresh, peek, thumbUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
 import WeatherPatterns, { type Patterns } from '../components/WeatherPatterns'
@@ -35,8 +35,12 @@ function backing(c: Insights['correlations'][number]) {
   return `From ${sightings}.`
 }
 
+// The findings read every photo on the estate box: slower than a page, but never forever.
+const SLOW_MS = 30_000
+
 export default function Insights() {
-  const [d, setD] = useState<Insights | null>(null)
+  // What this session last saw paints at once; the network replaces it (audit K-08).
+  const [d, setD] = useState<Insights | null>(() => peek<Insights>('/insights')?.data ?? null)
   const [err, setErr] = useState('')
   const [classErr, setClassErr] = useState('')
   const classRequest = useRef(0)
@@ -44,7 +48,7 @@ export default function Insights() {
   const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
   // Index into classImgs of the photo open in the viewer.
   const [zoom, setZoom] = useState<number | null>(null)
-  const [pat, setPat] = useState<Patterns | null>(null)
+  const [pat, setPat] = useState<Patterns | null>(() => peek<Patterns>('/insights/patterns')?.data ?? null)
   const [patScope, setPatScope] = useState('all')
   const [patErr, setPatErr] = useState('')
   const [patLoading, setPatLoading] = useState(true)
@@ -54,18 +58,31 @@ export default function Insights() {
   // from there: a refetch slides them to the new value rather than cutting.
   const grown = useReveal(!!d)
 
+  // Leaving the page drops what it was still asking for, so the next tab on a thin
+  // link isn't queued behind it (K-08).
+  const ctl = useRef<AbortController | null>(null)
+  const signal = () => {
+    if (!ctl.current || ctl.current.signal.aborted) ctl.current = new AbortController()
+    return ctl.current.signal
+  }
+  useEffect(() => () => ctl.current?.abort(), [])
+
   function loadPatterns() {
     const request = ++patternRequest.current
+    const sig = signal()
     setPatErr('')
     setPatLoading(true)
-    api<Patterns>('/insights/patterns')
-      .then(result => { if (request === patternRequest.current) setPat(result) })
-      .catch(e => { if (request === patternRequest.current) setPatErr(e.message) })
+    getFresh<Patterns>('/insights/patterns', { signal: sig, timeoutMs: SLOW_MS })
+      .then(got => { if (request === patternRequest.current) setPat(got.data) })
+      .catch(e => { if (request === patternRequest.current && !sig.aborted) setPatErr(e.message) })
       .finally(() => { if (request === patternRequest.current) setPatLoading(false) })
   }
   function load() {
+    const sig = signal()
     setErr('')
-    api<Insights>('/insights').then(setD).catch((e) => setErr(e.message))
+    getFresh<Insights>('/insights', { signal: sig, timeoutMs: SLOW_MS })
+      .then((got) => setD(got.data))
+      .catch((e) => { if (!sig.aborted) setErr(e.message) })
     loadPatterns()
   }
   useEffect(load, [])
@@ -77,7 +94,7 @@ export default function Insights() {
     setOpenClass(label)
     setClassImgs(null)
     try {
-      const photos = await api<ClassImg[]>('/insights/class?label=' + encodeURIComponent(label))
+      const photos = await api<ClassImg[]>('/insights/class?label=' + encodeURIComponent(label), { signal: signal(), timeoutMs: SLOW_MS })
       if (request === classRequest.current) setClassImgs(photos)
     } catch {
       if (request === classRequest.current) setClassErr('Could not load the photos. Check your connection and try again.')

@@ -7,12 +7,19 @@ import { RouterProvider, createBrowserRouter } from 'react-router-dom'
 // Spanish estate from ever downloading the Cyrillic subset.
 import '@fontsource-variable/ibm-plex-sans/wght.css'
 import App from './App'
+import { RouteCrash } from './components/ErrorBoundary'
+import { installCrashReporting } from './crash'
+import { registerServiceWorker } from './serviceWorker'
 import './theme.css'
+
+// First, so a crash while the app starts is reported too.
+installCrashReporting()
 
 // A data router, so a page can hold back a navigation it would lose work to: the
 // map asks before Back or a tab throws away an unsaved outline (useBlocker needs
-// this kind of router). Every route still lives in App's <Routes>.
-const router = createBrowserRouter([{ path: '*', element: <App /> }])
+// this kind of router). Every route still lives in App's <Routes>. A crash outside
+// a page (the frame, sign-in, Sit mode) lands on RouteCrash, never a blank screen.
+const router = createBrowserRouter([{ path: '*', element: <App />, errorElement: <RouteCrash /> }])
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -20,8 +27,4 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </React.StrictMode>,
 )
 
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {})
-  })
-}
+registerServiceWorker()

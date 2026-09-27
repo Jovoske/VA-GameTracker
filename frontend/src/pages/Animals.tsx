@@ -1,7 +1,7 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, thumbUrl } from '../api'
+import { api, getFresh, peek, thumbUrl } from '../api'
 import Overlay from '../components/Overlay'
 import PhotoLightbox from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
@@ -53,9 +53,21 @@ function lastSeen(s: string | null): string {
   return `Last seen ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
 }
 
+// Counting every sighting is slower than a page on the estate box, but never forever.
+const SLOW_MS = 30_000
+
 export default function Animals() {
+  // Leaving the page drops what it was still asking for, so the next tab on a thin
+  // link isn't queued behind it; what this session last saw paints at once (K-08).
+  const ctl = useRef<AbortController | null>(null)
+  const signal = () => {
+    if (!ctl.current || ctl.current.signal.aborted) ctl.current = new AbortController()
+    return ctl.current.signal
+  }
+  useEffect(() => () => ctl.current?.abort(), [])
+
   // ── species browser ─────────────────────────────────────
-  const [species, setSpecies] = useState<SpeciesRow[]>([])
+  const [species, setSpecies] = useState<SpeciesRow[]>(() => peek<SpeciesRow[]>('/species/spotted')?.data ?? [])
   const [spErr, setSpErr] = useState('')
   const [spLoading, setSpLoading] = useState(true)
   const [galleryErr, setGalleryErr] = useState('')
@@ -74,16 +86,17 @@ export default function Animals() {
   )
 
   function loadSpecies() {
+    const sig = signal()
     setSpErr('')
     setSpLoading(true)
-    api<SpeciesRow[]>('/species/spotted').then((rows) => {
+    getFresh<SpeciesRow[]>('/species/spotted', { signal: sig, timeoutMs: SLOW_MS }).then(({ data: rows }) => {
       setSpecies(rows)
       const want = deepLink.current
       if (!want) return
       const sp = rows.find((r) => r.id === want.species)
       if (sp) openGallery(sp, null)
       else { deepLink.current = null; setParams({}, { replace: true }) }
-    }).catch((e) => setSpErr(e.message)).finally(() => setSpLoading(false))
+    }).catch((e) => { if (!sig.aborted) setSpErr(e.message) }).finally(() => setSpLoading(false))
   }
   useEffect(loadSpecies, [])
   useEffect(() => {
@@ -104,7 +117,7 @@ export default function Animals() {
     setGalleryImgs(null)
     try {
       const q = label ? `?label=${encodeURIComponent(label)}` : ''
-      const photos = await api<SpImg[]>(`/species/${sp.id}/images${q}`)
+      const photos = await api<SpImg[]>(`/species/${sp.id}/images${q}`, { signal: signal(), timeoutMs: SLOW_MS })
       if (request === galleryRequest.current) setGalleryImgs(photos)
     } catch {
       if (request === galleryRequest.current) setGalleryErr('Photos did not load. Check your signal and try again.')
@@ -117,7 +130,7 @@ export default function Animals() {
   }
 
   // ── named animals (experimental) ────────────────────────
-  const [items, setItems] = useState<Animal[]>([])
+  const [items, setItems] = useState<Animal[]>(() => peek<Animal[]>('/animals')?.data ?? [])
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
   const [sel, setSel] = useState<Set<string>>(new Set())
@@ -125,11 +138,12 @@ export default function Animals() {
   const [busy, setBusy] = useState('')
 
   function load() {
+    const sig = signal()
     setErr('')
     setLoading(true)
-    api<Animal[]>('/animals')
-      .then((d) => setItems(d))
-      .catch((e) => setErr(e.message))
+    getFresh<Animal[]>('/animals', { signal: sig, timeoutMs: SLOW_MS })
+      .then((got) => setItems(got.data))
+      .catch((e) => { if (!sig.aborted) setErr(e.message) })
       .finally(() => setLoading(false))
   }
   useEffect(load, [])

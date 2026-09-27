@@ -1,78 +1,195 @@
 // GameSense service worker.
 //
-// The previous version claimed to "cache the app shell so an installed PWA opens
-// offline" and could not: its fetch handler only cached responses whose destination
-// was 'navigate', 'image' or 'style', so no JavaScript module was ever stored. With
-// no signal the app had no code to run, and API GETs fell back to caches.match('/'),
-// handing HTML to resp.json() — which is why the field failure mode was
-// "Couldn't load: Unexpected token '<'" rather than an honest offline state.
+// What it is for: an installed app that opens, with tonight's plan, wherever the
+// hunter is. On one bar of signal, with no signal, after a deploy, or while the
+// server or its tunnel is down.
 //
-// This version:
-//   * caches scripts, styles, fonts and navigations as they are fetched, so a second
-//     visit has the code it needs;
-//   * keeps the last good response for a small set of read-only API endpoints and
-//     replays it when the network is gone, tagged so the UI can say how old it is;
-//   * NEVER returns HTML for an /api/ request. If there is nothing cached it returns
-//     JSON, because a parse exception is a worse failure than a clear message.
-const CACHE = 'gamesense-v2'
+//   * Every build stamps this file with its id and its asset list (vite.config.ts),
+//     so each deploy installs a new worker, and that worker stores the whole app at
+//     install: the page, every script and style, the map included. The first visit
+//     after "Add to Home Screen" is therefore enough for the next one to open with
+//     no signal (audit K-03). The page and the files it names must all arrive or
+//     the new worker doesn't take over; the map and the fonts are best effort. Old
+//     builds are pruned on activate, keeping the one before so an app left open
+//     across a deploy can still open the map (D-20).
+//   * /assets/* are content-hashed and never change: served from the store first.
+//     On a weak link that is the difference between the plan in a second and a
+//     black screen for a minute (D-09, J-06).
+//   * Opening the app goes to the network, but waits at most 3 s when the stored
+//     page can stand in, and a 5xx or Cloudflare 52x/530 counts as no signal: the
+//     stored page opens instead of an error page (K-02).
+//   * A script or style is never answered with index.html. That turned a missing
+//     file into "Expected a JavaScript module" and a blank screen (B-02, D-01).
+//   * A small set of read-only API answers is kept and replayed when the network
+//     is gone or the server is down, tagged with when it was stored, so the page
+//     says how old it is. An /api/ request is never answered with HTML.
+const BUILD = '__GS_BUILD__'
+const ASSETS = /*__GS_ASSETS__*/[]
+const SHELL_PREFIX = 'gamesense-shell-'
+const SHELL_CACHE = SHELL_PREFIX + BUILD
 const API_CACHE = 'gamesense-api-v2'
+// The one cache the worker before this one kept everything in.
+const LEGACY_CACHE = 'gamesense-v2'
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png']
+const NAV_WAIT_MS = 3000
 
 // Endpoints worth replaying offline: the plan and the ground it describes. Writes
 // are never served from cache.
 const CACHEABLE_API = ['/api/forecast/tonight', '/api/stands', '/api/sits', '/api/alerts']
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()))
+  e.waitUntil(storeBuild().then(() => self.skipWaiting()))
 })
+
+// The app's own files that the stored page names: its script, its styles and any
+// chunk it preloads. Read from the stored index.html itself, so they always match it.
+const namedBy = (html) => [...new Set([...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]))]
+
+async function storeBuild() {
+  const c = await caches.open(SHELL_CACHE)
+  let entry
+  try {
+    // The page and the files it can't open without have to be whole, or this worker
+    // isn't worth installing: one that took over with an index.html naming a script
+    // it never stored would open on nothing with no signal, where the worker before
+    // it could open (a deploy, then a weak signal while the phone picked it up).
+    // Failing here keeps that worker in charge, and the browser tries this build
+    // again on its next update check.
+    await c.addAll(SHELL)
+    const page = await c.match('/index.html')
+    entry = namedBy(page ? await page.text() : '')
+    await c.addAll(entry)
+  } catch (err) {
+    await caches.delete(SHELL_CACHE)
+    throw err
+  }
+  // The rest (the map, the fonts) one by one, so one file that won't come on a thin
+  // link doesn't cost all the others; anything missed is stored when it is first used.
+  await Promise.all(ASSETS.filter((u) => !entry.includes(u)).map((u) => c.add(u).catch(() => {})))
+}
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE && k !== API_CACHE).map((k) => caches.delete(k))),
-      )
-      .then(() => self.clients.claim()),
+      .then((keys) => {
+        // Keep this build and the newest one before it: a page still running that
+        // build after a deploy can open its map from here instead of a 404.
+        const older = keys.filter((k) => k !== SHELL_CACHE && (k.startsWith(SHELL_PREFIX) || k === LEGACY_CACHE))
+        const keepPrevious = older[older.length - 1]
+        return Promise.all(
+          keys
+            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== keepPrevious)
+            .map((k) => caches.delete(k)),
+        )
+      })
+      .then(() => self.clients.claim())
+      // Every open page learns which build is stored now; one running an older
+      // build offers a reload (src/serviceWorker.ts).
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then((list) => list.forEach((c) => c.postMessage({ type: 'gs-sw-build', build: BUILD }))),
   )
 })
+
+// A 5xx is the server or the tunnel in front of it, not an answer: Cloudflare
+// sends 502/504 for a dead origin and 52x/530 for a dead tunnel.
+const serverDown = (res) => res.status >= 500 && res.status <= 599
 
 function isCacheableApi(url) {
   return CACHEABLE_API.some((p) => url.pathname === p || url.pathname.startsWith(p + '?'))
 }
 
+async function replay(cache, req, reason) {
+  const hit = await cache.match(req)
+  if (!hit) return null
+  const headers = new Headers(hit.headers)
+  headers.set('X-GameSense-Stale', 'true')
+  headers.set('X-GameSense-Stale-Reason', reason)
+  return new Response(await hit.text(), { status: 200, headers })
+}
+
 async function apiWithFallback(req) {
   const cache = await caches.open(API_CACHE)
+  let res
   try {
-    const res = await fetch(req)
-    if (res.ok) {
-      // Stamp when it was stored so the UI can show the age rather than implying
-      // the plan is current.
-      const body = await res.clone().text()
-      cache.put(
-        req,
-        new Response(body, {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-GameSense-Cached-At': new Date().toISOString(),
-          },
-        }),
-      )
-    }
-    return res
+    res = await fetch(req)
   } catch (err) {
-    const hit = await cache.match(req)
-    if (hit) {
-      const headers = new Headers(hit.headers)
-      headers.set('X-GameSense-Stale', 'true')
-      return new Response(await hit.text(), { status: 200, headers })
-    }
+    // The page gave up on it (left the tab, or its own timeout): nothing to answer.
+    if (req.signal && req.signal.aborted) throw err
+    const hit = await replay(cache, req, 'offline')
+    if (hit) return hit
     // Still JSON. Handing back the HTML shell here is what broke the app offline.
     return new Response(
       JSON.stringify({ detail: 'Offline, and nothing cached for this yet.', offline: true }),
       { status: 503, headers: { 'Content-Type': 'application/json' } },
     )
+  }
+  if (res.ok) {
+    // Stamp when it was stored so the UI can show the age rather than implying
+    // the plan is current.
+    const body = await res.clone().text()
+    cache.put(
+      req,
+      new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'X-GameSense-Cached-At': new Date().toISOString() },
+      }),
+    )
+    return res
+  }
+  if (serverDown(res)) return (await replay(cache, req, 'server')) || res
+  // 401 and the other 4xx pass through: the app signs out on a 401.
+  return res
+}
+
+async function storedShell() {
+  return (await caches.match('/index.html', { cacheName: SHELL_CACHE })) || (await caches.match('/index.html'))
+}
+
+async function navigate(req) {
+  const stored = await storedShell()
+  const network = fetch(req)
+  let res
+  try {
+    res = stored
+      ? await Promise.race([network, new Promise((resolve) => setTimeout(() => resolve(null), NAV_WAIT_MS))])
+      : await network
+  } catch {
+    return stored || Response.error()
+  }
+  // Too slow: open the stored app now. The browser still checks for a newer
+  // worker on its own, and that one brings the newer app with it.
+  if (!res) {
+    network.catch(() => {})
+    return stored
+  }
+  if (serverDown(res) && stored) return stored
+  return res
+}
+
+async function asset(req) {
+  const hit = await caches.match(req)
+  if (hit) return hit
+  try {
+    const res = await fetch(req)
+    if (res.ok) {
+      const copy = res.clone()
+      caches.open(SHELL_CACHE).then((c) => c.put(req, copy))
+    }
+    // A 404 goes through as a 404: the page then reloads once for the new build.
+    return res
+  } catch {
+    return Response.error()
+  }
+}
+
+async function otherFile(req) {
+  try {
+    const res = await fetch(req)
+    if (!serverDown(res)) return res
+    return (await caches.match(req)) || res
+  } catch {
+    return (await caches.match(req)) || Response.error()
   }
 }
 
@@ -80,27 +197,16 @@ self.addEventListener('fetch', (e) => {
   const req = e.request
   if (req.method !== 'GET') return
   const url = new URL(req.url)
+  // Map tiles and anything else from another site go straight to the network.
+  if (url.origin !== self.location.origin) return
 
   if (url.pathname.startsWith('/api/')) {
     if (isCacheableApi(url)) e.respondWith(apiWithFallback(req))
     return // other API calls pass through untouched
   }
-
-  e.respondWith(
-    fetch(req)
-      .then((res) => {
-        // 'script' was the missing one. Without it an installed PWA has no code.
-        const wanted = ['script', 'style', 'font', 'image'].includes(req.destination)
-        if (res.ok && (req.mode === 'navigate' || wanted)) {
-          const copy = res.clone()
-          caches.open(CACHE).then((c) => c.put(req, copy))
-        }
-        return res
-      })
-      .catch(() =>
-        caches.match(req).then((r) => r || caches.match('/index.html') || caches.match('/')),
-      ),
-  )
+  if (req.mode === 'navigate') return e.respondWith(navigate(req))
+  if (url.pathname.startsWith('/assets/')) return e.respondWith(asset(req))
+  e.respondWith(otherFile(req))
 })
 
 // ── Web Push ──

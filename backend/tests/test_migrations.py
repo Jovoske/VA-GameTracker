@@ -70,6 +70,11 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         }
         assert _index(eng, "photo_notes", "ix_photo_notes_image_id") == ["image_id"]
         assert _index(eng, "photo_notes", "ix_photo_notes_created_at") == ["created_at"]
+        assert set(_columns(eng, "client_errors")) == {
+            "id", "user_id", "kind", "message", "stack", "route", "build", "user_agent",
+            "happened_at", "created_at",
+        }
+        assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
     finally:
         eng.dispose()
 
@@ -128,6 +133,7 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "last_error" in _columns(eng, "camera_accounts")
         assert "photos_listed_to" in _columns(eng, "cameras")
         assert "download_attempts" in _columns(eng, "images")
+        assert _columns(eng, "client_errors")
     finally:
         eng.dispose()
 
@@ -550,6 +556,7 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
     try:
         with eng.begin() as c:
             # 0001 builds today's ORM; restore the 0019 shape first.
+            c.execute(text("DROP TABLE client_errors"))
             c.execute(text("DROP INDEX uq_camera_accounts_provider_login"))
             for table, column in (
                 ("camera_accounts", "last_attempt_at"), ("camera_accounts", "last_ok_at"),
@@ -639,5 +646,64 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "last_ok_at" in _columns(eng, "camera_accounts")
         assert "import_failures" in _columns(eng, "cameras")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_client_errors_upgrade_down_and_up_again(fresh_db):
+    """0021 on a real 0020 database: the new table arrives empty beside the rows already
+    there, a report outlives the person whose phone sent it, and going back down
+    removes only the reports."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0020_camera_login_status")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0020 shape first.
+            c.execute(text("DROP TABLE client_errors"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            user_id = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'pedro@x.local','h','member') RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            assert c.execute(text("SELECT count(*) FROM users")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM client_errors")).scalar_one() == 0
+            c.execute(text(
+                "INSERT INTO client_errors (id,user_id,kind,message,route,happened_at) "
+                "VALUES (gen_random_uuid(),:u,'chunk',:m,'/map',now() - interval '3 hours')"
+            ), {"u": user_id, "m": "Failed to fetch dynamically imported module"})
+            with pytest.raises(DBAPIError), c.begin_nested():
+                c.execute(text("INSERT INTO client_errors (id,kind,message) "
+                               "VALUES (gen_random_uuid(),'error',:m)"), {"m": "x" * 501})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user_id})
+            assert c.execute(text("SELECT count(*) FROM client_errors "
+                                  "WHERE user_id IS NULL")).scalar_one() == 1
+
+        command.downgrade(cfg, "0020_camera_login_status")
+        assert "client_errors" not in inspect(eng).get_table_names()
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM estates")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0020_camera_login_status")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
     finally:
         eng.dispose()
