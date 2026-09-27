@@ -285,13 +285,16 @@ const server=http.createServer((req,res)=>{
   const ctx=await context(),page=await open(ctx);await page.clock.install();
   await page.goto(base+'/photos');await page.locator('.photos-tile').nth(59).waitFor();
   for(const n of [60,120]){await page.locator('.photos-more').click();await page.waitForFunction(n=>document.querySelectorAll('.photos-tile').length>n,n)}
-  await page.locator('.photos-tile').nth(150).click();await page.getByText('Photo 151 of 180').first().waitFor();
+  await page.locator('.photos-tile').nth(150).click();
+  // The viewer by its name: at 390px the toolbar's own copy of it is squeezed out
+  // once Wrong? shows for someone who can fix photos.
+  await page.getByRole('dialog',{name:/Photo 151 of 180/}).waitFor();
   // One camera delivers late: a photo taken between the two newest on screen.
   const between=new Date((Date.parse(feed[0].captured_at)+Date.parse(feed[1].captured_at))/2).toISOString();
   feed=[{...feed[0],image_id:'new1',file_url:'/api/images/new1/file',captured_at:new Date().toISOString()},feed[0],{...feed[0],image_id:'late1',file_url:'/api/images/late1/file',camera:'Encinar',captured_at:between},...feed.slice(1)];
   const back=()=>page.evaluate(()=>{document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('focus'))});
   await page.clock.fastForward('03:00');await back();await page.waitForTimeout(800);
-  assert.ok(await page.getByText('Photo 151 of 180').count(),'back with a photo open: no crash, the same photo');
+  assert.ok(await page.getByRole('dialog',{name:/Photo 151 of 180/}).count(),'back with a photo open: no crash, the same photo');
   await page.keyboard.press('Escape');await page.clock.fastForward('03:00');await back();
   await page.waitForFunction(()=>document.querySelectorAll('.photos-tile').length===182);
   assert.equal(await page.locator('.photos-tile').count(),182,'the newer photo on top, the pages already loaded kept');
