@@ -12,12 +12,18 @@ export type Driver = {
   factor: string
   key?: string
   sample_nights: number
+  // low, mid and high; or only low and high when most nights read the same (dry
+  // nights against wet ones).
   buckets: Bucket[]
   // Held up against the same nights shuffled: a finding. False: could be chance.
+  // Only the high end against the low end is ever tested, never the middle bar.
   beats_chance?: boolean
+  // Which end had more visits: the one direction a finding may state.
+  favours_high?: boolean
 }
-// Why a condition has no bars: too few nights, or the weather history couldn't be had.
-type VarStatus = 'ok' | 'insufficient' | 'unavailable'
+// Why a condition has no bars: too few nights, nights enough that hardly differ (three
+// wet ones in ninety), or the weather history couldn't be had.
+type VarStatus = 'ok' | 'insufficient' | 'no_spread' | 'unavailable'
 export type PatternScope = {
   key: string; label: string; drivers: Driver[]; total_nights: number; sightings: number
   status?: Record<string, VarStatus>
@@ -28,33 +34,35 @@ export type Patterns = {
   tested?: boolean; shuffles?: number
 }
 
-// `labels` name the three bars. `phrases` finish the sentence
-// "More wild boar …" for the same three conditions.
+// `labels` name the three bars; `pair` the two when most nights read the same.
+// `phrases` finish the sentence "More wild boar … than …" for the low and the high
+// end, the only two a finding compares. `flat` is what a card says when the nights
+// hardly differ.
 const FACTORS = [
   { key: 'wind', title: 'Wind', Icon: WindIcon, labels: ['Light wind', 'In between', 'Strong wind'],
-    phrases: ['when the wind is light', 'in middling wind', 'when it is windy'],
+    phrases: ['when the wind is light', 'when it is windy'], flat: 'The wind hardly changed',
     meaning: 'Overnight wind speed. It says nothing about which way your scent goes; check the wind direction on the Map.' },
   { key: 'pressure', title: 'Air pressure', Icon: GaugeIcon, labels: ['Low pressure', 'In between', 'High pressure'],
-    phrases: ['when the pressure is low', 'in middling pressure', 'when the pressure is high'],
+    phrases: ['when the pressure is low', 'when the pressure is high'], flat: 'The pressure hardly changed',
     meaning: 'Overnight air pressure, as a barometer reads it.' },
   { key: 'pressure_trend', title: 'Pressure change', Icon: TrendUpIcon, labels: ['Smaller change', 'In between', 'Bigger change'],
-    phrases: ['when the pressure barely moves', 'in a middling change', 'when the pressure moves a lot'],
+    phrases: ['when the pressure barely moves', 'when the pressure moves a lot'], flat: 'The pressure hardly moved',
     meaning: 'How much the pressure moved since the night before. Below zero it fell, above zero it rose.' },
   { key: 'moon_illum', title: 'Moon', Icon: MoonIcon, labels: ['Dark moon', 'In between', 'Bright moon'],
-    phrases: ['on a dark moon', 'with a half-lit moon', 'on a bright moon'],
+    phrases: ['on a dark moon', 'on a bright moon'], flat: 'Too few nights to compare',
     meaning: 'How much of the moon was lit. Cloud and the moon being below the horizon still change how dark it is outside.' },
   { key: 'temp', title: 'Temperature', Icon: ThermometerIcon, labels: ['Cool', 'In between', 'Warm'],
-    phrases: ['on cool nights', 'on mild nights', 'on warm nights'],
+    phrases: ['on cool nights', 'on warm nights'], flat: 'The temperature hardly changed',
     meaning: 'Average overnight temperature.' },
-  { key: 'rain', title: 'Rain', Icon: DropIcon, labels: ['Dry', 'In between', 'Wet'],
-    phrases: ['on dry nights', 'with a little rain', 'on wet nights'],
+  { key: 'rain', title: 'Rain', Icon: DropIcon, labels: ['Dry', 'In between', 'Wet'], pair: ['Dry', 'Wet'],
+    phrases: ['on dry nights', 'on wet nights'], flat: 'Too few wet nights to compare',
     meaning: 'How much rain fell overnight.' },
-  { key: 'cloud', title: 'Cloud', Icon: CloudIcon, labels: ['Clear', 'In between', 'Overcast'],
-    phrases: ['under clear skies', 'under broken cloud', 'under heavy cloud'],
+  { key: 'cloud', title: 'Cloud', Icon: CloudIcon, labels: ['Clear', 'In between', 'Overcast'], pair: ['Clear', 'Cloudy'],
+    phrases: ['under clear skies', 'under cloud'], flat: 'Too few cloudy nights to compare',
     meaning: 'How much of the sky was covered overnight.' },
   { key: 'darkness', title: 'Dark hours', Icon: SunHorizonIcon, labels: ['Short nights', 'In between', 'Long nights'],
-    phrases: ['on short nights', 'on middling nights', 'on long nights'],
-    meaning: 'Sunset to sunrise. It changes with the season and includes twilight.' },
+    phrases: ['on short nights', 'on long nights'], flat: 'Too few nights to compare',
+    meaning: 'Sunset to sunrise. It changes with the season and includes twilight. Each night is compared with the weeks around it, so the season itself is not a finding.' },
 ]
 type Factor = typeof FACTORS[number]
 
@@ -74,9 +82,11 @@ function position(bucket: Bucket) {
   return bucket.label === 'low' ? 0 : bucket.label === 'high' ? 2 : 1
 }
 
-function bucketLabel(key: string, bucket: Bucket, labels: string[]) {
+function bucketLabel(factor: Factor, bucket: Bucket, pair: boolean) {
   const pos = position(bucket)
-  if (key !== 'pressure_trend' || bucket.min == null || bucket.max == null) return labels[pos]
+  if (factor.key !== 'pressure_trend' || bucket.min == null || bucket.max == null) {
+    return pair && 'pair' in factor && factor.pair ? factor.pair[pos === 0 ? 0 : 1] : factor.labels[pos]
+  }
   if (bucket.max < 0) return ['Bigger falls', 'Moderate falls', 'Smaller falls'][pos]
   if (bucket.min > 0) return ['Smaller rises', 'Moderate rises', 'Bigger rises'][pos]
   if (bucket.min === 0 && bucket.max === 0) return 'No change'
@@ -85,61 +95,71 @@ function bucketLabel(key: string, bucket: Bucket, labels: string[]) {
   return 'A mix of rises & falls'
 }
 
-// The plain-sentence version of bucketLabel: "More wild boar …".
-function bucketPhrase(factor: Factor, bucket: Bucket) {
-  const pos = position(bucket)
-  if (factor.key !== 'pressure_trend' || bucket.min == null || bucket.max == null) return factor.phrases[pos]
-  if (bucket.max < 0) return ['when the pressure is falling fast', 'when the pressure is falling', 'when the pressure is falling gently'][pos]
-  if (bucket.min > 0) return ['when the pressure is rising gently', 'when the pressure is rising', 'when the pressure is rising fast'][pos]
+// The plain-sentence version of bucketLabel, for the low or the high end only:
+// "More wild boar when it is windy than when the wind is light."
+function endPhrase(factor: Factor, bucket: Bucket) {
+  const end = bucket.label === 'high' ? 1 : 0
+  if (factor.key !== 'pressure_trend' || bucket.min == null || bucket.max == null) return factor.phrases[end]
+  if (bucket.max < 0) return ['when the pressure is falling fast', 'when the pressure is falling gently'][end]
+  if (bucket.min > 0) return ['when the pressure is rising gently', 'when the pressure is rising fast'][end]
   if (bucket.min === 0 && bucket.max === 0) return 'when the pressure is steady'
   if (bucket.min === 0) return 'when the pressure is steady or rising'
   if (bucket.max === 0) return 'when the pressure is steady or falling'
   return 'when the pressure is changing'
 }
 
-// Which of the three conditions clearly saw the most sightings, if any.
-function compare(driver?: Driver) {
-  const buckets = ['low', 'mid', 'high'].map(label => driver?.buckets.find(b => b.label === label)).filter((b): b is Bucket => !!b && Number.isFinite(b.rate))
-  const max = Math.max(...buckets.map(b => b.rate), 0)
-  const min = Math.min(...buckets.map(b => b.rate))
-  const leaders = buckets.filter(b => b.rate === max)
-  const complete = buckets.length === 3
-  // Equal/overlapping ranges do not support a distinct winning condition, even
-  // if sorting tied measurements happened to produce different sighting counts.
-  const separated = complete && (leaders.length === 1
-    ? buckets.every(b => b === leaders[0] || b.min == null || b.max == null || leaders[0].min == null || leaders[0].max == null || b.max < leaders[0].min || b.min > leaders[0].max)
-    : buckets[0].max == null || buckets[2].min == null || buckets[0].max < buckets[2].min)
-  const leader = complete && separated && max > min && leaders.length === 1 ? leaders[0] : null
-  return { buckets, max, complete, separated, leader }
+function more(factor: Factor, found: { more: Bucket; less: Bucket }) {
+  const a = endPhrase(factor, found.more)
+  const b = endPhrase(factor, found.less)
+  const said = 'when the pressure is '
+  return `${a} than ${a.startsWith(said) && b.startsWith(said) ? `when it is ${b.slice(said.length)}` : b}`
 }
 
-/** The one condition-group that stood out AND held up against chance, if any. */
+// The bars, and whether the two ends a finding compares are there and apart.
+function compare(driver?: Driver) {
+  const buckets = ['low', 'mid', 'high'].map(label => driver?.buckets.find(b => b.label === label)).filter((b): b is Bucket => !!b && Number.isFinite(b.rate))
+  const low = buckets.find(b => b.label === 'low')
+  const high = buckets.find(b => b.label === 'high')
+  const max = Math.max(...buckets.map(b => b.rate), 0)
+  const complete = !!low && !!high
+  // Overlapping ends do not tell two conditions apart, whatever the counts.
+  const separated = complete && (low.max == null || high.min == null || low.max < high.min)
+  const differs = buckets.some(b => b.rate !== buckets[0].rate)
+  return { buckets, low, high, max, complete, separated, differs, pair: complete && buckets.length === 2 }
+}
+
+/** The one end that stood out against the other AND held up against chance, if
+ *  any. Only the two ends were tested, so the middle bar is never a finding, even
+ *  when it is the tallest. */
 function finding(driver?: Driver) {
-  const { leader } = compare(driver)
-  return leader && driver?.beats_chance ? leader : null
+  const { low, high, separated } = compare(driver)
+  if (!driver?.beats_chance || !low || !high || !separated || low.rate === high.rate) return null
+  const upHigh = driver.favours_high ?? high.rate > low.rate
+  return upHigh ? { more: high, less: low } : { more: low, less: high }
 }
 
 function FactorCard({ factor, driver, status }: { factor: Factor; driver?: Driver; status?: VarStatus }) {
-  const { key, title, Icon, labels, meaning } = factor
-  const { buckets, max, complete, separated, leader } = compare(driver)
+  const { key, title, Icon, meaning } = factor
+  const { buckets, max, complete, separated, differs, pair } = compare(driver)
   const found = finding(driver)
   // Bars that did not beat chance are said to be what they are: a difference this
   // size turns up in shuffled nights too, so it is not a finding (audit G-04, J-09).
   const takeaway = status === 'unavailable' ? 'Weather history unavailable right now'
+    : status === 'no_spread' && !complete ? factor.flat
     : !complete ? 'Not enough nights to compare yet'
     : !separated ? 'Too close to call'
-    : found ? `Most visits: ${bucketLabel(key, found, labels).toLowerCase()}`
-    : leader ? 'Could be chance'
+    : found ? `More visits ${more(factor, found)}`
+    : differs ? 'Could be chance'
     : 'No difference'
 
   return <article className="weather-card" aria-labelledby={`factor-${key}`}>
     <div className="weather-card-heading"><Icon size={23} aria-hidden="true" /><h3 id={`factor-${key}`}>{title}</h3></div>
     <p className="weather-takeaway">{takeaway}</p>
     {complete && <>
-      <div className="weather-bars" role="img" aria-label={`${title}. Visits a night per camera. ${buckets.map(b => `${bucketLabel(key, b, labels)}: ${b.rate.toFixed(1)}`).join('. ')}`}>
+      <div className="weather-bars" role="img" aria-label={`${title}. Visits a night per camera. ${buckets.map(b => `${bucketLabel(factor, b, pair)}: ${b.rate.toFixed(1)}`).join('. ')}`}>
         {buckets.map(b => <div className="weather-bar-row" key={b.label} aria-hidden="true">
-          <div className="weather-bar-label"><span>{bucketLabel(key, b, labels)}</span><strong>{b.rate.toFixed(1)}</strong></div>
-          <div className="weather-bar-track"><div className={`weather-bar-fill${b === found ? ' is-highest' : ''}`} style={{ width: `${max > 0 ? b.rate / max * 100 : 0}%` }} /></div>
+          <div className="weather-bar-label"><span>{bucketLabel(factor, b, pair)}</span><strong>{b.rate.toFixed(1)}</strong></div>
+          <div className="weather-bar-track"><div className={`weather-bar-fill${b === found?.more ? ' is-highest' : ''}`} style={{ width: `${max > 0 ? b.rate / max * 100 : 0}%` }} /></div>
         </div>)}
       </div>
       <p className="weather-bar-caption">Visits a night per camera, over {driver?.sample_nights} watched nights</p>
@@ -147,7 +167,7 @@ function FactorCard({ factor, driver, status }: { factor: Factor; driver?: Drive
     <details className="weather-details">
       <summary>{complete ? 'What the bars measure' : `What ${title.toLowerCase()} measures`}</summary>
       <p>{meaning}</p>
-      {complete && <table><caption>Conditions behind each bar</caption><thead><tr><th>Bar</th><th>Range</th><th>Nights</th></tr></thead><tbody>{buckets.map(b => <tr key={b.label}><th>{bucketLabel(key, b, labels)}</th><td>{range(key, b)}</td><td>{b.days ?? '—'}</td></tr>)}</tbody></table>}
+      {complete && <table><caption>Conditions behind each bar</caption><thead><tr><th>Bar</th><th>Range</th><th>Nights</th></tr></thead><tbody>{buckets.map(b => <tr key={b.label}><th>{bucketLabel(factor, b, pair)}</th><td>{range(key, b)}</td><td>{b.days ?? '—'}</td></tr>)}</tbody></table>}
     </details>
   </article>
 }
@@ -160,7 +180,7 @@ export default function WeatherPatterns({ patterns, scope, onScope, error, loadi
   // An older server did no such test, so nothing it sends is stated as a finding.
   const findings = FACTORS.flatMap(factor => {
     const found = finding(driverFor(factor))
-    return found ? [{ key: factor.key, text: `More ${subject} ${bucketPhrase(factor, found)}.` }] : []
+    return found ? [{ key: factor.key, text: `More ${subject} ${more(factor, found)}.` }] : []
   })
   return <section className="insights-weather block" aria-labelledby="weather-heading">
     <h2 id="weather-heading" className="sect">Weather and moon</h2>
@@ -180,7 +200,7 @@ export default function WeatherPatterns({ patterns, scope, onScope, error, loadi
       {selected && <details className="weather-more" key={selected.key}>
         <summary>Show the numbers</summary>
         <p className="weather-reading-guide">Longer bar, more visits a night. {patterns.tested
-          ? '“Could be chance” means a gap that size turns up in shuffled nights too: it is not a finding.'
+          ? 'Only the top and bottom bars are compared. “Could be chance” means a gap that size turns up in shuffled nights too: it is not a finding.'
           : 'Not tested against chance: read these as counts, not findings.'} These are past counts, not tonight's odds.</p>
         <div className="weather-grid">{FACTORS.map(factor => <FactorCard key={factor.key} factor={factor} driver={driverFor(factor)} status={selected.status?.[factor.key]} />)}</div>
         <p className="weather-bar-caption">{selected.label}: {selected.sightings.toLocaleString()} visits over {selected.total_nights} watched nights{patterns.range && `, ${patterns.range[0]} to ${patterns.range[1]}`}.</p>

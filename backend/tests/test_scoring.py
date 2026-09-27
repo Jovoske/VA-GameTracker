@@ -193,8 +193,9 @@ def _graded(db, cam, night, probability, occurred, verdict=None):
 
 @requires_db
 def test_the_track_record_is_graded_per_verdict_and_against_each_cameras_rate(db_session, cam):
-    """What the hunter read is what is graded: "When it said Best odds, animals came
-    X of N nights", and behind that whether the odds beat each camera's usual rate."""
+    """What the hunter read is what is graded: "When it called a camera Best odds,
+    animals came there X of N times", and behind that whether the odds beat each
+    camera's usual rate."""
     base = date.today() - timedelta(days=MIN_SKILL_NIGHTS + 5)
     for i in range(MIN_SKILL_NIGHTS + 5):
         animal = i % 2 == 0
@@ -204,11 +205,11 @@ def test_the_track_record_is_graded_per_verdict_and_against_each_cameras_rate(db
     cal = calibration(db_session, days=365)
     assert cal["available"] is True
     assert cal["n_evaluated"] == MIN_SKILL_NIGHTS + 5
-    assert {v["verdict"]: (v["came"], v["nights"]) for v in cal["by_verdict"]} == {
+    assert {v["verdict"]: (v["came"], v["times"]) for v in cal["by_verdict"]} == {
         "BEST_ODDS": (18, 18), "WORTH_A_LOOK": (0, 17), "QUIET": (0, 0)}
     assert cal["lines"] == [
-        "When it said Best odds, animals came 18 of 18 nights.",
-        "When it said Worth a look, animals came 0 of 17 nights.",
+        "When it called a camera Best odds, animals came there 18 of 18 times.",
+        "When it called a camera Worth a look, animals came there 0 of 17 times.",
         "Its odds were closer to what happened than each camera's usual rate.",
     ]
     assert cal["skill_vs_climatology"] > 0
@@ -262,8 +263,36 @@ def test_worth_a_look_is_not_graded_as_a_prediction_of_no_animals(db_session, ca
     db_session.commit()
 
     cal = calibration(db_session, days=365)
-    assert cal["lines"][0] == "When it said Worth a look, animals came 30 of 30 nights."
+    assert cal["lines"][0] == (
+        "When it called a camera Worth a look, animals came there 30 of 30 times.")
     assert "Right on" not in cal["statement"] and "0%" not in cal["statement"]
+
+
+@requires_db
+def test_several_cameras_a_night_are_times_not_nights(db_session, cam):
+    """Four cameras over 14 checked nights are 56 claims. The fold said "animals came
+    56 of 56 nights" to a hunter who knew only 14 nights had been checked."""
+    cams = [cam]
+    for name in ("Loma", "Pinar", "Charca"):
+        other = Camera(estate_id=cam.estate_id, name=name, active=True)
+        db_session.add(other)
+        db_session.flush()
+        cams.append(other)
+    base = date.today() - timedelta(days=MIN_SCORED_NIGHTS + 1)
+    for i in range(MIN_SCORED_NIGHTS):
+        for c in cams:
+            _graded(db_session, c, base + timedelta(days=i), 0.8, True)
+    db_session.commit()
+
+    cal = calibration(db_session, days=365)
+    assert cal["available"] is True and cal["nights"] == MIN_SCORED_NIGHTS
+    best = next(v for v in cal["by_verdict"] if v["verdict"] == "BEST_ODDS")
+    assert (best["came"], best["times"], best["nights"]) == (
+        4 * MIN_SCORED_NIGHTS, 4 * MIN_SCORED_NIGHTS, MIN_SCORED_NIGHTS)
+    n = 4 * MIN_SCORED_NIGHTS
+    assert cal["lines"][0] == (
+        f"When it called a camera Best odds, animals came there {n} of {n} times.")
+    assert "nights." not in cal["lines"][0]
 
 
 @requires_db

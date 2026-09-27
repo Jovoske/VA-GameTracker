@@ -319,16 +319,20 @@ def calibration(db: Session, *, days: int = 90, today: date | None = None) -> di
             ),
         }
 
+    # A claim is one camera on one night, so with four cameras fourteen nights make
+    # 56 claims: said as times at a camera, never "56 of 56 nights" after 14 nights.
     by_verdict = []
     lines = []
     for verdict in GRADED:
         graded = [occurred for fc, occurred in rows if _verdict_of(fc) == verdict]
         came = sum(1 for occurred in graded if occurred)
-        by_verdict.append({"verdict": verdict, "nights": len(graded), "came": came})
+        by_verdict.append({"verdict": verdict, "times": len(graded), "came": came,
+                           "nights": len({fc.target_date for fc, _ in rows
+                                          if _verdict_of(fc) == verdict})})
         if len(graded) >= MIN_PER_VERDICT:
             lines.append(
-                f"When it said {VERDICT_WORDS[verdict]}, animals came {came} of "
-                f"{len(graded)} nights."
+                f"When it called a camera {VERDICT_WORDS[verdict]}, animals came there "
+                f"{came} of {len(graded)} times."
             )
 
     ys = [1.0 if occurred else 0.0 for _, occurred in rows]

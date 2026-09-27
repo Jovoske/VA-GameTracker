@@ -18,7 +18,7 @@ const assert=require('node:assert/strict');
  let plan={
   verdict:'BEST_ODDS',changed:{kind:'none',camera:null,text:'Nothing changed. Much the same as the last few nights.'},
   wind:{status:'unknown',text:'No wind forecast tonight.',is_advice:false},
-  calibration:{available:true,n_evaluated:40,statement:'x',lines:['When it said Best odds, animals came 7 of 9 nights.','When it said Quiet, animals came 1 of 12 nights.']},
+  calibration:{available:true,n_evaluated:40,statement:'x',lines:['When it called a camera Best odds, animals came there 7 of 9 times.','When it called a camera Quiet, animals came there 1 of 12 times.']},
   recommended:{camera:'Charca',camera_id:'c1',species:'Wild boar',runner_up:null,probability:0.7,best_window:win,expect:'Sow + piglets',
    classes:[{label:'Sow + piglets',visits:12,photos:120},{label:'Boar',visits:1,photos:3}],nights_present:21,active_nights:30,visits:13,photos:123,
    reason:'Wild boar seen 21 of 30 nights at this camera.',caveat:'The camera watches all night.'},
@@ -32,8 +32,12 @@ const assert=require('node:assert/strict');
  const overview={totals:{sightings:100,empty:5,nights:30,cameras:1},by_hour:Array.from({length:24},(_,h)=>({hour:h,count:h>=3&&h<6?30:h>=21?10:1})),
   by_camera:[{id:'c1',name:'Charca',sightings:100}],by_species:[{species:'Wild Boar',count:100}],best_window:{start_hour:3,end_hour:6,share_pct:60}};
  const bars=(lo,mid,hi)=>[{label:'low',rate:lo,days:20,min:0,max:30},{label:'mid',rate:mid,days:20,min:31,max:70},{label:'high',rate:hi,days:20,min:71,max:100}];
- const patterns={nights:60,tested:true,shuffles:200,range:['2026-08-01','2026-09-26'],scopes:[{key:'all',label:'All animals',total_nights:60,sightings:180,status:{moon_illum:'ok',temp:'ok',wind:'unavailable'},
-  drivers:[{factor:'Moonlight',key:'moon_illum',sample_nights:60,buckets:bars(4.1,2.9,1.2),beats_chance:true},{factor:'Temperature',key:'temp',sample_nights:60,buckets:bars(2.0,3.1,2.4),beats_chance:false}]}]};
+ // Wind: the middle bar is the tallest, but only still air against wind was tested
+ // (R3BE-2). Rain: dry nights against wet ones, two bars. Cloud: too few cloudy nights.
+ const patterns={nights:60,tested:true,shuffles:200,range:['2026-08-01','2026-09-26'],scopes:[{key:'all',label:'All animals',total_nights:60,sightings:180,status:{moon_illum:'ok',temp:'ok',wind:'ok',rain:'ok',cloud:'no_spread',pressure:'unavailable'},
+  drivers:[{factor:'Moonlight',key:'moon_illum',sample_nights:60,buckets:bars(4.1,2.9,1.2),beats_chance:true,favours_high:false},{factor:'Temperature',key:'temp',sample_nights:60,buckets:bars(2.0,3.1,2.4),beats_chance:false,favours_high:true},
+   {factor:'Wind',key:'wind',sample_nights:60,buckets:bars(0.3,2.4,2.0),beats_chance:true,favours_high:true},
+   {factor:'Rain',key:'rain',sample_nights:60,buckets:[{label:'low',rate:2.1,days:52,min:0,max:0},{label:'high',rate:4.0,days:8,min:0.2,max:6}],beats_chance:false,favours_high:true}]}]};
  const insights={outlook:[],correlations:[{kind:'time',statement:'Your cameras are busiest between 21:00 and midnight.',strength:0.4,sample:120}],
   composition:[{label:'Sow + piglets',count:12,visits:12,photos:120,top_camera:'Charca'}]};
  const classPhotos=Array.from({length:130},(_,i)=>({image_id:`s${i}`,file_url:`/api/images/s${i}/file`,captured_at:ago(i+1),camera:'Charca',group_size:5}));
@@ -81,7 +85,7 @@ const assert=require('node:assert/strict');
  await page.getByText('Show the numbers').click();
  const fold=await page.locator('.tn-details').innerText();
  assert.match(fold,/Sow \+ piglets\s*12 visits \(120 photos\)/);assert.match(fold,/A visit is one arrival/);
- assert.match(fold,/When it said Best odds, animals came 7 of 9 nights\.\s*When it said Quiet, animals came 1 of 12 nights\./);
+ assert.match(fold,/When it called a camera Best odds, animals came there 7 of 9 times\.\s*When it called a camera Quiet, animals came there 1 of 12 times\./);
  const greens=await page.$$eval('.tn-bars-y .bar-y',b=>b.map(x=>getComputedStyle(x).backgroundColor));
  const green=greens.map((c,h)=>c===greens[21]?h:null).filter(h=>h!==null);
  assert.deepEqual(green,[21,22,23],'the green band is the headline best hours, not 03-06');
@@ -96,12 +100,27 @@ const assert=require('node:assert/strict');
  // ── Insights
  page=await newPage();
  await page.goto(base+'/insights');
- await page.locator('.insights-findings li',{hasText:'More animals on a dark moon.'}).waitFor();
+ await page.locator('.insights-findings li',{hasText:'More animals on a dark moon than on a bright moon.'}).waitFor();
+ const found=await page.locator('.insights-weather .insights-findings li').allInnerTexts();
+ // Said as what was tested, the two ends; never the middle bar, though it is tallest.
+ assert.deepEqual(found,['More animals when it is windy than when the wind is light.','More animals on a dark moon than on a bright moon.']);
  const weather=await page.locator('.insights-weather').innerText();
+ assert.doesNotMatch(weather,/middling|half-lit|mild nights|broken cloud/,'the untested middle is never a finding');
  assert.doesNotMatch(weather,/More animals on (cool|mild|warm) nights/,'an untested difference is not a finding');
  assert.match(weather,/held up when the same nights were shuffled 200 times/);
  await page.locator('.insights-weather summary',{hasText:'Show the numbers'}).click();
- assert.match(await page.locator('.insights-weather').innerText(),/Could be chance[\s\S]*Weather history unavailable right now|Weather history unavailable right now[\s\S]*Could be chance/);
+ const cards=Object.fromEntries(await page.$$eval('.weather-card',cs=>cs.map(c=>[c.querySelector('h3').textContent,c.querySelector('.weather-takeaway').textContent])));
+ assert.equal(cards['Wind'],'More visits when it is windy than when the wind is light');
+ assert.equal(cards['Temperature'],'Could be chance');
+ assert.equal(cards['Air pressure'],'Weather history unavailable right now');
+ assert.equal(cards['Cloud'],'Too few cloudy nights to compare');
+ assert.equal(cards['Rain'],'Could be chance');
+ const card=title=>page.locator('.weather-card').filter({has:page.locator('h3',{hasText:new RegExp(`^${title}$`)})});
+ const rain=await card('Rain').locator('.weather-bar-label').allInnerTexts();
+ assert.deepEqual(rain.map(t=>t.split('\n')[0]),['Dry','Wet'],'dry nights against wet ones, two bars');
+ const lit=await card('Wind').locator('.weather-bar-fill.is-highest').count();
+ assert.equal(lit,1);
+ assert.equal(await card('Wind').locator('.weather-bar-row').nth(2).locator('.is-highest').count(),1,'the tested end is marked, not the tallest bar');
  assert.match(await page.locator('.insights-class').innerText(),/12 visits, mostly at Charca/);
  await page.locator('.insights-class').click();
  await page.locator('.insights-more').waitFor();
@@ -132,6 +151,6 @@ const assert=require('node:assert/strict');
  await page.close();
 
  assert.deepEqual(errors,[]);
- console.log('PASS: Tonight in visits with photos behind the fold, green band = best hours, watched nights and left-out note, no "1 nights", track record per verdict, a camera left out says so; Insights finding only when tested, makeup in visits, class photos paged; retire switch for admins only.');
+ console.log('PASS: Tonight in visits with photos behind the fold, green band = best hours, watched nights and left-out note, no "1 nights", track record per verdict in times at a camera, a camera left out says so; Insights finding only when tested and only of the two ends it tested (never the middle bar), dry against wet, too few cloudy nights, makeup in visits, class photos paged; retire switch for admins only.');
  } finally { await browser.close() }
 })().catch(e=>{console.error(e);process.exit(1)});

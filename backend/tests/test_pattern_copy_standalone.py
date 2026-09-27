@@ -7,7 +7,7 @@ from pathlib import Path
 source = Path(__file__).parents[1] / 'app' / 'forecasting' / 'patterns.py'
 tree = ast.parse(source.read_text(encoding='utf-8-sig'))
 names = {'_mean', '_pearson', '_driver', '_split'}
-namespace = {'math': math, 'MIN_NIGHTS': 10}
+namespace = {'math': math, 'MIN_NIGHTS': 10, 'MIN_SIDE': 5}
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[]), str(source), 'exec'), namespace)
 
 class PatternCopyTests(unittest.TestCase):

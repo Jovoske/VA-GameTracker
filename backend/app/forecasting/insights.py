@@ -58,10 +58,18 @@ def _clock(hour: int) -> str:
     return "midnight" if hour == 0 else f"{hour:02d}:00"
 
 
-def _summaries(rows: list[tuple]) -> list[dict]:
+def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     """The plain-sentence summaries, from visits per (camera, species id, species
     name, local hour of arrival). Visits, not photos: one boar loitering for thirty
-    frames is one arrival, and a camera that fires often no longer counts for more."""
+    frames is one arrival, and a camera that fires often no longer counts for more.
+
+    The camera is a key `names` turns into its name (the key itself without it): two
+    cameras that share a name are still two cameras (audit I-26)."""
+    names = names or {}
+
+    def name_of(camera) -> str:
+        return names.get(camera, camera)
+
     out: list[dict] = []
     total = sum(n for *_, n in rows)
     if total < 20:
@@ -101,15 +109,15 @@ def _summaries(rows: list[tuple]) -> list[dict]:
     # denominator also includes quiet recording nights. "The other cameras see far
     # less" only when there are others, and they do: with two cameras the top two
     # always hold everything, and 30/25/25/20 is not "far less".
-    cams = sorted(per_camera.items(), key=lambda kv: (-kv[1], kv[0]))
+    cams = sorted(per_camera.items(), key=lambda kv: (-kv[1], str(name_of(kv[0]))))
     if len(cams) >= 2:
         top2 = cams[0][1] + cams[1][1]
         share = round(top2 / total * 100)
-        names = f"{cams[0][0]} and {cams[1][0]}"
+        both = f"{name_of(cams[0][0])} and {name_of(cams[1][0])}"
         concentrated = len(cams) >= 3 and cams[2][1] < cams[1][1] / 2
         statement = (
-            f"Most of the action is at {names}. The other cameras see far less."
-            if concentrated else f"{names} are your busiest cameras."
+            f"Most of the action is at {both}. The other cameras see far less."
+            if concentrated else f"{both} are your busiest cameras."
         )
         out.append({
             "kind": "location",
@@ -127,17 +135,19 @@ def _correlations(db: Session) -> list[dict]:
 
     v = visit_rows(start=_since())
     hour = local_hour(v.c.first_at).label("h")
+    # By camera id, named afterwards: two cameras called "SPYPOINT" are two cameras.
     rows = db.execute(
-        select(Camera.name, v.c.species_id, v.c.common_name, hour, func.count())
+        select(Camera.id, v.c.species_id, v.c.common_name, hour, func.count())
         .select_from(v)
         .join(Camera, Camera.id == v.c.camera_id)
         .where(Camera.retired_at.is_(None))
-        .group_by(Camera.name, v.c.species_id, v.c.common_name, hour)
+        .group_by(Camera.id, v.c.species_id, v.c.common_name, hour)
     ).all()
+    names = dict(db.execute(select(Camera.id, Camera.name)).all())
     return _summaries([
         (cam, sid, sentence_case(name) if name else None, int(h), int(n))
         for cam, sid, name, h, n in rows
-    ])
+    ], names)
 
 
 def _composition(db: Session) -> list[dict]:

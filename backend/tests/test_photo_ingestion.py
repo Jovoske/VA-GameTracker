@@ -783,11 +783,13 @@ def test_a_refused_main_login_says_so_in_settings_cards_and_alerts(
     assert health[0]["detail"] == "Photos not coming in. The camera login needs attention."
     assert health[0]["login"] == {"label": "Main SPYPOINT login", "error": words}
 
+    # Said once in each place: the line above the plan names the login and the way
+    # to Settings, the plan's "Cameras not sending" card its cameras. The alerts
+    # under them don't say it a third time (J-12).
+    fresh = logins.freshness(db_session, now=NOW)
+    assert fresh["problem"] == "login" and fresh["logins"] == ["Main SPYPOINT login"]
     feed = alerts.compute_alerts(db_session)
-    login_alerts = [a for a in feed if a["type"] == "camera"]
-    assert [a["title"] for a in login_alerts] == ["Main SPYPOINT login: photos not coming in"]
-    assert "Cam sp-1, Cam sp-2" in login_alerts[0]["text"]
-    assert words in login_alerts[0]["text"]
+    assert not any(a["type"] == "camera" for a in feed)
     assert not any("battery" in a["text"] for a in feed)
 
 
@@ -849,11 +851,14 @@ def test_a_long_job_holding_the_pipeline_is_busy_not_stopped(
     assert camera_health(cameras[0], NOW, states[cameras[0].id])["status"] == "ok"
     assert logins.freshness(db_session, now=NOW)["problem"] is None
 
-    # No job explains it: stopped, and one alert for the estate, not one per login.
+    # No job explains it: stopped, said once for the estate above the plan, not once
+    # per login, and not again in the alerts (J-12).
     monkeypatch.setattr(logins, "pipeline_busy_since", lambda now=None: None)
-    feed = [a for a in alerts.compute_alerts(db_session) if a["type"] == "camera"]
-    assert [a["title"] for a in feed] == ["Photos not coming in"]
-    assert "Cam 0, Cam 1, Cam 2" in feed[0]["text"]
+    assert logins.freshness(db_session, now=NOW)["problem"] == "stopped"
+    plan = model.forecast_tonight(db_session)
+    assert plan["freshness"]["problem"] == "stopped"
+    assert {a["camera"] for a in plan["alerts"]} == {"Cam 0", "Cam 1", "Cam 2"}
+    assert not [a for a in alerts.compute_alerts(db_session) if a["type"] == "camera"]
     # A job that only began after they had stopped doesn't excuse them.
     busy = datetime.now(UTC) - timedelta(minutes=10)
     monkeypatch.setattr(logins, "pipeline_busy_since", lambda now=None: busy)

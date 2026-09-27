@@ -365,6 +365,52 @@ def test_counts_are_visits_and_the_top_card_lists_the_animal_it_names(db_session
         "Roe deer": (60, 60), "Sow + piglets": (10, 120)}
 
 
+@requires_db
+def test_the_classes_of_an_animal_add_up_to_its_visits(db_session, estate):
+    """The sex and group pass looks at only some frames, so one arrival's frames carry
+    two labels. Counted per label, each such arrival was a visit of both, and the top
+    card listed about twice the visits the forecast, the map and Insights counted.
+    Each visit is now of one class: the most telling label, then the most frames."""
+    cam = camera(db_session, estate, "PL19 Charca")
+    watched(db_session, cam, 26)
+    for n in range(1, 11):  # a sow with piglets; only the first frame was sexed
+        seen(db_session, cam, ago(n), 22, 0, group="sow_with_piglets")
+        seen(db_session, cam, ago(n), 22, 2)
+        seen(db_session, cam, ago(n), 22, 4)
+    for n in range(11, 21):  # a boar frame and two sow frames: most frames say sow
+        seen(db_session, cam, ago(n), 21, 0, sex="male")
+        seen(db_session, cam, ago(n), 21, 2, sex="female")
+        seen(db_session, cam, ago(n), 21, 4, sex="female")
+    for n in range(21, 26):  # nobody sexed these
+        seen(db_session, cam, ago(n), 23, 0)
+        seen(db_session, cam, ago(n), 23, 10)
+    # A night whose photos are not all checked yet is not counted, class or visit.
+    seen(db_session, cam, ago(26), 22, 0, sex="male")
+    seen(db_session, cam, ago(26), 23, 0, checked=False)
+    db_session.commit()
+    recompute_camera_nights(db_session)
+
+    out = forecast_tonight(db_session)
+    rec = out["recommended"]
+    assert (rec["visits"], rec["photos"]) == (25, 70)
+    assert rec["classes"] == [
+        {"label": "Sow", "visits": 10, "photos": 30},
+        {"label": "Sow + piglets", "visits": 10, "photos": 30},
+        {"label": "Wild boar", "visits": 5, "photos": 10},
+    ]
+    assert sum(c["visits"] for c in rec["classes"]) == rec["visits"]
+    assert sum(c["photos"] for c in rec["classes"]) == rec["photos"]
+    fold = out["where"][0]["classes"]
+    assert sum(c["visits"] for c in fold) == out["where"][0]["visits"]
+
+    # Insights' makeup counts the same visits (the unchecked night's boar too: the
+    # makeup is every visit of the season, as its summaries are).
+    from app.forecasting.insights import compute_insights
+
+    makeup = {c["label"]: c["visits"] for c in compute_insights(db_session)["composition"]}
+    assert makeup == {"Sow + piglets": 10, "Sow": 10, "Wild boar": 5, "Boar": 1}
+
+
 # ── A-12 / G-18 / J-12: alerts don't work the plan out again ────────────────
 
 
@@ -430,8 +476,34 @@ def test_a_second_camera_cannot_take_a_name_already_in_use(db_session, estate):
             ok = client.patch(f"/api/cameras/{a.id}/name", json={"name": "Pinar Bajo"},
                               headers=headers)
             assert ok.status_code == 200
+            # "Use camera's name" too: the vendor's default is often the same for all.
+            a.provider_name = "SPYPOINT"
+            camera(db_session, estate, "SPYPOINT")
+            db_session.commit()
+            back = client.patch(f"/api/cameras/{a.id}/name", json={"name": None},
+                                headers=headers)
+            assert back.status_code == 409
+            assert back.json()["detail"] == (
+                "Another camera is already called SPYPOINT, so this one keeps its own name.")
+            db_session.refresh(a)
+            assert (a.name, a.name_is_custom) == ("Pinar Bajo", True)
     finally:
         app.dependency_overrides.clear()
+
+
+@requires_db
+def test_two_cameras_that_share_a_name_are_two_cameras_in_insights(db_session, estate):
+    """Two cameras left on the vendor's name merged into one busiest camera."""
+    from app.forecasting.insights import compute_insights
+
+    for name, visits in (("SPYPOINT", 10), ("SPYPOINT", 10), ("Loma", 15)):
+        cam = camera(db_session, estate, name)
+        for n in range(1, visits + 1):
+            seen(db_session, cam, ago(n), 22)
+    db_session.commit()
+    places = [c["statement"] for c in compute_insights(db_session)["correlations"]
+              if c["kind"] == "location"]
+    assert places == ["Loma and SPYPOINT are your busiest cameras."]
 
 
 # ── G-16 / J-10 / G-17: the Changed line ────────────────────────────────────

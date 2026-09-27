@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.checking import hunter_decided
 from app.api.deps import get_current_user
+from app.api.routes_images import recount_after_flag
 from app.api.routes_map import latest_photos
 from app.api.visibility import ONLY_HIDDEN_SPECIES
 from app.core.db import get_db
@@ -148,6 +149,10 @@ def add_note(
             species_id=shown["species_id"] if shown else None,
         )
     db.commit()
+    if kept:
+        # Kept as an animal photo, as the Keep button does: the nights it was left
+        # out of are counted again, and a night already graded without it graded again.
+        recount_after_flag(db, image.camera_id, image.captured_at)
     if new_told:
         background.add_task(deliver_in_background, [n.id for n in new_told])
     return {

@@ -156,8 +156,14 @@ def rename_camera(
         Camera.estate_id == user.estate_id, Camera.id != camera.id,
         func.lower(Camera.name) == name.lower(),
     ).limit(1))
-    if taken is not None and body.name is not None:
-        raise HTTPException(409, f"Another camera is already called {name}. Pick another name.")
+    if taken is not None:
+        # Going back to the vendor's name too: two SPYPOINTs called "SPYPOINT" are the
+        # same trap as two cameras a hunter called "Feeder".
+        raise HTTPException(409, (
+            f"Another camera is already called {name}. Pick another name."
+            if body.name is not None else
+            f"Another camera is already called {name}, so this one keeps its own name."
+        ))
     camera.name = name
     camera.name_is_custom = body.name is not None
     db.commit()

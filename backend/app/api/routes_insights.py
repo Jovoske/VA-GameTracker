@@ -31,8 +31,9 @@ def patterns(_: User = Depends(get_current_user), db: Session = Depends(get_db))
 
 def _in_class(label: str):
     """SQL on a Detection joined to its Species: it is of this class (Stag, Sow +
-    piglets, Roe deer). The same split as model.class_label, so the photos always
-    match the class the Insights makeup counted."""
+    piglets, Roe deer). The same split as model.class_label, so the photos are the
+    ones labelled with the class the Insights makeup names (a visit it counted as
+    "Sow + piglets" may have plain "Wild boar" frames too; those list under that)."""
     split = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type)
     name = func.concat(func.upper(func.left(Species.common_name, 1)),
                        func.lower(func.substr(Species.common_name, 2)))

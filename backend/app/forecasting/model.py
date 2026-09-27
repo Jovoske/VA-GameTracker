@@ -261,6 +261,11 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
     return sentence_case(common_name) if common_name else (species_id or "Animal")
 
 
+# class_label's plain species, when the sex and group pass said nothing about it:
+# every other class of red deer and wild boar tells more.
+PLAIN_CLASSES = ("Red deer", "Wild boar")
+
+
 def class_label_sql(species_id, sex, group_type):
     """SQL for class_label's split of red deer and wild boar ("Stag", "Sow + piglets"),
     NULL for every other species (which is its name). Mirrors class_label, so a visit
@@ -280,26 +285,36 @@ def class_label_sql(species_id, sex, group_type):
     )
 
 
-def _classes(rows: list[dict], camera_id: str, species_ids=None) -> list[dict]:
-    """The four commonest classes at a camera, by visits, photos alongside."""
+def _classes(rows: list[dict], camera_id: str, species_ids=None, nights=None,
+             limit: int | None = 4) -> list[dict]:
+    """The commonest classes at a camera, by visits, photos alongside.
+
+    Only visits on `nights` (the nights the camera was watching, which is what its
+    visits are counted over), so the classes of one animal add up to its visits.
+    """
     agg: dict[str, dict] = {}
     for r in rows:
         if str(r["camera_id"]) != camera_id or (species_ids and r["species_id"] not in species_ids):
             continue
+        if nights is not None and r["night"] not in nights:
+            continue
         c = agg.setdefault(r["label"], {"label": r["label"], "visits": 0, "photos": 0})
         c["visits"] += r["visits"]
         c["photos"] += r["photos"]
-    return sorted(agg.values(), key=lambda c: (-c["visits"], -c["photos"], c["label"]))[:4]
+    return sorted(agg.values(), key=lambda c: (-c["visits"], -c["photos"], c["label"]))[:limit]
 
 
 def _expectations(
-    db: Session, forecasts: list[dict], species_ids: list[str] | None, tonight
+    db: Session, forecasts: list[dict], species_ids: list[str] | None, tonight,
+    watched: dict[str, set],
 ) -> tuple[list[dict], list[dict]]:
     """Per ranked camera: which classes (stag/hind/sow+piglets/…) to expect there.
 
     Counted in visits, the unit a hunter reads: a sow and her piglets loitering for
-    forty frames are one visit, not "×40". The class rows come back too, so the top
-    card can list only the animal it names."""
+    forty frames are one visit, not "×40". Each visit is of one class
+    (visits.class_visits) and only the nights the camera was watching count, so the
+    classes of an animal add up to its visits. The class rows come back too, so the
+    top card can list only the animal it names."""
     from app.forecasting.visits import class_visits
 
     if not forecasts:
@@ -325,7 +340,7 @@ def _expectations(
             "nights_present": f["nights_present"], "active_nights": f["active_nights"],
             "visits": f["visits"], "photos": f["photos"],
             "best_window": f["best_window"],
-            "classes": _classes(rows, f["camera_id"]),
+            "classes": _classes(rows, f["camera_id"], nights=watched.get(f["camera_id"])),
         })
     return out, rows
 
@@ -513,10 +528,13 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
                 "conditions": cond, "alternates": [], "alerts": alerts, "freshness": fresh}
 
     top = forecasts[0]
-    where, class_rows = _expectations(db, forecasts, species_ids, tonight)
-    # The top card names one animal, so it lists that animal's classes only; the
-    # mixed list stays in the per-camera fold (audit I-20).
-    top_classes = _classes(class_rows, top["camera_id"], {top["species_id"]})
+    watched = {str(c.id): ev[c.id]["watched"] for c in ranked}
+    where, class_rows = _expectations(db, forecasts, species_ids, tonight, watched)
+    # The top card names one animal, so it lists that animal's classes only, all of
+    # them, adding up to its visits; the mixed list stays in the per-camera fold
+    # (audit I-20).
+    top_classes = _classes(class_rows, top["camera_id"], {top["species_id"]},
+                           watched[top["camera_id"]], limit=None)
 
     # One line of news beats a wall of unchanged numbers. A hunter who opened the app
     # yesterday needs to know what moved, not to re-read what didn't.
