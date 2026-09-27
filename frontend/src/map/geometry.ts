@@ -1,6 +1,10 @@
 // A camera as the map has it (GET /map/cameras): its newest photo worth showing,
 // how many photos are new to you, and last night in visits, never in frames.
-export type CameraHealth = { status: string; detail: string; producing: boolean; hours_since_report: number | null }
+export type CameraHealth = {
+  status: string; detail: string; producing: boolean; hours_since_report: number | null
+  // With status not_syncing: the login that fetches this camera, and what is wrong with it.
+  login?: { label: string | null; error: string | null }
+}
 export type LatestPhoto = { image_id: string; captured_at: string; species_id: string | null; label: string }
 export type Visits = { species_id: string | null; label: string; visits: number }
 // How far to trust last night's list (routes_map.night_status): working, so an empty

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { ageLabel, api, thumbUrl, whenLabel } from '../api'
@@ -58,10 +58,20 @@ export function lastNightLine(c: Camera): NightLine {
     : { text: `Nothing on camera ${night}`, note: null, tone: 'plain' }
 }
 
-/** What is wrong with the camera, in words, or null when it is working. */
-function trouble(c: Camera): string | null {
-  if (c.health.status === 'offline') return c.last_report_at ? `Not checking in. Last heard ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'
-  if (c.health.status === 'out_of_credits') return 'Out of photo credits. New photos won’t come through until the plan renews.'
+/** What is wrong with the camera, in words, or null when it is working. A login that
+ * stopped is said as such, with the way to Settings: the camera itself may be fine. */
+function trouble(c: Camera): ReactNode | null {
+  const h = c.health
+  if (h.status === 'not_syncing') return <>
+    {h.login?.error
+      ? `Photos not coming in. Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
+      : 'Photos not coming in. No photo fetch has worked for over 2 hours.'}{' '}
+    <Link className="map-link" to="/settings#accounts">Camera logins</Link>
+  </>
+  if (h.status === 'disconnected') return 'Not connected. No camera login here fetches it now; its photos so far stay.'
+  if (h.status === 'quiet') return `${h.detail}. It sends photos only, so check it on your next visit.`
+  if (h.status === 'offline') return c.last_report_at ? `Not checking in. Last heard ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'
+  if (h.status === 'out_of_credits') return 'Out of photo credits. New photos won’t come through until the plan renews.'
   return null
 }
 

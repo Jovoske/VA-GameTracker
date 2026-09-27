@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { NoteMark } from '../components/WorthALook'
@@ -11,7 +12,18 @@ type Health = {
   producing: boolean
   credits_left: number | null
   hours_since_report: number | null
+  // With status not_syncing: the login that fetches this camera, and what is wrong.
+  login?: { label: string | null; error: string | null }
 }
+/** What /cameras/sync/status says about the latest photo fetch. */
+type SyncStatus = {
+  status: string
+  result?: string
+  images_downloaded?: number | null
+  started_at?: string | null
+  problems?: { label: string; error: string }[]
+}
+type SyncLine = { state: 'idle' | 'running' | 'ok' | 'quiet' | 'warn' | 'error'; msg: string; logins?: boolean }
 type Camera = {
   id: string
   name: string
@@ -100,6 +112,17 @@ function sinceLabel(ts: string): string {
 function healthWords(c: Camera): { label: string; color: string; ok: boolean } {
   const status = c.health?.status ?? 'ok'
   switch (status) {
+    // The camera may be fine; its photos are not reaching us. Settings, not batteries.
+    case 'not_syncing':
+      return { label: 'Photos not coming in', color: 'var(--skip)', ok: false }
+    case 'disconnected':
+      return { label: 'Not connected', color: 'var(--text-dim)', ok: false }
+    // A Suntek sends photos only: a week without one is worth a look, nothing more.
+    case 'quiet':
+      return {
+        label: c.last_report_at ? `No photos since ${sinceLabel(c.last_report_at)}` : 'No photos yet',
+        color: 'var(--marginal)', ok: false,
+      }
     case 'offline':
       return {
         label: c.last_report_at ? `Quiet since ${sinceLabel(c.last_report_at)}` : 'Never checked in',
@@ -113,6 +136,51 @@ function healthWords(c: Camera): { label: string; color: string; ok: boolean } {
       return { label: 'Sending photos', color: 'var(--go)', ok: true }
   }
 }
+
+/** The line under a camera that is not working for a reason other than the camera. */
+function HealthNote({ c }: { c: Camera }) {
+  const h = c.health
+  if (h?.status === 'not_syncing') {
+    // With an error, the login is the problem; without one, fetching has stopped.
+    return (
+      <p className="cam-health-note cam-health-note--warn">
+        {h.login?.error
+          ? `Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
+          : 'No photo fetch has worked for over 2 hours.'}{' '}
+        <Link to="/settings#accounts">Camera logins</Link>
+      </p>
+    )
+  }
+  if (h?.status === 'disconnected') {
+    return <p className="cam-health-note">No camera login here fetches it now. Its photos so far stay.</p>
+  }
+  if (h?.status === 'quiet') {
+    return <p className="cam-health-note">It sends photos only, so a quiet spell and a flat battery look the same. Check it on your next visit.</p>
+  }
+  return null
+}
+
+/** What a finished fetch came to, count first, then what needs a look. */
+function resultLine(s: SyncStatus): SyncLine {
+  const n = s.images_downloaded ?? 0
+  const photos = n > 0 ? `${n} new photo${n === 1 ? '' : 's'} came in.` : ''
+  const problems = s.problems ?? []
+  const issue = problems.length
+    ? `${problems[0].label}: ${problems[0].error}${problems.length > 1 ? ` And ${problems.length - 1} more.` : ''}`
+    : ''
+  switch (s.result ?? s.status) {
+    case 'skipped':
+      return { state: 'quiet', msg: 'No camera logins to check yet. Add one in Settings.', logins: true }
+    case 'ok':
+      return n > 0 ? { state: 'ok', msg: photos } : { state: 'quiet', msg: 'Nothing new since last time.' }
+    case 'error':
+      if (n === 0) return { state: 'error', msg: `Couldn't fetch any photos. ${issue}`.trim(), logins: true }
+      break
+  }
+  return { state: 'warn', msg: `${photos || 'No new photos from the logins that worked.'} ${issue}`.trim(), logins: !!issue }
+}
+
+const wait = (ms: number) => new Promise((res) => setTimeout(res, ms))
 
 type Zoom = { photos: LightboxPhoto[]; idx: number }
 type CameraName = Pick<Camera, 'id' | 'name' | 'provider_name' | 'name_is_custom' | 'can_rename'>
@@ -253,9 +321,10 @@ export default function Cameras() {
   const [showHidden, setShowHidden] = useState<Record<string, boolean>>({})
   const [syncing, setSyncing] = useState(false)
   // What the last check came to, so the line under the button reads as a
-  // result and not a running commentary: green when photos came in, red when
-  // it failed, quiet otherwise. Good news clears itself after a moment.
-  const [sync, setSync] = useState<{ state: 'idle' | 'running' | 'ok' | 'quiet' | 'error'; msg: string }>({ state: 'idle', msg: '' })
+  // result and not a running commentary: green when photos came in, amber when
+  // some did and a login needs a look, red when nothing could be fetched, quiet
+  // otherwise. Good news clears itself after a moment; a problem stays.
+  const [sync, setSync] = useState<SyncLine>({ state: 'idle', msg: '' })
   useEffect(() => {
     if (sync.state !== 'ok' && sync.state !== 'quiet') return
     const t = setTimeout(() => setSync({ state: 'idle', msg: '' }), 8000)
@@ -331,41 +400,49 @@ export default function Cameras() {
     })
   }
 
+  // Ask for a fetch, then follow it to its end: the count as soon as the photos are
+  // in, then the result. A check already running (the scheduled one) is followed the
+  // same way, and nothing here spins for ever: past ten minutes it says it carries on.
   async function syncNow() {
     setSyncing(true)
     setSync({ state: 'running', msg: 'Asking the cameras for new photos…' })
+    // A fetch summary started after this is this check's result; an older one isn't.
+    let since = -Infinity
     try {
-      const r = await api<{ status: string; note?: string }>('/cameras/sync', { method: 'POST' })
-      if (r.status === 'busy') {
-        setSync({ state: 'running', msg: r.note || 'Already checking. New photos show up as they arrive.' })
-      } else {
-        // Poll the sync log until this run finishes, so the line reports a real result.
-        let done = false
-        for (let i = 0; i < 24 && !done; i++) {
-          await new Promise((res) => setTimeout(res, 2500))
-          try {
-            const s = await api<{ status: string; images_downloaded?: number }>('/cameras/sync/status')
-            if (s.status === 'ok') {
-              const n = s.images_downloaded ?? 0
-              setSync(n > 0
-                ? { state: 'ok', msg: `${n} new photo${n === 1 ? '' : 's'} came in.` }
-                : { state: 'quiet', msg: 'Nothing new since last time.' })
-              done = true
-            } else if (s.status === 'error') {
-              setSync({ state: 'error', msg: 'Could not reach the cameras. Check the camera login in Settings.' })
-              done = true
-            } else {
-              setSync({ state: 'running', msg: 'Still checking…' })
-            }
-          } catch {
-            /* transient: keep polling */
-          }
-        }
-        if (!done) setSync({ state: 'quiet', msg: 'Taking a while. Photos show up as they arrive.' })
-      }
+      const r = await api<{ status: string; since?: string | null; note?: string }>('/cameras/sync', { method: 'POST' })
+      if (r.since) since = new Date(r.since).getTime() - 5000
+      if (r.status === 'busy') setSync({ state: 'running', msg: 'Already checking. Waiting for it to finish…' })
     } catch (e) {
       setSync({ state: 'error', msg: `Could not start the check. ${(e as Error).message}` })
+      setSyncing(false)
+      return
     }
+    const began = Date.now()
+    let done = false
+    let counted = false
+    while (!done && Date.now() - began < 10 * 60_000) {
+      await wait(Date.now() - began < 60_000 ? 2500 : 10_000)
+      let s: SyncStatus
+      try {
+        s = await api<SyncStatus>('/cameras/sync/status')
+      } catch {
+        continue // no signal for a moment: keep following it
+      }
+      const ours = !s.started_at || new Date(s.started_at).getTime() >= since
+      if (s.status === 'running') continue
+      if (s.status === 'identifying') {
+        if (ours && !counted) {
+          counted = true
+          const line = resultLine(s)
+          setSync({ ...line, state: 'running', msg: `${line.msg} Looking for animals in them…` })
+          void loadCameras()
+        }
+        continue
+      }
+      done = true
+      setSync(ours ? resultLine(s) : { state: 'quiet', msg: 'Done checking. New photos show as they arrive.' })
+    }
+    if (!done) setSync({ state: 'quiet', msg: 'Still going in the background. Photos show up as they arrive.' })
     await loadCameras()
     setSyncing(false)
   }
@@ -383,8 +460,11 @@ export default function Cameras() {
       <div className={`cam-sync-status cam-sync-status--${sync.state}`} role="status" aria-live="polite">
         {sync.state === 'running' && <span className="cam-sync-spinner" aria-hidden="true" />}
         {sync.state === 'ok' && <span className="cam-sync-glyph" aria-hidden="true">✓</span>}
-        {sync.state === 'error' && <span className="cam-sync-glyph" aria-hidden="true">!</span>}
-        <span>{sync.msg}</span>
+        {(sync.state === 'error' || sync.state === 'warn') && <span className="cam-sync-glyph" aria-hidden="true">!</span>}
+        <span>
+          {sync.msg}
+          {sync.logins && sync.state !== 'running' && <>{' '}<Link className="cam-sync-link" to="/settings#accounts">Camera logins</Link></>}
+        </span>
       </div>
       {err && (
         <div className="card cam-error">
@@ -412,6 +492,7 @@ export default function Cameras() {
                 </span>
               </div>
               <div className="cam-last-seen">{lastSeenLine(c, imgs)}</div>
+              <HealthNote c={c} />
 
               <div
                 className="cam-strip"
