@@ -8,11 +8,14 @@ place that conflation can get somebody hurt.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
+import zlib
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user
@@ -24,12 +27,15 @@ from app.models import Camera, Estate, Sit, Stand, User
 
 router = APIRouter(tags=["stands"])
 
+CurrentUser = Annotated[User, Depends(get_current_user)]
+DB = Annotated[Session, Depends(get_db)]
+
 OUTCOMES = ("unreported", "nothing", "seen", "shootable_no_shot", "shot", "cancelled")
 
 
 def tonight(now: datetime | None = None) -> date:
     """The night now belongs to — before 06:00 still counts as last evening."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     local = now.astimezone(__import__("zoneinfo").ZoneInfo(settings.estate_timezone))
     return (local - timedelta(hours=6)).date()
 
@@ -71,15 +77,15 @@ def _stand_out(s: Stand, claim: Sit | None = None) -> dict:
 
 
 @router.get("/stands")
-def list_stands(
-    _: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> list[dict]:
-    claims = {
-        c.stand_id: c
-        for c in db.scalars(
-            select(Sit).where(Sit.night == tonight(), Sit.outcome != "cancelled")
-        ).all()
-    }
+def list_stands(_: CurrentUser, db: DB) -> list[dict]:
+    now = datetime.now(UTC)
+    night = tonight(now)
+    # Tonight's reservations, and a sit still on from the night before (a dawn sit
+    # after 06:00): somebody is in that stand now. Tonight's wins a stand.
+    live = db.scalars(
+        select(Sit).where(or_(and_(Sit.night == night, Sit.outcome != "cancelled"), _live(now)))
+    ).all()
+    claims = {c.stand_id: c for c in sorted(live, key=lambda c: c.night == night)}
     rows = db.scalars(select(Stand).order_by(Stand.name)).all()
     return [_stand_out(s, claims.get(s.id)) for s in rows]
 
@@ -179,6 +185,23 @@ def delete_stand(
 
 # ── claims ──────────────────────────────────────────────────────────────────
 
+# What a report is worth. A report only moves up this ladder; 'unreported' and
+# 'cancelled' are not on it (see update_sit).
+RANK = {"nothing": 0, "seen": 1, "shootable_no_shot": 2, "shot": 3}
+
+# A sit started and not ended stays on Stands this long whatever its night, so a
+# dawn sit does not vanish at the 06:00 changeover (audit A-20). Bounded, because a
+# phone that died before END SIT would otherwise leave the stand taken for good.
+LIVE_FOR = timedelta(hours=12)
+
+# How many nights back "What happened last night?" still asks about a sit.
+ASK_NIGHTS = 3
+
+# Reserving takes this per-night lock (with the night as the second key), so two
+# hunters reserving at once are served one after the other: the same stand, or two
+# stands whose fire lanes cross, can't both be given out.
+_CLAIM_LOCK = zlib.crc32(b"gamesense.sits.claim") & 0x7FFFFFFF
+
 
 class ClaimIn(BaseModel):
     stand_id: uuid.UUID
@@ -186,8 +209,20 @@ class ClaimIn(BaseModel):
 
 class OutcomeIn(BaseModel):
     outcome: str
+    # When the hunter tapped, by the phone's clock. A tap queued with no signal can
+    # arrive an hour after a newer one; this is how the server tells them apart.
+    at: datetime | None = None
+    # Only a deliberate "What happened?" answer sends this. It is the one way to
+    # lower a report, because it is the hunter saying so, not a glove.
+    correct: bool = False
     species_seen: str | None = None
     notes: str | None = None
+
+
+class TapIn(BaseModel):
+    """START or END SIT, with when it was tapped by the phone's clock."""
+
+    at: datetime | None = None
 
 
 def _sit_out(s: Sit, stand_name: str | None = None) -> dict:
@@ -201,50 +236,109 @@ def _sit_out(s: Sit, stand_name: str | None = None) -> dict:
         "started_at": s.started_at,
         "ended_at": s.ended_at,
         "outcome": s.outcome,
+        "reported_at": s.reported_at,
         "species_seen": s.species_seen,
         "wind_status": s.wind_status,
         "wind_text": s.wind_text,
     }
 
 
+def _sit_reply(db: Session, sit: Sit) -> dict:
+    stand = db.get(Stand, sit.stand_id)
+    return _sit_out(sit, stand.name if stand else None)
+
+
+def _live(now: datetime):
+    """Started, not ended, not cancelled, and started recently enough to be on."""
+    return and_(
+        Sit.started_at.is_not(None),
+        Sit.started_at >= now - LIVE_FOR,
+        Sit.ended_at.is_(None),
+        Sit.outcome != "cancelled",
+    )
+
+
+def _own_sit(db: Session, sit_id: uuid.UUID, user: User) -> Sit:
+    """The sit, if this person may write to it: its hunter, or an admin for the record."""
+    sit = db.get(Sit, sit_id)
+    if sit is None:
+        raise HTTPException(404, "That sit isn't on the app.")
+    if user.role == "viewer":
+        raise HTTPException(403, "Viewers can look at the sits but can't change them.")
+    if sit.user_id != user.id and user.role != "admin":
+        raise HTTPException(403, "That sit is another hunter's.")
+    return sit
+
+
+def _client_time(at: datetime | None, now: datetime) -> datetime:
+    """The phone's time for a write, never later than the server's clock.
+
+    A phone running fast would otherwise stamp a report in the future, and every
+    honest write after it would look older and be ignored.
+    """
+    if at is None:
+        return now
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return min(at, now)
+
+
 @router.get("/sits")
-def list_sits(
-    night: date | None = None,
-    _: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    target = night or tonight()
+def list_sits(_: CurrentUser, db: DB, night: date | None = None) -> list[dict]:
+    """A night's sits: tonight's by default, with any sit still on from the night
+    before (a dawn sit after 06:00). An asked-for night is that night only."""
+    now = datetime.now(UTC)
+    which = Sit.night == night if night else or_(Sit.night == tonight(now), _live(now))
     rows = db.execute(
-        select(Sit, Stand.name).join(Stand, Stand.id == Sit.stand_id).where(Sit.night == target)
+        select(Sit, Stand.name).join(Stand, Stand.id == Sit.stand_id).where(which)
     ).all()
     return [_sit_out(s, name) for s, name in rows]
 
 
-@router.post("/sits", status_code=201)
-def claim_stand(
-    body: ClaimIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)
-) -> dict:
-    """Claim a stand for tonight.
+@router.get("/sits/mine")
+def my_sits(user: CurrentUser, db: DB) -> dict:
+    """Your sits that want something from you.
 
-    This is the app's data-capture mechanism, and it works because claiming has a
-    payoff for the person doing it: the wind verdict and the answer to "is anyone
-    else on that ridge". The row is written before the sit, when the phone is out
-    and hands are clean — not at 23:40 in the dark after a blank evening.
+    `live`: started and not ended, so Tonight can say "Back to sit" after the phone
+    killed the app mid-sit. `to_report`: nobody said what happened, from the last
+    few nights, or from tonight once it ended. A reserved sit that was never started
+    is asked about too: plenty of hunters never open Sit mode, and "unreported" is
+    not "saw nothing".
     """
-    stand = db.get(Stand, body.stand_id)
-    if stand is None:
-        raise HTTPException(404, "That stand isn't on the app.")
-
-    night = tonight()
-    existing = db.scalars(
-        select(Sit).where(Sit.night == night, Sit.outcome != "cancelled")
+    now = datetime.now(UTC)
+    night = tonight(now)
+    rows = db.execute(
+        select(Sit, Stand.name)
+        .join(Stand, Stand.id == Sit.stand_id)
+        .where(
+            Sit.user_id == user.id,
+            Sit.outcome != "cancelled",
+            Sit.night >= night - timedelta(days=ASK_NIGHTS),
+        )
+        .order_by(Sit.night.desc(), Sit.claimed_at.desc())
     ).all()
+    live, to_report = [], []
+    for s, name in rows:
+        on = s.started_at is not None and s.ended_at is None and s.started_at >= now - LIVE_FOR
+        if on:
+            live.append(_sit_out(s, name))
+        elif s.outcome == "unreported" and (s.night < night or s.ended_at is not None):
+            to_report.append(_sit_out(s, name))
+    return {"live": live, "to_report": to_report}
 
+
+def _refusal(db: Session, stand: Stand, user: User, night: date) -> Sit | str | None:
+    """Why this stand can't be given to `user` tonight, or their own claim on it.
+
+    Only meaningful under the night's lock: without it two callers can both read
+    "free" and both write.
+    """
+    existing = db.scalars(select(Sit).where(Sit.night == night, Sit.outcome != "cancelled")).all()
     for other in existing:
         if other.stand_id == stand.id:
             if other.user_id == user.id:
-                return _sit_out(other, stand.name)  # idempotent re-claim
-            raise HTTPException(409, f"{stand.name} is already claimed tonight by another hunter.")
+                return other
+            return f"{stand.name} is already claimed tonight by another hunter."
 
     # Safety interlock: never put two people in each other's fire lanes. Only
     # fires when both stands actually have recorded arcs — absent geometry must
@@ -254,17 +348,46 @@ def claim_stand(
         if other_stand and shooting_arcs_conflict(
             stand.shooting_dirs_deg, other_stand.shooting_dirs_deg
         ):
-            raise HTTPException(
-                409,
+            return (
                 f"{stand.name} and {other_stand.name} share a shooting arc, and "
-                f"{other_stand.name} is taken tonight. Pick another stand.",
+                f"{other_stand.name} is taken tonight. Pick another stand."
             )
+    return None
+
+
+def _lock_night(db: Session, night: date) -> None:
+    """Serialise reservations for one night until this transaction ends."""
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :night)"),
+        {"ns": _CLAIM_LOCK, "night": night.toordinal()},
+    )
+
+
+@router.post("/sits", status_code=201)
+def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
+    """Claim a stand for tonight.
+
+    This is the app's data-capture mechanism, and it works because claiming has a
+    payoff for the person doing it: the wind verdict and the answer to "is anyone
+    else on that ridge". The row is written before the sit, when the phone is out
+    and hands are clean — not at 23:40 in the dark after a blank evening.
+
+    Two hunters reserving at the same moment are served one after the other (a
+    per-night lock), so the second is told the stand, or the fire lane, is taken.
+    The weather is asked for before the lock: it can take seconds, and nobody
+    should queue behind somebody else's weather call.
+    """
+    if user.role not in ("admin", "member"):
+        raise HTTPException(403, "Viewers can look at the stands but can't reserve one.")
+    stand = db.get(Stand, body.stand_id)
+    if stand is None:
+        raise HTTPException(404, "That stand isn't on the app.")
 
     # Record what the app told them about the wind, so the advice can be scored later.
     from app.forecasting.model import _tonight_conditions
 
     try:
-        cond = _tonight_conditions(datetime.now(timezone.utc))
+        cond = _tonight_conditions(datetime.now(UTC))
     except Exception:
         cond = {}
     verdict = assess(
@@ -273,6 +396,16 @@ def claim_stand(
         wind_speed_kmh=cond.get("wind_speed_kmh"),
         approach_dirs_deg=stand.approach_dirs_deg,
     )
+
+    night = tonight()
+    _lock_night(db, night)
+    refusal = _refusal(db, stand, user, night)
+    if isinstance(refusal, Sit):
+        db.commit()  # ends the transaction, and the lock with it
+        return _sit_out(refusal, stand.name)  # idempotent re-claim
+    if refusal:
+        db.rollback()
+        raise HTTPException(409, refusal)
 
     sit = Sit(
         stand_id=stand.id,
@@ -283,49 +416,116 @@ def claim_stand(
         wind_text=verdict.text,
     )
     db.add(sit)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The unique index caught a second live reservation the lock should have
+        # stopped. Answer as the check would have.
+        db.rollback()
+        mine = db.scalar(
+            select(Sit).where(
+                Sit.stand_id == stand.id, Sit.night == night, Sit.outcome != "cancelled",
+                Sit.user_id == user.id,
+            )
+        )
+        if mine is not None:
+            return _sit_out(mine, stand.name)
+        raise HTTPException(
+            409, f"{stand.name} is already claimed tonight by another hunter."
+        ) from None
     return _sit_out(sit, stand.name)
 
 
 @router.patch("/sits/{sit_id}")
-def update_sit(
-    sit_id: uuid.UUID,
-    body: OutcomeIn,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    sit = db.get(Sit, sit_id)
-    if sit is None:
-        raise HTTPException(404, "That sit isn't on the app.")
-    if sit.user_id and sit.user_id != user.id and user.role != "admin":
-        raise HTTPException(403, "That sit is another hunter's.")
+def update_sit(sit_id: uuid.UUID, body: OutcomeIn, user: CurrentUser, db: DB) -> dict:
+    """Record what happened on a sit. Safe to replay, late and in any order.
+
+    Sit mode keeps taps on the phone when there is no signal and sends them later,
+    so a report can arrive twice, late, or after a newer one. The rules:
+
+    - A report never goes down (shot > shootable_no_shot > seen > nothing). Only a
+      `correct: true` answer lowers it, or clears it back to 'unreported'.
+    - A write stamped earlier than the report already kept (`reported_at`) is
+      ignored. That is what stops an old queued tap undoing a correction.
+    - A cancelled reservation stays cancelled, and only an unreported one can be
+      cancelled.
+
+    An ignored write still answers 200 with the sit as it is, so the phone drops it
+    from its queue. Reporting never ends the sit; END SIT does.
+    """
+    sit = _own_sit(db, sit_id, user)
     if body.outcome not in OUTCOMES:
         raise HTTPException(422, f"outcome must be one of {', '.join(OUTCOMES)}")
 
-    sit.outcome = body.outcome
-    if body.species_seen is not None:
-        sit.species_seen = body.species_seen
-    if body.notes is not None:
-        sit.notes = body.notes
-    if body.outcome != "unreported" and sit.ended_at is None:
-        sit.ended_at = datetime.now(timezone.utc)
+    current, target = sit.outcome, body.outcome
+    if current == "cancelled":
+        if target == "cancelled":
+            return _sit_reply(db, sit)
+        raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
+
+    at = _client_time(body.at, datetime.now(UTC))
+    if sit.reported_at is not None and at < sit.reported_at:
+        return _sit_reply(db, sit)
+    if target == "cancelled" and current != "unreported":
+        raise HTTPException(409, "You've already said what happened on this sit.")
+
+    if target == current:
+        took, same = False, True
+    elif body.correct or target == "cancelled":
+        took, same = True, False
+    else:
+        # Up the ladder only. A lower report, or clearing one, without a correction
+        # is a glove on the button or an old tap: keep what is on record.
+        took = target in RANK and (current not in RANK or RANK[target] > RANK[current])
+        same = False
+
+    if took:
+        sit.outcome = target
+    if took or same:
+        if body.species_seen is not None:
+            sit.species_seen = body.species_seen
+        if body.notes is not None:
+            sit.notes = body.notes
+    # Only a write that counted moves the clock. Moving it for an ignored lower tap
+    # would make a queued, older SHOT look stale when it finally arrives.
+    if took or body.correct:
+        sit.reported_at = at
     db.commit()
-    stand = db.get(Stand, sit.stand_id)
-    return _sit_out(sit, stand.name if stand else None)
+    return _sit_reply(db, sit)
 
 
 @router.post("/sits/{sit_id}/start")
 def start_sit(
-    sit_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    sit_id: uuid.UUID, user: CurrentUser, db: DB, body: TapIn | None = None
 ) -> dict:
-    sit = db.get(Sit, sit_id)
-    if sit is None:
-        raise HTTPException(404, "That sit isn't on the app.")
+    """Sit mode opened. Idempotent: the first start the server hears is kept."""
+    sit = _own_sit(db, sit_id, user)
+    if sit.outcome == "cancelled":
+        raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
     if sit.started_at is None:
-        sit.started_at = datetime.now(timezone.utc)
-    db.commit()
-    stand = db.get(Stand, sit.stand_id)
-    return _sit_out(sit, stand.name if stand else None)
+        at = _client_time(body.at if body else None, datetime.now(UTC))
+        sit.started_at = max(at, sit.claimed_at) if sit.claimed_at else at
+        db.commit()
+    return _sit_reply(db, sit)
+
+
+@router.post("/sits/{sit_id}/end")
+def end_sit(sit_id: uuid.UUID, user: CurrentUser, db: DB, body: TapIn | None = None) -> dict:
+    """END SIT. Idempotent: the first end the server hears is the one it keeps.
+
+    The outcome is left alone. A sit ended with nothing reported stays
+    'unreported' and the phone asks what happened; a blank sit is never assumed.
+    """
+    sit = _own_sit(db, sit_id, user)
+    if sit.outcome == "cancelled":
+        raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
+    if sit.started_at is None:
+        raise HTTPException(409, "That sit hasn't started.")
+    if sit.ended_at is None:
+        at = _client_time(body.at if body else None, datetime.now(UTC))
+        sit.ended_at = max(at, sit.started_at)
+        db.commit()
+    return _sit_reply(db, sit)
 
 
 @router.get("/stands/{stand_id}/suggested-arcs")
