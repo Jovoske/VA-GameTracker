@@ -329,6 +329,13 @@ class Detection(Base):
     # DINOv2-L embedding stored as a JSON list (no pgvector).
     embedding: Mapped[list[float] | None] = mapped_column(JSONB)
     model_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("model_runs.id"))
+    # A hunter said what this is from the photo viewer (routes_images.set_species): the
+    # species is theirs, and the AI never changes it again (the burst vote leaves it
+    # be). Who, for "Fixed by Pedro"; a removed login leaves the fix and no name.
+    corrected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    corrected_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("sex IN ('male','female','unknown')", name="sex_valid"),

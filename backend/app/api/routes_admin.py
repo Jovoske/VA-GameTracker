@@ -6,6 +6,7 @@ docs/08-git-update.md, so here we surface the version delta + the exact command.
 """
 import os
 import re
+import shutil
 from typing import Annotated
 
 import httpx
@@ -97,6 +98,24 @@ def _suntek_spool() -> dict | None:
         return None
 
 
+# Below this much free space where the photos are kept, Settings says so. A UBox HD
+# frame is about 0.4 MB and a busy camera sends hundreds a day, and the disk is the
+# database's too: a full one stops both, with nothing on screen until it has.
+LOW_DISK_BYTES = 2 * 1024**3
+
+
+def _disk() -> dict | None:
+    """Free space on the disk the photos are kept on; None when it can't be read."""
+    from app.core.config import settings
+
+    try:
+        use = shutil.disk_usage(settings.media_root)
+    except OSError:
+        return None
+    return {"free_gb": round(use.free / 1024**3, 1), "total_gb": round(use.total / 1024**3, 1),
+            "low": use.free < LOW_DISK_BYTES}
+
+
 @router.get("/status")
 def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) -> dict:
     from app.ingestion.fetch import latest_run
@@ -112,6 +131,7 @@ def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) 
             {"status": last.status, "at": last.finished_at or last.started_at} if last else None
         ),
         "suntek": _suntek_spool(),
+        "disk": _disk(),
         "ai": _ai_status(db),
         "sex_pass": _sex_status(db),
     }

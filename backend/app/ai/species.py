@@ -12,19 +12,23 @@ Three rules keep a misread from reaching the hunter as a sighting:
 * A new species is only in the advice when it is the big game the evening advice
   is for (BIG_GAME). Every other animal is tracked but has to be switched into the
   advice in Settings: fox and rabbit are small game here, and badger is protected.
+
+A hunter has the last word: a species fixed from the photo viewer (set_by_hand) is
+never changed by the AI again, and votes in its visit as a sure frame.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import uuid
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import exists, select
+from sqlalchemy import delete, exists, select
 from sqlalchemy.orm import Session
 
-from app.ai.classifier import ESTATE_KEYS, classify_and_embed
+from app.ai.classifier import ESTATE_KEYS, classify_and_embed, default_name
 from app.ai.detector import detect_animals
 from app.ai.grouping import drop_nested, group_type
 from app.core.logging import get_logger
-from app.models import Detection, Image, Species
+from app.models import Detection, DetectionIndividual, Image, Individual, Species
 
 log = get_logger(__name__)
 
@@ -102,7 +106,10 @@ def classify_image(db: Session, image: Image, boxes: list[dict] | None = None) -
 
 
 def _own(det: Detection) -> tuple[str | None, float]:
-    """The frame's own reading, before any vote: what the model said about it alone."""
+    """The frame's own reading, before any vote: what the model said about it alone.
+    A frame a hunter fixed reads as they said, and as sure as can be."""
+    if det.corrected_at is not None:
+        return det.species_id, 1.0
     info = det.bbox if isinstance(det.bbox, dict) else {}
     own = info.get("own")
     if own is not None:
@@ -169,6 +176,8 @@ def vote_bursts(db: Session, image_ids: list) -> int:
             if len(run) < 2 or winner is None or weight[winner] <= say / 2:
                 winner = None  # no visit, or no majority: every frame keeps its own
             for det, _ in run:
+                if det.corrected_at is not None:
+                    continue  # a hunter's fix: never the vote's to change
                 sp, conf = _own(det)
                 keep = winner is None or sp == winner or (sp is not None and conf >= KEEP_OWN)
                 label = sp if keep else winner
@@ -201,3 +210,97 @@ def vote_bursts(db: Session, image_ids: list) -> int:
         db.flush()
         log.info("species.voted", changed=changed)
     return changed
+
+
+# What the AI had said about a sighting before a hunter fixed it, kept in its bbox
+# JSON under this key so the fix can be taken back ("Put back what the AI said"). A
+# sighting the hunter added to a photo the AI had nothing on is marked BY_HAND.
+_AI = "ai"
+BY_HAND = "by_hand"
+
+
+def set_by_hand(db: Session, image: Image, key: str, user_id: uuid.UUID | None,
+                now: datetime | None = None) -> None:
+    """A hunter says the animal in `image` is `key` (the photo viewer's "Wrong?").
+
+    Every sighting on the photo becomes that species and is marked as theirs
+    (corrected_at, corrected_by): the AI never changes it again, and every count,
+    the forecast included, reads the species from the sighting, so they all follow.
+    What the AI had said is kept (bbox["ai"]) so the fix can be undone. A photo with
+    no sighting yet (the AI never reached it, or called it empty) gets one. Either
+    way it is an animal photo a person has checked from now on.
+
+    A sighting that was grouped with an animal of another species (Animals) leaves
+    that group: a fox is not one of the boar's visits.
+    """
+    now = now or datetime.now(UTC)
+    # The AI pass writes a photo's sighting under this same lock (classify_image).
+    db.execute(select(Image.id).where(Image.id == image.id).with_for_update())
+    _ensure_species(db, key, default_name(key))
+    was_empty = image.is_empty_frame is True
+    dets = db.scalars(select(Detection).where(Detection.image_id == image.id)).all()
+    if not dets:
+        det = Detection(image_id=image.id,
+                        bbox={"boxes": [], BY_HAND: True, "photo_was_empty": was_empty})
+        db.add(det)
+        dets = [det]
+    for det in dets:
+        info = dict(det.bbox) if isinstance(det.bbox, dict) else {}
+        if det.corrected_at is None and not info.get(BY_HAND):
+            checked = det.sex_checked_at.isoformat() if det.sex_checked_at else None
+            info[_AI] = {
+                "species": det.species_id, "conf": det.species_conf, "sex": det.sex,
+                "sex_conf": det.sex_conf, "sex_checked_at": checked,
+                "group_size": det.group_size, "group_type": det.group_type,
+                "photo_was_empty": was_empty,
+            }
+        if det.species_id != key:
+            # Stag or hind, boar or sow, belong to what it was judged as.
+            det.sex, det.sex_conf, det.sex_attempts, det.sex_checked_at = (
+                "unknown", None, 0, None)
+        det.species_id = key
+        det.species_conf = 1.0
+        det.group_size, det.group_type = group_type(info.get("boxes") or [], key)
+        det.corrected_at, det.corrected_by = now, user_id
+        det.bbox = info
+    db.flush()
+    other = select(Individual.id).where(Individual.species_id != key).scalar_subquery()
+    db.execute(delete(DetectionIndividual).where(
+        DetectionIndividual.detection_id.in_([d.id for d in dets]),
+        DetectionIndividual.individual_id.in_(other),
+    ))
+    if image.is_empty_frame is not False:
+        # Kept by hand: it shows on the map from now (routes_map.shown_after).
+        image.processed_at = now
+    image.is_empty_frame = False
+    image.reviewed = True
+    image.ai_failed_at, image.ai_attempts, image.ai_error = None, 0, None
+
+
+def undo_by_hand(db: Session, image: Image) -> bool:
+    """Take a hunter's fix back, to what the AI had said: its species (or "an animal
+    nobody named") returns, a sighting the hunter added goes, and a photo that was
+    marked "nothing in it" before the fix is again. False when nobody had fixed it."""
+    db.execute(select(Image.id).where(Image.id == image.id).with_for_update())
+    dets = db.scalars(select(Detection).where(
+        Detection.image_id == image.id, Detection.corrected_at.isnot(None))).all()
+    was_empty = False
+    for det in dets:
+        info = dict(det.bbox) if isinstance(det.bbox, dict) else {}
+        ai = info.pop(_AI, None) or {}
+        was_empty = was_empty or bool(ai.get("photo_was_empty") or info.get("photo_was_empty"))
+        if info.get(BY_HAND) or not ai:
+            db.delete(det)
+            continue
+        det.species_id, det.species_conf = ai.get("species"), ai.get("conf")
+        det.sex, det.sex_conf = ai.get("sex") or "unknown", ai.get("sex_conf")
+        checked = ai.get("sex_checked_at")
+        det.sex_checked_at = datetime.fromisoformat(checked) if checked else None
+        det.sex_attempts = 0
+        det.group_size, det.group_type = ai.get("group_size"), ai.get("group_type")
+        det.corrected_at, det.corrected_by = None, None
+        det.bbox = info
+    if was_empty:
+        image.is_empty_frame = True
+    db.flush()
+    return bool(dets)

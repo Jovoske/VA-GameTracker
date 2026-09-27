@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.ai.checking import COULD_NOT_CHECK, NOT_CHECKED_YET, photo_states
@@ -22,6 +22,7 @@ from app.core.db import get_db
 from app.forecasting.model import class_label, sentence_case
 from app.models import Camera, Detection, Image, PhotoNote, Species, User
 from app.notes import note_counts, notes_for
+from app.people import name_for
 
 router = APIRouter(prefix="/photos", tags=["photos"])
 
@@ -32,13 +33,24 @@ def _csv(value: str | None) -> list[str]:
 
 @router.get("/filters")
 def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    """The chips: every animal that is not hidden and every camera, with photo counts."""
+    """The chips: every animal that is not hidden and every camera, with photo counts.
+
+    Counted as the feed shows them: a photo marked "nothing in it" (a false alarm)
+    or one without its file is not one of the animal's photos.
+    """
+    shown = (
+        select(Detection.image_id, Detection.species_id)
+        .join(Image, Image.id == Detection.image_id)
+        .where(Image.original_path.isnot(None), Image.is_empty_frame.isnot(True))
+        .subquery()
+    )
+    n_photos = func.count(func.distinct(shown.c.image_id))
     sp_rows = db.execute(
-        select(Species.id, Species.common_name, func.count(func.distinct(Detection.image_id)))
-        .outerjoin(Detection, Detection.species_id == Species.id)
+        select(Species.id, Species.common_name, n_photos)
+        .outerjoin(shown, shown.c.species_id == Species.id)
         .where(Species.hidden.is_(False))
         .group_by(Species.id, Species.common_name)
-        .order_by(func.count(func.distinct(Detection.image_id)).desc(), Species.common_name)
+        .order_by(n_photos.desc(), Species.common_name)
     ).all()
     # A camera no login fetches any more keeps its chip while it has photos: its
     # history is still worth filtering to.
@@ -65,6 +77,9 @@ def feed(
     species: str | None = Query(None, description="Comma-separated species ids; omit for all"),
     cameras: str | None = Query(None, description="Comma-separated camera ids; omit for all"),
     before: datetime | None = Query(None, description="Only photos taken before this instant"),
+    before_id: uuid.UUID | None = Query(
+        None, description="With `before`: the last photo of the page before (next_before_id)",
+    ),
     limit: int = Query(60, ge=1, le=200),
     checked: bool = Query(
         False, description="Only photos the detector has checked and kept, as on the map",
@@ -72,7 +87,12 @@ def feed(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Newest first. `next_before` pages on; it is null on the last page.
+    """Newest first. `next_before` and `next_before_id` page on; null on the last page.
+
+    The page ends at a photo, not a moment: a Suntek burst can stamp three frames
+    with one minute, and paging by the time alone skipped whichever of them fell
+    past the page break (often the frame that shows the tusks). Asked for with
+    `before` alone (an older app), it pages by time as it used to.
 
     `checked` leaves out frames the detector hasn't reached yet (most turn out
     empty): the camera sheet's strip asks for it so it agrees with the map's photo.
@@ -100,14 +120,31 @@ def feed(
         q = q.where(Image.camera_id.in_(camera_ids))
     if checked:
         q = q.where(Image.is_empty_frame.is_(False))
-    if before is not None:
-        q = q.where(Image.captured_at < before)
+    q = after_cursor(q, before, before_id)
     rows = db.execute(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit + 1)).all()
     more = len(rows) > limit
     rows = rows[:limit]
     return {
         "items": _items(db, rows),
-        "next_before": rows[-1].captured_at if more and rows else None,
+        **next_cursor(rows, more),
+    }
+
+
+def after_cursor(q, before: datetime | None, before_id: uuid.UUID | None):
+    """Photos after the page that ended at (`before`, `before_id`), newest first."""
+    if before is None:
+        return q
+    if before_id is None:
+        return q.where(Image.captured_at < before)
+    return q.where(tuple_(Image.captured_at, Image.id) < tuple_(before, before_id))
+
+
+def next_cursor(rows, more: bool) -> dict:
+    """Where the next page starts: the last photo of this one, by time and id."""
+    last = rows[-1] if more and rows else None
+    return {
+        "next_before": last.captured_at if last else None,
+        "next_before_id": str(last.id) if last else None,
     }
 
 
@@ -116,14 +153,17 @@ def _items(db: Session, rows) -> list[dict]:
     every tile is: the photo's surest sighting of a species that is not hidden, or
     "Animal" when nobody has named it. `checking` is "waiting" or "failed" while the
     AI has not finished with it, and the label says so. `notes_count` marks the
-    team's notes on it."""
+    team's notes on it. `fixed_by` names the hunter who said what it is (the photo
+    viewer's "Wrong?"), when one did."""
     ids = [r.id for r in rows]
     labels: dict[uuid.UUID, tuple[str, str | None, int | None]] = {}
+    fixed: dict[uuid.UUID, uuid.UUID | None] = {}
     if ids:
         drows = db.execute(
             select(
                 Detection.image_id, Detection.species_id, Species.common_name, Species.hidden,
                 Detection.sex, Detection.group_type, Detection.group_size, Detection.species_conf,
+                Detection.corrected_at, Detection.corrected_by,
             )
             .join(Species, Species.id == Detection.species_id)
             .where(Detection.image_id.in_(ids))
@@ -137,6 +177,9 @@ def _items(db: Session, rows) -> list[dict]:
                 d.species_id,
                 d.group_size,
             )
+            if d.corrected_at is not None:
+                fixed[d.image_id] = d.corrected_by
+    fixers = fixed_names(db, fixed.values())
     counts = note_counts(db, ids)
     # A photo nobody has named is "Animal" only once the AI has looked at it.
     states = photo_states(db, [i for i in ids if i not in labels])
@@ -157,8 +200,20 @@ def _items(db: Session, rows) -> list[dict]:
             "group_size": size,
             "notes_count": counts.get(r.id, 0),
             "checking": states.get(r.id),
+            "fixed_by": fixers.get(fixed[r.id]) if r.id in fixed else None,
         })
     return items
+
+
+def fixed_names(db: Session, user_ids) -> dict:
+    """{user id: the name "Fixed by …" shows}; a removed login is "a hunter"."""
+    ids = {u for u in user_ids if u is not None}
+    users = {u.id: u for u in db.scalars(select(User).where(User.id.in_(ids)))} if ids else {}
+    out: dict = {uid: name_for(u) for uid, u in users.items()}
+    out[None] = "a hunter"
+    for uid in ids - users.keys():
+        out[uid] = "a hunter"
+    return out
 
 
 @router.get("/highlights")

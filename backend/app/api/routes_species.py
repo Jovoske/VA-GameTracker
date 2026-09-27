@@ -1,15 +1,22 @@
-"""Species — list them, toggle hunting-advice visibility, and browse what was spotted."""
+"""Species — list them, name them, toggle hunting-advice visibility, and browse what
+was spotted."""
+import unicodedata
 import uuid
+from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from pydantic import BaseModel, field_validator
+from sqlalchemy import and_, false, func, or_, select, true
 from sqlalchemy.orm import Session
 
+from app.ai.classifier import ESTATE_KEYS, default_name
 from app.ai.species import BIG_GAME
 from app.api.deps import get_current_admin, get_current_user
+from app.api.routes_photos import after_cursor, fixed_names, next_cursor
+from app.api.visibility import VISIBLE_ANIMAL
 from app.core.db import get_db
-from app.forecasting.model import class_label
+from app.forecasting.model import class_label, sentence_case
 from app.models import Camera, Detection, Image, Species, User
 from app.notes import note_counts
 
@@ -32,6 +39,8 @@ def list_species(_: User = Depends(get_current_user), db: Session = Depends(get_
             "huntable": s.huntable,
             "hidden": s.hidden,
             "is_priority": s.is_priority,
+            # What the app calls it unless an admin names it otherwise (Settings).
+            "default_name": default_name(s.id),
             # The big game the advice is for (ai.species.BIG_GAME): Settings asks
             # once about any other animal still in the advice from before new ones
             # started off.
@@ -50,16 +59,18 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
     """Every species seen on the estate, with its class breakdown (Stag/Hind, Boar/Sow…).
 
     This is the tracking view — it always includes every species, regardless of the
-    huntable (advice) toggle.
+    huntable (advice) toggle. A photo marked "nothing in it" (a false alarm) is not
+    one of anything's photos.
     """
     rows = db.execute(
         select(
             Detection.species_id, Species.common_name, Detection.sex, Detection.group_type,
-            func.count(Detection.id), func.max(Image.captured_at),
+            func.count(func.distinct(Detection.image_id)), func.max(Image.captured_at),
         )
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
-        .where(Image.original_path.isnot(None), Species.hidden.is_(False))
+        .where(Image.original_path.isnot(None), Species.hidden.is_(False),
+               Image.is_empty_frame.isnot(True))
         .group_by(Detection.species_id, Species.common_name, Detection.sex, Detection.group_type)
     ).all()
 
@@ -77,7 +88,8 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
         thumb = db.scalar(
             select(Image.id)
             .join(Detection, Detection.image_id == Image.id)
-            .where(Detection.species_id == sid, Image.original_path.isnot(None))
+            .where(Detection.species_id == sid, Image.original_path.isnot(None),
+                   Image.is_empty_frame.isnot(True))
             .order_by(Image.captured_at.desc())
             .limit(1)
         )
@@ -96,6 +108,100 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
     return out
 
 
+# Stag / Hind / Hind + calf / Red deer (herd) / Red deer and the boar classes, as SQL,
+# so a class gallery pages in the database (forecasting.model.class_label in reverse).
+_CLASSES = {
+    "red_deer": ("hind_with_calf", "Hind + calf", "Stag", "Hind", "herd", "Red deer (herd)",
+                 "Red deer"),
+    "wild_boar": ("sow_with_piglets", "Sow + piglets", "Boar", "Sow", "sounder", "Sounder",
+                  "Wild boar"),
+}
+
+
+def class_filter(species_id: str, common_name: str | None, label: str | None):
+    """SQL on Detection for the photos class_label() calls `label` (all when None)."""
+    if not label:
+        return true()
+    classes = _CLASSES.get(species_id)
+    if classes is None:
+        return true() if label == class_label(species_id, common_name, None, None) else false()
+    young_type, young, male, female, group_type, group, alone = classes
+    not_young = or_(Detection.group_type.is_(None), Detection.group_type != young_type)
+    unsexed = Detection.sex.notin_(("male", "female"))
+    return {
+        young: Detection.group_type == young_type,
+        male: and_(not_young, Detection.sex == "male"),
+        female: and_(not_young, Detection.sex == "female"),
+        group: and_(unsexed, Detection.group_type == group_type),
+        alone: and_(unsexed, or_(Detection.group_type.is_(None),
+                                 Detection.group_type.notin_((young_type, group_type)))),
+    }.get(label, false())
+
+
+def _gallery(db: Session, species_id: str, label: str | None, before: datetime | None,
+             before_id: uuid.UUID | None, limit: int) -> tuple[list[dict], bool, list]:
+    """One page of a species' photos, newest first, and whether there are more.
+
+    One row per photo (a photo with two sightings of the species is one photo), only
+    photos that show (not "nothing in it", not a hidden species' alone), paged in SQL
+    by (time, id) like the feed: it used to read every sighting of the season and
+    stop at 300, while the chip said 684.
+    """
+    sp = db.get(Species, species_id)
+    # The photo's surest sighting of the species (of the class asked for): one row a photo.
+    top = (
+        select(Detection.image_id, Detection.sex, Detection.group_type, Detection.group_size,
+               Detection.corrected_at, Detection.corrected_by)
+        .where(Detection.species_id == species_id,
+               class_filter(species_id, sp.common_name if sp else None, label))
+        .distinct(Detection.image_id)
+        .order_by(Detection.image_id, Detection.species_conf.desc().nullslast())
+        .subquery()
+    )
+    q = (
+        select(Image.id, Image.captured_at, Camera.name, top.c.sex, top.c.group_type,
+               top.c.group_size, top.c.corrected_at, top.c.corrected_by)
+        .join(top, top.c.image_id == Image.id)
+        .join(Camera, Camera.id == Image.camera_id)
+        .where(Image.original_path.isnot(None), VISIBLE_ANIMAL)
+    )
+    q = after_cursor(q, before, before_id)
+    rows = db.execute(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit + 1)).all()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    counts = note_counts(db, [r.id for r in rows])
+    fixers = fixed_names(db, [r.corrected_by for r in rows if r.corrected_at is not None])
+    name = sp.common_name if sp else None
+    items = [{
+        "image_id": str(r.id),
+        "file_url": f"/api/images/{r.id}/file",
+        "captured_at": r.captured_at,
+        "camera": r.name,
+        "label": class_label(species_id, name, r.sex, r.group_type),
+        "species_id": species_id,
+        "group_size": r.group_size,
+        "notes_count": counts.get(r.id, 0),
+        "fixed_by": fixers.get(r.corrected_by) if r.corrected_at is not None else None,
+    } for r in rows]
+    return items, more, rows
+
+
+@router.get("/{species_id}/photos")
+def species_photos(
+    species_id: str,
+    _: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    label: Annotated[str | None, Query(description="Only one class (e.g. 'Stag')")] = None,
+    before: Annotated[datetime | None, Query(description="next_before, page before")] = None,
+    before_id: Annotated[uuid.UUID | None, Query(description="next_before_id")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 60,
+) -> dict:
+    """A species' photos a page at a time, newest first, optionally one class (Stag,
+    Sow + piglets…). `next_before`/`next_before_id` page on, null on the last page."""
+    items, more, rows = _gallery(db, species_id, label, before, before_id, limit)
+    return {"items": items, **next_cursor(rows, more)}
+
+
 @router.get("/{species_id}/images")
 def species_images(
     species_id: str,
@@ -104,42 +210,57 @@ def species_images(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    """All photos of a species, newest first — optionally only one class (Stag, Sow + piglets…)."""
-    rows = db.execute(
-        select(
-            Detection.sex, Detection.group_type, Detection.group_size,
-            Image.id, Image.captured_at, Camera.name, Species.common_name,
-        )
-        .join(Image, Image.id == Detection.image_id)
-        .join(Species, Species.id == Detection.species_id)
-        .join(Camera, Camera.id == Image.camera_id)
-        .where(Detection.species_id == species_id, Image.original_path.isnot(None))
-        .order_by(Image.captured_at.desc())
-    ).all()
-    out = []
-    for sex, gt, gsize, img_id, cap, cam, cn in rows:
-        lbl = class_label(species_id, cn, sex, gt)
-        if label and lbl != label:
-            continue
-        out.append({
-            "image_id": str(img_id),
-            "file_url": f"/api/images/{img_id}/file",
-            "captured_at": cap,
-            "camera": cam,
-            "label": lbl,
-            "group_size": gsize,
-        })
-        if len(out) >= limit:
-            break
-    counts = note_counts(db, [uuid.UUID(o["image_id"]) for o in out])
-    for o in out:
-        o["notes_count"] = counts.get(uuid.UUID(o["image_id"]), 0)
+    """The newest `limit` photos of a species, as one list: what an app from before
+    /photos paging asks for. Paged in SQL all the same."""
+    return _gallery(db, species_id, label, None, None, limit)[0]
+
+
+@router.get("/choices")
+def choices(
+    _: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
+) -> list[dict]:
+    """The animals a hunter can say a photo shows (the photo viewer's "Wrong?"): every
+    one that can be on the estate, by the name the app gives it.
+
+    `likely` marks the short list the viewer opens with: the big game, and whatever
+    the cameras have seen. The big game comes first, then by how often each is seen.
+    `hidden` ones (Settings) are offered too: a photo said to be one leaves the lists.
+    """
+    rows = {s.id: s for s in db.scalars(select(Species).where(Species.id.in_(ESTATE_KEYS)))}
+    seen = dict(db.execute(
+        select(Detection.species_id, func.count(Detection.id))
+        .where(Detection.species_id.in_(ESTATE_KEYS))
+        .group_by(Detection.species_id)
+    ).all())
+    out = [{
+        "id": key,
+        "name": sentence_case(rows[key].common_name) if key in rows else default_name(key),
+        "hidden": bool(rows[key].hidden) if key in rows else False,
+        "likely": key in BIG_GAME or seen.get(key, 0) > 0,
+        "big_game": key in BIG_GAME,
+        "seen": int(seen.get(key, 0)),
+    } for key in ESTATE_KEYS]
+    out.sort(key=lambda c: (not c["big_game"], -c["seen"], c["name"]))
     return out
 
 
 class HuntableBody(BaseModel):
     huntable: bool | None = None
     hidden: bool | None = None
+    # A name for it (admins). An explicit null goes back to the app's own name.
+    common_name: str | None = None
+
+    @field_validator("common_name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value):
+            raise ValueError("That name has hidden characters in it. Retype it.")
+        value = " ".join(value.split())
+        if not 1 <= len(value) <= 40:
+            raise ValueError("A name is 1 to 40 characters.")
+        return value
 
 
 @router.patch("/{species_id}")
@@ -155,10 +276,14 @@ def set_huntable(
     hidden: out of the app altogether (photos, counts, alerts, advice). Hiding also
     takes the species out of the advice; showing it again leaves it out of the
     advice until switched back on, so nothing reappears in Tonight unasked.
+    common_name: what the app calls it everywhere ("Hare" for the hares and rabbits
+    the model can't tell apart, on an estate with no rabbits); null for the app's own.
     """
     sp = db.get(Species, species_id)
     if sp is None:
         raise HTTPException(404, "Species not found.")
+    if "common_name" in body.model_fields_set:
+        sp.common_name = body.common_name or default_name(sp.id)
     if body.huntable is not None:
         sp.huntable = body.huntable
     if body.hidden is not None:
@@ -167,6 +292,6 @@ def set_huntable(
             sp.huntable = False
     db.commit()
     return {
-        "id": sp.id, "common_name": sp.common_name,
+        "id": sp.id, "common_name": sp.common_name, "default_name": default_name(sp.id),
         "huntable": sp.huntable, "hidden": sp.hidden,
     }

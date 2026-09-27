@@ -165,9 +165,16 @@ def _camera_forecast(
 
 
 def sentence_case(name: str) -> str:
-    """"Roe Deer" -> "Roe deer". The classifier stores names in title case; the app
-    writes them as words in a sentence, the way "Wild boar" and "Red deer" read."""
-    return name[:1].upper() + name[1:].lower()
+    """"Roe Deer" -> "Roe deer". Older builds stored names in title case; the app
+    writes them as words in a sentence, the way "Wild boar" and "Red deer" read.
+
+    A name written some other way (an admin's "Hare or rabbit", "Big Tusker's sow")
+    is left as written, bar a capital to start it: lower-casing every name threw
+    away capitals that someone had typed on purpose.
+    """
+    if name == name.title() or name.isupper():
+        return name[:1].upper() + name[1:].lower()
+    return name[:1].upper() + name[1:]
 
 
 def class_label(species_id: str | None, common_name: str | None, sex: str | None, group_type: str | None) -> str:

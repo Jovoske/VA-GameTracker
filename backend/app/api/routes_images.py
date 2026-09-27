@@ -1,10 +1,14 @@
-"""Serve stored image files (the original and a small copy); let the user flag a frame."""
+"""Serve stored image files (the original and a small copy); let the user flag a frame
+or say what is in it."""
 import os
 import re
 import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,13 +20,16 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai import species as species_ai
 from app.ai.checking import hunter_decided
+from app.ai.classifier import ESTATE_KEYS
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.logging import get_logger
 from app.core.security import decode_token
-from app.models import Camera, Image, User
+from app.forecasting.model import class_label
+from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/images", tags=["images"])
 log = get_logger(__name__)
@@ -38,12 +45,22 @@ THUMB_QUALITY = 70
 # A photo never changes once taken, so its small copy never does either.
 THUMB_CACHE = "private, max-age=31536000, immutable"
 
+VIEWERS_LOOK = "Viewers can look at the photos but can't change them."
+
 
 def download_name(camera_name: str | None, captured_at) -> str:
-    """`Ridge_2025-10-04_22-00.jpg`: the camera and the moment, which is what anyone
-    sorting a folder of these later actually wants to know."""
+    """`Ridge_2025-10-04_22-00-15.jpg`: the camera and the moment, which is what anyone
+    sorting a folder of these later actually wants to know.
+
+    On the estate's clock, whatever zone the database answers in: a 22:05 photo was
+    saved as 20-05 where Postgres runs in UTC. With the seconds, so the hour the
+    clocks go back (02:00-03:00 twice on the last Sunday of October) doesn't give
+    two photos one name.
+    """
     stem = re.sub(r"[^A-Za-z0-9]+", "-", camera_name or "camera").strip("-") or "camera"
-    return f"{stem}_{captured_at:%Y-%m-%d_%H-%M}.jpg"
+    if captured_at.tzinfo is not None:
+        captured_at = captured_at.astimezone(ZoneInfo(settings.estate_timezone))
+    return f"{stem}_{captured_at:%Y-%m-%d_%H-%M-%S}.jpg"
 
 
 def _require_user(
@@ -195,7 +212,10 @@ def flag_image(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Manual override of the detector. Sticky — the auto-scan won't touch it again."""
+    """Manual override of the detector. Sticky — the auto-scan won't touch it again.
+    Members and admins: it hides the photo (or brings it back) for everyone."""
+    if user.role == "viewer":
+        raise HTTPException(403, VIEWERS_LOOK)
     image, _ = _estate_image(db, image_id, user)
     if not body.is_empty and image.is_empty_frame is not False:
         # Kept by hand: it shows on the map from now, so it is new to whoever hasn't
@@ -211,3 +231,73 @@ def flag_image(
     hunter_decided(image, keep=not body.is_empty)
     db.commit()
     return {"id": str(image.id), "is_empty_frame": image.is_empty_frame, "reviewed": True}
+
+
+class SpeciesBody(BaseModel):
+    species_id: str
+
+
+def _fixed(db: Session, image: Image, camera: Camera) -> dict:
+    """The photo as the feed lists it after a fix (its label as every tile writes it,
+    who fixed it), and whether it still shows: `hidden` when the animal is one hidden
+    in Settings, `empty` when it is marked "nothing in it"."""
+    from app.api.routes_photos import _items
+
+    row = SimpleNamespace(id=image.id, captured_at=image.captured_at, camera_id=camera.id,
+                          name=camera.name)
+    item = _items(db, [row])[0]
+    top = db.execute(
+        select(Detection, Species)
+        .join(Species, Species.id == Detection.species_id)
+        .where(Detection.image_id == image.id)
+        .order_by(Detection.species_conf.desc().nullslast())
+        .limit(1)
+    ).first()
+    hidden = top is not None and top[1].hidden and item["species_id"] is None
+    if hidden:
+        det, sp = top
+        item.update(label=class_label(sp.id, sp.common_name, det.sex, det.group_type),
+                    species_id=sp.id, group_size=det.group_size)
+    return {**item, "hidden": hidden, "empty": image.is_empty_frame is True}
+
+
+@router.post("/{image_id}/species")
+def set_species(
+    image_id: uuid.UUID,
+    body: SpeciesBody,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """"It's a …": a member or admin says what the animal is, from the photo viewer.
+
+    Any animal that can be on the estate (the species list the viewer offers,
+    GET /species/choices). The fix is the hunter's and the AI never changes it back;
+    every list, count and the forecast read the species from the sighting, so they
+    all follow at once. "Nothing in it" is POST /flag. DELETE takes the fix back.
+    """
+    if user.role == "viewer":
+        raise HTTPException(403, VIEWERS_LOOK)
+    key = body.species_id.strip()
+    if key not in ESTATE_KEYS:
+        raise HTTPException(422, "Pick one of the animals on the list.")
+    image, camera = _estate_image(db, image_id, user)
+    if not image.original_path:
+        raise HTTPException(409, "This photo has no picture yet, so there's nothing to fix.")
+    species_ai.set_by_hand(db, image, key, user.id)
+    db.commit()
+    return _fixed(db, image, camera)
+
+
+@router.delete("/{image_id}/species")
+def undo_species(
+    image_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Take a hunter's fix back to what the AI had said (the viewer's Undo)."""
+    if user.role == "viewer":
+        raise HTTPException(403, VIEWERS_LOOK)
+    image, camera = _estate_image(db, image_id, user)
+    species_ai.undo_by_hand(db, image)
+    db.commit()
+    return _fixed(db, image, camera)

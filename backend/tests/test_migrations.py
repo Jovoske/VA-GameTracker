@@ -78,6 +78,7 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(images)
         assert "reported_at" in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
+        assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
     finally:
         eng.dispose()
 
@@ -140,6 +141,7 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "ai_failed_at" in _columns(eng, "images")
         assert "reported_at" in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live")
+        assert "corrected_by" in _columns(eng, "detections")
     finally:
         eng.dispose()
 
@@ -899,5 +901,92 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "reported_at" in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_species_fixes_upgrade_down_and_up_again(fresh_db):
+    """0025 on a real 0023 database: the classifier's old names become the app's
+    ("Wild Boar" -> "Wild boar", "Rabbit" -> "Hare or rabbit", "Micromammal" -> "Mouse
+    or rat"), a name somebody chose stays, hidden stays hidden, sightings are kept;
+    a fix records who made it and outlives that login; down and up again is safe."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0023_sit_reports")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0023 shape first.
+            c.execute(text("ALTER TABLE detections DROP COLUMN corrected_by"))
+            c.execute(text("ALTER TABLE detections DROP COLUMN corrected_at"))
+            for key, name, hidden in (
+                ("wild_boar", "Wild Boar", False), ("red_deer", "Red Deer", False),
+                ("lagomorph", "Rabbit", True), ("micromammal", "Micromammal", False),
+                ("mustelid", "Mustelid", False), ("fox", "Fox", False),
+                ("roe_deer", "Corzo", False), ("moose", "Moose", False),
+            ):
+                c.execute(text("INSERT INTO species (id, common_name, is_priority, huntable, "
+                               "hidden) VALUES (:k, :n, false, true, :h)"),
+                          {"k": key, "n": name, "h": hidden})
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            cam = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active,import_failures) "
+                "VALUES (gen_random_uuid(),:e,'PL19',false,true,'{}') RETURNING id"),
+                {"e": estate}).scalar_one()
+            img = c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,reviewed,download_attempts,"
+                "ai_attempts) VALUES (gen_random_uuid(),:c,now(),false,0,0) RETURNING id"),
+                {"c": cam}).scalar_one()
+            c.execute(text(
+                "INSERT INTO detections (id,image_id,species_id,sex,sex_attempts,age_class) "
+                "VALUES (gen_random_uuid(),:i,'lagomorph','unknown',0,'unknown')"), {"i": img})
+
+        command.upgrade(cfg, "head")
+        names = {}
+        with eng.begin() as c:
+            names = dict(c.execute(text("SELECT id, common_name FROM species")).all())
+            assert names == {
+                "wild_boar": "Wild boar", "red_deer": "Red deer", "lagomorph": "Hare or rabbit",
+                "micromammal": "Mouse or rat", "mustelid": "Marten or weasel", "fox": "Fox",
+                "roe_deer": "Corzo", "moose": "Moose",
+            }
+            assert c.execute(text("SELECT hidden FROM species WHERE id='lagomorph'")).scalar()
+            assert c.execute(text("SELECT count(*) FROM detections")).scalar_one() == 1
+            user = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'pedro@x.es','h','member') RETURNING id"),
+                {"e": estate}).scalar_one()
+            c.execute(text("UPDATE detections SET species_id='wild_boar', corrected_at=now(), "
+                           "corrected_by=:u"), {"u": user})
+            # A removed login leaves the fix, without a name.
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user})
+            fixed = c.execute(text("SELECT species_id, corrected_at IS NOT NULL, corrected_by "
+                                   "FROM detections")).one()
+            assert tuple(fixed) == ("wild_boar", True, None)
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0023_sit_reports")
+        assert "corrected_at" not in _columns(eng, "detections")
+        with eng.connect() as c:
+            back = dict(c.execute(text("SELECT id, common_name FROM species")).all())
+            assert back["wild_boar"] == "Wild Boar" and back["lagomorph"] == "Rabbit"
+            assert back["roe_deer"] == "Corzo"
+            assert c.execute(text("SELECT species_id FROM detections")).scalar_one() == "wild_boar"
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0023_sit_reports")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
+        with eng.connect() as c:
+            assert dict(c.execute(text("SELECT id, common_name FROM species")).all()) == names
     finally:
         eng.dispose()
