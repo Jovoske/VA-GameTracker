@@ -131,10 +131,13 @@ def test_parse_camera_real_spypoint_shape():
 
 
 @requires_db
-def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(db_session, monkeypatch):
+def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(
+    db_session, monkeypatch, tmp_path,
+):
     """One camera's photos are visible before the next camera starts, and a camera
     that fails is left as it was for the next run (as in the UBox sync): it takes
-    none of the cameras before it with it, nor the sync log."""
+    none of the cameras before it with it, nor the sync log. The run says "partial",
+    not "ok": one camera's photos did not come in."""
     from sqlalchemy import create_engine, func, select
 
     from app.core.config import settings
@@ -145,6 +148,7 @@ def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(db_sessio
     db_session.commit()
     monkeypatch.setattr(settings, "spypoint_username", "owner@example.com")
     monkeypatch.setattr(settings, "spypoint_password", "secret")
+    monkeypatch.setattr(settings, "media_root", str(tmp_path))
     monkeypatch.setattr(sync, "enrich_image", lambda db, image: None)
     others = create_engine(db_session.get_bind().url)
     seen_by_others: list[int] = []
@@ -161,11 +165,17 @@ def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(db_sessio
             return [SpypointCamera("sp-1", "Charca"), SpypointCamera("sp-2", "Pinar Alto"),
                     SpypointCamera("sp-3", "Barranco")]
 
+        def date_cursor(self, when):
+            return when.isoformat()
+
         def list_photos(self, spypoint_id, limit=100, date_end=None):
+            if date_end is not None:
+                return []  # the camera's whole history is the first page
             # What anyone else can see right now, e.g. a hunter opening the map.
             with others.connect() as c:
                 seen_by_others.append(c.scalar(select(func.count(Image.id))))
-            photos = [SpypointPhoto(f"{spypoint_id}-p{i}", shot, url="") for i in range(2)]
+            photos = [SpypointPhoto(f"{spypoint_id}-p{i}", shot, url=f"https://cdn/{i}.jpg")
+                      for i in range(2)]
             if spypoint_id == "sp-2":
                 # Half its photos stored, then the connection drops.
                 sync._ingest_photo(db_session, self, None, db_session.scalar(
@@ -174,7 +184,7 @@ def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(db_sessio
             return photos
 
         def download(self, url):
-            return b""
+            return b"jpeg"
 
         def close(self):
             pass
@@ -186,11 +196,12 @@ def test_sync_shows_each_cameras_photos_as_soon_as_that_camera_is_done(db_sessio
         others.dispose()
 
     assert seen_by_others == [0, 2, 2]  # Charca's two were out before Pinar Alto began
-    assert result["status"] == "ok" and result["total"] == 4
+    assert result["status"] == "partial" and result["total"] == 4
     assert [r.get("error") for r in result["cameras"]] == [None, "connection reset", None]
     by_camera = dict(db_session.execute(
         select(Camera.name, func.count(Image.id)).outerjoin(Image).group_by(Camera.name)
     ).all())
     assert by_camera == {"Charca": 2, "Barranco": 2}
     log = db_session.scalar(select(SyncLog))
-    assert (log.status, log.images_downloaded) == ("ok", 4) and log.finished_at is not None
+    assert (log.status, log.images_downloaded) == ("partial", 4) and log.finished_at is not None
+    assert log.error.startswith("Main SPYPOINT login: 1 of 3 cameras failed.")

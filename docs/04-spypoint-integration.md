@@ -25,6 +25,34 @@ This endpoint set and the host/path URL reconstruction are the genuinely valuabl
 6. **Credentials.** From encrypted app settings / env (`SPYPOINT_USERNAME`, `SPYPOINT_PASSWORD`); never logged, never committed.
 7. **Timestamps are camera wall clock.** `originDate` (and `date`, `dateEnd`) carry the camera's own clock with a `Z` suffix, not UTC: a frame the camera stamps 10:30 arrives as `10:30:00.000Z`. The client reads them as wall times in `ESTATE_TIMEZONE` and stores real UTC, and expresses the `dateEnd` cursor the same way. Migration `0015_spypoint_local_time` corrected rows imported before this (and their env snapshots) once, recorded under `app_settings.spypoint_capture_times_localized`.
 
+## How a fetch works now (Sep 2026, plan item 4)
+
+- **Paging back to what is already listed.** Each camera keeps `photos_listed_to`: every
+  photo captured up to then has been listed. A routine fetch pages back from the newest
+  photo to that mark less 48 h (late uploads from a camera out of signal), at most 20
+  pages of 100, committing each page. Only a complete listing moves the mark, so a
+  fetch cut short tries again next time. A login whose history was never imported (added
+  while the pipeline was busy) gets the 2-month backfill instead.
+- **Retried downloads.** A photo whose file fails to download (or cannot be written) is
+  stored without one and tried again with the freshest link on the next 5 fetches; a
+  repair pass also retries recent file-less rows the listing no longer shows. After a
+  day the detector lets such a row through as "no file", so it stops holding its night
+  as "not checked yet"; if the file comes later, the photo is looked at again.
+- **One error costs one photo or one camera.** Photo inserts and enrichment run in
+  savepoints, pages commit on their own, and a login or camera failing never stops the
+  others (or UBox, or the AI pass: `app.ingestion.fetch`).
+- **Camera clocks.** An `originDate` more than 30 days before SPYPOINT's `date`, or more
+  than 3 h after it, is a reset or wrong clock: the photo is filed at `date` instead.
+- **Busy.** A 429/503 with `Retry-After` of up to 30 s is waited out once.
+- **Login status.** Every fetch records per login (guests on `camera_accounts`, the .env
+  login in `app_settings.spypoint_primary_login`) when it last tried, when it last
+  worked and, if not, why in words. Settings, the camera cards, the map sheet, the alerts
+  and Tonight read it (`app.ingestion.logins`).
+- **Cameras no login lists.** After a run in which every login answered, a camera none of
+  them listed (its login was removed) is switched off (`active = false`): shown as "Not
+  connected", left out of Tonight's ranking, photos kept. A login listing it again
+  switches it back on.
+
 ## Client shape
 
 ```python

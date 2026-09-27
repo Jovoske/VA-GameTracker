@@ -69,12 +69,43 @@ def compute_alerts(db: Session) -> list[dict]:
 
     # 3. Camera health — a camera that can't send photos is a fault, never a "pattern".
     from app.health import camera_health
+    from app.ingestion.logins import camera_logins
 
     cams = db.scalars(select(Camera)).all()
-    health = {c.id: camera_health(c, now) for c in cams}
+    login_states = camera_logins(db, cams, now)
+    health = {c.id: camera_health(c, now, login_states.get(c.id)) for c in cams}
+    # A login that stopped is one alert naming its cameras, not one "offline" per
+    # camera: the fix is in Settings, not a trip round the batteries.
+    stopped: dict[str, dict] = {}
     for c in cams:
         h = health[c.id]
-        if h["status"] == "out_of_credits":
+        if h["status"] == "not_syncing":
+            login = h.get("login") or {}
+            entry = stopped.setdefault(login.get("label") or "A camera login",
+                                       {"error": login.get("error"), "cameras": []})
+            entry["cameras"].append(c.name)
+    for label, entry in stopped.items():
+        names = ", ".join(entry["cameras"])
+        if entry["error"]:
+            text = (f"{entry['error']} Photos from {names} wait until it's fixed: "
+                    "Settings, Camera logins says how.")
+        else:
+            text = (f"No photo fetch has worked for over 2 hours, so photos from {names} "
+                    "are not coming in. The server's scheduled fetch may have stopped.")
+        alerts.append({
+            "type": "camera", "severity": "warn", "title": f"{label}: photos not coming in",
+            "text": text,
+        })
+    for c in cams:
+        h = health[c.id]
+        if h["status"] == "quiet":
+            alerts.append({
+                "type": "camera", "severity": "warn",
+                "title": f"{c.name}: no photos for over a week",
+                "text": f"{h['detail']}. It sends photos only, so a quiet spell and a flat "
+                        "battery look the same. Check it on your next visit.",
+            })
+        elif h["status"] == "out_of_credits":
             reset_on = f"{c.cycle_end.day} {c.cycle_end.strftime('%b')}" if c.cycle_end else "next cycle"
             reset = f" Resets {reset_on}."
             alerts.append({

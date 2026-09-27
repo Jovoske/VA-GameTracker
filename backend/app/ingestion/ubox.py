@@ -12,9 +12,7 @@ import hmac
 import ipaddress
 import logging
 import math
-import secrets
 import socket
-import string
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -51,6 +49,16 @@ def _private_request():
         yield
     finally:
         _quiet_request.reset(state)
+
+
+def device_token(email: str) -> str:
+    """The same 30-character device token for a login on every sign-in.
+
+    A fresh random one each fetch (every 15 minutes) looked like a new phone signing
+    in every time, which invites UBox to throttle or lock the login.
+    """
+    digest = hashlib.sha256(f"gamesense-ubox:{email.strip().lower()}".encode()).digest()
+    return base64.b32encode(digest).decode().lower()[:30]
 
 
 class UboxError(Exception):
@@ -227,9 +235,7 @@ class UboxClient:
                     "account": self._email,
                     "password": hash_password(self._password),
                 "lang": "en", "app": self._app, "device_type": 2,
-                    "device_token": "".join(
-                        secrets.choice(string.ascii_letters + string.digits) for _ in range(30)
-                    ),
+                    "device_token": device_token(self._email),
                 })
         except httpx.HTTPError:
             raise UboxError("Unable to reach UBox for login") from None

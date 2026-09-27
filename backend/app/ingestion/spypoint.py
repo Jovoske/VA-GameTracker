@@ -6,8 +6,9 @@ hard-won knowledge preserved from the old app; everything else (typed DTOs,
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -22,7 +23,26 @@ SPYPOINT_API = "https://restapi.spypoint.com/api/v3"
 
 
 class SpypointError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class SpypointAuthError(SpypointError):
+    """SPYPOINT refused the username or password."""
+
+
+# A 429 or 503 is waited out once when SPYPOINT says how long (Retry-After), up to
+# this long; any longer and the fetch gives up until its next run.
+RETRY_AFTER_MAX_S = 30
+
+# A camera clock that disagrees this much with SPYPOINT's own receipt time is wrong
+# (a reset after a battery swap stamps 1970 or 2020; a bad setting can run ahead).
+# Such a frame is placed at its receipt time instead (see _capture_time). "Ahead"
+# allows three hours, not one, so a receipt time that turned out to be real UTC
+# rather than wall clock (Madrid is at most two hours off) can never move a good frame.
+CLOCK_AHEAD = timedelta(hours=3)
+CLOCK_BEHIND = timedelta(days=30)
 
 
 @dataclass
@@ -191,6 +211,28 @@ def _parse_dt(value: Any, tz: ZoneInfo | None = None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _capture_time(photo: dict, tz: ZoneInfo) -> datetime | None:
+    """When the camera fired, or when SPYPOINT got the photo if the camera's clock is off.
+
+    originDate is the camera's own clock, which a battery swap can reset to 1970 or
+    2020 and a bad setting can run ahead of. One such frame used to sit on top of
+    the strip as "Last seen" for months, or stretch a camera's history back years.
+    SPYPOINT's own `date` is when the photo reached it: a capture later than that is
+    impossible, and one more than a month earlier is a clock that was never set.
+    """
+    origin = _parse_dt(photo.get("originDate"), tz)
+    received = _parse_dt(photo.get("date"), tz) or _parse_dt(photo.get("createdAt"), tz)
+    if origin is None:
+        return received
+    if received is not None and not (
+        received - CLOCK_BEHIND <= origin <= received + CLOCK_AHEAD
+    ):
+        log.warning("spypoint.camera_clock_ignored", photo=str(photo.get("id") or ""),
+                    origin=origin.isoformat(), received=received.isoformat())
+        return received
+    return origin
+
+
 def wall_clock_cursor(when: datetime, tz: ZoneInfo) -> str:
     """Express a real instant in SPYPOINT's ``dateEnd`` convention (camera wall clock + Z)."""
     if when.tzinfo is None:
@@ -206,6 +248,17 @@ def _extract_tags(photo: dict) -> list[str]:
     if isinstance(tag, str) and tag:
         return [tag]
     return []
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    """Seconds to wait before one more try, when SPYPOINT is busy and says how long."""
+    if resp.status_code not in (429, 503):
+        return None
+    try:
+        seconds = float(resp.headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return seconds if 0 <= seconds <= RETRY_AFTER_MAX_S else None
 
 
 class SpypointClient:
@@ -230,8 +283,10 @@ class SpypointClient:
             json={"username": self._username, "password": self._password},
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
+        if resp.status_code in (400, 401, 403):
+            raise SpypointAuthError(f"login refused: HTTP {resp.status_code}", resp.status_code)
         if resp.status_code != 200:
-            raise SpypointError(f"login failed: HTTP {resp.status_code}")
+            raise SpypointError(f"login failed: HTTP {resp.status_code}", resp.status_code)
         token = resp.json().get("token")
         if not token:
             raise SpypointError("login response missing token")
@@ -254,8 +309,13 @@ class SpypointClient:
             log.info("spypoint.reauth")
             self._token = None
             resp = self._client.request(method, url, json=json, headers=self._auth_headers())
+        wait = _retry_after(resp)
+        if wait is not None:  # busy: wait as long as asked, once, then try again
+            log.info("spypoint.retry_after", status=resp.status_code, seconds=wait)
+            time.sleep(wait)
+            resp = self._client.request(method, url, json=json, headers=self._auth_headers())
         if resp.status_code >= 400:
-            raise SpypointError(f"{method} {path} -> HTTP {resp.status_code}")
+            raise SpypointError(f"{method} {path} -> HTTP {resp.status_code}", resp.status_code)
         return resp
 
     # ── cameras ─────────────────────────────────────────────
@@ -315,9 +375,7 @@ class SpypointClient:
             # received it. Cellular cameras batch-upload when signal returns, so
             # preferring `date` can manufacture a dawn "peak window" out of a late
             # delivery. Capture time first, receipt time only as a fallback.
-            captured_at = _parse_dt(
-                p.get("originDate") or p.get("date") or p.get("createdAt"), self.camera_tz
-            )
+            captured_at = _capture_time(p, self.camera_tz)
             if captured_at is None:
                 skipped += 1
                 continue

@@ -52,7 +52,7 @@ class CameraAccount(Base):
     """A provider login whose cameras feed this estate (guests' own accounts).
 
     The primary SPYPOINT account stays in .env; these are added via Settings. Each
-    password is encrypted at rest (Fernet, key derived from JWT_SECRET).
+    password is encrypted at rest (Fernet, see app.core.crypto).
     """
     __tablename__ = "camera_accounts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
@@ -72,7 +72,17 @@ class CameraAccount(Base):
     ubox_max_images_per_day: Mapped[int] = mapped_column(
         Integer, nullable=False, default=500, server_default=text("500")
     )
+    # Set once a fetch has imported this login's history; None means that is still due.
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Whether the login still works, for Settings and the camera cards (see
+    # app.ingestion.logins). A fetch that could not sign in or list the cameras sets
+    # last_error, in words a hunter can act on, and leaves last_ok_at alone.
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    # How many cameras the provider listed last time, so a login shows its cameras
+    # before the first import has linked them.
+    reported_cameras: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("provider IN ('spypoint','ubox')", name="provider_valid"),
@@ -84,6 +94,11 @@ class CameraAccount(Base):
         ),
         # Device identifiers are global: one provider account belongs to one estate.
         UniqueConstraint("provider", "username", name="uq_camera_accounts_provider_username"),
+        # Emails are case-blind: Julle@ and julle@ are one login, fetched once.
+        Index(
+            "uq_camera_accounts_provider_login", "provider", text("lower(username)"),
+            unique=True, postgresql_where=text("active"),
+        ),
     )
 
 
@@ -118,7 +133,18 @@ class Camera(Base):
     photo_limit: Mapped[int | None] = mapped_column(Integer)
     plan_name: Mapped[str | None] = mapped_column(String)
     cycle_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # False once no login reaches the camera (its login was removed); a login that
+    # lists it again switches it back on. Its photos stay either way.
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
+    # pages back to it (less an overlap) rather than reading only the newest page.
+    photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # UBox snapshots that would not download, {event_id: [attempts, captured_at]}:
+    # retried on later fetches, then given up on so one dead link can't hold the
+    # camera's import back (ubox_sync).
+    import_failures: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint(
@@ -240,6 +266,10 @@ class Image(Base):
     annotated_path: Mapped[str | None] = mapped_column(String)
     cdn_url: Mapped[str | None] = mapped_column(String)
     file_hash: Mapped[str | None] = mapped_column(String)
+    # Tries at fetching a SPYPOINT photo's file that failed; retried until MAX in sync.
+    download_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     is_empty_frame: Mapped[bool | None] = mapped_column(Boolean)

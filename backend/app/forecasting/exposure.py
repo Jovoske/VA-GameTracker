@@ -22,6 +22,7 @@ counts arrivals instead, and `group_size` recovers the herd.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -50,6 +51,10 @@ VISIT_GAP = timedelta(minutes=30)
 # known-blind. Conservative: better to exclude a few real nights than to record a
 # throttled camera's silence as an observation of absence.
 CREDIT_BLIND_DAYS = 7
+
+# A camera silent for longer than this, frames on both sides or not, is not presumed
+# to have been watching: two weeks of nothing is a fault or a wrong clock.
+MAX_PRESUMED_GAP_DAYS = 14
 
 
 def night_expr(col=Image.captured_at):
@@ -103,6 +108,7 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
     by_night = {r.night: r for r in rows}
     first, last = rows[0].night, rows[-1].night
     observed = sorted(by_night)
+    today = datetime.now(ZoneInfo(_TZ)).date()
 
     # SPYPOINT reports each camera's photo-credit usage and billing cycle. A camera
     # that hit its monthly limit stopped *sending*, not necessarily stopped seeing —
@@ -130,10 +136,17 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
             # No frames at all. If the camera produced frames on both sides it was
             # almost certainly up and simply saw nothing — a real zero. Otherwise we
             # genuinely do not know, and guessing is what caused the original bug.
-            has_before = any(n < cur for n in observed)
-            has_after = any(n > cur for n in observed)
-            state = "PRESUMED_UP" if (has_before and has_after) else "UNKNOWN"
-            states[cur] = (state, 0, 0)
+            # Not across a long silence, though (one frame from a reset camera clock
+            # would otherwise make years of "watched, saw nothing"), and never for a
+            # night that has not happened yet (a clock running ahead).
+            at = bisect_left(observed, cur)
+            before = observed[at - 1] if at > 0 else None
+            after = observed[at] if at < len(observed) else None
+            presumed = (
+                before is not None and after is not None
+                and (after - before).days <= MAX_PRESUMED_GAP_DAYS and cur < today
+            )
+            states[cur] = ("PRESUMED_UP" if presumed else "UNKNOWN", 0, 0)
         elif row.unprocessed:
             # Frames exist but the detector has not seen them. Counting this as
             # "no animals" is the backlog artefact; it is not an observation yet.

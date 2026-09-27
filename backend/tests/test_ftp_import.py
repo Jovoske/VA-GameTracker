@@ -386,3 +386,71 @@ def test_postgres_concurrent_duplicate_packages_create_one_image(tmp_path, db_se
     assert sum(r["imported"] for r in results) == 1
     assert sum(r["duplicate"] for r in results) == 1
     assert db_session.scalar(select(func.count()).select_from(Image)) == 1
+
+
+def test_a_reset_camera_clock_falls_back_to_receipt_time(tmp_path):
+    """E-03: a battery swap that reset the clock to 2020 must not date a photo 2020."""
+    result = ftp.read_package(package(tmp_path, name="PICT_20200718_0012.jpg"), "Europe/Madrid")
+    assert result.captured_at == datetime.fromisoformat(RECEIVED)
+    assert result.timestamp_source == "received_at_fallback"
+    assert any("30 days" in note for note in result.timestamp_notes)
+
+
+def test_a_full_disk_puts_the_photo_back_and_parks_it_only_after_five_tries(
+    tmp_path, monkeypatch,
+):
+    """E-19: disk full, a permission problem or a file held open waits its turn."""
+    import errno
+
+    package(tmp_path)
+    package(tmp_path)
+    p = min((tmp_path / "ready").iterdir(), key=lambda d: d.name)  # first in the batch
+
+    def full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    for _ in range(1, ftp.MAX_DISK_ATTEMPTS):
+        summary = run(tmp_path, monkeypatch, full)
+        assert summary == {"imported": 0, "duplicate": 0, "failed": 0, "deferred": 1}
+        assert len(list((tmp_path / "ready").iterdir())) == 2  # the batch stops at one
+    assert json.loads((tmp_path / "ready" / p.name / "attempts.json").read_text()) == {
+        "disk": ftp.MAX_DISK_ATTEMPTS - 1}
+    assert run(tmp_path, monkeypatch, full)["failed"] == 1
+    assert (tmp_path / "failed" / p.name / "photo.jpg").exists()
+    assert ftp.spool_counts(tmp_path) == {"ready": 1, "failed": 1}
+
+
+def test_a_windows_sharing_violation_waits_too(tmp_path, monkeypatch):
+    package(tmp_path)
+
+    def held_open(*args, **kwargs):
+        error = OSError(13, "The process cannot access the file")
+        error.winerror = 32
+        raise error
+
+    assert run(tmp_path, monkeypatch, held_open)["deferred"] == 1
+    assert ftp._transient_disk_failure(PermissionError("denied"))
+    assert not ftp._transient_disk_failure(OSError("disk full after database commit"))
+
+
+def test_a_failure_note_that_cannot_be_written_does_not_stop_the_watcher(
+    tmp_path, monkeypatch,
+):
+    p = package(tmp_path)
+    original = ftp._json_write
+
+    def no_note(path, data):
+        if path.name == "error.json":
+            raise OSError("disk full")
+        original(path, data)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad data")
+
+    monkeypatch.setattr(ftp, "_json_write", no_note)
+    assert run(tmp_path, monkeypatch, broken)["failed"] == 1
+    assert (tmp_path / "failed" / p.name / "photo.jpg").exists()
+
+
+def test_spool_counts_without_a_spool(tmp_path):
+    assert ftp.spool_counts(tmp_path / "nowhere") is None

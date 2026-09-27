@@ -3,6 +3,13 @@
 Limits are per camera and estate-local calendar day, including already stored
 photos. They deliberately discard surplus events before download or inference.
 No cloud files or previously imported images are deleted.
+
+Catching up: a routine fetch reads back to where the last complete one stopped (less
+two hours), however long ago that was, up to the week UBox keeps listing. A snapshot
+that will not download is a warning, not a failed login: it is tried again on the
+next MAX_SNAPSHOT_ATTEMPTS fetches (Camera.import_failures) and then given up on, so
+one dead link can neither hold the camera's catch-up back for good nor turn every
+fetch red. What each login did is recorded for Settings (app.ingestion.logins).
 """
 from __future__ import annotations
 
@@ -23,15 +30,27 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.crypto import decrypt
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
+from app.ingestion.logins import (
+    disconnect_unlisted,
+    login_error,
+    read_password,
+    record,
+    run_status,
+)
 from app.ingestion.ubox import UboxClient, UboxDevice, UboxError, UboxEvent, UboxPageLimitError
 from app.models import Camera, CameraAccount, Estate, Image, SyncLog
 
 log = get_logger(__name__)
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 40_000_000
+# How far back a fetch reaches after an outage: about what UBox keeps listing.
+CATCH_UP = timedelta(days=7)
+# A snapshot that will not download is tried on this many fetches, then given up on.
+MAX_SNAPSHOT_ATTEMPTS = 3
+COUNTERS = ("seen", "downloaded", "duplicate", "interval_skipped", "daily_limit_skipped",
+            "no_image", "failed", "given_up")
 
 
 class ImportBudget:
@@ -79,6 +98,7 @@ def upsert_camera(db: Session, estate_id, device: UboxDevice, account_id=None) -
     elif camera.estate_id != estate_id:
         raise UboxError("This UBox camera is already linked to another estate")
     camera.account_id = account_id
+    camera.active = True  # a login lists it, so it is connected (again)
     if device.name:
         camera.provider_name = device.name
         if not camera.name_is_custom:
@@ -202,6 +222,11 @@ def _cleanup_uncommitted(db, paths) -> None:
             break
 
 
+def _snapshot_note(failed: int) -> str:
+    return (f"{failed} photo{'s' if failed != 1 else ''} wouldn't download. "
+            "They're tried again on the next fetch.")
+
+
 def _sync_camera(
     db, client, account, estate, device, since, until, hours=24, created_paths=None,
 ) -> dict:
@@ -211,10 +236,11 @@ def _sync_camera(
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
     camera = upsert_camera(db, estate.id, device, account.id)
     if since is None:
-        cutoff = until - timedelta(hours=hours)
-        since = max(camera.last_sync_at - timedelta(hours=2), cutoff) if (
-            camera.last_sync_at
-        ) else cutoff
+        # Back to where the last complete fetch of this camera (or login) stopped,
+        # however long ago, up to what UBox still lists: an outage leaves no hole.
+        marks = [m for m in (camera.last_sync_at, account.last_sync_at) if m is not None]
+        since = (max(min(marks) - timedelta(hours=2), until - CATCH_UP) if marks
+                 else until - timedelta(hours=hours))
     zone = ZoneInfo(estate.timezone)
     # Include the entire first/last local day (and interval neighbors across midnight).
     start = datetime.combine(since.astimezone(zone).date(), time.min, zone)
@@ -229,10 +255,14 @@ def _sync_camera(
         account.ubox_max_images_per_day, estate.timezone,
     )
     known = {r.ubox_event_id for r in existing if r.ubox_event_id}
-    result = dict.fromkeys(
-        ("seen", "downloaded", "duplicate", "interval_skipped", "daily_limit_skipped",
-         "no_image", "failed"), 0,
-    )
+    # Snapshots that would not download before: {event_id: [attempts, captured_at]}.
+    failures = {
+        event_id: entry for event_id, entry in (camera.import_failures or {}).items()
+        if datetime.fromisoformat(entry[1]) >= until - CATCH_UP - timedelta(days=1)
+    }
+    # The oldest capture this pass left unfinished, which the next fetch must reach.
+    hold = None
+    result = dict.fromkeys(COUNTERS, 0)
     result.update(account_id=str(account.id), camera_id=str(camera.id), camera=camera.name)
     window_end = until
     while window_end > since:
@@ -250,9 +280,14 @@ def _sync_camera(
             result["seen"] += 1
             if event.event_id in known:
                 result["duplicate"] += 1
+                failures.pop(event.event_id, None)
                 continue
             if not event.image_url:
                 result["no_image"] += 1
+                continue
+            attempts = failures.get(event.event_id, [0])[0]
+            if attempts >= MAX_SNAPSHOT_ATTEMPTS:
+                result["given_up"] += 1
                 continue
             reason = budget.reason(event.captured_at)
             if reason:
@@ -262,6 +297,7 @@ def _sync_camera(
                 with db.begin_nested():
                     saved = _ingest_photo(db, client, camera, event, created_paths)
                 known.add(event.event_id)
+                failures.pop(event.event_id, None)
                 if saved:
                     budget.record(event.captured_at)
                     result["downloaded"] += 1
@@ -275,13 +311,19 @@ def _sync_camera(
             except Exception as exc:
                 result["failed"] += 1
                 window_failures += 1
+                failures[event.event_id] = [attempts + 1, event.captured_at.isoformat()]
+                if attempts + 1 < MAX_SNAPSHOT_ATTEMPTS:
+                    hold = min(hold or event.captured_at, event.captured_at)
                 log.warning("ubox.snapshot_failed", camera=str(camera.id),
-                            error=type(exc).__name__)
+                            attempt=attempts + 1, error=type(exc).__name__)
                 if window_failures >= 5:
-                    break  # stale links/outages must not cause thousands of GETs
+                    # Stale links/outages must not cause thousands of GETs; what is
+                    # left of this window is read again next time.
+                    hold = min(hold or window_start, window_start)
+                    break
         window_end = window_start
-    if not result["failed"]:
-        camera.last_sync_at = until
+    camera.import_failures = failures
+    camera.last_sync_at = hold or until
     log.info("ubox.camera_synced", **result)
     return result
 
@@ -295,18 +337,24 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
     db.add(sync)
     db.commit()
     results = []
-    errors = []
     account_results = []
+    listed: set[str] = set()
+    every_login_listed = True
     for account in accounts:
-        account_ok = True
-        account_errors = []
+        label = account.label or account.username
+        summary = {"account_id": str(account.id), "label": label, "status": "ok", "error": None}
+        account_results.append(summary)
+        failures: list[str] = []
+        failed_snapshots = 0
+        devices: list[UboxDevice] = []
         try:
             estate = db.get(Estate, account.estate_id)
             if estate is None:
                 raise UboxError("Account has no estate")
-            with UboxClient(account.username, decrypt(account.password_enc)) as client:
+            with UboxClient(account.username, read_password(db, account)) as client:
                 client.login()
                 devices = client.list_devices()
+                listed.update(device.uid for device in devices)
                 for device in devices:
                     created_paths = []
                     try:
@@ -322,35 +370,46 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
                             )
                         db.commit()
                         results.append(result)
-                        account_ok = account_ok and not result["failed"]
-                        if result["failed"]:
-                            account_errors.append("Some snapshots could not be imported")
+                        failed_snapshots += result["failed"]
                     except Exception as exc:
                         db.rollback()
                         _cleanup_uncommitted(db, created_paths)
-                        account_ok = False
-                        account_errors.append(f"Camera import failed ({type(exc).__name__})")
+                        failures.append(login_error(exc, "ubox"))
+                        results.append({"account_id": str(account.id), "camera": device.name,
+                                        "error": type(exc).__name__})
                         log.error("ubox.camera_failed", account=str(account.id),
                                   error=type(exc).__name__)
-                if account_ok:
-                    account.last_sync_at = now
-                    db.commit()
         except Exception as exc:
             db.rollback()
-            account_ok = False
-            account_errors.append(f"Account connection failed ({type(exc).__name__})")
+            every_login_listed = False
+            words = login_error(exc, "ubox")
+            summary.update(status="error", error=words)
             log.error("ubox.account_failed", account=str(account.id), error=type(exc).__name__)
-        errors.extend(account_errors)
-        account_results.append({
-            "account_id": str(account.id), "status": "ok" if account_ok else "error",
-            "error": "; ".join(account_errors) or None,
-        })
-    totals = {key: sum(r[key] for r in results) for key in (
-        "seen", "downloaded", "duplicate", "interval_skipped", "daily_limit_skipped",
-        "no_image", "failed",
-    )}
-    sync.status = "error" if errors or totals["failed"] else "ok"
-    sync.error = "; ".join(errors) or None
+            if (row := db.get(CameraAccount, account.id)) is not None:
+                record(db, row, error=words)
+                db.commit()
+            continue
+        if failures:
+            everything = len(failures) == len(devices)
+            summary["status"] = "error" if everything else "partial"
+            summary["error"] = (failures[0] if everything else
+                                f"{len(failures)} of {len(devices)} cameras failed. {failures[0]}")
+        elif failed_snapshots:
+            summary.update(status="partial", error=_snapshot_note(failed_snapshots))
+        if not failures:
+            # Every camera was listed: the login's history is in, even if some
+            # snapshots are still being retried (their cameras hold their own place).
+            account.last_sync_at = now
+        record(db, account, cameras=len(devices),
+               error=summary["error"] if summary["status"] == "error" else None)
+        db.commit()
+    if account_id is None and every_login_listed and accounts:
+        # Every login answered: a camera none of them listed is no longer connected.
+        disconnect_unlisted(db, accounts[0].estate_id, "ubox", listed)
+    totals = {key: sum(r.get(key, 0) for r in results) for key in COUNTERS}
+    sync.status = run_status([a["status"] for a in account_results], totals["downloaded"])
+    sync.error = "; ".join(f"{a['label']}: {a['error']}" for a in account_results
+                           if a["error"]) or None
     sync.finished_at = datetime.now(UTC)
     sync.images_downloaded = totals["downloaded"]
     sync.photos_synced = totals["seen"]

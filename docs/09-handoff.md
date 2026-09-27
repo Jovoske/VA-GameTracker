@@ -108,9 +108,12 @@ passwords and live rows behind it, and only one of the two could survive.
 
 ### Rules this leaves behind
 
-1. **`JWT_SECRET` must never be rotated casually.** It signs sessions *and*
-   derives the Fernet key for `camera_accounts.password_enc`. Changing it logs
-   every user out **and** makes every stored SPYPOINT password undecryptable.
+1. **`JWT_SECRET` must never be rotated casually.** It signs sessions *and*,
+   unless `CREDENTIALS_KEY` is set, derives the Fernet key for
+   `camera_accounts.password_enc`. To rotate it, first set `CREDENTIALS_KEY` and
+   let one photo fetch run (it saves every password again under that key), or put
+   the old value in `PREVIOUS_JWT_SECRET`. A password no key can read shows in
+   Settings as "re-enter the password"; it is never dropped silently.
 2. **`0001` runs `create_all()` against the current ORM**, so every later
    revision must be idempotent — `IF NOT EXISTS`, or an explicit no-op — or
    fresh installs break. `backend/tests/test_migrations.py` enforces this, and

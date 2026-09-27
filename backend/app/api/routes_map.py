@@ -33,6 +33,7 @@ from app.forecasting.activity import activity, replay, replay_nights, still_runn
 from app.forecasting.model import class_label
 from app.forecasting.visits import CHECKED_ANIMAL, map_night_window, visit_rows
 from app.health import camera_health
+from app.ingestion.logins import camera_logins
 from app.models import Camera, CameraNight, CameraView, Detection, Image, Species, User
 from app.notifications.prefs import effective_prefs, muted_cameras
 
@@ -260,6 +261,7 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
     can_rename = user.role in {"admin", "member"}
     muted = muted_cameras(db, user.id)
     alerts_enabled = effective_prefs(db, user.id)[0]
+    login_states = camera_logins(db, [r.Camera for r in rows], now)
     out = []
     for r in rows:
         c = r.Camera
@@ -271,7 +273,7 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
             "battery_pct": c.battery_pct,
             "signal_pct": c.signal_pct,
             "last_report_at": c.last_report_at,
-            "health": camera_health(c, now),
+            "health": camera_health(c, now, login_states.get(c.id)),
             "can_rename": can_rename,
             "latest": photos.get(r.latest_id),
             "new_count": min(int(r.fresh or 0), NEW_CAP),
