@@ -114,6 +114,47 @@ The agent deploying this integration should start with the [Suntek server handof
 - **Migrations:** generated against the running Postgres — `alembic revision --autogenerate -m "..."`.
 - Secrets live in `.env` (gitignored). Never commit real credentials.
 
+## Tests, and what reaches the server
+
+Every push and pull request runs `.github/workflows/ci.yml`, and the server only
+installs a commit on `main` that passed all of it
+([deployment](docs/09-deployment.md#the-loop)):
+
+- **Backend:** the tests against a real PostgreSQL built from `docker/postgres`
+  (PostGIS + pgvector). On a laptop, point them at one and make a missing database
+  fail rather than skip:
+
+  ```bash
+  cd backend
+  GAMESENSE_TEST_DSN=postgresql+psycopg://postgres:postgres@localhost:5432/postgres \
+  GAMESENSE_REQUIRE_DB=1 python -m pytest -q
+  ```
+- **Ruff:** no errors, and no new finding in a backend file a change touches:
+  `cd backend && python scripts/ruff_ratchet.py origin/main`.
+- **Frontend:** `npm run build`.
+- **UI scripts** (`frontend/tests/*.cjs`, Playwright with its own Chromium) against a
+  started stack. Most answer `/api` from a fake server of their own; a few sign in to
+  the real API as the made-up people of `backend/scripts/demo_data.py`:
+
+  ```bash
+  # the API, on an empty database (never the real one)
+  cd backend
+  alembic upgrade head && python -m app.seed && python scripts/demo_data.py
+  python -m uvicorn app.main:app --port 8000 &
+  # the app, built (two scripts serve dist/) and served by Vite in front of the API
+  cd ../frontend && npm run build && npx vite --port 5173 &
+  # every script, or name some: npm run test:ui -- stands insights
+  PLAYWRIGHT_MODULE=/path/to/node_modules/playwright npm run test:ui
+  ```
+
+  `frontend/tests/run.sh` lists the settings it reads (`BASE_URL`, `API_URL`,
+  `PW_CHANNEL` for Edge or Chrome instead of Chromium, `UI_TIMEOUT`, `UI_LOGS`), runs
+  the scripts one after another and fails if any does.
+- **The schema guard:** `backend/tests/fixtures/schema/snapshot.sql` is a database
+  migrated long ago; the tests upgrade it and fail when a model changed with no
+  migration. After adding a migration, refresh it with
+  `cd backend && python -m tests.schema_snapshot` (needs `pg_dump`).
+
 ## Roadmap
 
 - **M1** — real SPYPOINT sync (image download, battery/signal, pagination) + correct weather/moon/solar enrichment.

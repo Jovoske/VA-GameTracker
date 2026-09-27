@@ -6,6 +6,7 @@ import HarvestBook from '../components/HarvestBook'
 import NotificationSettings from '../components/NotificationSettings'
 import { resetChoices } from '../components/PhotoFix'
 import PhoneProblems from '../components/PhoneProblems'
+import { BackupRows, type BackupStatus, DiskRow, type Disk, type RestoreCheck, UpdateStatus, type VersionInfo } from '../components/ServerStatus'
 import SettingsSection from '../components/SettingsSection'
 import Toggle from '../components/Toggle'
 
@@ -20,8 +21,11 @@ type Status = {
   suntek: { ready: number | null; failed: number | null } | null
   ai?: AiStatus
   sex_pass?: SexStatus
-  // Free space where the photos are kept; `low` under 2 GB. Null when unreadable.
-  disk?: { free_gb: number; total_gb: number; low: boolean } | null
+  // Free space where the photos are kept. Null when unreadable.
+  disk?: Disk | null
+  // The nightly backup and the weekly restore test; null when never run here.
+  backup?: BackupStatus | null
+  restore_check?: RestoreCheck | null
 }
 /** The AI pass (app.ai.checking): its backlog, what it gave up on, why it stopped. */
 type AiStatus = {
@@ -46,13 +50,6 @@ type SexStatus = {
   stopped: string | null
   last_error: string | null
   last_error_at: string | null
-}
-type Check = {
-  current: string
-  latest: string | null
-  update_available?: boolean
-  update_command?: string
-  error?: string
 }
 type Species = {
   id: string
@@ -283,12 +280,17 @@ function SpeciesName({ sp, canEdit, onSaved }: { sp: Species; canEdit: boolean; 
   )
 }
 
+/** Anything in System the owner should act on: shown beside its heading when folded. */
+function systemNeedsLook(s: Status): boolean {
+  if (s.disk?.low) return true
+  if ('backup' in s && (!s.backup || !s.backup.ok || s.backup.late)) return true
+  return !!s.restore_check && !s.restore_check.ok
+}
+
 export default function Admin() {
   const nav = useNavigate()
-  const [version, setVersion] = useState('')
+  const [version, setVersion] = useState<VersionInfo | null>(null)
   const [status, setStatus] = useState<Status | null>(null)
-  const [check, setCheck] = useState<Check | null>(null)
-  const [checking, setChecking] = useState(false)
   const [sexMsg, setSexMsg] = useState('')
   const [sexBusy, setSexBusy] = useState(false)
   const [retryBusy, setRetryBusy] = useState(false)
@@ -387,7 +389,7 @@ export default function Admin() {
   // The admin-only parts, once it is known this is an admin: nobody else is answered.
   useEffect(() => {
     if (!admin) return
-    api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
+    api<VersionInfo>('/admin/version').then(setVersion).catch(() => {})
     loadStatus()
     api<UserRow[]>('/users').then(setUsers).catch(() => {})
   }, [admin])
@@ -580,16 +582,6 @@ export default function Admin() {
       setSpeciesErr(`${s.common_name} wasn’t changed. ${(e as Error).message}`)
     }
     setSavingId(null)
-  }
-
-  async function checkUpdates() {
-    setChecking(true)
-    try {
-      setCheck(await api<Check>('/admin/version/check'))
-    } catch (e) {
-      setCheck({ current: version, latest: null, error: (e as Error).message })
-    }
-    setChecking(false)
   }
 
   const rows: [string, number][] = status
@@ -895,45 +887,11 @@ export default function Admin() {
         {pwMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
       </SettingsSection>
 
-      {admin && <SettingsSection id="version" title="App version" summary={version ? `v${version}` : undefined}>
-        <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
-        <button
-          className="btn"
-          style={{ ...goBtn, marginTop: 12 }}
-          onClick={checkUpdates}
-          disabled={checking}
-        >
-          {checking ? 'Checking…' : 'Check for updates'}
-        </button>
-        {check && (
-          <div style={{ marginTop: 12, fontSize: 13 }}>
-            {check.error ? (
-              <span style={{ color: 'var(--text-dim)' }}>Couldn't check for updates: {check.error}</span>
-            ) : check.update_available ? (
-              <>
-                <div style={{ color: 'var(--go)' }}>
-                  Update available: {check.latest} (you have {check.current})
-                </div>
-                <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>How to update:</div>
-                <code
-                  style={{
-                    display: 'block',
-                    background: 'var(--surface-2)',
-                    padding: '8px 10px',
-                    borderRadius: 'var(--r-ctl)',
-                    marginTop: 4,
-                    fontSize: 12,
-                    fontFamily: 'var(--font-mono, monospace)',
-                  }}
-                >
-                  {check.update_command}
-                </code>
-              </>
-            ) : (
-              <span style={{ color: 'var(--text-dim)' }}>Up to date ({check.current}).</span>
-            )}
-          </div>
-        )}
+      {admin && <SettingsSection id="version" title="App version"
+        summary={version ? (version.deploy?.late || (version.deploy?.failed && version.deploy.failed.commit !== version.deploy.running)
+          ? <span style={{ color: 'var(--skip)' }}>Needs a look</span> : `v${version.version}`) : undefined}>
+        <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>GameSense v{version?.version ?? '…'}</div>
+        <UpdateStatus info={version} />
       </SettingsSection>}
 
       {admin && status?.ai && (() => {
@@ -1028,7 +986,8 @@ export default function Admin() {
       {admin && <PhoneProblems />}
 
       {admin && status && (
-        <SettingsSection id="system" title="System" style={{ marginBottom: 0 }}>
+        <SettingsSection id="system" title="System" style={{ marginBottom: 0 }}
+          summary={systemNeedsLook(status) ? <span style={{ color: 'var(--skip)' }}>Needs a look</span> : undefined}>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>{k}</span>
@@ -1041,16 +1000,8 @@ export default function Admin() {
               <span>{FETCH_WORDS[status.last_sync.status] ?? status.last_sync.status}{status.last_sync.at ? `, ${ageLabel(status.last_sync.at)}` : ''}</span>
             </div>
           )}
-          {status.disk && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, padding: '4px 0' }}
-              role={status.disk.low ? 'alert' : undefined} data-disk={status.disk.low ? 'low' : 'ok'}>
-              <span style={{ color: 'var(--text-dim)' }}>Space for photos</span>
-              <span style={{ textAlign: 'right', color: status.disk.low ? 'var(--skip)' : undefined }}>
-                {status.disk.free_gb} GB free{status.disk.low
-                  ? '. Nearly full: new photos can’t be saved once it is. Ask whoever runs the server to free some space.' : ''}
-              </span>
-            </div>
-          )}
+          {status.disk && <DiskRow disk={status.disk} />}
+          {'backup' in status && <BackupRows backup={status.backup ?? null} restore={status.restore_check ?? null} />}
           {status.suntek && (
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>Suntek photos</span>
