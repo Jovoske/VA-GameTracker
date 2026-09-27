@@ -8,7 +8,8 @@ their own strip (highlights), and one photo can be asked for by id, which is wha
 push opens.
 
 Frames with a person or a vehicle in them are never in the feed (visibility.PEOPLE).
-An admin has them apart, with `people=true`: "People & vehicles" (feature 25).
+An admin has them apart, with `people=true`: "People & vehicles" (feature 25). Nor
+is a frame the AI hasn't looked at yet, except for an admin (visibility.team_sees).
 """
 import uuid
 from datetime import datetime
@@ -20,7 +21,14 @@ from sqlalchemy.orm import Session
 
 from app.ai.checking import COULD_NOT_CHECK, NOT_CHECKED_YET, photo_states
 from app.api.deps import get_current_user
-from app.api.visibility import HAS_PERSON, HAS_VEHICLE, NO_PEOPLE, PEOPLE, VISIBLE_ANIMAL
+from app.api.visibility import (
+    HAS_PERSON,
+    HAS_VEHICLE,
+    NO_PEOPLE,
+    PEOPLE,
+    VISIBLE_ANIMAL,
+    team_sees,
+)
 from app.core.db import get_db
 from app.forecasting.model import class_label, sentence_case
 from app.models import Camera, Detection, Image, PhotoNote, Species, User
@@ -61,7 +69,7 @@ def filters(user: User = Depends(get_current_user), db: Session = Depends(get_db
     # history is still worth filtering to.
     cam_rows = db.execute(
         select(Camera.id, Camera.name, Camera.active, func.count(Image.id))
-        .outerjoin(Image, (Image.camera_id == Camera.id) & VISIBLE_ANIMAL)
+        .outerjoin(Image, (Image.camera_id == Camera.id) & VISIBLE_ANIMAL & team_sees(user))
         .group_by(Camera.id, Camera.name, Camera.active)
         .having(or_(Camera.active.is_(True), func.count(Image.id) > 0))
         .order_by(Camera.name)
@@ -112,6 +120,8 @@ def feed(
 
     `checked` leaves out frames the detector hasn't reached yet (most turn out
     empty): the camera sheet's strip asks for it so it agrees with the map's photo.
+    For all but an admin they are left out anyway until the AI has looked at them
+    for people (visibility.team_sees): minutes after a sync.
 
     `people` lists the frames with a person or a vehicle in them instead, whatever
     else is in them, for an admin only (the animal chips don't apply). Each says
@@ -130,7 +140,8 @@ def feed(
     q = (
         select(Image.id, Image.captured_at, Image.camera_id, Camera.name)
         .join(Camera, Camera.id == Image.camera_id)
-        .where(Image.original_path.isnot(None), PEOPLE if people else VISIBLE_ANIMAL)
+        .where(Image.original_path.isnot(None), PEOPLE if people else VISIBLE_ANIMAL,
+               team_sees(user))
     )
     if people:
         q = q.where(Camera.estate_id == user.estate_id)
@@ -286,6 +297,7 @@ def highlights(
         .join(Camera, Camera.id == Image.camera_id)
         .where(
             Camera.estate_id == user.estate_id, Image.original_path.isnot(None), VISIBLE_ANIMAL,
+            team_sees(user),
         )
         .group_by(Image.id, Camera.id)
         .order_by(marked.desc(), Image.id.desc())
@@ -319,7 +331,7 @@ def one_photo(
         .join(Camera, Camera.id == Image.camera_id)
         .where(
             Image.id == image_id, Camera.estate_id == user.estate_id,
-            Image.original_path.isnot(None), VISIBLE_ANIMAL,
+            Image.original_path.isnot(None), VISIBLE_ANIMAL, team_sees(user),
         )
     ).first()
     if row is None:

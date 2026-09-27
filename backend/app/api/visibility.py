@@ -13,10 +13,12 @@ A frame with a person or a vehicle in it (PEOPLE) is neither: it is out of every
 shared list and every count, whatever else is in it, and only an admin sees it, in
 Photos' "People & vehicles" (feature 25). A walker, a poacher or the keeper's truck
 at a stand is estate business, not a sighting, and nobody's photo for the team feed.
+A frame nobody has looked at yet (NOT_LOOKED_AT, straight after a sync) may be one,
+so until the AI pass has, only an admin sees it too (team_sees, hidden_from).
 """
-from sqlalchemy import and_, exists, func, or_
+from sqlalchemy import and_, exists, func, or_, true
 
-from app.models import Detection, Image, Species
+from app.models import Detection, Image, Species, User
 
 # How sure MegaDetector must be (Image.person_conf, vehicle_conf) before a frame is
 # one of people or vehicles. A person at a lower bar than a vehicle: a walker in the
@@ -34,6 +36,36 @@ HAS_PERSON = and_(Image.people_cleared.is_(False), _PERSON)
 HAS_VEHICLE = and_(Image.people_cleared.is_(False), _VEHICLE)
 PEOPLE = and_(Image.people_cleared.is_(False), or_(_PERSON, _VEHICLE))
 NO_PEOPLE = or_(Image.people_cleared.is_(True), and_(~_PERSON, ~_VEHICLE))
+
+
+# SQL predicate on Image: neither the detector nor a hunter has looked at it yet (no
+# verdict of either kind), the state a frame is in from the sync until the AI pass
+# reaches it (minutes; longer after a catch-up), or one the pass gave up on. It could
+# be anyone, so only an admin sees it until then (R6BE-2). A frame checked before
+# people were looked for (processed_at set, person_conf NULL) shows as it always has
+# while the rescan works back through them (ai.checking._rescan_ids): hiding the
+# estate's whole history from the team for the days that takes would read as photos
+# lost.
+NOT_LOOKED_AT = and_(Image.person_conf.is_(None), Image.processed_at.is_(None),
+                     Image.is_empty_frame.is_(None), Image.reviewed.is_(False))
+
+
+def not_looked_at(image: Image) -> bool:
+    """NOT_LOOKED_AT, for a photo in hand."""
+    return (image.person_conf is None and image.processed_at is None
+            and image.is_empty_frame is None and not image.reviewed)
+
+
+def team_sees(user: User):
+    """SQL on Image: the frames this person's lists may hold beyond what they filter
+    on. An admin sees a frame the AI hasn't looked at yet; nobody else does."""
+    return true() if user.role == "admin" else ~NOT_LOOKED_AT
+
+
+def hidden_from(user: User, image: Image) -> bool:
+    """Not this person's to see, file and all, even by its address: a frame with a
+    person or a vehicle in it, or one nobody has looked at yet, for all but an admin."""
+    return user.role != "admin" and (is_people(image) or not_looked_at(image))
 
 
 def people_in(image: Image) -> tuple[bool, bool]:

@@ -289,27 +289,106 @@ def test_photos_checked_before_are_looked_at_again_for_people_in_daylight(
     flagged = _frame(db_session, cam, now - timedelta(days=4), "flagged.jpg", is_empty_frame=True,
                      reviewed=True, processed_at=now - timedelta(days=4))
     broken = _seen(db_session, cam, now - timedelta(days=5), "broken.jpg")
+    # However old: a walker from last spring was in the team's feed until looked at (R6BE-4).
     long_ago = _seen(db_session, cam, now - timedelta(days=90), "longago.jpg")
+    # Judged empty at the old cut-off 40 days ago: looked at for people, and only for
+    # them (the old cut-off's own look again stays to the last RESCAN_DAYS).
+    old_empty = _frame(db_session, cam, now - timedelta(days=40), "oldempty.jpg",
+                       is_empty_frame=True, processed_at=now - timedelta(days=40))
     models["boxes"] = {"oldwalk.jpg": [BOAR, PERSON], "oldboar.jpg": [BOAR],
-                       "flagged.jpg": [TRUCK]}
+                       "flagged.jpg": [TRUCK], "longago.jpg": [BOAR, PERSON],
+                       "oldempty.jpg": [BOAR, TRUCK]}
     models["raises"]["broken.jpg"] = OSError("cannot identify image file")
 
     assert checking.check_photos(db_session, now=now.replace(hour=19))["rescanned"] == 0
     result = checking.check_photos(db_session, now=now)
-    assert result["rescanned"] == 3 and result["found_on_rescan"] == 0
-    for img in (old_walk, old_boar, flagged, broken, long_ago):
+    assert result["rescanned"] == 5 and result["found_on_rescan"] == 0
+    for img in (old_walk, old_boar, flagged, broken, long_ago, old_empty):
         db_session.refresh(img)
     assert (old_walk.person_conf, old_boar.person_conf) == (0.81, 0.0)
     # A hunter's "nothing in it" stands, and the truck in it is on record all the same.
     assert (flagged.is_empty_frame, flagged.reviewed, flagged.vehicle_conf) == (True, True, 0.77)
     # A photo that won't read is left as it was judged, and not tried again.
     assert (broken.person_conf, broken.vehicle_conf, broken.detector_conf) == (0.0, 0.0, None)
-    assert long_ago.person_conf is None
+    assert long_ago.person_conf == 0.81 and is_people(long_ago)
+    assert (old_empty.vehicle_conf, old_empty.is_empty_frame, old_empty.detector_conf) == (
+        0.77, True, None)
     # Kept as a boar: no second sighting from looking again.
     assert db_session.scalar(
         select(Detection.id).where(Detection.image_id == old_walk.id)) is not None
     assert db_session.query(Detection).filter_by(image_id=old_walk.id).count() == 1
     assert checking.check_photos(db_session, now=now)["rescanned"] == 0  # once each
+
+
+@requires_db
+def test_the_rescan_works_back_newest_first_a_few_a_run(db_session, cam, models, monkeypatch):
+    now = datetime(2026, 9, 27, 10, 0, tzinfo=UTC)
+    monkeypatch.setattr(checking, "RESCAN_PER_RUN", 2)
+    frames = [_seen(db_session, cam, now - timedelta(days=d), f"d{d}.jpg") for d in (400, 60, 5)]
+    assert checking.check_photos(db_session, now=now)["rescanned"] == 2
+    for img in frames:
+        db_session.refresh(img)
+    assert [f.person_conf is None for f in frames] == [True, False, False]
+    assert checking.check_photos(db_session, now=now)["rescanned"] == 1
+    db_session.refresh(frames[0])
+    assert frames[0].person_conf == 0.0
+
+
+# ── a frame nobody has looked at yet ────────────────────────────────────────────
+
+
+@requires_db
+def test_a_frame_the_ai_hasnt_looked_at_is_the_admins_until_it_has(
+    client, db_session, cam, admin, member, models, tmp_path,
+):
+    """Between the fetch and the AI pass a frame has no person_conf, which used to read
+    as "nobody in it": a walker synced at 21:00 was in the team's feed, and its file
+    theirs to open, until the pass got to it (R6BE-2)."""
+    viewer = _user(db_session, cam, "viewer")
+
+    def synced(name, at):
+        img = _frame(db_session, cam, at, str(tmp_path / name))
+        PImage.new("RGB", (64, 48), (90, 120, 60)).save(img.original_path, "JPEG")
+        return img
+
+    walker = synced("walker.jpg", NIGHT)
+    boar = synced("boar.jpg", NIGHT + timedelta(minutes=10))
+    gave_up = _frame(db_session, cam, NIGHT + timedelta(minutes=20), "broken.jpg",
+                     ai_failed_at=NIGHT, ai_attempts=3)
+    both = {str(walker.id), str(boar.id)}
+
+    for who in (member, viewer):
+        assert client.get("/api/photos", headers=who[1]).json()["items"] == []
+        assert client.get(f"/api/cameras/{cam.id}/images?include_empty=true",
+                          headers=who[1]).json() == []
+        chip = client.get("/api/photos/filters", headers=who[1]).json()["cameras"][0]
+        assert chip["count"] == 0
+        token = image_token(who[0])
+        for img in (walker, boar, gave_up):
+            assert client.get(f"/api/images/{img.id}/file?token={token}").status_code == 404
+            assert client.get(f"/api/images/{img.id}/thumb?token={token}").status_code == 404
+            assert client.get(f"/api/images/{img.id}/notes", headers=who[1]).status_code == 404
+            assert client.get(f"/api/photos/{img.id}", headers=who[1]).status_code == 404
+    # The admin sees them, as "Not checked yet", and can't send the team to one yet.
+    feed = client.get("/api/photos", headers=admin[1]).json()["items"]
+    assert {i["image_id"] for i in feed} == both | {str(gave_up.id)}
+    assert {i["label"] for i in feed if i["image_id"] in both} == {"Not checked yet"}
+    token = image_token(admin[0])
+    assert client.get(f"/api/images/{walker.id}/file?token={token}").status_code == 200
+    r = client.post(f"/api/images/{boar.id}/notes", json={"text": "Big one", "tell_team": True},
+                    headers=admin[1])
+    assert r.status_code == 409 and "checked" in r.json()["detail"]
+
+    # The AI pass: the boar is the team's, the walker stays the admin's.
+    models["boxes"] = {walker.original_path: [BOAR, PERSON], boar.original_path: [BOAR]}
+    checking.check_photos(db_session, now=NIGHT + timedelta(minutes=30))
+    assert _ids(client.get("/api/photos", headers=member[1]).json()["items"]) == [str(boar.id)]
+    token = image_token(member[0])
+    assert client.get(f"/api/images/{boar.id}/file?token={token}").status_code == 200
+    assert client.get(f"/api/images/{walker.id}/file?token={token}").status_code == 404
+    # One the AI gave up on is the team's once an admin has looked and kept it.
+    client.post(f"/api/images/{gave_up.id}/flag", json={"is_empty": False}, headers=admin[1])
+    assert str(gave_up.id) in _ids(client.get("/api/photos", headers=member[1]).json()["items"])
 
 
 def test_boxes_from_before_people_were_looked_for_are_animals():

@@ -263,7 +263,8 @@ def test_a_photo_flagged_before_the_detector_reached_it_does_not_blind_its_night
     from app.main import app
     from app.models import User
 
-    user = User(estate_id=cam.estate_id, email="m@x.local", password_hash="x", role="member")
+    # An admin: only they see a frame the detector hasn't reached (R6BE-2).
+    user = User(estate_id=cam.estate_id, email="m@x.local", password_hash="x", role="admin")
     db_session.add(user)
     img = _frame(db_session, cam, NIGHT)
     app.dependency_overrides[get_db] = lambda: db_session

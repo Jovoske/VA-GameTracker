@@ -19,8 +19,10 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.routes_harvests import season_bounds, season_of
+from app.api.routes_harvests import season_bounds, season_of, shot_time
 from app.api.routes_stands import tonight
+from app.forecasting.conditions import sunset_of
+from app.forecasting.thermal import SETTLING
 from app.models import Estate, Harvest, Sit, Stand, User
 
 from .conftest import requires_db
@@ -126,6 +128,58 @@ def test_the_morning_after_a_shot_asks_to_log_it_and_stops_once_it_is(
     assert client.get("/api/harvests/asks", headers=h).json() == []
 
 
+def _local(night, hour, minute=0, days=0):
+    return datetime.combine(night + timedelta(days=days), datetime.min.time(),
+                            tzinfo=MADRID).replace(hour=hour, minute=minute)
+
+
+@requires_db
+def test_a_shot_answered_the_next_morning_is_logged_on_the_night_of_the_sit(
+    client, db_session, people, stand,
+):
+    """ "What happened last night?" answered at 08:30: the report's time is the
+    morning's, and the harvest used to be dated to it, a day late in the book and the
+    return (R6BE-1). The shot was during the sit."""
+    pedro, h = people["pedro"]
+    night = tonight() - timedelta(days=1)
+    sit = Sit(stand_id=stand.id, user_id=pedro.id, night=night, outcome="shot",
+              started_at=_local(night, 20), ended_at=_local(night, 22, 30),
+              reported_at=_local(night, 8, 30, days=1))
+    db_session.add(sit)
+    db_session.commit()
+    ask = client.get("/api/harvests/asks", headers=h).json()[0]
+    assert datetime.fromisoformat(ask["shot_at"]) == sit.ended_at
+    line = client.post("/api/harvests", json={**BOAR, "sit_id": str(sit.id)}, headers=h).json()
+    assert datetime.fromisoformat(line["taken_at"]) == sit.ended_at
+    csv_rows = list(csv.reader(io.StringIO(client.get(
+        f"/api/harvests/export.csv?season={season_of(sit.ended_at)}",
+        headers=people["admin"][1]).content.decode()[1:]), delimiter=";"))
+    assert csv_rows[1][:3] == [night.isoformat(), "22:30", "Wild boar"]
+
+
+def test_the_shot_time_is_always_on_the_night_of_the_sit():
+    night = tonight() - timedelta(days=3)
+
+    def sit(**kw):
+        return Sit(night=night, outcome="shot", **kw)
+
+    # Tapped during the sit: that is when.
+    assert shot_time(sit(started_at=_local(night, 20), ended_at=_local(night, 23),
+                         reported_at=_local(night, 21, 40))) == _local(night, 21, 40)
+    # Tapped on the walk back, after END SIT: no later than the end.
+    assert shot_time(sit(started_at=_local(night, 20), ended_at=_local(night, 22, 30),
+                         reported_at=_local(night, 23, 10))) == _local(night, 22, 30)
+    # A dawn sit's SHOT at 04:50 is still that night.
+    assert shot_time(sit(reported_at=_local(night, 4, 50, days=1))) == _local(night, 4, 50, days=1)
+    # Answered the next morning, sit mode ended the next morning too: its start.
+    assert shot_time(sit(started_at=_local(night, 20, 15), ended_at=_local(night, 7, 55, days=1),
+                         reported_at=_local(night, 8, 30, days=1))) == _local(night, 20, 15)
+    # Never in sit mode, answered days later: the sit time that evening.
+    at = shot_time(sit(reported_at=_local(night, 9, 0, days=2)))
+    assert at == sunset_of(night) + SETTLING
+    assert tonight(at) == night
+
+
 @requires_db
 def test_nothing_to_log_stops_the_card_and_undo_brings_it_back(client, db_session, people, stand):
     pedro, h = people["pedro"]
@@ -140,6 +194,15 @@ def test_nothing_to_log_stops_the_card_and_undo_brings_it_back(client, db_sessio
     # Someone else's sit is theirs to say.
     r = client.post(f"/api/sits/{sit.id}/no-harvest", headers=people["ana"][1])
     assert r.status_code == 403
+    # Only a SHOT has nothing to log, as only a SHOT has a line to log (R6BE-6).
+    seen = _sit(db_session, stand, pedro, nights_ago=2, outcome="seen")
+    r = client.post(f"/api/sits/{seen.id}/no-harvest", json={"nothing": True}, headers=h)
+    assert r.status_code == 409 and "shot" in r.json()["detail"]
+    db_session.refresh(seen)
+    assert seen.no_harvest_at is None
+    # Undo still works whatever the sit says now.
+    assert client.post(f"/api/sits/{seen.id}/no-harvest", json={"nothing": False},
+                       headers=h).json()["nothing_to_log"] is False
 
 
 @requires_db
@@ -173,6 +236,35 @@ def test_saving_again_after_no_answer_is_the_same_line(client, db_session, peopl
     assert db_session.query(Harvest).count() == 1
     # Another hunter can't take over the line by sending its id.
     assert client.post("/api/harvests", json=body, headers=people["ana"][1]).status_code == 409
+
+
+@requires_db
+def test_a_retry_with_changed_answers_keeps_what_was_sent_last(client, db_session, people, stand):
+    """A save lost its answer, and the hunter put the animal right before trying again
+    with the same line: the book says what they sent last, not the first try (R6BE-5)."""
+    pedro, h = people["pedro"]
+    sit = _sit(db_session, stand, pedro)
+    line_id = str(uuid.uuid4())
+    first = client.post("/api/harvests", json={
+        **BOAR, "id": line_id, "sit_id": str(sit.id), "seal": "CU-1", "weight_kg": 70}, headers=h)
+    assert first.status_code == 201
+    again = client.post("/api/harvests", json={
+        "id": line_id, "sit_id": str(sit.id), "species_id": "red_deer", "sex": "female",
+        "age_class": "unknown", "seal": "CU-9", "weight_kg": None,
+        "taken_at": "2026-09-20T21:15:00+02:00",
+    }, headers=h)
+    assert again.status_code == 200, again.text
+    line = again.json()
+    assert (line["id"], line["species_id"], line["sex"], line["seal"], line["weight_kg"]) == (
+        line_id, "red_deer", "female", "CU-9", None)
+    assert datetime.fromisoformat(line["taken_at"]) == datetime(2026, 9, 20, 19, 15, tzinfo=UTC)
+    assert line["stand"] == "Puente" and line["hunter"] == "Pedro"
+    assert db_session.query(Harvest).count() == 1
+    # The same answers again change nothing, and a member's retry can't rename it.
+    same = client.post("/api/harvests", json={
+        "id": line_id, "species_id": "red_deer", "sex": "female", "seal": "CU-9",
+        "hunter": "Somebody"}, headers=h).json()
+    assert (same["species_id"], same["hunter"], same["seal"]) == ("red_deer", "Pedro", "CU-9")
 
 
 @requires_db
@@ -273,16 +365,19 @@ def test_the_season_export_is_the_admins_and_opens_right_in_a_spreadsheet(
     assert 'filename="harvest-2026-27.csv"' in r.headers["content-disposition"]
     text = r.content.decode("utf-8")
     assert text.startswith("﻿")
-    rows = list(csv.reader(io.StringIO(text[1:])))
+    # Excel set to Spanish (the estate's PC) splits on ';' and reads "78,5" as a number
+    # (R6BE-7); no "sep=" line, which would make it drop the byte-order mark.
+    assert text[1:].startswith("Date;Time;Species;")
+    rows = list(csv.reader(io.StringIO(text[1:]), delimiter=";"))
     assert rows[0] == ["Date", "Time", "Species", "Sex", "Age", "Seal number", "Weight (kg)",
                        "Hunter", "Stand", "Notes"]
     assert rows[1] == ["2026-09-02", "20:05", "Red deer", "Female", "Not sure", "", "",
                        "Luis Martín", "", ""]
-    assert rows[2] == ["2026-09-10", "21:40", "Wild boar", "Male", "Adult", "CU-0412", "78.5",
+    assert rows[2] == ["2026-09-10", "21:40", "Wild boar", "Male", "Adult", "CU-0412", "78,5",
                        "Pedro", "Puente", "'=HYPERLINK(\"http://x\")"]
     assert len(rows) == 3
     old = client.get("/api/harvests/export.csv?season=2025", headers=people["admin"][1])
-    assert len(list(csv.reader(io.StringIO(old.content.decode()[1:])))) == 2
+    assert len(list(csv.reader(io.StringIO(old.content.decode()[1:]), delimiter=";"))) == 2
 
 
 @requires_db

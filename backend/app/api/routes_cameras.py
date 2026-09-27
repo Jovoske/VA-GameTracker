@@ -15,7 +15,7 @@ from app import geo, jobs
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
 from app.api.routes_photos import _items, after_cursor
-from app.api.visibility import SHOWN_EMPTY, VISIBLE_ANIMAL
+from app.api.visibility import SHOWN_EMPTY, VISIBLE_ANIMAL, team_sees
 from app.core.db import get_db
 from app.health import camera_health
 from app.ingestion.logins import camera_logins
@@ -105,7 +105,9 @@ def list_cameras(
     The strip lists `animal_count` + `unchecked_count` photos: the checked ones with
     an animal in them (not only a hidden animal, with a picture), and the ones the AI
     has not checked yet (or couldn't), which are often grass, so they are counted
-    apart. `empty_count` is the "nothing in it" ones "Show empty photos" brings up.
+    apart (for an admin; the team's are only those the detector has looked at for
+    people and the species model hasn't named yet). `empty_count` is the "nothing in
+    it" ones "Show empty photos" brings up.
     They used to be every frame minus the empty ones, so hidden rabbits and frames
     not checked yet counted as animals, and it took four queries a camera; now it is
     one for them all.
@@ -123,8 +125,11 @@ def list_cameras(
             func.count(Image.id).label("count"),
             func.count(Image.id).filter(
                 has_file, Image.is_empty_frame.is_(False), VISIBLE_ANIMAL).label("animals"),
+            # For all but an admin, not a frame the AI hasn't looked at yet: the strip
+            # leaves those out too (visibility.team_sees).
             func.count(Image.id).filter(
-                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL).label("unchecked"),
+                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL, team_sees(user),
+            ).label("unchecked"),
             # Not a frame of people or vehicles: those are an admin's, in Photos.
             func.count(Image.id).filter(has_file, SHOWN_EMPTY).label("empty"),
         )
@@ -471,6 +476,8 @@ def camera_images(
     # Photos of nothing but hidden species never show; empties only on request; and a
     # frame with a person or a vehicle in it never does (Photos' admin-only filter).
     q = q.where(or_(SHOWN_EMPTY, VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
+    # Nor, for all but an admin, one the AI hasn't looked at yet: it could be one.
+    q = q.where(team_sees(user))
     q = after_cursor(q, before, before_id)
     rows = db.scalars(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit)).all()
     cam_name = db.scalar(select(Camera.name).where(Camera.id == camera_id))

@@ -4,7 +4,9 @@
 // is the same line on the next try; what was typed survives closing it), Settings'
 // book for an admin (the season's CSV) and a member (their own, no export), and Photos'
 // admin-only "People & vehicles" (no notes or "Wrong?" on those frames, "Nobody in it?"
-// with Undo; a member's phone never asks for them, even with an old choice saved).
+// with Undo; a member's phone never asks for them, even with an old choice saved; the
+// chip is glove-sized). Signing out takes the harvest card with it: the next person
+// on the phone never sees "You shot at Puente last night", even with no signal.
 // Run like map-and-stands.cjs (BASE_URL, PW_CHANNEL).
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert=require('node:assert/strict'),fs=require('node:fs');
@@ -26,7 +28,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const feed=[{image_id:'a1',file_url:'/api/images/a1/file',captured_at:ago(2),camera:'Charca',camera_id:'c1',label:'Wild boar',species_id:'wild_boar',group_size:1,notes_count:0}];
  const people=[{image_id:'p1',file_url:'/api/images/p1/file',captured_at:ago(3),camera:'Charca',camera_id:'c1',label:'Person',species_id:null,group_size:null,notes_count:0,has_person:true,has_vehicle:false},
   {image_id:'p2',file_url:'/api/images/p2/file',captured_at:ago(5),camera:'Charca',camera_id:'c1',label:'Vehicle',species_id:null,group_size:null,notes_count:0,has_person:false,has_vehicle:true}];
- let role='member',post='ok',asks=[ask],book=[];
+ let role='member',post='ok',asks=[ask],book=[],asksDown=false;
  const posts=[],nothing=[],cleared=[],feedAsks=[];
  const newPage=async(viewport={width:390,height:844},init)=>{
   const page=await browser.newPage({viewport,serviceWorkers:'block',hasTouch:true,timezoneId:'Europe/Madrid',locale:'en-GB',acceptDownloads:true});
@@ -52,6 +54,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
     return route.fulfill({status:200,headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="harvest-2026-27.csv"'},
      body:'﻿Date,Time,Species\n2026-09-26,21:40,Wild boar\n'});
    }
+   if(p==='/api/harvests/asks'&&asksDown)return route.abort('internetdisconnected');
    if(method!=='GET')return route.fulfill({json:{}});
    if(p==='/api/photos'){
     feedAsks.push(u.search);
@@ -84,6 +87,10 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  const form=page.locator('.hv-form');await form.getByRole('button',{name:'Wild boar'}).waitFor();
  assert.equal(await form.getByRole('button',{name:'Fox'}).count(),0,'small game behind More animals');
  for(const b of await form.locator('.hv-choice').all())assert.ok((await b.boundingBox()).height>=56,'every choice is glove-sized');
+ // The time of the SHOT in words beside When, so a wrong day stands out.
+ const words=await page.evaluate(iso=>{const d=new Date(iso);return `${d.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'})}, ${d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}`},ask.shot_at);
+ assert.equal(await form.locator('.hv-when').innerText(),words);
+ assert.match(words,new RegExp(String(new Date(ask.shot_at).toLocaleString('en-GB',{day:'numeric',timeZone:'Europe/Madrid'}))),'the day of the SHOT');
  await form.getByRole('button',{name:'Log it'}).click();
  assert.equal(await form.locator('.hv-err').innerText(),'Pick the animal first.');
  await form.getByRole('button',{name:'Wild boar'}).click();
@@ -154,6 +161,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  page=await newPage();
  await page.goto(base+'/photos');
  const chip=page.locator('.photos-chip--people');await chip.waitFor();
+ assert.ok((await chip.boundingBox()).height>=44,'the People & vehicles chip is glove-sized');
  await chip.click();
  await page.locator('.photos-people-note').waitFor();
  await page.waitForFunction(()=>document.querySelectorAll('.photos-tile').length===2);
@@ -180,6 +188,26 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  assert.equal(await page.locator('.photos-chip--people').count(),0);
  assert.equal(await page.locator('.photos-tile').count(),1);
  assert.ok(feedAsks.length>0&&feedAsks.every(q=>!q.includes('people=true')),`never asked for them (${feedAsks})`);
+ await page.close();
+
+ // ── Signing out takes the harvest card with it (the phone is passed round) ──
+ role='member';asks=[ask];
+ page=await newPage();
+ await page.goto(base+'/stands');
+ await page.locator('.hv-ask').waitFor();
+ assert.ok(await page.evaluate(()=>!!localStorage.getItem('gs_cache:/harvests/asks')),'the card is kept for no signal');
+ // Settings, as on a phone (the header's Sign out is the desktop's).
+ await page.getByRole('link',{name:/Settings|More/}).first().click();
+ await page.locator('#account').getByRole('button',{name:'Sign out'}).click();
+ await page.waitForURL(/\/login/);
+ assert.deepEqual(await page.evaluate(()=>Object.keys(localStorage).filter(k=>k.includes('/harvests'))),[]);
+ assert.deepEqual(await page.evaluate(()=>Object.keys(sessionStorage).filter(k=>k.startsWith('gs.harvest.draft.'))),[]);
+ // The next person signs in in a valley: the old card isn't theirs to see.
+ role='viewer';asksDown=true;
+ await page.evaluate(()=>localStorage.setItem('gs_token','viewer-fixture'));
+ await page.goto(base+'/stands');
+ await page.getByText('Puente').first().waitFor();await page.waitForTimeout(500);
+ assert.equal(await page.locator('.hv-ask').count(),0,'no "You shot at…" for the next person');
  await page.close();
 
  assert.deepEqual(errors,[]);

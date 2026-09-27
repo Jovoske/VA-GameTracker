@@ -32,7 +32,9 @@ from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_stands import tonight
 from app.core.config import settings
 from app.core.db import get_db
+from app.forecasting.conditions import sunset_of
 from app.forecasting.model import sentence_case
+from app.forecasting.thermal import SETTLING
 from app.models import Harvest, Sit, Species, Stand, User
 from app.people import name_for
 
@@ -56,6 +58,7 @@ EARLIEST = datetime(2000, 1, 1, tzinfo=UTC)
 
 VIEWERS_LOOK = "Viewers can’t log a harvest."
 NOT_YOURS = "That harvest is another hunter’s. An admin can change it."
+NOT_A_SHOT = "That sit isn’t reported as a shot. Say what happened first."
 
 
 def _tz() -> ZoneInfo:
@@ -167,6 +170,29 @@ def _when(at: datetime | None, now: datetime) -> datetime | None:
     return at
 
 
+def shot_time(sit: Sit) -> datetime:
+    """When the shot was, as near as the sit says, for the form's time and the book.
+
+    The SHOT tap when it was made that night (tonight() of it is the sit's night),
+    and no later than END SIT: a SHOT tapped on the walk back was before the end.
+    A SHOT answered the next morning on "What happened last night?" is not when it
+    was (R6BE-1): then the end of the sit, its start, or the sit time (45 minutes
+    after that evening's sunset, 21:00 without one), all on the sit's night.
+    """
+    def that_night(at: datetime | None) -> bool:
+        return at is not None and tonight(at) == sit.night
+
+    ended = sit.ended_at if that_night(sit.ended_at) else None
+    if that_night(sit.reported_at):
+        return min(sit.reported_at, ended) if ended else sit.reported_at
+    if ended:
+        return ended
+    if that_night(sit.started_at):
+        return sit.started_at
+    sunset = sunset_of(sit.night)
+    return sunset + SETTLING if sunset else datetime.combine(sit.night, time(21), tzinfo=_tz())
+
+
 def _stand(db: Session, stand_id: uuid.UUID | None) -> Stand | None:
     if stand_id is None:
         return None
@@ -268,8 +294,8 @@ def harvest_asks(user: CurrentUser, db: DB) -> list[dict]:
         "stand_id": str(s.stand_id),
         "stand": name,
         "night": s.night.isoformat(),
-        # When SHOT was tapped, for the form's time.
-        "shot_at": s.reported_at or s.ended_at or s.started_at,
+        # When SHOT was, on the sit's night, for the form's time (shot_time).
+        "shot_at": shot_time(s),
     } for s, name in rows]
 
 
@@ -288,7 +314,9 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
     SHOT, yours (or anyone's, for an admin), and the line is its hunter's. Without
     one: yours, or for an admin whoever `hunter` names.
 
-    A second save with the same `id` is the same line (200, not a second animal)."""
+    A second save with the same `id` is the same line (200, not a second animal), as
+    this save says it: a hunter who changed the animal or the seal after a save lost
+    its answer gets what they sent, not the first try (R6BE-5)."""
     _can_write(user)
     _check_kind(body.species_id, body.sex, body.age_class)
     now = datetime.now(UTC)
@@ -299,7 +327,7 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
             if not _mine(same, user):
                 raise HTTPException(409, "That harvest couldn’t be saved. Close it and try again.")
             response.status_code = 200
-            return _out(db, same, user)
+            return _change(db, same, _as_change(body, user), user)
 
     hunter_user: User | None = user
     stand = _stand(db, body.stand_id)
@@ -307,10 +335,10 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
     if body.sit_id is not None:
         sit = _sit_for(db, body.sit_id, user)
         if sit.outcome != "shot":
-            raise HTTPException(409, "That sit isn’t reported as a shot. Say what happened first.")
+            raise HTTPException(409, NOT_A_SHOT)
         stand = db.get(Stand, sit.stand_id)
         hunter_user = db.get(User, sit.user_id) if sit.user_id else None
-        taken = taken or sit.reported_at or sit.ended_at or sit.started_at
+        taken = taken or min(shot_time(sit), now)
     # A removed hunter's sit carries no name: the line says "Hunter" until an admin
     # writes one.
     hunter = body.hunter if user.role == "admin" and body.hunter else name_for(hunter_user)
@@ -330,8 +358,25 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
     if h is None or not _mine(h, user):
         raise HTTPException(409, "That harvest couldn’t be saved. Close it and try again.")
     if not fresh:
+        # Saved alongside by another try of this one: this try's answers stand.
         response.status_code = 200
+        return _change(db, h, _as_change(body, user), user)
     return _out(db, h, user)
+
+
+def _as_change(body: HarvestIn, user: User) -> HarvestPatch:
+    """A save of a line already in the book, as the change it makes: every answer the
+    form holds (an empty seal, weight or note clears it), the time when one was sent,
+    the name for an admin who wrote one, and the stand when one was picked."""
+    fields = {k: getattr(body, k) for k in (
+        "species_id", "sex", "age_class", "seal", "weight_kg", "notes")}
+    if body.taken_at is not None:
+        fields["taken_at"] = body.taken_at
+    if user.role == "admin" and body.hunter:
+        fields["hunter"] = body.hunter
+    if body.stand_id is not None:
+        fields["stand_id"] = body.stand_id
+    return HarvestPatch(**fields)
 
 
 def _own_harvest(db: Session, harvest_id: uuid.UUID, user: User) -> Harvest:
@@ -349,7 +394,10 @@ def change_harvest(harvest_id: uuid.UUID, body: HarvestPatch, user: CurrentUser,
     """Put a line right: the hunter who logged it or whose it is, or an admin. Only
     the fields sent change; an empty seal, weight or note (null) clears it. Only an
     admin changes the name on it."""
-    h = _own_harvest(db, harvest_id, user)
+    return _change(db, _own_harvest(db, harvest_id, user), body, user)
+
+
+def _change(db: Session, h: Harvest, body: HarvestPatch, user: User) -> dict:
     sent = body.model_fields_set
     _check_kind(body.species_id, body.sex, body.age_class)
     if "species_id" in sent:
@@ -395,10 +443,13 @@ class NothingIn(BaseModel):
 def nothing_to_log(sit_id: uuid.UUID, user: CurrentUser, db: DB,
                    body: NothingIn | None = None) -> dict:
     """The SHOT left nothing to log (a miss, or an animal not found): the morning
-    card stops asking. The sit's report stays a shot; the book has no line for it."""
+    card stops asking. The sit's report stays a shot; the book has no line for it.
+    Only a sit reported as a SHOT, as for logging one; Undo always works."""
     _can_write(user)
     sit = _sit_for(db, sit_id, user)
     nothing = body.nothing if body is not None else True
+    if nothing and sit.outcome != "shot":
+        raise HTTPException(409, NOT_A_SHOT)
     if nothing and sit.no_harvest_at is None:
         sit.no_harvest_at = datetime.now(UTC)
     elif not nothing:
@@ -427,8 +478,11 @@ def export_season(
     season: Annotated[int | None, Query(description="The year the season started")] = None,
 ) -> Response:
     """The season's harvest as a CSV for the annual return (admins), oldest first, on
-    the estate's clock. Opens as it is in a spreadsheet: UTF-8 with a byte-order mark,
-    so "García" and "Añojo" come out right in Excel."""
+    the estate's clock. Written the way a Spanish spreadsheet reads one, so it opens
+    as it is with a double-click in Excel on the estate's PC: ';' between cells and a
+    decimal comma in the weight ("78,5"), as Excel set to Spanish expects (R6BE-7),
+    and UTF-8 with a byte-order mark, so "García" and "Añojo" come out right. No
+    "sep=" line: Excel then drops the byte-order mark and breaks the accents."""
     current = season_of(datetime.now(UTC))
     season = current if season is None else season
     if not 2000 <= season <= current + 1:
@@ -441,11 +495,11 @@ def export_season(
     names = _species_names(db)
     stands = {s.id: s.name for s in db.scalars(select(Stand))}
     buf = io.StringIO()
-    out = csv.writer(buf)
+    out = csv.writer(buf, delimiter=";")
     out.writerow(COLUMNS)
     for h in rows:
         local = h.taken_at.astimezone(_tz())
-        weight = None if h.weight_kg is None else f"{h.weight_kg:g}"
+        weight = None if h.weight_kg is None else f"{h.weight_kg:g}".replace(".", ",")
         out.writerow([_cell(v) for v in (
             local.strftime("%Y-%m-%d"), local.strftime("%H:%M"),
             names.get(h.species_id) or default_name(h.species_id),

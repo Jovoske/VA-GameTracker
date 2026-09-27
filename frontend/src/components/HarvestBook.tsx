@@ -149,7 +149,7 @@ export default function HarvestBook({ admin }: { admin: boolean }) {
       {book && (
         <p className="hv-season-note">
           The {book.label} season runs {day(book.from)} to {day(book.to)}.
-          {book.can_export ? ' The file opens in any spreadsheet, for the annual return.' : ''}
+          {book.can_export ? ' The file opens as it is in Excel on a Spanish computer, for the annual return.' : ''}
         </p>
       )}
       {open && (

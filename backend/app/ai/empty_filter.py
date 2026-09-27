@@ -94,15 +94,16 @@ def old_rule_empty(image: Image) -> bool:
     return image.is_empty_frame is True and not image.reviewed and image.detector_conf is None
 
 
-def rescan_image(db: Session, image: Image, boxes: list[dict]) -> bool:
+def rescan_image(db: Session, image: Image, boxes: list[dict], *,
+                 animals_too: bool = True) -> bool:
     """A frame looked at again: for the people and vehicles in it (a frame checked
     before they were looked for), and, when it was judged empty at the detector's
-    old 0.25 cut-off (old_rule_empty), for an animal at DETECT_CONF. True when there
-    is an animal after all: it is kept, and stamped as checked now, so it shows as new
-    on the map (routes_map.shown_after)."""
+    old 0.25 cut-off (old_rule_empty) and `animals_too` (a recent one), for an animal
+    at DETECT_CONF. True when there is an animal after all: it is kept, and stamped as
+    checked now, so it shows as new on the map (routes_map.shown_after)."""
     animals, person, vehicle = split(boxes)
     note_people(db, image, person, vehicle)
-    if not old_rule_empty(image):
+    if not animals_too or not old_rule_empty(image):
         return False
     empty, conf = judge(animals)
     values = {"animal_conf": conf, "detector_conf": DETECT_CONF}

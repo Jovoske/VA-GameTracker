@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { type Failure, type Got, api, getFresh, peek, peekMe, plainWords, whoAmI } from '../api'
+import { type Failure, type Got, HARVEST_DRAFT_KEY, api, getFresh, peek, peekMe, plainWords, whoAmI } from '../api'
 import { useRefetchOnReturn } from '../hooks'
 import { nightLabel } from '../night'
 import { newNoteId } from '../notes'
@@ -71,6 +71,16 @@ function localInput(iso: string | number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+/** "Sat 26 Sep, 22:30": the form's time with its day in words beside the field, so a
+ *  wrong day stands out (the field shows a bare date). Written as the phone writes
+ *  dates, like the night headings (night.ts). */
+function whenWords(local: string): string {
+  const d = new Date(local)
+  if (!local || Number.isNaN(d.getTime())) return ''
+  const day = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  return `${day}, ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
+}
+
 /** "78.5" or "78,5" (a Spanish keyboard) as kg; null for nothing; NaN for nonsense. */
 function kg(text: string): number | null {
   const t = text.trim().replace(',', '.')
@@ -93,8 +103,9 @@ type Draft = {
 }
 
 // What was typed, kept on the phone until it is saved: the form can close under a
-// glove (Back, a call coming in) and open again with it all there.
-const DRAFT_KEY = 'gs.harvest.draft.'
+// glove (Back, a call coming in) and open again with it all there. Signing out
+// clears it (api.signOut).
+const DRAFT_KEY = HARVEST_DRAFT_KEY
 function readDraft(key: string): Draft | null {
   try {
     return JSON.parse(sessionStorage.getItem(DRAFT_KEY + key) || 'null')
@@ -278,7 +289,7 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
             </label>
           </div>
           <label className="hv-field">
-            <span>When</span>
+            <span>When <small className="hv-when">{whenWords(d.when)}</small></span>
             <input className="input" type="datetime-local" value={d.when} max={localInput(Date.now())}
               onChange={(e) => set({ when: e.target.value })} />
           </label>

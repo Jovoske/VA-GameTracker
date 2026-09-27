@@ -31,6 +31,7 @@
 .hv-set { margin: 14px 0 0; padding: 0; border: 0; min-width: 0; }
 .hv-set legend, .hv-field > span { display: block; margin: 0 0 6px; padding: 0; font-size: 14px; font-weight: 600; }
 .hv-field > span small { font-weight: 400; color: var(--text-dim); }
+.hv-field > span .hv-when { color: var(--text); margin-left: 4px; }
 .hv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .hv-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .hv-choice {

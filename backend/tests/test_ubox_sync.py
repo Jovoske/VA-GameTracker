@@ -179,8 +179,9 @@ def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, 
     assert camera.battery_pct == 82 and camera.photo_limit is None
     assert camera.last_report_at and camera.last_sync_at
     # A real login: the photo endpoints look the person up, as every other one does.
-    user = User(estate_id=setup.estate_id, email="viewer@ubox.local", password_hash="x",
-                role="viewer")
+    # An admin: until the AI has looked at them, fresh photos are theirs alone (R6BE-2).
+    user = User(estate_id=setup.estate_id, email="owner@ubox.local", password_hash="x",
+                role="admin")
     db_session.add(user)
     db_session.commit()
     gallery = camera_images(camera.id, limit=40, include_empty=False, user=user, db=db_session)

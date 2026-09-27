@@ -20,7 +20,7 @@ from app.ai import species as species_ai
 from app.ai.checking import hunter_decided
 from app.ai.classifier import ESTATE_KEYS
 from app.api.deps import get_current_admin, get_current_user, user_from_token
-from app.api.visibility import is_people, people_in
+from app.api.visibility import hidden_from, is_people, people_in
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.logging import get_logger
@@ -85,14 +85,15 @@ def _require_user(
 def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
     """The photo and its camera, if it is on this person's estate; 404 otherwise.
 
-    A frame with a person or a vehicle in it is the admin's alone (visibility.PEOPLE):
-    for anyone else it is not there, file and all, even by its address."""
+    A frame with a person or a vehicle in it is the admin's alone (visibility.PEOPLE),
+    and so is one the AI hasn't looked at yet: for anyone else it is not there, file
+    and all, even by its address (visibility.hidden_from)."""
     row = db.execute(
         select(Image, Camera)
         .join(Camera, Camera.id == Image.camera_id)
         .where(Image.id == image_id, Camera.estate_id == user.estate_id)
     ).first()
-    if row is None or (user.role != "admin" and is_people(row[0])):
+    if row is None or hidden_from(user, row[0]):
         raise HTTPException(404, "Photo not found.")
     return row[0], row[1]
 

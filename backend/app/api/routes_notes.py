@@ -20,7 +20,7 @@ from app.ai.checking import hunter_decided
 from app.api.deps import get_current_user
 from app.api.routes_images import recount_after_flag
 from app.api.routes_map import latest_photos
-from app.api.visibility import ONLY_HIDDEN_SPECIES, is_people
+from app.api.visibility import ONLY_HIDDEN_SPECIES, hidden_from, is_people, not_looked_at
 from app.core.db import get_db
 from app.models import Camera, Image, PhotoNote, User
 from app.notes import (
@@ -42,13 +42,14 @@ DB = Annotated[Session, Depends(get_db)]
 
 def _photo(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
     """The photo and its camera, if it is this estate's; 404 otherwise. A frame with a
-    person or a vehicle in it is not there for anyone but an admin (visibility.PEOPLE)."""
+    person or a vehicle in it, or one the AI hasn't looked at yet, is not there for
+    anyone but an admin (visibility.hidden_from)."""
     row = db.execute(
         select(Image, Camera)
         .join(Camera, Camera.id == Image.camera_id)
         .where(Image.id == image_id, Camera.estate_id == user.estate_id)
     ).first()
-    if row is None or (user.role != "admin" and is_people(row[0])):
+    if row is None or hidden_from(user, row[0]):
         raise HTTPException(404, "Photo not found.")
     return row[0], row[1]
 
@@ -84,6 +85,8 @@ EMPTY_FRAME = "This photo is marked “nothing in it”. Keep it as an animal ph
 HIDDEN_ONLY = "Only animals hidden from the app are in this photo, so the team can’t see it."
 PEOPLE_ONLY = ("There’s a person or a vehicle in this photo, so it stays with the admins "
                "and the team can’t see it.")
+NOT_LOOKED = ("The app hasn’t checked this photo yet, so the team can’t see it. Try again "
+              "in a few minutes.")
 
 
 def _markable(db: Session, image: Image, keep: bool) -> bool:
@@ -91,13 +94,15 @@ def _markable(db: Session, image: Image, keep: bool) -> bool:
 
     A note sends the team to the photo (the strips, a push), so it goes only on one
     the app shows: never one of nothing but hidden animals, never one with a person
-    or a vehicle in it, and not one marked "nothing in it" unless the hunter says to
-    keep it.
+    or a vehicle in it (nor one the AI hasn't looked at for them yet: only an admin
+    sees it), and not one marked "nothing in it" unless the hunter says to keep it.
     """
     if db.scalar(select(Image.id).where(Image.id == image.id, ONLY_HIDDEN_SPECIES)) is not None:
         raise HTTPException(409, HIDDEN_ONLY)
     if is_people(image):
         raise HTTPException(409, PEOPLE_ONLY)
+    if not_looked_at(image):
+        raise HTTPException(409, NOT_LOOKED)
     if not image.is_empty_frame:
         return False
     if not keep:

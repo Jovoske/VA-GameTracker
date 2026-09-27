@@ -31,8 +31,9 @@ What used to go wrong, and what happens now:
 * A photo with an animal in it gets its small copy for the grids (app.thumbs) as soon
   as it is checked, so the Photos grid at dusk is quick from the first look (E-24).
 * The same look records the people and vehicles in the frame (feature 25). Photos
-  checked before that are looked at again for them, the last RESCAN_DAYS, a few a
-  run in daylight, like the frames judged at the old cut-off.
+  checked before that are looked at again for them, all of them back to the first,
+  newest first, a few a run in daylight, like the frames judged at the old cut-off
+  (those only the last RESCAN_DAYS).
 """
 from __future__ import annotations
 
@@ -62,9 +63,10 @@ RUN_LIMIT = int(os.environ.get("AI_LIMIT_PER_RUN", "300"))
 RUN_BUDGET = timedelta(minutes=int(os.environ.get("AI_MINUTES_PER_RUN", "10")))
 
 # Frames the detector judged empty at its old 0.25 cut-off (detector_conf NULL) are
-# looked at again at DETECT_CONF, and frames checked before people and vehicles were
-# looked for (person_conf NULL) are looked at for them: a bounded window, a few a
-# run, in daylight only, so it never slows the photos that matter at dusk.
+# looked at again at DETECT_CONF, the last RESCAN_DAYS; frames checked before people
+# and vehicles were looked for (person_conf NULL) are looked at for them, however old:
+# a walker from last spring is in the team's feed until then (R6BE-4). Newest first,
+# a few a run, in daylight only, so it never slows the photos that matter at dusk.
 RESCAN_DAYS = 30
 RESCAN_PER_RUN = 100
 RESCAN_HOURS = range(8, 16)
@@ -266,15 +268,15 @@ def _rescan_ids(db: Session, now: datetime, room: int) -> list:
     local = now.astimezone(ZoneInfo(settings.estate_timezone))
     if room <= 0 or local.hour not in RESCAN_HOURS:
         return []
-    # Checked (by the detector or a hunter) before people were looked for. One still
-    # waiting for the detector is looked at for them on its first look.
+    # Checked (by the detector or a hunter) before people were looked for, at any
+    # age. One still waiting for the detector is looked at for them on its first look.
     no_people_look = and_(Image.person_conf.is_(None),
                           or_(Image.processed_at.isnot(None), Image.reviewed.is_(True)))
+    old_rule = and_(OLD_RULE_EMPTY, Image.captured_at >= now - timedelta(days=RESCAN_DAYS))
     return list(db.scalars(
         select(Image.id).where(
-            or_(OLD_RULE_EMPTY, no_people_look), Image.original_path.isnot(None),
+            or_(old_rule, no_people_look), Image.original_path.isnot(None),
             Image.ai_failed_at.is_(None),
-            Image.captured_at >= now - timedelta(days=RESCAN_DAYS),
         ).order_by(Image.captured_at.desc()).limit(min(room, RESCAN_PER_RUN))
     ).all())
 
@@ -380,9 +382,11 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
                 image.person_conf is not None and not empty_filter.old_rule_empty(image)
             ):
                 continue
+            # Older than the old cut-off's window: looked at for people only.
+            recent = image.captured_at >= now - timedelta(days=RESCAN_DAYS)
             try:
                 boxes = detect(image.original_path)
-                if empty_filter.rescan_image(db, image, boxes):
+                if empty_filter.rescan_image(db, image, boxes, animals_too=recent):
                     result["found_on_rescan"] += 1
                     touched.append(image_id)
                     species.classify_image(db, image, boxes=split(boxes)[0])
