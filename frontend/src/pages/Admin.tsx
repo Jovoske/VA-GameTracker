@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api, setToken } from '../api'
+import { ageLabel, api, setToken } from '../api'
 import NotificationSettings from '../components/NotificationSettings'
 import SettingsSection from '../components/SettingsSection'
 import Toggle from '../components/Toggle'
@@ -11,6 +11,9 @@ type Status = {
   detections: number
   empty: number
   last_sync: { status: string; at: string | null } | null
+  // Suntek (FTP or email) photos waiting to be imported and parked after failing;
+  // null when this server has no Suntek spool.
+  suntek: { ready: number | null; failed: number | null } | null
 }
 type Check = {
   current: string
@@ -31,14 +34,32 @@ type Me = { id: string; email: string; role: string }
 type UserRow = { id: string; email: string; role: string; is_you: boolean }
 type CameraProvider = 'spypoint' | 'ubox'
 type ImportLimits = { interval: string; daily: string }
+/** Whether a login still works, as the last fetch found it (app.ingestion.logins). */
+type LoginStatus = {
+  // busy: no fetch lately because a long job (the AI pass) holds the server.
+  state: 'ok' | 'failing' | 'stale' | 'busy' | 'unknown' | 'off'
+  error: string | null
+  last_ok_at: string | null
+  last_attempt_at: string | null
+  // A new password would fix it (refused, signed out, unreadable), not a network blip.
+  password_problem: boolean
+  // Its cameras whose photos didn't come on the last fetch although the login worked.
+  cameras_failing: number
+  camera_error: string | null
+}
 type CamAccount = {
   id: string
   label: string
-  username: string
+  username: string | null
   provider: CameraProvider
   owner: string | null
   active: boolean
+  // The estate's main SPYPOINT login, from the server's .env: shown, not removable here.
+  primary: boolean
   cameras: number
+  // Its first import is still running: `cameras` is what the provider listed.
+  importing: boolean
+  status: LoginStatus
   can_remove: boolean
   can_edit: boolean
   ubox_min_interval_seconds: number
@@ -54,7 +75,45 @@ type CamAccount = {
     failed: number
   } | null
 }
+// The fetch summary's status (app.ingestion.fetch), in words.
+const FETCH_WORDS: Record<string, string> = {
+  ok: 'Worked', partial: 'Partly worked', error: 'Failed',
+  skipped: 'No camera logins', running: 'Running', never: 'Never run',
+}
 const providerName = (provider: CameraProvider) => provider === 'ubox' ? 'UBox Pro' : 'SPYPOINT'
+const needsLook = (a: CamAccount) => a.active
+  && (a.status.state === 'failing' || a.status.state === 'stale' || a.status.cameras_failing > 0)
+/** "3 h", "2 d": how long, from ageLabel's "3 h ago". */
+const forLabel = (iso: string) => ageLabel(iso).replace(/ ago$/, '')
+
+/** One line on whether the login works, in words: what is wrong comes first. */
+function loginLine(a: CamAccount): { text: string; warn: boolean } {
+  const s = a.status
+  if (!a.active) return { text: 'Another copy of this login is already fetched. Remove this one.', warn: false }
+  if (a.importing) return { text: 'Fetching its photos for the first time…', warn: false }
+  const where = a.primary && s.password_problem ? ' It is set in the server’s .env file (SPYPOINT_PASSWORD).' : ''
+  if ((s.state === 'ok' || s.state === 'busy') && s.cameras_failing > 0) {
+    const which = s.cameras_failing === 1 ? 'One of its cameras' : `${s.cameras_failing} of its cameras`
+    return { text: `${which} didn’t come through on the last fetch. ${s.camera_error ?? ''}`.trim(), warn: true }
+  }
+  switch (s.state) {
+    case 'failing':
+      return { text: `${s.error ?? 'The last fetch failed.'}${where}`, warn: true }
+    case 'stale':
+      return {
+        text: s.last_ok_at
+          ? `No fetch has worked for ${forLabel(s.last_ok_at)}. Photos have stopped coming in.`
+          : 'No fetch has worked yet. Photos have stopped coming in.',
+        warn: true,
+      }
+    case 'busy':
+      return { text: 'Busy going through new photos. Fetching carries on when that’s done.', warn: false }
+    case 'ok':
+      return { text: `Working. Last fetch ${s.last_ok_at ? ageLabel(s.last_ok_at) : 'just now'}.`, warn: false }
+    default:
+      return { text: 'Not fetched yet. Photos come in on the next fetch.', warn: false }
+  }
+}
 
 function UboxImportFields({
   prefix, limits, onChange, disabled,
@@ -99,6 +158,8 @@ const smallBtn = {
   cursor: 'pointer',
   flexShrink: 0,
 } as const
+// Glove-sized: the buttons a hunter needs when a login breaks.
+const loginBtn = { ...smallBtn, minHeight: 44, padding: '8px 14px', fontSize: 13, color: 'var(--text)' } as const
 
 export default function Admin() {
   const nav = useNavigate()
@@ -123,6 +184,11 @@ export default function Admin() {
   const [acctBusy, setAcctBusy] = useState(false)
   const [editingLimits, setEditingLimits] = useState<(ImportLimits & { id: string }) | null>(null)
   const [limitsBusy, setLimitsBusy] = useState(false)
+  // A login's password being typed in again (it changed, or can't be read here).
+  const [reentering, setReentering] = useState<{ id: string; password: string } | null>(null)
+  const [reenterBusy, setReenterBusy] = useState(false)
+  const [reenterMsg, setReenterMsg] = useState<{ id: string; text: string } | null>(null)
+  const importPoll = useRef<number | null>(null)
   const [pw, setPw] = useState({ current: '', next: '' })
   const [pwMsg, setPwMsg] = useState('')
 
@@ -144,7 +210,43 @@ export default function Admin() {
     api<Me>('/auth/me').then(setMe).catch(() => {})
     api<UserRow[]>('/users').then(setUsers).catch(() => {})
     api<CamAccount[]>('/camera-accounts').then(setAccounts).catch(() => {})
+    return () => { if (importPoll.current) window.clearTimeout(importPoll.current) }
   }, [])
+
+  // A login just added imports in the background: look again every few seconds, for
+  // two minutes at most, so its cameras and "Working" show without a reload.
+  function followImport(tries = 24) {
+    if (importPoll.current) window.clearTimeout(importPoll.current)
+    importPoll.current = window.setTimeout(async () => {
+      try {
+        const list = await api<CamAccount[]>('/camera-accounts')
+        setAccounts(list)
+        if (tries > 1 && list.some((a) => a.importing)) followImport(tries - 1)
+      } catch {
+        if (tries > 1) followImport(tries - 1)
+      }
+    }, 5000)
+  }
+
+  async function reenterPassword() {
+    if (!reentering || !reentering.password) return
+    setReenterBusy(true)
+    setReenterMsg(null)
+    const { id } = reentering
+    try {
+      const r = await api<{ note: string }>(`/camera-accounts/${id}/password`, {
+        method: 'PUT',
+        body: JSON.stringify({ password: reentering.password }),
+      })
+      setReentering(null)
+      setAccounts(await api<CamAccount[]>('/camera-accounts'))
+      setReenterMsg({ id, text: r.note })
+    } catch (e) {
+      setReenterMsg({ id, text: (e as Error).message })
+    } finally {
+      setReenterBusy(false)
+    }
+  }
 
   async function addUser() {
     setUserMsg('')
@@ -187,6 +289,7 @@ export default function Admin() {
       setNewAcct({ ...newAcct, username: '', password: '', label: '' })
       setAccounts(await api<CamAccount[]>('/camera-accounts'))
       setAcctMsg(r.note || 'Added')
+      followImport()
     } catch (e) {
       setAcctMsg((e as Error).message)
     }
@@ -352,10 +455,14 @@ export default function Admin() {
       <NotificationSettings />
 
       <SettingsSection id="accounts" title="Camera logins"
-        summary={accounts.length > 0 ? `${accounts.length} login${accounts.length === 1 ? '' : 's'}` : undefined}>
+        summary={accounts.some(needsLook)
+          ? <span style={{ color: 'var(--skip)' }}>{accounts.filter(needsLook).length} need{accounts.filter(needsLook).length === 1 ? 's' : ''} attention</span>
+          : accounts.length > 0 ? `${accounts.length} login${accounts.length === 1 ? '' : 's'}` : undefined}>
         <p className="settings-hint">Add a SPYPOINT or UBox Pro login and its cameras join the estate.</p>
-        {accounts.map((a) => (
-          <div key={a.id} style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
+        {accounts.map((a) => {
+          const line = loginLine(a)
+          return (
+          <div key={a.id} data-login={a.id} style={{ padding: '12px 0', borderTop: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
               <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: 7 }}>
@@ -365,14 +472,39 @@ export default function Admin() {
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-dim)', overflowWrap: 'anywhere' }}>
-                  {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.owner ? ` · added by ${a.owner}` : ''}
+                  {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.primary ? ' · the estate’s own' : a.owner ? ` · added by ${a.owner}` : ''}
+                </div>
+                <div className="login-status" data-state={a.importing ? 'importing' : a.status.state} role={line.warn ? 'alert' : undefined}
+                  style={{ fontSize: 13, lineHeight: 1.45, marginTop: 4, color: line.warn ? 'var(--skip)' : 'var(--text-dim)' }}>
+                  {line.text}
                 </div>
               </div>
               {a.can_remove && (
-                <button type="button" onClick={() => delAccount(a)} style={smallBtn}
+                <button type="button" onClick={() => delAccount(a)} style={loginBtn}
                   disabled={limitsBusy} aria-label={`Remove ${a.label}`}>Remove</button>
               )}
             </div>
+            {a.can_edit && !a.primary && a.active && reentering?.id !== a.id && a.status.password_problem && (
+              <button type="button" style={{ ...loginBtn, marginTop: 8 }} onClick={() => { setReenterMsg(null); setReentering({ id: a.id, password: '' }) }}
+                aria-label={`Re-enter the password for ${a.label}`}>Re-enter password</button>
+            )}
+            {reentering?.id === a.id && (
+              <form onSubmit={(e) => { e.preventDefault(); void reenterPassword() }} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+                <label htmlFor={`reenter-${a.id}`} style={{ fontSize: 13 }}>
+                  {providerName(a.provider)} password for {a.username}
+                  <input id={`reenter-${a.id}`} className="input" type="password" required autoFocus value={reentering.password}
+                    disabled={reenterBusy} style={{ marginTop: 5 }} autoComplete="new-password"
+                    onChange={(e) => setReentering({ id: a.id, password: e.target.value })} />
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn" type="submit" disabled={reenterBusy || !reentering.password} style={{ width: 'auto', padding: '9px 14px', minHeight: 44 }}>
+                    {reenterBusy ? `Checking with ${providerName(a.provider)}…` : 'Save password'}
+                  </button>
+                  <button type="button" style={loginBtn} disabled={reenterBusy} onClick={() => setReentering(null)}>Cancel</button>
+                </div>
+              </form>
+            )}
+            {reenterMsg?.id === a.id && <div role="status" style={{ marginTop: 8, fontSize: 13, color: 'var(--text-dim)' }}>{reenterMsg.text}</div>}
             {a.provider === 'ubox' && editingLimits?.id !== a.id && (
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 8 }}>
                 <div style={{ fontSize: 12, color: 'var(--text-dim)', flex: '1 1 200px' }}>
@@ -394,7 +526,7 @@ export default function Admin() {
                 {' '}{a.last_import.daily_limit_skipped} skipped (daily limit).
                 {a.last_import.no_image > 0 && ` ${a.last_import.no_image} had no photo.`}
                 {a.last_import.failed > 0 && ` ${a.last_import.failed} failed.`}
-                {a.last_import.error && <div style={{ marginTop: 4 }}>Problem: {a.last_import.error}</div>}
+                {a.last_import.error && a.last_import.error !== a.status.error && <div style={{ marginTop: 4 }}>Problem: {a.last_import.error}</div>}
               </div>
             )}
             {a.provider === 'ubox' && editingLimits?.id === a.id && (
@@ -411,7 +543,8 @@ export default function Admin() {
               </form>
             )}
           </div>
-        ))}
+          )
+        })}
         <form onSubmit={(e) => { e.preventDefault(); void addAccount() }}
           style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
           <label htmlFor="camera-provider" style={{ fontSize: 13 }}>
@@ -585,7 +718,16 @@ export default function Admin() {
           {status.last_sync && (
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>Last photo fetch</span>
-              <span>{status.last_sync.status}</span>
+              <span>{FETCH_WORDS[status.last_sync.status] ?? status.last_sync.status}{status.last_sync.at ? `, ${ageLabel(status.last_sync.at)}` : ''}</span>
+            </div>
+          )}
+          {status.suntek && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, padding: '4px 0' }}>
+              <span style={{ color: 'var(--text-dim)' }}>Suntek photos</span>
+              <span style={{ textAlign: 'right', color: status.suntek.failed ? 'var(--skip)' : undefined }}>
+                {status.suntek.ready ?? '?'} waiting{status.suntek.failed
+                  ? `. ${status.suntek.failed} failed: ask whoever runs the server to retry them.` : ''}
+              </span>
             </div>
           )}
         </SettingsSection>

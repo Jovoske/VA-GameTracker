@@ -253,6 +253,8 @@
 /* A camera's sheet: how it is, last night, its latest photos. */
 .cam-sheet-status { margin: 4px 0 0; font-size: 14px; line-height: 1.45; color: var(--text); }
 .cam-sheet-status--warn, .cam-sheet-numbers summary.cam-sheet-status--warn { color: var(--marginal); }
+/* A 44px target that keeps the line spacing: the padding reaches past the text. */
+.cam-sheet-status .map-link { display: inline-block; min-height: 0; min-width: 0; padding: 13px 2px; margin: -13px 0; color: var(--text); text-decoration: underline; text-underline-offset: 3px; font-size: inherit; }
 .cam-sheet-numbers { margin: 0 0 6px; font-size: 12px; color: var(--text-dim); }
 .cam-sheet-numbers summary { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 14px; color: var(--text); cursor: pointer; list-style: none; }
 .cam-sheet-numbers summary::-webkit-details-marker { display: none; }

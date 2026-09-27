@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ageLabel, api, apiCached } from '../api'
+import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
@@ -63,6 +64,7 @@ type Forecast = {
   alerts?: { camera: string; status: string; detail: string }[]
   exposure?: { excluded_nights: number; note: string }
   nights_of_data: number
+  freshness?: Freshness | null
 }
 
 type Alert = { type: string; severity: string; title: string; text: string }
@@ -204,6 +206,7 @@ export default function Tonight() {
           Plan from {ageLabel(planAt)}{stale ? ', may be out of date' : ''}
         </p>
       )}
+      <PhotoFreshness freshness={f.freshness} />
 
       {/* ── The decision ───────────────────────────── */}
       <section

@@ -53,12 +53,12 @@ def _run(mode: str) -> None:
             months = int(os.environ.get("BACKFILL_MONTHS", "1"))
             log.info("pipeline.backfill", result=backfill_all(db, months=months))
         elif mode == "sync":
-            from app.ingestion.sync import sync_all
-            from app.ingestion.ubox_sync import sync_ubox_all
-            log.info("pipeline.sync", result=sync_all(db))
-            log.info("pipeline.ubox", result=sync_ubox_all(db))
+            # Both providers (one failing never stops the other), the AI pass and the
+            # night recount, leaving the summary row the Check button and Settings read.
+            from app.ingestion.fetch import run_fetch
+            log.info("pipeline.sync", result=run_fetch(db))
 
-        if mode in ("sync", "backfill"):
+        if mode == "backfill":
             from app.ai.empty_filter import scan_unprocessed
             from app.ai.species import classify_unclassified
             log.info("pipeline.scan", result=scan_unprocessed(db))

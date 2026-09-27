@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -39,11 +39,13 @@ def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
         .group_by(Species.id, Species.common_name)
         .order_by(func.count(func.distinct(Detection.image_id)).desc(), Species.common_name)
     ).all()
+    # A camera no login fetches any more keeps its chip while it has photos: its
+    # history is still worth filtering to.
     cam_rows = db.execute(
-        select(Camera.id, Camera.name, func.count(Image.id))
+        select(Camera.id, Camera.name, Camera.active, func.count(Image.id))
         .outerjoin(Image, (Image.camera_id == Camera.id) & VISIBLE_ANIMAL)
-        .where(Camera.active.is_(True))
-        .group_by(Camera.id, Camera.name)
+        .group_by(Camera.id, Camera.name, Camera.active)
+        .having(or_(Camera.active.is_(True), func.count(Image.id) > 0))
         .order_by(Camera.name)
     ).all()
     return {
@@ -52,7 +54,8 @@ def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
             {"id": sid, "common_name": sentence_case(name), "count": int(n)}
             for sid, name, n in sp_rows if n
         ],
-        "cameras": [{"id": str(cid), "name": name, "count": int(n)} for cid, name, n in cam_rows],
+        "cameras": [{"id": str(cid), "name": name, "count": int(n), "connected": bool(active)}
+                    for cid, name, active, n in cam_rows],
     }
 
 

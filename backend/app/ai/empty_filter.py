@@ -7,9 +7,9 @@ the user has manually reviewed.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.detector import detect_animals
@@ -20,6 +20,9 @@ log = get_logger(__name__)
 
 # Low on purpose: keep faint/partial animals. Below this with no boxes => empty.
 ANIMAL_THRESHOLD = 0.10
+# How long a photo with no file waits for its download to be retried before it is
+# passed as unreadable rather than left "not checked yet" (see scan_unprocessed).
+MISSING_FILE_GRACE = timedelta(hours=24)
 
 
 def scan_image(db: Session, image: Image) -> bool:
@@ -44,7 +47,21 @@ def scan_image(db: Session, image: Image) -> bool:
 
 
 def scan_unprocessed(db: Session, *, limit: int = 5000, only_unprocessed: bool = True) -> dict:
-    q = select(Image).where(Image.original_path.isnot(None), Image.reviewed.is_(False))
+    # A photo whose file never downloaded is retried by the fetch for a while
+    # (ingestion.sync). Once the fetch has given up on it (or has no link to try),
+    # or past a day, it is let through as "no file", so one lost frame stops holding
+    # its whole night as "not checked yet"; if the file does come in later, the
+    # fetch sends the photo back here.
+    from app.ingestion.sync import MAX_DOWNLOAD_ATTEMPTS
+
+    no_file_given_up = and_(Image.original_path.is_(None), or_(
+        Image.download_attempts >= MAX_DOWNLOAD_ATTEMPTS,
+        Image.cdn_url.is_(None), Image.cdn_url == "",
+        Image.created_at < datetime.now(UTC) - MISSING_FILE_GRACE,
+    ))
+    q = select(Image).where(
+        or_(Image.original_path.isnot(None), no_file_given_up), Image.reviewed.is_(False),
+    )
     if only_unprocessed:
         q = q.where(Image.processed_at.is_(None))
     images = db.scalars(q.order_by(Image.captured_at.desc()).limit(limit)).all()

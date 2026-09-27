@@ -18,6 +18,9 @@
 /* ── freshness ────────────────────────────────────────────── */
 .tn-fresh { font-size: 11px; color: var(--text-dim); margin: 0 0 10px; }
 .tn-fresh[data-stale='true'] { color: var(--v-look); }
+/* Photos behind the plan have stopped coming in: said plainly, with the way to fix it. */
+.tn-fresh--photos { font-size: 13px; line-height: 1.45; }
+.tn-fresh--photos a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; display: inline-block; padding: 13px 0; margin: -13px 0; }
 
 /* ── verdict card ─────────────────────────────────────────── */
 .tn-verdict { padding: 18px; margin-bottom: 14px; }

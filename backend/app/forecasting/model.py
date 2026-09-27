@@ -285,6 +285,23 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     return out
 
 
+def _freshness(db: Session, now: datetime) -> dict | None:
+    """How old the photos behind the plan are, and whether fetching them has stopped.
+
+    "Plan from just now" says when the answer was worked out, not how current its
+    photos are; with a login broken or the scheduled fetch stopped, those can be days
+    old while the plan still looks fresh (app.ingestion.logins.freshness).
+    """
+    from app.ingestion.logins import freshness
+
+    try:
+        with db.begin_nested():
+            return freshness(db, now=now)
+    except Exception as e:  # never let the extra line break the verdict
+        log.warning("freshness.failed", error=str(e))
+        return None
+
+
 def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     now = datetime.now(timezone.utc)
     total_nights = db.scalar(
@@ -295,10 +312,17 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
     # must not have its silence scored as "no animals". We keep it in the ranking on its
     # HISTORICAL presence (skipping the recent-activity penalty) and also surface it as an
     # alert — so a strong spot whose camera is merely capped isn't hidden or downgraded.
+    # A camera whose login was removed is not ranked at all: nothing it "saw" lately
+    # can reach us, and nobody is going to fix it (health.py, disconnected).
     from app.health import camera_health
+    from app.ingestion.logins import camera_logins
 
-    cams = db.scalars(select(Camera).order_by(Camera.name)).all()
-    health = {c.id: camera_health(c, now) for c in cams}
+    cams = db.scalars(
+        select(Camera).where(Camera.active.is_(True)).order_by(Camera.name)
+    ).all()
+    login_states = camera_logins(db, cams, now)
+    health = {c.id: camera_health(c, now, login_states.get(c.id)) for c in cams}
+    fresh = _freshness(db, now)
     alerts = [
         {"camera": c.name, "status": health[c.id]["status"], "detail": health[c.id]["detail"]}
         for c in cams if not health[c.id]["producing"]
@@ -324,7 +348,7 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         # NO_DATA, not SKIP: we have nothing to say about the ground, which is not the
         # same as telling somebody their evening isn't worth having.
         return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": total_nights,
-                "conditions": cond, "alternates": [], "alerts": alerts}
+                "conditions": cond, "alternates": [], "alerts": alerts, "freshness": fresh}
 
     # The learned weather/moon "drivers" used to be multiplied into this number.
     # They were removed after a null simulation run against the real _driver() code:
@@ -423,4 +447,5 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         ],
         "alerts": alerts,
         "nights_of_data": total_nights,
+        "freshness": fresh,
     }

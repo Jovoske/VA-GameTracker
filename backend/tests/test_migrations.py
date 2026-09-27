@@ -125,6 +125,9 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert _index(eng, "images", "ix_images_camera_created")
         assert "muted_camera_ids" in _columns(eng, "notification_prefs")
         assert _columns(eng, "photo_notes")
+        assert "last_error" in _columns(eng, "camera_accounts")
+        assert "photos_listed_to" in _columns(eng, "cameras")
+        assert "download_attempts" in _columns(eng, "images")
     finally:
         eng.dispose()
 
@@ -532,5 +535,109 @@ def test_camera_alerts_and_photo_notes_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "muted_camera_ids" in _columns(eng, "notification_prefs")
         assert _index(eng, "photo_notes", "ix_photo_notes_image_id") == ["image_id"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
+    """0020 on a real 0019 database: a login added twice (in two cases) becomes one,
+    its cameras and photos kept; a UBox camera whose login was removed is switched
+    off; every photo starts with no failed download against it."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0019_camera_alerts_photo_notes")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0019 shape first.
+            c.execute(text("DROP INDEX uq_camera_accounts_provider_login"))
+            for table, column in (
+                ("camera_accounts", "last_attempt_at"), ("camera_accounts", "last_ok_at"),
+                ("camera_accounts", "last_error"), ("camera_accounts", "reported_cameras"),
+                ("camera_accounts", "session_enc"),
+                ("cameras", "photos_listed_to"), ("cameras", "import_failures"),
+                ("cameras", "photos_gap_from"), ("cameras", "photos_gap_to"),
+                ("cameras", "fetch_error"), ("images", "download_attempts"),
+            ):
+                c.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            first, second = (c.execute(text(
+                "INSERT INTO camera_accounts (id,estate_id,username,provider,password_enc,"
+                "active,created_at) VALUES (gen_random_uuid(),:e,:u,'spypoint','x',true,"
+                "now() - make_interval(days => :d)) RETURNING id"
+            ), {"e": estate_id, "u": user, "d": days}).scalar_one()
+                for user, days in (("julle@x.local", 2), ("Julle@x.local", 1)))
+            doubled = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,account_id,spypoint_id,name,"
+                "name_is_custom,active) VALUES (gen_random_uuid(),:e,:a,'sp-1','Charca',"
+                "false,true) RETURNING id"
+            ), {"e": estate_id, "a": second}).scalar_one()
+            orphan = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,ubox_uid,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'ubox-1','Orchard',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            suntek = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Suntek',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,spypoint_photo_id,captured_at,reviewed) "
+                "VALUES (gen_random_uuid(),:c,'p-1',now(),false)"
+            ), {"c": doubled})
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            accounts = dict(c.execute(text(
+                "SELECT id, active FROM camera_accounts")).all())
+            assert accounts == {first: True, second: False}  # the first copy stays
+            cameras = dict(c.execute(text("SELECT id, active FROM cameras")).all())
+            assert cameras == {doubled: True, orphan: False, suntek: True}
+            assert c.execute(text("SELECT account_id FROM cameras WHERE id=:c"),
+                             {"c": doubled}).scalar_one() == first
+            assert c.execute(text(
+                "SELECT download_attempts, spypoint_photo_id FROM images")).one() == (0, "p-1")
+            assert c.execute(text("SELECT import_failures FROM cameras WHERE id=:c"),
+                             {"c": orphan}).scalar_one() == {}
+            # Nothing listed or failing yet: the first fetch finds its own place.
+            assert c.execute(text(
+                "SELECT photos_listed_to, photos_gap_from, photos_gap_to, fetch_error "
+                "FROM cameras WHERE id=:c"), {"c": doubled}).one() == (None, None, None, None)
+            assert c.execute(text("SELECT session_enc FROM camera_accounts WHERE id=:a"),
+                             {"a": first}).scalar_one() is None
+            # One active copy of a login from now on, whatever the case of its email.
+            with pytest.raises(IntegrityError), c.begin_nested():
+                c.execute(text(
+                    "INSERT INTO camera_accounts (id,estate_id,username,provider,"
+                    "password_enc,active) VALUES (gen_random_uuid(),:e,'JULLE@x.local',"
+                    "'spypoint','x',true)"), {"e": estate_id})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0019_camera_alerts_photo_notes")
+        assert "last_error" not in _columns(eng, "camera_accounts")
+        assert "photos_listed_to" not in _columns(eng, "cameras")
+        gone = {"photos_gap_from", "photos_gap_to", "fetch_error"}
+        assert not gone & set(_columns(eng, "cameras"))
+        assert "session_enc" not in _columns(eng, "camera_accounts")
+        assert "download_attempts" not in _columns(eng, "images")
+        assert _index(eng, "camera_accounts", "uq_camera_accounts_provider_login") is None
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM camera_accounts")).scalar_one() == 2
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0019_camera_alerts_photo_notes")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "last_ok_at" in _columns(eng, "camera_accounts")
+        assert "import_failures" in _columns(eng, "cameras")
     finally:
         eng.dispose()

@@ -69,12 +69,49 @@ def compute_alerts(db: Session) -> list[dict]:
 
     # 3. Camera health — a camera that can't send photos is a fault, never a "pattern".
     from app.health import camera_health
+    from app.ingestion.logins import camera_logins
 
     cams = db.scalars(select(Camera)).all()
-    health = {c.id: camera_health(c, now) for c in cams}
+    login_states = camera_logins(db, cams, now)
+    health = {c.id: camera_health(c, now, login_states.get(c.id)) for c in cams}
+    # A login that stopped is one alert naming its cameras, not one "offline" per
+    # camera: the fix is in Settings, not a trip round the batteries. Fetching that
+    # has stopped altogether (no login error) is one alert for the estate.
+    stopped: dict[tuple, dict] = {}
     for c in cams:
         h = health[c.id]
-        if h["status"] == "out_of_credits":
+        if h["status"] == "not_syncing":
+            login = h.get("login") or {}
+            if not login.get("error"):
+                key = ("stopped",)
+            else:
+                key = (login.get("label") or "A camera login", login["error"],
+                       bool(login.get("camera")))
+            stopped.setdefault(key, []).append(c.name)
+    for key, cameras in stopped.items():
+        names = ", ".join(cameras)
+        if key == ("stopped",):
+            title = "Photos not coming in"
+            text = (f"No photo fetch has worked for over 2 hours, so photos from {names} "
+                    "are not coming in. The server's scheduled fetch may have stopped.")
+        elif key[2]:
+            title = f"{names}: photos not coming in"
+            text = f"The last fetch couldn't list the photos from {names}. {key[1]}"
+        else:
+            title = f"{key[0]}: photos not coming in"
+            text = (f"{key[1]} Photos from {names} wait until it's fixed: "
+                    "Settings, Camera logins says how.")
+        alerts.append({"type": "camera", "severity": "warn", "title": title, "text": text})
+    for c in cams:
+        h = health[c.id]
+        if h["status"] == "quiet":
+            alerts.append({
+                "type": "camera", "severity": "warn",
+                "title": f"{c.name}: no photos for over a week",
+                "text": f"{h['detail']}. It sends photos only, so a quiet spell and a flat "
+                        "battery look the same. Check it on your next visit.",
+            })
+        elif h["status"] == "out_of_credits":
             reset_on = f"{c.cycle_end.day} {c.cycle_end.strftime('%b')}" if c.cycle_end else "next cycle"
             reset = f" Resets {reset_on}."
             alerts.append({

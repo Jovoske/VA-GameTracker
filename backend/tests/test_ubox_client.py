@@ -371,3 +371,29 @@ def test_probe_fixture_scrubs_nested_secrets_and_consistently_hashes_ids():
     assert scrubbed["event_time"] == 1789556400
     assert scrubbed["token_valid_hours"] == 24
     assert "private" not in json.dumps(scrubbed)
+
+
+def test_a_busy_ubox_is_waited_out_once_when_it_says_how_long(monkeypatch):
+    """E-21: a 429 or 5xx with Retry-After is tried once more after the wait."""
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "3"})
+        if request.url.path.endswith("login"):
+            return httpx.Response(200, json={"code": 0, "data": {"Token": "t"}})
+        if len(calls) == 3:
+            return httpx.Response(503, headers={"Retry-After": "120"})  # too long to wait
+        return httpx.Response(200, json={"code": 0, "data": {"items": [], "infos": []}})
+
+    slept = []
+    monkeypatch.setattr(ubox.time, "sleep", slept.append)
+    client = client_for(handler)
+    client._token = None
+    assert client.login() == "t" and client.token == "t"
+    with pytest.raises(UboxError, match="HTTP 503"):
+        client.list_devices()
+    assert slept == [3.0] and calls == ["/api/v3/login"] * 2 + ["/api/v2/user/device_list"]
+    client.use_token("kept")
+    assert client.list_devices() == [] and client.token == "kept"
