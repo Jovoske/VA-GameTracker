@@ -58,7 +58,7 @@ def models(monkeypatch):
         return state["species"](path) if callable(state["species"]) else state["species"]
 
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", detect)
+    monkeypatch.setattr(checking, "detect", detect)
     monkeypatch.setattr(species, "detect_animals", detect)
     monkeypatch.setattr(species, "classify_crop", classify)
     monkeypatch.setattr(checking, "models_work", lambda: state["broken"])
@@ -240,12 +240,12 @@ def test_a_hunters_flag_while_the_detector_looks_is_never_overwritten(db_session
         return BOAR
 
     models["boxes"] = {}
-    checking_detect = checking.detect_animals
+    checking_detect = checking.detect
     try:
-        checking.detect_animals = detect_while_hunter_flags
+        checking.detect = detect_while_hunter_flags
         checking.check_photos(db_session)
     finally:
-        checking.detect_animals = checking_detect
+        checking.detect = checking_detect
         other.close()
     db_session.refresh(img)
     assert (img.reviewed, img.is_empty_frame) == (True, True)

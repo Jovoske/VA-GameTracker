@@ -14,7 +14,7 @@ from app.api.routes_stands import tonight
 from app.core.db import get_db
 from app.core.logging import get_logger
 from app.core.security import hash_password
-from app.models import CameraAccount, Sit, User, Zone
+from app.models import CameraAccount, Harvest, Sit, User, Zone
 
 router = APIRouter(prefix="/users", tags=["users"])
 log = get_logger(__name__)
@@ -107,6 +107,9 @@ def delete_user(
     # so a database that missed that migration still lets the person go.
     db.execute(update(Sit).where(Sit.user_id == u.id).values(user_id=None))
     db.execute(update(Zone).where(Zone.created_by == u.id).values(created_by=None))
+    # Their lines in the harvest book stay, with the name written on them.
+    db.execute(update(Harvest).where(Harvest.user_id == u.id).values(user_id=None))
+    db.execute(update(Harvest).where(Harvest.created_by == u.id).values(created_by=None))
     db.delete(u)
     try:
         db.commit()

@@ -15,7 +15,7 @@ from app import geo, jobs
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
 from app.api.routes_photos import _items, after_cursor
-from app.api.visibility import VISIBLE_ANIMAL
+from app.api.visibility import SHOWN_EMPTY, VISIBLE_ANIMAL
 from app.core.db import get_db
 from app.health import camera_health
 from app.ingestion.logins import camera_logins
@@ -125,7 +125,8 @@ def list_cameras(
                 has_file, Image.is_empty_frame.is_(False), VISIBLE_ANIMAL).label("animals"),
             func.count(Image.id).filter(
                 has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL).label("unchecked"),
-            func.count(Image.id).filter(has_file, Image.is_empty_frame.is_(True)).label("empty"),
+            # Not a frame of people or vehicles: those are an admin's, in Photos.
+            func.count(Image.id).filter(has_file, SHOWN_EMPTY).label("empty"),
         )
         .where(Image.camera_id.in_([c.id for c in rows]))
         .group_by(Image.camera_id)
@@ -467,8 +468,9 @@ def camera_images(
     """
     # A photo with no picture yet (still to download) has nothing to show.
     q = select(Image).where(Image.camera_id == camera_id, Image.original_path.isnot(None))
-    # Photos of nothing but hidden species never show; empties only on request.
-    q = q.where(or_(Image.is_empty_frame.is_(True), VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
+    # Photos of nothing but hidden species never show; empties only on request; and a
+    # frame with a person or a vehicle in it never does (Photos' admin-only filter).
+    q = q.where(or_(SHOWN_EMPTY, VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
     q = after_cursor(q, before, before_id)
     rows = db.scalars(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit)).all()
     cam_name = db.scalar(select(Camera.name).where(Camera.id == camera_id))

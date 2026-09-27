@@ -339,7 +339,7 @@ def test_a_photo_stored_while_you_look_still_counts_as_new(client, db_session, e
 
 def _detector(monkeypatch, *, animal: bool):
     """What the detector pass does to a frame: judge it and stamp it (empty_filter)."""
-    monkeypatch.setattr(empty_filter, "detect_animals",
+    monkeypatch.setattr(empty_filter, "detect",
                         lambda path: [{"confidence": 0.9}] if animal else [])
 
 

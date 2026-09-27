@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ageLabel, api, changePassword, peekMe, plainWords, signOut, whoAmI } from '../api'
 import { confirmSignOut } from '../sits'
+import HarvestBook from '../components/HarvestBook'
 import NotificationSettings from '../components/NotificationSettings'
 import { resetChoices } from '../components/PhotoFix'
 import PhoneProblems from '../components/PhoneProblems'
@@ -801,6 +802,8 @@ export default function Admin() {
         )}
         {acctMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
       </SettingsSection>
+
+      {me && !viewer && <HarvestBook admin={admin} />}
 
       {admin && (
         <SettingsSection id="people" title="Who can sign in"

@@ -12,6 +12,7 @@ import {
   peek,
 } from '../api'
 import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
+import HarvestPrompt from '../components/Harvest'
 import SitPrompts from '../components/SitPrompts'
 import { isCall } from '../map/geometry'
 import { useRefetchOnReturn, useReveal } from '../hooks'
@@ -329,10 +330,11 @@ export default function Tonight() {
   const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>
 
   // Your sit, before the plan: "Back to sit" after the phone closed the app mid-sit,
-  // and "What happened last night?" in the morning. With no plan saved and no
-  // signal, the way back into the seat must still be there. Same place in every
-  // state below, so the plan arriving doesn't start it over.
-  const top = <><h1 className="page-title">Tonight</h1><SitPrompts page="tonight" /></>
+  // and "What happened last night?" in the morning, then the morning's "log what you
+  // shot" (the harvest book). With no plan saved and no signal, the way back into the
+  // seat must still be there. Same place in every state below, so the plan arriving
+  // doesn't start it over.
+  const top = <><h1 className="page-title">Tonight</h1><SitPrompts page="tonight" /><HarvestPrompt /></>
 
   if (!f && err) return (
     <div className="tonight">

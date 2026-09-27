@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto, morePhotosFailed } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import type { PhotoFix } from '../components/PhotoFix'
@@ -14,9 +14,14 @@ import './photos.css'
  * clock) and by day for the daytime ones ("Today", "Yesterday"). Pick the animals and
  * cameras you want with the chips, or none for everything. Empty frames and hidden animals (Settings) never appear here. Above
  * them, the photos the team marked "Worth a look", once there are any.
+ *
+ * Frames with a person or a vehicle in them are never in the feed. An admin has them
+ * apart, behind the "People & vehicles" chip (feature 25); nobody else ever sees them.
  */
 
 type Filters = {
+  /** How many photos "People & vehicles" has: admins only, null for everyone else. */
+  people?: number | null
   species: { id: string; common_name: string; count: number }[]
   cameras: { id: string; name: string; count: number }[]
 }
@@ -31,6 +36,9 @@ type Photo = {
   group_size: number | null
   notes_count: number
   fixed_by?: string | null
+  /** In "People & vehicles" only: what the detector saw. */
+  has_person?: boolean
+  has_vehicle?: boolean
 }
 /** A page, and where the next starts: the last photo's time and id (a burst can
  *  share one time, and paging by time alone skipped its frames at a page break). */
@@ -42,15 +50,20 @@ type Failure = Error & { status?: number }
 const toViewer = (p: Photo): LightboxPhoto => ({
   id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count,
   species_id: p.species_id, fixed_by: p.fixed_by,
+  people: p.has_person != null || p.has_vehicle != null ? { person: !!p.has_person, vehicle: !!p.has_vehicle } : null,
 })
 
 const PICK_KEY = 'gs.photos.pick'
 const PAGE = 60
 
-function readPick(): { species: string[]; cameras: string[] } {
+type Pick = { species: string[]; cameras: string[]; people?: boolean }
+
+function readPick(): Pick {
   try {
     const v = JSON.parse(localStorage.getItem(PICK_KEY) || '')
-    return { species: v.species ?? [], cameras: v.cameras ?? [] }
+    // "People & vehicles" only for an admin: a phone signed in as someone else since
+    // never asks for them.
+    return { species: v.species ?? [], cameras: v.cameras ?? [], people: !!v.people && peekMe()?.role === 'admin' }
   } catch {
     return { species: [], cameras: [] }
   }
@@ -65,7 +78,7 @@ const feedOrder = (a: Photo, b: Photo) =>
 export default function Photos() {
   const [params, setParams] = useSearchParams()
   const [filters, setFilters] = useState<Filters | null>(null)
-  const [pick, setPick] = useState(() => {
+  const [pick, setPick] = useState<Pick>(() => {
     // A link from a notification names the animal and camera; otherwise last choice.
     const sp = params.get('species')
     const cam = params.get('camera')
@@ -118,7 +131,8 @@ export default function Photos() {
 
   const query = useCallback((after?: Cursor | null) => {
     const q = new URLSearchParams()
-    if (pick.species.length) q.set('species', pick.species.join(','))
+    if (pick.people) q.set('people', 'true')
+    else if (pick.species.length) q.set('species', pick.species.join(','))
     if (pick.cameras.length) q.set('cameras', pick.cameras.join(','))
     if (after) {
       q.set('before', after.before)
@@ -159,9 +173,11 @@ export default function Photos() {
         if (got.stale) return
         const sp = new Set(got.data.species.map((x) => x.id))
         const cams = new Set(got.data.cameras.map((x) => x.id))
+        // "People & vehicles" is an admin's: gone for anyone the server doesn't count it for.
+        const people = got.data.people != null
         setPick((p) => {
-          const next = { species: p.species.filter((x) => sp.has(x)), cameras: p.cameras.filter((x) => cams.has(x)) }
-          if (next.species.length === p.species.length && next.cameras.length === p.cameras.length) return p
+          const next = { species: p.species.filter((x) => sp.has(x)), cameras: p.cameras.filter((x) => cams.has(x)), people: !!p.people && people }
+          if (next.species.length === p.species.length && next.cameras.length === p.cameras.length && next.people === !!p.people) return p
           try { localStorage.setItem(PICK_KEY, JSON.stringify(next)) } catch { /* private mode */ }
           return next
         })
@@ -294,6 +310,13 @@ export default function Photos() {
   /** "Wrong?" in the viewer: the tile takes the new name now; a photo that no longer
    *  belongs here (nothing in it, a hidden animal, or not one of the chosen animals)
    *  goes when the viewer closes. */
+  /** "Nobody in it?" in the viewer: the photo leaves "People & vehicles" when it
+   *  closes (and comes back with Undo). */
+  const peopleCleared = useCallback((id: string, cleared: boolean) => {
+    if (cleared) leaving.current.add(id)
+    else leaving.current.delete(id)
+    anyFix.current = true
+  }, [])
   const photoFixed = useCallback((id: string, fix: PhotoFix) => {
     setPhotos((prev) => prev && prev.map((p) => (p.image_id === id
       ? { ...p, label: fix.empty ? p.label : fix.label, species_id: fix.species_id, fixed_by: fix.fixed_by }
@@ -325,12 +348,13 @@ export default function Photos() {
     return () => io.disconnect()
   }, [nextBefore, loadMore])
 
-  function choose(next: { species: string[]; cameras: string[] }) {
+  function choose(next: Pick) {
     setPick(next)
     try { localStorage.setItem(PICK_KEY, JSON.stringify(next)) } catch { /* private mode */ }
   }
   const toggleIn = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
-  const everything = pick.species.length === 0 && pick.cameras.length === 0
+  const everything = pick.species.length === 0 && pick.cameras.length === 0 && !pick.people
+  const peopleChip = filters?.people != null && (filters.people > 0 || !!pick.people)
 
   // By night, as the server counts them: last night's photos after midnight are
   // under "Last night" with the rest of it, not under "Today" (audit I-27); and the
@@ -361,12 +385,19 @@ export default function Photos() {
             Everything
           </button>
           {filters?.species.map((s) => (
-            <button key={s.id} className="photos-chip" aria-pressed={pick.species.includes(s.id)}
+            <button key={s.id} className="photos-chip" aria-pressed={!pick.people && pick.species.includes(s.id)}
               title={`${s.count} photos`}
-              onClick={() => choose({ ...pick, species: toggleIn(pick.species, s.id) })}>
+              onClick={() => choose({ ...pick, people: false, species: toggleIn(pick.people ? [] : pick.species, s.id) })}>
               {s.common_name}
             </button>
           ))}
+          {peopleChip && (
+            <button className="photos-chip photos-chip--people" aria-pressed={!!pick.people}
+              title={`${filters?.people ?? 0} photos. Only admins see these.`}
+              onClick={() => choose({ species: [], cameras: pick.cameras, people: !pick.people })}>
+              People &amp; vehicles
+            </button>
+          )}
         </div>
         {filters && filters.cameras.length > 1 && (
           <div className="photos-filter-row">
@@ -391,9 +422,14 @@ export default function Photos() {
         </div>
       )}
       {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
+      {pick.people && (
+        <p className="photos-people-note">
+          Photos with a person or a vehicle in them. Only admins see these: they never go in the team’s photos, counts or alerts.
+        </p>
+      )}
       {photos && photos.length === 0 && (
         <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>
-          {everything ? 'No animal photos yet.' : 'Nothing for that choice yet. Try fewer chips.'}
+          {pick.people ? 'No people or vehicles on camera.' : everything ? 'No animal photos yet.' : 'Nothing for that choice yet. Try fewer chips.'}
         </div>
       )}
 
@@ -413,7 +449,7 @@ export default function Photos() {
                 <img src={thumbUrl(p.image_id)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
                 <NoteMark count={p.notes_count} />
                 <div className="photos-tile-meta">
-                  <span className="photos-tile-label">{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
+                  <span className={`photos-tile-label${p.has_person != null ? ' photos-tile-label--people' : ''}`}>{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
                   <span className="photos-tile-when">{timeOf(p.captured_at)}</span>
                 </div>
                 <div className="photos-tile-cam">{p.camera}</div>
@@ -443,6 +479,7 @@ export default function Photos() {
           onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
           onFixed={photoFixed}
+          onPeopleCleared={peopleCleared}
           hasMore={!!nextBefore}
           onNeedMore={loadMore}
           moreError={moreErr}

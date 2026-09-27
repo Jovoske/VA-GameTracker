@@ -15,6 +15,7 @@ import {
   peekMe,
   whoAmI,
 } from '../api'
+import HarvestPrompt from '../components/Harvest'
 import SitPrompts from '../components/SitPrompts'
 import { useRefetchOnReturn } from '../hooks'
 import { isCall, windColor, windFor, type MapData, type WindReport } from '../map/geometry'
@@ -202,6 +203,7 @@ export default function Stands() {
     {err && <div className="map-message map-message--error" role="alert">{err}<button onClick={load} disabled={!!busy}>Try again</button></div>}
     {notice && <div className="map-message" role="status">{notice}</div>}
     <SitPrompts page="stands" />
+    <HarvestPrompt />
     {!stands && !err && <div className="status-panel" role="status">Loading stands…</div>}
     {stands && stands.length > 0 && !reservationsUnknown && <>
       <p className="stand-tonight" aria-label="Tonight's reservations">

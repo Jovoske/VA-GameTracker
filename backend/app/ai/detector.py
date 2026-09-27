@@ -23,6 +23,8 @@ log = get_logger(__name__)
 
 # MegaDetector category ids: 0 = animal, 1 = person, 2 = vehicle
 ANIMAL_CATEGORY = 0
+PERSON_CATEGORY = 1
+VEHICLE_CATEGORY = 2
 _MODEL_URL = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
 _MODEL_FILE = "MDV6-yolov9-c.pt"
 
@@ -185,8 +187,10 @@ def load() -> None:
     _get_model()
 
 
-def detect_animals(image_path: str, conf: float = DETECT_CONF) -> list[dict]:
-    """Return [{confidence, bbox}] for animal detections in the image."""
+def detect(image_path: str, conf: float = DETECT_CONF) -> list[dict]:
+    """Every box MegaDetector finds: [{category, confidence, bbox}], category 0 an
+    animal, 1 a person, 2 a vehicle. People and vehicles used to be dropped here, so
+    a walker or a truck at a stand was filed as an empty frame (audit F-25)."""
     model = _get_model()
     results = model.predict(image_path, device="cpu", verbose=False, conf=conf)
     out: list[dict] = []
@@ -195,9 +199,30 @@ def detect_animals(image_path: str, conf: float = DETECT_CONF) -> list[dict]:
         if boxes is None:
             continue
         for i in range(len(boxes)):
-            if int(boxes.cls[i]) == ANIMAL_CATEGORY:
+            category = int(boxes.cls[i])
+            if category in (ANIMAL_CATEGORY, PERSON_CATEGORY, VEHICLE_CATEGORY):
                 out.append({
+                    "category": category,
                     "confidence": float(boxes.conf[i]),
                     "bbox": [float(v) for v in boxes.xyxy[i]],
                 })
     return out
+
+
+def split(boxes: list[dict]) -> tuple[list[dict], float, float]:
+    """(the animal boxes, the surest person, the surest vehicle) of detect()'s answer.
+
+    A box with no category is an animal: the answer detect_animals gives, and boxes
+    stored before people were looked for."""
+    animals = [b for b in boxes if b.get("category", ANIMAL_CATEGORY) == ANIMAL_CATEGORY]
+    person = max((b["confidence"] for b in boxes if b.get("category") == PERSON_CATEGORY),
+                 default=0.0)
+    vehicle = max((b["confidence"] for b in boxes if b.get("category") == VEHICLE_CATEGORY),
+                  default=0.0)
+    return animals, round(person, 4), round(vehicle, 4)
+
+
+def detect_animals(image_path: str, conf: float = DETECT_CONF) -> list[dict]:
+    """Return [{confidence, bbox}] for animal detections in the image."""
+    return [{"confidence": b["confidence"], "bbox": b["bbox"]}
+            for b in split(detect(image_path, conf))[0]]

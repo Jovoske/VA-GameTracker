@@ -340,7 +340,7 @@ def test_ubox_enters_normal_classification_and_animals_gallery(db_session, setup
     sync.sync_ubox_all(db_session)
     boxes = [{"confidence": 0.95, "bbox": [0.1, 0.1, 0.9, 0.9]}]
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", lambda _: boxes)
+    monkeypatch.setattr(checking, "detect", lambda _: boxes)
     monkeypatch.setattr(species, "classify_crop", lambda *_: ("fox", "Fox", 0.97))
     notified = []
     monkeypatch.setattr(dispatch, "dispatch_new_sightings", lambda db: notified.append(True))

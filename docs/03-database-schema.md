@@ -248,6 +248,17 @@ CREATE TABLE sync_log (
 
 ## Notes & decisions baked in
 
+- **Harvest book (`0030_harvest_and_people`, feature 23):** `harvests` holds one line
+  per animal taken: the sit it came from (optional), its stand, who shot it
+  (`user_id`, and `hunter`, the name the line carries, kept when the person is
+  removed), species, sex, age class, seal (precinto) number, weight, notes and when.
+  Logged the morning after a SHOT (`sits.no_harvest_at` marks a shot with nothing to
+  log) and exported per season (1 April to 31 March) as a CSV by an admin. No tallies
+  or rankings are computed from it.
+- **People and vehicles (`0030`, feature 25):** `images.person_conf` / `vehicle_conf`
+  are MegaDetector's surest person and vehicle box; `images.people_cleared` is an
+  admin's "nobody in it". See docs/05-ai-pipeline.md, Stage 1.
+
 - **UBox (`0013_ubox`):** existing camera accounts default to `spypoint`; UBox uses
   the same encrypted credential storage, camera rows and image pipeline. A provider
   account is unique globally by `(provider, username)`, since device identifiers

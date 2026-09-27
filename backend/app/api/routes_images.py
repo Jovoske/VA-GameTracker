@@ -1,5 +1,5 @@
 """Serve stored image files (the original and a small copy); let the user flag a frame
-or say what is in it."""
+or say what is in it, and an admin say nobody is in one the detector read as people."""
 import os
 import re
 import uuid
@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 from app.ai import species as species_ai
 from app.ai.checking import hunter_decided
 from app.ai.classifier import ESTATE_KEYS
-from app.api.deps import get_current_user, user_from_token
+from app.api.deps import get_current_admin, get_current_user, user_from_token
+from app.api.visibility import is_people, people_in
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.logging import get_logger
@@ -82,13 +83,16 @@ def _require_user(
 
 
 def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
-    """The photo and its camera, if it is on this person's estate; 404 otherwise."""
+    """The photo and its camera, if it is on this person's estate; 404 otherwise.
+
+    A frame with a person or a vehicle in it is the admin's alone (visibility.PEOPLE):
+    for anyone else it is not there, file and all, even by its address."""
     row = db.execute(
         select(Image, Camera)
         .join(Camera, Camera.id == Image.camera_id)
         .where(Image.id == image_id, Camera.estate_id == user.estate_id)
     ).first()
-    if row is None:
+    if row is None or (user.role != "admin" and is_people(row[0])):
         raise HTTPException(404, "Photo not found.")
     return row[0], row[1]
 
@@ -296,3 +300,39 @@ def undo_species(
     fixed = _fixed(db, image, camera, visit)
     recount_after_flag(db, image.camera_id, image.captured_at)
     return fixed
+
+
+class PeopleBody(BaseModel):
+    # True: nobody is in it (a feeder read as a vehicle), so it is an animal photo
+    # again. False takes that back (the viewer's Undo).
+    cleared: bool
+
+
+@router.post("/{image_id}/people")
+def clear_people(
+    image_id: uuid.UUID,
+    body: PeopleBody,
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """An admin says there is no person or vehicle in a frame the detector read as one.
+
+    The detector's confidences stay as they were; the frame is simply one of animals
+    (or empty) again, in every list and count, until the admin takes it back. What it
+    counts changed, so the camera's nights are counted again, as after a flag.
+    """
+    image, _ = _estate_image(db, image_id, user)
+    if not body.cleared and not image.people_cleared:
+        return _people_out(image)
+    if body.cleared and not image.people_cleared and not is_people(image):
+        raise HTTPException(409, "The app doesn’t count anyone in this photo already.")
+    image.people_cleared = body.cleared
+    db.commit()
+    recount_after_flag(db, image.camera_id, image.captured_at)
+    return _people_out(image)
+
+
+def _people_out(image: Image) -> dict:
+    person, vehicle = people_in(image)
+    return {"id": str(image.id), "people_cleared": image.people_cleared,
+            "has_person": person, "has_vehicle": vehicle}

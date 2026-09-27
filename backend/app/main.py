@@ -13,6 +13,7 @@ from app.api import (
     routes_client_errors,
     routes_estate,
     routes_forecast,
+    routes_harvests,
     routes_health,
     routes_images,
     routes_insights,
@@ -70,6 +71,7 @@ app.include_router(routes_photos.router, prefix=API_PREFIX)
 app.include_router(routes_map.router, prefix=API_PREFIX)
 app.include_router(routes_notes.router, prefix=API_PREFIX)
 app.include_router(routes_client_errors.router, prefix=API_PREFIX)
+app.include_router(routes_harvests.router, prefix=API_PREFIX)
 
 import mimetypes
 import os

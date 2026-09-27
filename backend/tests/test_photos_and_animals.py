@@ -445,7 +445,7 @@ def test_the_ai_pass_makes_the_small_copy_of_each_animal_photo(db_session, estat
     db_session.commit()
     boxes = {photos["boar"].original_path: [{"bbox": [0.1, 0.1, 0.5, 0.5], "confidence": 0.9}]}
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", lambda path: boxes.get(path, []))
+    monkeypatch.setattr(checking, "detect", lambda path: boxes.get(path, []))
     monkeypatch.setattr(species_ai, "classify_crop",
                         lambda path, bbox: ("wild_boar", "Wild boar", 0.9))
     checking.check_photos(db_session, now=datetime(2026, 9, 21, 20, 0, tzinfo=UTC))
@@ -686,7 +686,7 @@ def test_undo_on_a_photo_never_checked_lets_the_detector_look(client, db_session
     assert (img.processed_at, img.reviewed, img.is_empty_frame) == (None, False, None)
 
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", lambda path: [])
+    monkeypatch.setattr(checking, "detect", lambda path: [])
     monkeypatch.setattr(species_ai, "classify_crop",
                         lambda path, bbox: ("wild_boar", "Wild boar", 0.2))
     checking.check_photos(db_session, now=datetime(2026, 9, 21, 20, 0, tzinfo=UTC))

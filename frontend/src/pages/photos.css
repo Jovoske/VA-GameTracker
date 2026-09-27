@@ -18,3 +18,9 @@
    as a tap that missed (audit C-25). */
 .photos-grid[data-pending] { opacity: 0.45; transition: opacity var(--d-fast) var(--ease-out); }
 .photos-pending { font-size: 13px; color: var(--text-dim); padding: 0 8px 8px; }
+
+/* People & vehicles: an admin's photos, apart from the feed. Orange is for people. */
+.photos-chip--people { border-color: color-mix(in srgb, var(--marginal) 55%, var(--border)); color: var(--marginal); }
+.photos-chip--people[aria-pressed='true'] { background: var(--marginal); color: #1f1400; }
+.photos-people-note { margin: 0 0 10px; padding: 8px 12px; border-left: 3px solid var(--marginal); background: var(--surface); border-radius: var(--r-ctl); font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+.photos-tile-meta .photos-tile-label--people { color: var(--marginal); }
