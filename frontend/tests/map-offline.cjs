@@ -195,7 +195,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  // Zoomed in past the closest level saved: that needs signal, and it says so (R4FE-5).
  await page.locator('.bsheet').waitFor({state:'detached'});
  for(let i=0;i<6;i++){await page.getByRole('button',{name:'Zoom in'}).click();await page.waitForTimeout(400)}
- await page.waitForFunction(()=>/This close needs signal\. Zoom out a little for the map saved on this phone\./.test(document.querySelector('.map-notices')?.textContent||''),null,{timeout:15000});
+ await page.waitForFunction(()=>/This close needs signal\. Zoom out a little for the map saved on this phone\./.test(document.querySelector('.map-notices')?.textContent||''),null,{timeout:15000}).catch(async e=>{console.log('Zoomed in:',JSON.stringify({scale:await page.locator('.map-scale').innerText().catch(()=>null),notices:await notices(page),online:await page.evaluate(()=>navigator.onLine)}),'page errors:',JSON.stringify(errors));throw e});
  assert.doesNotMatch(await notices(page),/past the estate/,'the view is on the estate');
  if(shots)await page.screenshot({path:shots+'/offline-too-close.png'});
  // The Map sheet says what the phone has.
