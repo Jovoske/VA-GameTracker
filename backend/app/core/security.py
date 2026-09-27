@@ -12,6 +12,11 @@ Two kinds of token, told apart by their `scope` claim:
   tunnel's logs as a working login to the whole API (audit C-19, D-08, H-13). A pass
   opens photos and nothing else, for hours, not a month, and dies with the sign-in
   (same version, same person).
+
+A third, the known-phone mark (scope "phone"), opens nothing at all. The sign-in
+answer gives it to the phone, which sends it with its next sign-in: a phone that has
+signed in with an email before is not held up by a crowd of guessers trying that
+email from elsewhere (app.api.throttle).
 """
 from datetime import UTC, datetime, timedelta
 
@@ -80,6 +85,30 @@ def image_token(user, now: datetime | None = None) -> str:
          "exp": pass_expiry(now)},
         settings.jwt_secret, algorithm=settings.jwt_algorithm,
     )
+
+
+PHONE_SCOPE = "phone"
+PHONE_LASTS = timedelta(days=400)
+
+
+def phone_token(user) -> str:
+    """The known-phone mark for `user`'s email on the phone that just signed in."""
+    return jwt.encode(
+        {"sub": str(user.id), "em": (user.email or "").strip().lower(), "scope": PHONE_SCOPE,
+         "exp": datetime.now(UTC) + PHONE_LASTS},
+        settings.jwt_secret, algorithm=settings.jwt_algorithm,
+    )
+
+
+def known_phone(token: str | None, email: str) -> bool:
+    """Whether `token` is this server's known-phone mark for `email`."""
+    if not token:
+        return False
+    try:
+        claims = decode_token(token)
+    except jwt.PyJWTError:
+        return False
+    return claims.get("scope") == PHONE_SCOPE and claims.get("em") == email.strip().lower()
 
 
 def decode_token(token: str) -> dict:

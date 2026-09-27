@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import jwt
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -405,22 +406,278 @@ def test_one_place_guessing_many_emails_is_held_up_and_nobody_else_is(
 def test_the_visitors_address_is_believed_only_from_the_tunnel(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxies", ["127.0.0.1", "::1"])
 
-    def req(peer, header=None):
+    def req(peer, **headers):
         return SimpleNamespace(client=SimpleNamespace(host=peer),
-                               headers={"cf-connecting-ip": header} if header else {})
+                               headers={k.replace("_", "-"): v for k, v in headers.items()})
 
-    assert throttle_mod.client_ip(req("127.0.0.1", "203.0.113.9")) == "203.0.113.9"
+    assert throttle_mod.client_ip(req("127.0.0.1", cf_connecting_ip="203.0.113.9")) == "203.0.113.9"
+    assert throttle_mod.client_ip(
+        req("127.0.0.1", x_forwarded_for="10.9.9.9, 203.0.113.9")) == "203.0.113.9"
     # From anywhere else the header is anyone's to write: the peer is what counts.
-    assert throttle_mod.client_ip(req("192.168.1.50", "203.0.113.9")) == "192.168.1.50"
+    lan = req("192.168.1.50", cf_connecting_ip="203.0.113.9")
+    assert throttle_mod.client_ip(lan) == "192.168.1.50"
     assert throttle_mod.client_ip(req("127.0.0.1")) == "127.0.0.1"
+    # From the internet: through the tunnel, or straight from a public address. The
+    # server's own network is not.
+    assert throttle_mod.from_outside(req("127.0.0.1", cf_connecting_ip="203.0.113.9"))
+    assert throttle_mod.from_outside(req("8.8.8.8"))
+    assert throttle_mod.from_outside(req("::ffff:8.8.8.8"))
+    assert not throttle_mod.from_outside(req("127.0.0.1"))
+    assert not throttle_mod.from_outside(req("192.168.1.50", cf_connecting_ip="203.0.113.9"))
+    assert not throttle_mod.from_outside(req("testclient"))
+
+
+def test_the_tunnel_is_seen_as_the_tunnel_through_uvicorn_as_serve_py_runs_it(monkeypatch):
+    """uvicorn's own X-Forwarded-For rewrite replaced the tunnel's address with the
+    visitor's before the app saw it, so the CF-Connecting-IP rule never ran and every
+    sign-in through the tunnel logged a false warning. serve.py turns that rewrite off;
+    this goes through uvicorn's middleware stack built from serve.py's own options."""
+    import asyncio
+    import importlib.util
+
+    import httpx
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    spec = importlib.util.spec_from_file_location("serve_under_test", BACKEND / "serve.py")
+    serve = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(serve)
+    monkeypatch.setattr(settings, "trusted_proxies", ["127.0.0.1", "::1"])
+
+    def who(request):
+        return JSONResponse({"ip": throttle_mod.client_ip(request),
+                             "outside": throttle_mod.from_outside(request)})
+
+    probe = Starlette(routes=[Route("/who", who)])
+
+    def ask(options: dict, peer: str, headers: dict) -> dict:
+        config = uvicorn.Config(probe, log_config=None, **{
+            k: v for k, v in options.items() if k not in ("host", "port")})
+        config.load()
+
+        async def go():
+            transport = httpx.ASGITransport(app=config.loaded_app, client=(peer, 50123))
+            async with httpx.AsyncClient(transport=transport, base_url="http://db01") as c:
+                return (await c.get("/who", headers=headers)).json()
+        return asyncio.run(go())
+
+    tunnel = {"CF-Connecting-IP": "198.51.100.7", "X-Forwarded-For": "198.51.100.7"}
+    assert ask(serve.uvicorn_options(), "127.0.0.1", tunnel) == {
+        "ip": "198.51.100.7", "outside": True}
+    assert ask(serve.uvicorn_options(), "127.0.0.1", {}) == {"ip": "127.0.0.1", "outside": False}
+    assert ask(serve.uvicorn_options(), "192.168.1.20", tunnel) == {
+        "ip": "192.168.1.20", "outside": False}
+    # What uvicorn's default did: the tunnel's own address is gone before the app
+    # looks, so it can't tell the request came through the tunnel at all.
+    assert ask({"proxy_headers": True}, "127.0.0.1", tunnel)["outside"] is False
+    assert serve.uvicorn_options()["proxy_headers"] is False
+
+
+def test_an_ipv6_address_counts_by_its_block():
+    """One home or phone is given a /64: every address in it is one place."""
+    place = throttle_mod.place_of
+    assert place("2001:db8:1:2:aaaa::1") == place("2001:db8:1:2:bbbb:cccc:dddd:9")
+    assert place("2001:db8:1:2::1") != place("2001:db8:1:3::1")
+    assert place("::ffff:203.0.113.9") == place("203.0.113.9") == "203.0.113.9"
+    assert place("testclient") == "testclient"
+    t = throttle_mod.LoginThrottle(clock=lambda: 1.0)
+    for n in range(throttle_mod.IP_LIMIT):
+        with t.attempt(f"2001:db8:1:2::{n + 1:x}", f"u{n}@x.es") as a:
+            a.failed()
+    with pytest.raises(HTTPException) as held:
+        t.attempt("2001:db8:1:2:ffff::1", "ana@estate.local")
+    assert held.value.status_code == 429 and "from here" in held.value.detail
+    t.attempt("2001:db8:9:9::1", "ana@estate.local").succeeded()
 
 
 def test_the_throttle_forgets_rather_than_grows_without_end(monkeypatch):
     monkeypatch.setattr(throttle_mod, "MAX_KEYS", 50)
     t = throttle_mod.LoginThrottle(clock=lambda: 1.0)
     for n in range(500):
-        t.failed(f"10.0.{n // 250}.{n % 250}", f"u{n}@x.es")
-    assert len(t._ips) + len(t._emails) <= 50
+        with t.attempt(f"10.0.{n // 250}.{n % 250}", f"u{n}@x.es") as a:
+            a.failed()
+        assert len(t._places) + len(t._pairs) + len(t._emails) <= 50 + 3
+    # A sign-in being checked is never forgotten, however full it gets.
+    busy = t.attempt("10.9.9.9", "busy@x.es")
+    for n in range(200):
+        with t.attempt(f"10.1.{n // 250}.{n % 250}", f"v{n}@x.es") as a:
+            a.failed()
+    assert t._pairs[("10.9.9.9", "busy@x.es")].checking
+    busy.succeeded()
+
+
+def _fake_login(monkeypatch, users: dict[str, str], delay: float = 0.0):
+    """Sign-in without a database or Argon2: `users` maps emails to their passwords
+    (all admins). Returns the running count of password checks and the most that
+    ran at once."""
+    import threading
+    import time as _time
+
+    from app.api import routes_auth
+
+    ids = {email: uuid.uuid4() for email in users}
+    seen = {"checks": 0, "now": 0, "most": 0}
+    lock = threading.Lock()
+
+    def find_user(db, email):
+        email = email.strip().lower()
+        if email not in users:
+            return None
+        return SimpleNamespace(id=ids[email], email=email, role="admin", token_version=0,
+                               password_hash=f"hash:{users[email]}")
+
+    def verify(password, hashed):
+        with lock:
+            seen["checks"] += 1
+            seen["now"] += 1
+            seen["most"] = max(seen["most"], seen["now"])
+        _time.sleep(delay)
+        with lock:
+            seen["now"] -= 1
+        return hashed == f"hash:{password}"
+
+    monkeypatch.setattr(routes_auth, "find_user", find_user)
+    monkeypatch.setattr(routes_auth, "verify_password", verify)
+    monkeypatch.setattr(routes_auth, "_no_such_hash", lambda: "hash:nobody")
+    return seen
+
+
+@pytest.fixture
+def bare_client():
+    from app.main import app
+
+    with TestClient(app) as c:
+        yield c
+
+
+def test_sign_ins_sent_all_at_once_are_held_like_one_after_another(bare_client, monkeypatch):
+    """A burst of wrong passwords in parallel used to pass the check before any of
+    them was counted, so every one got a password check (R5BE-2)."""
+    import threading
+
+    monkeypatch.setattr(throttle_mod.throttle, "clock", lambda: 7000.0)  # no wait runs out
+    seen = _fake_login(monkeypatch, {"admin@gamesense.local": PASSWORD}, delay=0.05)
+
+    def burst(n, email_for):
+        statuses: list[int] = []
+        gate = threading.Barrier(n)
+
+        def go(i):
+            gate.wait()
+            statuses.append(bare_client.post("/api/auth/login", json={
+                "email": email_for(i), "password": f"guess-{i}"}).status_code)
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        return statuses
+
+    one_email = burst(30, lambda i: "admin@gamesense.local")
+    assert one_email.count(401) <= throttle_mod.FREE_TRIES
+    assert one_email.count(429) == 30 - one_email.count(401)
+    assert seen["checks"] == one_email.count(401)
+
+    throttle_mod.throttle.reset()
+    seen["checks"] = 0
+    many_emails = burst(40, lambda i: f"guest{i}@estate.local")
+    assert many_emails.count(401) <= throttle_mod.IP_LIMIT
+    assert 2 <= seen["most"] <= throttle_mod.IP_AT_ONCE  # at once, but a few at most
+    assert seen["checks"] == many_emails.count(401)
+    assert set(many_emails) <= {401, 429}
+
+
+def test_a_guesser_elsewhere_never_holds_the_owner_up(bare_client, monkeypatch):
+    """One guess a minute at the admin's email from somewhere else used to keep the
+    owner waiting for as long as the guesser liked (R5BE-3)."""
+    now = [10_000.0]
+    monkeypatch.setattr(throttle_mod.throttle, "clock", lambda: now[0])
+    monkeypatch.setattr(settings, "trusted_proxies", ["testclient"])
+    seen = _fake_login(monkeypatch, {"admin@gamesense.local": PASSWORD})
+
+    def attempt(ip, password):
+        return bare_client.post("/api/auth/login", headers={"CF-Connecting-IP": ip}, json={
+            "email": "admin@gamesense.local", "password": password})
+
+    owner_in = guesses = 0
+    for second in range(0, 3 * 3600, 5):  # three hours; the guesser tries every 5 s
+        now[0] = 10_000.0 + second
+        r = attempt("203.0.113.9", "guess")
+        assert r.status_code in (401, 429)
+        guesses += r.status_code == 401
+        if second % 600 == 300:  # the owner, from home, every ten minutes
+            got = attempt("198.51.100.4", PASSWORD)
+            assert got.status_code == 200, (second, got.json())
+            owner_in += 1
+    assert owner_in == 18
+    # The guesser got about one password check a minute, never more.
+    assert guesses <= 3 * 60 + throttle_mod.FREE_TRIES + 5
+    assert seen["checks"] == guesses + owner_in
+
+
+def test_a_crowd_guessing_one_email_holds_new_phones_but_not_a_known_one(
+    bare_client, monkeypatch,
+):
+    now = [20_000.0]
+    monkeypatch.setattr(throttle_mod.throttle, "clock", lambda: now[0])
+    monkeypatch.setattr(settings, "trusted_proxies", ["testclient"])
+    _fake_login(monkeypatch, {"owner@estate.local": PASSWORD, "guest@estate.local": PASSWORD})
+
+    def attempt(ip, password, phone=None):
+        return bare_client.post("/api/auth/login", headers={"CF-Connecting-IP": ip}, json={
+            "email": "owner@estate.local", "password": password, "known_phone": phone})
+
+    first = attempt("198.51.100.4", PASSWORD)
+    assert first.status_code == 200
+    mark = first.json()["known_phone"]
+    assert decode_token(mark)["scope"] == "phone"
+
+    for n in range(throttle_mod.EMAIL_LIMIT):  # a crowd, three guesses from each place
+        assert attempt(f"203.0.{n // 3 // 250}.{n // 3 % 250 + 1}", "guess").status_code == 401
+    held = attempt("192.0.2.77", PASSWORD)
+    assert held.status_code == 429
+    assert "phone that has signed in with it before" in held.json()["detail"]
+    # The owner's own phone, signed in before, is not held; nor is it from anywhere.
+    assert attempt("192.0.2.77", PASSWORD, phone=mark).status_code == 200
+    # A mark for another email, or a made-up one, is no mark.
+    guests = bare_client.post("/api/auth/login", json={
+        "email": "guest@estate.local", "password": PASSWORD}).json()["known_phone"]
+    assert attempt("192.0.2.78", PASSWORD, phone=guests).status_code == 429
+    assert attempt("192.0.2.79", PASSWORD, phone="not-a-mark").status_code == 429
+    # The crowd's hour passes.
+    now[0] += throttle_mod.EMAIL_WINDOW_S
+    assert attempt("192.0.2.77", PASSWORD).status_code == 200
+
+
+def test_a_sign_in_the_server_was_too_busy_to_check_counts_for_nothing(
+    bare_client, monkeypatch,
+):
+    from app.api import routes_auth
+
+    _fake_login(monkeypatch, {"admin@gamesense.local": PASSWORD})
+    monkeypatch.setattr(routes_auth, "HASH_WAIT_S", 0.01)
+    taken = [throttle_mod.HASHING.acquire(timeout=1) for _ in range(4)]
+    try:
+        busy = bare_client.post("/api/auth/login", json={
+            "email": "admin@gamesense.local", "password": PASSWORD})
+        assert busy.status_code == 503 and "busy" in busy.json()["detail"]
+    finally:
+        for got in taken:
+            if got:
+                throttle_mod.HASHING.release()
+    # Let go, not left "still checking", and not counted as a wrong password.
+    assert bare_client.post("/api/auth/login", json={
+        "email": "admin@gamesense.local", "password": PASSWORD}).status_code == 200
+
+
+def test_the_known_phone_mark_opens_nothing(bare_client, monkeypatch):
+    _fake_login(monkeypatch, {"admin@gamesense.local": PASSWORD})
+    got = bare_client.post("/api/auth/login", json={
+        "email": "admin@gamesense.local", "password": PASSWORD}).json()
+    mark = got["known_phone"]
+    assert decode_token(mark)["em"] == "admin@gamesense.local"
+    assert bare_client.get("/api/auth/me", headers=_auth(mark)).status_code == 401
+    assert bare_client.get(f"/api/images/{uuid.uuid4()}/file?token={mark}").status_code == 401
 
 
 # ── who may change what ─────────────────────────────────────────────────────
@@ -509,80 +766,262 @@ def test_the_api_docs_are_off_unless_asked_for(monkeypatch):
         importlib.reload(main)
 
 
-def test_the_server_refuses_the_published_secret(monkeypatch):
+def _env_values(env: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in env.read_text().splitlines()
+                if "=" in line and not line.startswith("#"))
+
+
+@pytest.fixture
+def server_secrets(monkeypatch):
+    """The server's secrets, as settings and the environment hold them, put back
+    afterwards whatever the code under test does to them."""
+    def put(**values):
+        for key in ("jwt_secret", "credentials_key", "previous_jwt_secret"):
+            value = values.get(key, "")
+            monkeypatch.setattr(settings, key, value)
+            if value:
+                monkeypatch.setenv(key.upper(), value)
+            else:
+                monkeypatch.delenv(key.upper(), raising=False)
+    monkeypatch.setattr(settings, "app_env", "production")
+    return put
+
+
+def test_a_published_or_short_secret_is_replaced_as_the_server_starts(
+    tmp_path, server_secrets, monkeypatch,
+):
+    """The server used to refuse to start on it, so the next auto-deploy could leave
+    the estate's app down until someone reached Db01 (R5BE-1). It starts, on a fresh
+    one, and the saved camera logins still read."""
+    from app.core import crypto, startup
+
+    env = tmp_path / ".env"
+    env.write_text("# the server's settings\nADMIN_EMAIL=admin@gamesense.local\n")
+    # No JWT_SECRET line: the server runs on the code's own default, a published one.
+    server_secrets(jwt_secret="dev-secret-change-me")
+    saved = crypto.encrypt("guest-spypoint-password")
+
+    note = startup.replace_published_secret(env)
+    assert "was the one published with GameSense" in note
+    assert "Everyone signs in again once; saved camera logins keep working" in note
+    values = _env_values(env)
+    assert values["PREVIOUS_JWT_SECRET"] == "dev-secret-change-me"
+    assert len(values["JWT_SECRET"]) >= 48 and len(values["CREDENTIALS_KEY"]) >= 48
+    assert env.read_text().startswith("# the server's settings\nADMIN_EMAIL=")
+    # This process runs on the new one from here on, and reads the saved login.
+    assert settings.jwt_secret == values["JWT_SECRET"]
+    assert crypto.decrypt(saved) == "guest-spypoint-password"
+    assert startup.replace_published_secret(env) is None  # nothing left to do
+
+    # A short one of the owner's own is replaced too.
+    server_secrets(jwt_secret="short-but-not-published")
+    assert "shorter than 32" in startup.replace_published_secret(env)
+    # The service's environment holding a published one over a good one in the file:
+    # the file's is used, and nothing is rotated again (no sign-out at every start).
+    good = _env_values(env)["JWT_SECRET"]
+    server_secrets(jwt_secret="dev-secret-change-me")
+    assert "is used instead" in startup.replace_published_secret(env)
+    assert settings.jwt_secret == good == _env_values(env)["JWT_SECRET"]
+    # On a laptop nothing is touched.
+    server_secrets(jwt_secret="dev-secret-change-me")
+    monkeypatch.setattr(settings, "app_env", "development")
+    assert startup.replace_published_secret(env) is None
+    assert settings.jwt_secret == "dev-secret-change-me"
+
+
+def test_a_secret_that_cant_be_written_is_said_and_the_server_starts_anyway(
+    tmp_path, server_secrets,
+):
     from app.core import startup
 
-    monkeypatch.setattr(settings, "app_env", "production")
-    for published in ("dev-secret-change-me", "dev-secret-change-me-please"):
-        monkeypatch.setattr(settings, "jwt_secret", published)
-        [why] = startup.refusals()
-        assert "python -m app.manage new-secret" in why
-    monkeypatch.setattr(settings, "jwt_secret", "short-but-not-published")
-    assert "shorter than 32" in startup.refusals()[0]
-    monkeypatch.setattr(settings, "jwt_secret", "x" * 48)
-    assert startup.refusals() == []
-    # On a laptop it starts anyway.
-    monkeypatch.setattr(settings, "jwt_secret", "dev-secret-change-me")
-    monkeypatch.setattr(settings, "app_env", "development")
-    assert startup.refusals() == []
+    server_secrets(jwt_secret="dev-secret-change-me")
+    blocked = tmp_path / "no-such-folder" / ".env"
+    note = startup.replace_published_secret(blocked)
+    assert "couldn't be written" in note and "python -m app.manage new-secret" in note
+    assert settings.jwt_secret == "dev-secret-change-me"
 
 
 @requires_db
-def test_the_server_refuses_an_admin_on_the_published_password(db_session, estate, monkeypatch):
+def test_an_admin_on_the_published_password_is_named_and_cant_sign_in_from_the_internet(
+    client, db_session, estate, monkeypatch,
+):
     from app.core import startup
 
     monkeypatch.setattr(settings, "app_env", "production")
-    monkeypatch.setattr(settings, "jwt_secret", "y" * 48)
     monkeypatch.setattr(settings, "admin_password", "changeme")
     # No admin yet: the seed would make one with the published password.
-    assert "ADMIN_PASSWORD" in startup.refusals(db_session)[0]
+    [why] = startup.password_notes(db_session)
+    assert "ADMIN_PASSWORD" in why and "server's own network" in why
     _user(db_session, estate, "admin", email="admin@gamesense.local", password="changeme")
     _user(db_session, estate, "member", email="m@estate.local", password="changeme")
-    [why] = startup.refusals(db_session)
+    [why] = startup.password_notes(db_session)
     assert why.endswith("python -m app.manage set-password admin@gamesense.local")
+
+    monkeypatch.setattr(settings, "trusted_proxies", ["testclient"])
+
+    def sign_in(email, **headers):
+        return client.post("/api/auth/login", headers=headers,
+                           json={"email": email, "password": "changeme"})
+
+    # Through the tunnel: refused, in words that say where it does work.
+    far = sign_in("admin@gamesense.local", **{"CF-Connecting-IP": "203.0.113.9"})
+    assert far.status_code == 403
+    assert "can't sign in from the internet" in far.json()["detail"]
+    assert "set-password admin@gamesense.local" in far.json()["detail"]
+    # On the server's own network it signs in, so it can be changed there.
+    assert sign_in("admin@gamesense.local").status_code == 200
+    # Only admins; and on a laptop, anyone.
+    assert sign_in("m@estate.local", **{"CF-Connecting-IP": "203.0.113.9"}).status_code == 200
+    monkeypatch.setattr(settings, "app_env", "development")
+    laptop = sign_in("admin@gamesense.local", **{"CF-Connecting-IP": "203.0.113.8"})
+    assert laptop.status_code == 200
+    assert startup.password_notes(db_session) == []
+
+    monkeypatch.setattr(settings, "app_env", "production")
     admin = db_session.scalar(select(User).where(User.email == "admin@gamesense.local"))
     admin.password_hash = hash_password(PASSWORD)
     db_session.commit()
-    assert startup.refusals(db_session) == []
+    assert startup.password_notes(db_session) == []
 
 
-def test_serve_py_stops_with_the_fix_in_words(tmp_path):
-    """The real entrypoint, as the Windows service runs it: it exits before uvicorn
-    and prints what to do (the service log keeps it)."""
-    env = {"PATH": "/usr/bin:/bin", "JWT_SECRET": "dev-secret-change-me",
-           "DATABASE_URL": "postgresql+psycopg://nobody@127.0.0.1:1/none",
-           "PYTHONPATH": str(BACKEND)}
-    run = subprocess.run([sys.executable, str(BACKEND / "serve.py")], cwd=tmp_path, env=env,
-                         capture_output=True, text=True, timeout=60)
-    assert run.returncode == 2
-    assert "GameSense will not start" in run.stderr
-    assert "python -m app.manage new-secret" in run.stderr
+def _serve_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("serve_under_test", BACKEND / "serve.py")
+    serve = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(serve)
+    return serve
 
 
-def test_new_secret_keeps_the_saved_camera_logins_readable(tmp_path, monkeypatch):
+def test_serve_py_check_changes_nothing_and_says_what_starting_will_do(tmp_path):
+    """What deploy/update.ps1 asks before it deploys: the real entrypoint, as the
+    Windows service would run it, beside a .env of its own."""
+    (tmp_path / "serve.py").write_text((BACKEND / "serve.py").read_text())
+    env_text = "JWT_SECRET=dev-secret-change-me-please\nADMIN_PASSWORD=changeme\n"
+    (tmp_path / ".env").write_text(env_text)
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(BACKEND),
+           "DATABASE_URL": "postgresql+psycopg://nobody@127.0.0.1:1/none"}
+    run = subprocess.run([sys.executable, str(tmp_path / "serve.py"), "check"], cwd=tmp_path,
+                         env=env, capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "GameSense writes a fresh one when it restarts" in run.stdout
+    assert "Could not check the admin passwords" in run.stdout
+    assert (tmp_path / ".env").read_text() == env_text
+
+
+def test_serve_py_check_fails_when_the_app_does_not_load(monkeypatch):
+    import app.main  # noqa: F401  (loaded, as by the service, before check looks)
+
+    serve = _serve_module()
+    monkeypatch.setattr(serve, "prepare", lambda dry_run: [])
+    assert serve.check() == 0
+    monkeypatch.setitem(sys.modules, "app.main", None)  # any import error
+    assert serve.check() == 1
+
+
+def test_serve_py_starts_on_a_fresh_secret_it_wrote_itself(tmp_path, server_secrets, monkeypatch):
+    from app.core import crypto
+    from app.core import db as core_db
+
+    serve = _serve_module()
+    env = tmp_path / ".env"
+    env.write_text("JWT_SECRET=dev-secret-change-me-please\n")
+    monkeypatch.setattr(serve, "ENV_FILE", env)
+    server_secrets(jwt_secret="dev-secret-change-me-please")
+    saved = crypto.encrypt("guest-ubox-password")
+
+    def no_database():
+        raise OSError("no database here")
+    monkeypatch.setattr(core_db, "SessionLocal", no_database)
+    notes = serve.prepare()
+    assert "a fresh one was written" in notes[0]
+    assert settings.jwt_secret == _env_values(env)["JWT_SECRET"]
+    assert crypto.decrypt(saved) == "guest-ubox-password"
+
+
+def test_the_update_checks_the_new_version_before_it_changes_anything():
+    """deploy/update.ps1: serve.py check runs before the build, the backup, the
+    migration and the restart, and a version that doesn't load is rolled back."""
+    script = (BACKEND.parent / "deploy" / "update.ps1").read_text()
+    check = script.index('serve.py" check')
+    for later in ("vite.cmd", "pg_dump", "alembic.exe", "Restart-Service GameSenseAPI"):
+        assert check < script.index(later), later
+    after = script[check:script.index("vite.cmd")]
+    assert "git reset --hard $before" in after and "exit 1" in after
+
+
+def test_new_secret_keeps_the_saved_camera_logins_readable(tmp_path, server_secrets):
     from app import manage
     from app.core import crypto
 
+    def restart_on(env):
+        values = _env_values(env)
+        server_secrets(**{k: values.get(k.upper(), "")
+                          for k in ("jwt_secret", "credentials_key", "previous_jwt_secret")})
+
+    # 1. The file names the published secret; nothing else set.
     env = tmp_path / ".env"
     env.write_text("# the server's settings\nJWT_SECRET=dev-secret-change-me-please\n"
                    "CREDENTIALS_KEY=\nADMIN_EMAIL=admin@gamesense.local\n", encoding="utf-8")
-    monkeypatch.setattr(settings, "jwt_secret", "dev-secret-change-me-please")
-    monkeypatch.setattr(settings, "credentials_key", "")
-    monkeypatch.setattr(settings, "previous_jwt_secret", "")
-    saved = crypto.encrypt("guest-spypoint-password")
-
+    restart_on(env)
+    first = crypto.encrypt("guest-spypoint-password")
     assert "Restart the GameSense service" in manage.new_secret(env)
-    values = dict(line.split("=", 1) for line in env.read_text().splitlines()
-                  if "=" in line and not line.startswith("#"))
-    assert len(values["JWT_SECRET"]) >= 48 and values["JWT_SECRET"] != "dev-secret-change-me-please"
+    values = _env_values(env)
     assert values["PREVIOUS_JWT_SECRET"] == "dev-secret-change-me-please"
-    assert len(values["CREDENTIALS_KEY"]) >= 48
     assert values["ADMIN_EMAIL"] == "admin@gamesense.local"
-    assert env.read_text().startswith("# the server's settings\n")
-    # The server as it restarts with the new file still reads the saved password.
-    for key in ("jwt_secret", "credentials_key", "previous_jwt_secret"):
-        monkeypatch.setattr(settings, key, values[key.upper()])
-    assert crypto.decrypt(saved) == "guest-spypoint-password"
+    restart_on(env)
+    assert crypto.decrypt(first) == "guest-spypoint-password"
+
+    # 2. No JWT_SECRET line at all: the server ran on the code's default (R5BE-4).
+    bare = tmp_path / "bare.env"
+    bare.write_text("ADMIN_PASSWORD=something-else\n")
+    server_secrets(jwt_secret="dev-secret-change-me")
+    on_default = crypto.encrypt("guest-password")
+    manage.new_secret(bare)
+    assert _env_values(bare)["PREVIOUS_JWT_SECRET"] == "dev-secret-change-me"
+    restart_on(bare)
+    assert crypto.decrypt(on_default) == "guest-password"
+
+    # 3. CREDENTIALS_KEY already set, but a login not saved again under it yet: the
+    #    old JWT_SECRET is kept too, and so is every secret kept before it.
+    env.write_text(f"JWT_SECRET={'j' * 40}\nCREDENTIALS_KEY={'c' * 40}\n"
+                   f"PREVIOUS_JWT_SECRET={'p' * 40}\n")
+    server_secrets(jwt_secret="j" * 40, previous_jwt_secret="p" * 40)  # before the key was set
+    under_jwt = crypto.encrypt("saved-before-the-key")
+    server_secrets(jwt_secret="p" * 40)
+    under_older = crypto.encrypt("saved-long-ago")
+    restart_on(env)
+    under_key = crypto.encrypt("saved-under-the-key")
+    manage.new_secret(env)
+    values = _env_values(env)
+    assert values["CREDENTIALS_KEY"] == "c" * 40
+    assert values["PREVIOUS_JWT_SECRET"] == f"{'j' * 40},{'p' * 40}"
+    restart_on(env)
+    for token, plain in ((under_jwt, "saved-before-the-key"), (under_older, "saved-long-ago"),
+                         (under_key, "saved-under-the-key")):
+        assert crypto.decrypt(token) == plain
+    # And once more: the list grows, newest first, and keeps them all.
+    manage.new_secret(env)
+    assert _env_values(env)["PREVIOUS_JWT_SECRET"].split(",")[1:] == ["j" * 40, "p" * 40]
+
+
+def test_new_secret_refuses_when_the_environment_would_win_over_the_file(
+    tmp_path, monkeypatch, capsys,
+):
+    from app import manage
+
+    env = tmp_path / ".env"
+    env.write_text("JWT_SECRET=dev-secret-change-me-please\n")
+    monkeypatch.setattr(manage, "ENV_FILE", env)
+    monkeypatch.setenv("JWT_SECRET", "set-for-the-whole-machine")
+    assert manage.main(["new-secret"]) == 1
+    assert "wins over" in capsys.readouterr().out
+    assert env.read_text() == "JWT_SECRET=dev-secret-change-me-please\n"
+    monkeypatch.delenv("JWT_SECRET")
+    for key in ("CREDENTIALS_KEY", "PREVIOUS_JWT_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    assert manage.main(["new-secret"]) == 0
+    assert _env_values(env)["PREVIOUS_JWT_SECRET"] == "dev-secret-change-me-please"
 
 
 @requires_db

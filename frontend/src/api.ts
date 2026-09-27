@@ -563,14 +563,25 @@ function savedMe(token: string | null): Me | null {
 /** Who signed in last on this phone, to fill the sign-in form (never a guess). */
 export const LAST_EMAIL_KEY = 'gs_last_email'
 
+/** This phone's known-phone mark from its last sign-in. It opens nothing; sent with
+ *  the next sign-in, it keeps a crowd of strangers guessing the same email from
+ *  holding this phone up (backend api/throttle.py). Kept through sign-out: it
+ *  belongs to the phone, not to the sign-in. */
+export const PHONE_KEY = 'gs_phone'
+
 export async function login(email: string, password: string): Promise<void> {
-  const data = await api<{ access_token: string; image_token?: string | null }>('/auth/login', {
+  let phone: string | null = null
+  try { phone = localStorage.getItem(PHONE_KEY) } catch { /* private mode */ }
+  const data = await api<{ access_token: string; image_token?: string | null; known_phone?: string | null }>('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, known_phone: phone }),
   })
   setToken(data.access_token)
   setImagePass(data.image_token ?? null)
-  try { localStorage.setItem(LAST_EMAIL_KEY, email.trim()) } catch { /* private mode */ }
+  try {
+    localStorage.setItem(LAST_EMAIL_KEY, email.trim())
+    if (data.known_phone) localStorage.setItem(PHONE_KEY, data.known_phone)
+  } catch { /* private mode */ }
 }
 
 /** A password change: this phone gets a new sign-in and pass in the answer; every

@@ -21,25 +21,33 @@ scheduled task (SYSTEM). Each run:
 3. `git reset --hard origin/main`. The server is deploy-only and never carries
    local edits.
 4. `pip install` only if `backend/requirements.txt` changed.
-5. `npm install` + `vite build` only if anything under `frontend/` changed, then
+5. `serve.py check`, before anything else changes: the new version has to load, or
+   the code is **rolled back** and nothing is deployed (the reason is in
+   `update-check.log`). It also notes in `update.log` what the new version will do
+   about the secrets published with GameSense as it starts (a published or short
+   `JWT_SECRET` is replaced; an admin on the published password is named). Neither
+   stops it starting.
+6. `npm install` + `vite build` only if anything under `frontend/` changed, then
    mirrors `frontend/dist` to `C:\GameSense\web` (served by FastAPI).
-6. **`pg_dump -Fc` to `C:\GameSense\backups`**, keeping the last 7. Connection
+7. **`pg_dump -Fc` to `C:\GameSense\backups`**, keeping the last 7. Connection
    details are parsed from the same `DATABASE_URL` the app uses, so the backup
    cannot dump a different database than the one about to change. **If the dump
    cannot be taken, the update refuses to migrate** and rolls the code back — a
    deploy that stops is visible and recoverable, a half-applied migration with no
    backup is neither.
-7. `alembic upgrade head`. If migrations fail it **rolls the code back** and does
+8. `alembic upgrade head`. If migrations fail it **rolls the code back** and does
    not restart, rather than running new code against an old schema. The *schema*
    is restored by hand from the dump — deliberately manual, because an automatic
    restore destroys rows written since the backup.
-8. Restarts `GameSenseAPI` and checks `/api/health`.
+9. Restarts `GameSenseAPI` and checks `/api/health`.
 
 Progress goes to `C:\GameSense\logs\update.log`; per-step output to
-`update-git.log`, `update-pip.log`, `update-npm.log`, `update-dump.log`,
-`update-alembic.log`.
+`update-git.log`, `update-pip.log`, `update-check.log`, `update-npm.log`,
+`update-dump.log`, `update-alembic.log`.
 
-The script lives in the repo, so it updates itself on the next pull.
+The script lives in the repo, so it updates itself on the next pull. The run that
+pulls a change to it still runs the old copy (PowerShell reads a script whole before
+it starts), so a new step first works on the deploy after the one that brought it.
 
 ## Scheduled jobs
 

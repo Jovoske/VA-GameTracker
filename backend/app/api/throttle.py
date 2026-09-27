@@ -1,24 +1,37 @@
 """Slowing down password guessing on the public sign-in (audit D-06).
 
-Two rules, both kept in this process's memory (one API process serves the estate):
+Kept in this process's memory (one API process serves the estate). Every attempt is
+booked before its password is checked, and a booked one counts like a wrong one, so
+a burst of requests sent all at once is held just as the same requests one after
+another would be.
 
-* Per address: 20 wrong passwords in 15 minutes from one place, and that place
-  waits until the oldest of them is 15 minutes old. Production sits behind a
-  Cloudflare tunnel, so every request reaches the API from the tunnel's own local
-  address; the visitor's address is in CF-Connecting-IP, which is believed only
-  when the request came from the tunnel (TRUSTED_PROXIES). Believed from anyone,
-  a guesser would just make up a new one each time.
-* Per email: a growing wait after a few wrong passwords (2 s, 4 s, 8 s ... up to a
-  minute), never a lockout. A lockout would let anyone keep the owner out of their
-  own app by guessing wrong on purpose; a wait costs the owner seconds and a
-  guesser nearly everything. The right password afterwards works as always.
+* One place, one email: a growing wait after a few wrong passwords (2 s, 4 s, 8 s ...
+  up to a minute), and one check at a time. It is keyed on the email *and* the
+  place, so a guesser somewhere else never holds the owner up.
+* One place, any email: 20 wrong passwords in 15 minutes, then that place waits
+  until the oldest of them is 15 minutes old; and at most a few checks at once, so
+  one place can't tie up the server's workers waiting for a turn to hash.
+* One email, from everywhere: a guesser with many addresses gets 50 wrong passwords
+  an hour at one email, then new phones wait. A phone that has signed in with that
+  email before carries a known-phone mark (app.core.security.phone_token) and isn't
+  held by this, so a crowd guessing the owner's email can't keep the owner out.
 
-A refused attempt never checks the password, so it costs no Argon2 hashing either;
-and at most a few hashes run at once (HASHING), because each takes 64 MB and a
-flood of them in parallel could starve the server of memory.
+Never a lockout: every wait ends, and the right password afterwards works as always.
+A held attempt never checks the password, so it costs no Argon2 hashing either; and
+at most a few hashes run at once (HASHING), because each takes 64 MB and a flood of
+them in parallel could starve the server of memory.
+
+The place: production sits behind a Cloudflare tunnel, so every request reaches the
+API from the tunnel's own local address; the visitor's is in CF-Connecting-IP, which
+is believed only when the request came from the tunnel (TRUSTED_PROXIES). Believed
+from anyone, a guesser would just make up a new one each time. serve.py runs uvicorn
+without its own X-Forwarded-For rewrite so this sees the real peer. An IPv6 address
+counts by its /64, the block a single home or phone is given.
 """
 from __future__ import annotations
 
+import ipaddress
+import math
 import threading
 import time
 from collections import deque
@@ -28,119 +41,246 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException, Request
 
 from app.core.config import settings
-from app.core.logging import get_logger
-
-log = get_logger(__name__)
 
 IP_WINDOW_S = 15 * 60
 IP_LIMIT = 20
-FREE_TRIES = 3  # wrong passwords for one email before any wait
+IP_AT_ONCE = 3  # password checks in progress from one place
+FREE_TRIES = 3  # wrong passwords from one place for one email before any wait
 MAX_WAIT_S = 60
-FORGET_S = 60 * 60  # an email with no wrong password for this long starts afresh
-MAX_KEYS = 10_000  # addresses and emails remembered, at most
+FORGET_S = 60 * 60  # one place, one email: this long with no wrong password starts afresh
+EMAIL_WINDOW_S = 60 * 60
+EMAIL_LIMIT = 200  # wrong passwords an hour at one email from everywhere, new phones
+MAX_KEYS = 10_000  # places and emails remembered, at most
 
 # Password checks running at once, and how long a sign-in waits for its turn.
 HASHING = threading.BoundedSemaphore(4)
-HASH_WAIT_S = 10
+HASH_WAIT_S = 5
+
+SOON_S = 2  # "try again in a few seconds"
 
 
 def client_ip(request: Request) -> str:
-    """The visitor's address: CF-Connecting-IP when the request came through the
-    tunnel (a trusted peer), else the address that connected."""
+    """The visitor's address: CF-Connecting-IP (or the last X-Forwarded-For hop) when
+    the request came through the tunnel, a trusted peer; else the address that
+    connected. From anyone else those headers are anyone's to write."""
     peer = request.client.host if request.client else ""
-    forwarded = request.headers.get("cf-connecting-ip", "").strip()
-    if forwarded:
-        if peer in settings.trusted_proxies:
+    if peer in settings.trusted_proxies:
+        forwarded = _forwarded(request)
+        if forwarded:
             return forwarded
-        log.warning("login.untrusted_forwarded_for", peer=peer)
     return peer or "unknown"
 
 
+def from_outside(request: Request) -> bool:
+    """Whether a request came from the internet: through the tunnel (or another
+    trusted proxy), or straight from a public address. The server's own network,
+    the LAN or the machine itself, is not."""
+    peer = request.client.host if request.client else ""
+    if peer in settings.trusted_proxies and _forwarded(request):
+        return True
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return addr.is_global
+
+
+def _forwarded(request: Request) -> str:
+    cf = request.headers.get("cf-connecting-ip", "").strip()
+    if cf:
+        return cf
+    hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",")]
+    return next((h for h in reversed(hops) if h), "")
+
+
+def place_of(ip: str) -> str:
+    """The key an address counts under: itself, or its /64 for IPv6."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
+
+
 def wait_for(failures: int) -> int:
-    """Seconds an email waits after `failures` wrong passwords in a row."""
+    """Seconds one place waits for an email after `failures` wrong passwords in a row."""
     if failures < FREE_TRIES:
         return 0
     return min(MAX_WAIT_S, 2 ** (failures - FREE_TRIES + 1))
 
 
 @dataclass
-class _Email:
+class _Place:
+    wrong: deque = field(default_factory=lambda: deque(maxlen=IP_LIMIT))
+    checking: int = 0
+
+
+@dataclass
+class _Pair:  # one place, one email
     failures: int = 0
     last: float = 0.0
+    checking: bool = False
+
+
+@dataclass
+class _Email:  # one email, from everywhere
+    wrong: deque = field(default_factory=lambda: deque(maxlen=EMAIL_LIMIT))
+    checking: int = 0
+
+
+class Attempt:
+    """One booked sign-in. Say how it went (`failed`, `succeeded`); left unsaid (the
+    server was busy, the database went away) it is let go and counts for nothing."""
+
+    def __init__(self, throttle: LoginThrottle, place: str, email: str) -> None:
+        self._throttle, self.place, self.email = throttle, place, email
+        self._done = False
+
+    def failed(self) -> None:
+        self._finish("wrong")
+
+    def succeeded(self) -> None:
+        self._finish("right")
+
+    def _finish(self, outcome: str) -> None:
+        if not self._done:
+            self._done = True
+            self._throttle._finish(self.place, self.email, outcome)
+
+    def __enter__(self) -> Attempt:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._finish("none")
 
 
 @dataclass
 class LoginThrottle:
     clock: Callable[[], float] = time.monotonic
-    _ips: dict[str, deque] = field(default_factory=dict)
+    _places: dict[str, _Place] = field(default_factory=dict)
+    _pairs: dict[tuple[str, str], _Pair] = field(default_factory=dict)
     _emails: dict[str, _Email] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def check(self, ip: str, email: str) -> None:
-        """Raise 429 with a Retry-After if this attempt has to wait."""
+    def attempt(self, ip: str, email: str, *, known: bool = False) -> Attempt:
+        """Book a sign-in for `email` from `ip`, or raise 429 with a Retry-After if it
+        has to wait. `known`: the phone has signed in with this email before."""
         now = self.clock()
-        with self._lock:
-            tries = self._ips.get(ip)
-            if tries:
-                while tries and now - tries[0] >= IP_WINDOW_S:
-                    tries.popleft()
-                if len(tries) >= IP_LIMIT:
-                    wait = int(IP_WINDOW_S - (now - tries[0])) + 1
-                    raise _too_many(
-                        f"Too many wrong passwords from here. Try again in {_minutes(wait)}.",
-                        wait)
-            entry = self._emails.get(email)
-            if entry is not None:
-                if now - entry.last >= FORGET_S:
-                    del self._emails[email]
-                else:
-                    wait = int(wait_for(entry.failures) - (now - entry.last) + 0.999)
-                    if wait > 0:
-                        raise _too_many(
-                            f"Too many wrong passwords for this email. Try again in "
-                            f"{wait} second{'' if wait == 1 else 's'}.", wait)
-
-    def failed(self, ip: str, email: str) -> None:
-        now = self.clock()
+        key = place_of(ip)
         with self._lock:
             self._trim(now)
-            self._ips.setdefault(ip, deque()).append(now)
-            entry = self._emails.setdefault(email, _Email())
-            entry.failures += 1
-            entry.last = now
+            place = self._places.get(key) or _Place()
+            _expire(place.wrong, now - IP_WINDOW_S)
+            if len(place.wrong) + place.checking >= IP_LIMIT:
+                wait = IP_WINDOW_S - (now - place.wrong[0]) if place.wrong else SOON_S
+                raise _too_many(
+                    f"Too many wrong passwords from here. Try again in {_minutes(wait)}.", wait)
+            if place.checking >= IP_AT_ONCE:
+                raise _too_many("Too many sign-ins from here at once. Try again in a few seconds.",
+                                SOON_S)
 
-    def succeeded(self, email: str) -> None:
+            pair = self._pairs.get((key, email))
+            if pair is not None and not pair.checking and now - pair.last >= FORGET_S:
+                del self._pairs[(key, email)]
+                pair = None
+            if pair is not None:
+                if pair.checking:
+                    raise _too_many("Still checking your last try. Try again in a few seconds.",
+                                    SOON_S)
+                wait = math.ceil(wait_for(pair.failures) - (now - pair.last))
+                if wait > 0:
+                    raise _too_many(
+                        f"Too many wrong passwords for this email. Try again in {wait} "
+                        f"second{'' if wait == 1 else 's'}.", wait)
+
+            everywhere = self._emails.get(email) or _Email()
+            _expire(everywhere.wrong, now - EMAIL_WINDOW_S)
+            if not known and len(everywhere.wrong) + everywhere.checking >= EMAIL_LIMIT:
+                wait = (EMAIL_WINDOW_S - (now - everywhere.wrong[0]) if everywhere.wrong
+                        else SOON_S)
+                raise _too_many(
+                    "Too many wrong passwords for this email lately. Try again in "
+                    f"{_minutes(wait)}, or on a phone that has signed in with it before.", wait)
+
+            place.checking += 1
+            self._places[key] = place
+            pair = pair or _Pair()
+            pair.checking = True
+            self._pairs[(key, email)] = pair
+            everywhere.checking += 1
+            self._emails[email] = everywhere
+        return Attempt(self, key, email)
+
+    def _finish(self, key: str, email: str, outcome: str) -> None:
+        now = self.clock()
+        wrong = outcome == "wrong"
         with self._lock:
-            self._emails.pop(email, None)
+            place = self._places.setdefault(key, _Place()) if wrong else self._places.get(key)
+            if place is not None:
+                place.checking = max(0, place.checking - 1)
+                if wrong:
+                    place.wrong.append(now)
+            pair = (self._pairs.setdefault((key, email), _Pair()) if wrong
+                    else self._pairs.get((key, email)))
+            if pair is not None:
+                pair.checking = False
+                if wrong:
+                    pair.failures += 1
+                    pair.last = now
+                elif outcome == "right":
+                    del self._pairs[(key, email)]
+            everywhere = (self._emails.setdefault(email, _Email()) if wrong
+                          else self._emails.get(email))
+            if everywhere is not None:
+                everywhere.checking = max(0, everywhere.checking - 1)
+                if wrong:
+                    everywhere.wrong.append(now)
 
     def reset(self) -> None:
         with self._lock:
-            self._ips.clear()
+            self._places.clear()
+            self._pairs.clear()
             self._emails.clear()
 
     def _trim(self, now: float) -> None:
         """Forget old entries once there are many, so a flood of made-up emails and
-        addresses can't grow this without end."""
-        if len(self._ips) + len(self._emails) < MAX_KEYS:
+        addresses can't grow this without end. Nothing being checked is forgotten."""
+        if len(self._places) + len(self._pairs) + len(self._emails) < MAX_KEYS:
             return
-        for ip in [k for k, v in self._ips.items() if not v or now - v[-1] >= IP_WINDOW_S]:
-            del self._ips[ip]
-        for email in [k for k, v in self._emails.items() if now - v.last >= FORGET_S]:
-            del self._emails[email]
+        for k in [k for k, v in self._places.items()
+                  if not v.checking and (not v.wrong or now - v.wrong[-1] >= IP_WINDOW_S)]:
+            del self._places[k]
+        for k in [k for k, v in self._pairs.items() if not v.checking and now - v.last >= FORGET_S]:
+            del self._pairs[k]
+        for k in [k for k, v in self._emails.items()
+                  if not v.checking and (not v.wrong or now - v.wrong[-1] >= EMAIL_WINDOW_S)]:
+            del self._emails[k]
         # Still full of fresh ones: drop the oldest half rather than grow.
-        for store in (self._ips, self._emails):
-            if len(store) >= MAX_KEYS // 2:
-                for key in list(store)[: len(store) // 2]:
-                    del store[key]
+        for store in (self._places, self._pairs, self._emails):
+            if len(store) >= MAX_KEYS // 3:
+                idle = [k for k, v in store.items() if not v.checking]
+                for k in idle[: len(store) // 2]:
+                    del store[k]
 
 
-def _minutes(seconds: int) -> str:
-    m = max(1, (seconds + 59) // 60)
+def _expire(times: deque, before: float) -> None:
+    while times and times[0] <= before:
+        times.popleft()
+
+
+def _minutes(seconds: float) -> str:
+    m = max(1, math.ceil(seconds / 60))
     return f"{m} minute{'' if m == 1 else 's'}"
 
 
-def _too_many(detail: str, wait: int) -> HTTPException:
-    return HTTPException(429, detail, headers={"Retry-After": str(max(1, wait))})
+def _too_many(detail: str, wait: float) -> HTTPException:
+    return HTTPException(429, detail, headers={"Retry-After": str(max(1, math.ceil(wait)))})
 
 
 throttle = LoginThrottle()

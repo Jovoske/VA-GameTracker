@@ -8,15 +8,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import IMAGE_TOKEN_HEADER, get_current_user
-from app.api.throttle import HASH_WAIT_S, HASHING, client_ip, throttle
+from app.api.throttle import HASH_WAIT_S, HASHING, client_ip, from_outside, throttle
 from app.core.db import get_db
 from app.core.security import (
     hash_password,
     image_token,
+    known_phone,
     pass_expiry,
+    phone_token,
     session_token,
     verify_password,
 )
+from app.core.startup import PUBLISHED_PASSWORDS, development
 from app.models import User
 from app.schemas import LoginRequest, TokenResponse, UserOut
 
@@ -26,6 +29,11 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 DB = Annotated[Session, Depends(get_db)]
 
 BUSY = "The server is busy. Try again in a minute."
+PUBLISHED = (
+    "That is the password published with GameSense, so it can't sign in from the internet. "
+    "Sign in on the server's own network and change it in Settings, or on the server run: "
+    "python -m app.manage set-password {email}"
+)
 
 
 @lru_cache(maxsize=1)
@@ -58,14 +66,25 @@ def find_user(db: Session, email: str) -> User | None:
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
     email = body.email.strip().lower()
-    ip = client_ip(request)
-    throttle.check(ip, email)
-    user = find_user(db, email)
-    if not check_password(body.password, user.password_hash if user else None):
-        throttle.failed(ip, email)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong email or password")
-    throttle.succeeded(email)
-    return TokenResponse(access_token=session_token(user), image_token=image_token(user))
+    known = known_phone(body.known_phone, email)
+    # Booked before the password is checked, so requests sent all at once are held
+    # like the same ones one after another (app.api.throttle).
+    with throttle.attempt(client_ip(request), email, known=known) as attempt:
+        user = find_user(db, email)
+        if not check_password(body.password, user.password_hash if user else None):
+            attempt.failed()
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong email or password")
+        # An admin on the password published with this repository is the first thing
+        # anyone would try on the public address: from the internet it doesn't sign
+        # in; on the server's own network it does, so the owner can change it there
+        # (audit H-14; the server no longer refuses to start over it).
+        if (user.role == "admin" and body.password in PUBLISHED_PASSWORDS
+                and not development() and from_outside(request)):
+            attempt.failed()
+            raise HTTPException(status.HTTP_403_FORBIDDEN, PUBLISHED.format(email=user.email))
+        attempt.succeeded()
+    return TokenResponse(access_token=session_token(user), image_token=image_token(user),
+                         known_phone=phone_token(user))
 
 
 @router.get("/me", response_model=UserOut)

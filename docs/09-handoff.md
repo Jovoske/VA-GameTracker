@@ -117,10 +117,22 @@ passwords and live rows behind it, and only one of the two could survive.
    `python -m app.manage new-secret` (from `backend\`) does all of that: a fresh
    `JWT_SECRET`, the old one kept as `PREVIOUS_JWT_SECRET`, a fresh
    `CREDENTIALS_KEY`. Everyone signs in again once; camera logins keep working.
-   `serve.py` refuses to start while `JWT_SECRET` is a published value or shorter
-   than 32 characters, or while an admin still has the published password
-   (`python -m app.manage set-password EMAIL`): the reason is in the service log.
-   Check `backend\.env` on Db01 before deploying plan item 12.
+   It keeps every secret it replaces in `PREVIOUS_JWT_SECRET` (comma-separated),
+   because a login no fetch has re-saved yet may still be under an older one.
+   `serve.py` never runs on a published or short `JWT_SECRET` (under 32
+   characters): as the service starts it does the same as `new-secret` itself and
+   says so in the service log, so a deploy never leaves the app down waiting for
+   someone to reach Db01. Everyone signs in again once. An admin still on the
+   published password is named in the service log at every start, and that password
+   doesn't sign in from the internet (through the tunnel): on the server's own
+   network (`http://db01:8090`) it does, so change it there in Settings, or run
+   `python -m app.manage set-password EMAIL`. `update.ps1` runs `serve.py check`
+   before it deploys: a version that doesn't load is rolled back, and what the new
+   one will do at start is noted in `update.log`.
+   **Before merging plan item 12:** check `JWT_SECRET` in `backend\.env` on Db01
+   (and that the service's own environment has none), and the admin password. With
+   a published secret, the first start of item 12 signs everyone out once; pick a
+   quiet hour for the merge.
 2. **`0001` runs `create_all()` against the current ORM**, so every later
    revision must be idempotent — `IF NOT EXISTS`, or an explicit no-op — or
    fresh installs break. `backend/tests/test_migrations.py` enforces this, and

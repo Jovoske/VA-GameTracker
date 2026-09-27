@@ -28,7 +28,7 @@ C: has **~24 GB free**, so 12 months of originals can't live on the laptop. Reso
 
 ## Phase 2 — Server (Linux VPS / dedicated / home server)
 
-- **Not `compose.yaml` as it stands.** It is the development stack: its ports are bound to 127.0.0.1, it runs `uvicorn --reload`, and its database and Redis use default credentials. The estate's real server is Db01, native Windows (`docs/09-handoff.md`), started by `backend/serve.py`, which refuses to start with the published `JWT_SECRET` or an admin still on the published password (`python -m app.manage new-secret` / `set-password EMAIL`). A Docker server would need its own compose file with real secrets, no published database or Redis ports, and `serve.py` rather than `--reload`.
+- **Not `compose.yaml` as it stands.** It is the development stack: its ports are bound to 127.0.0.1, it runs `uvicorn --reload`, and its database and Redis use default credentials. The estate's real server is Db01, native Windows (`docs/09-handoff.md`), started by `backend/serve.py`, which replaces a published `JWT_SECRET` as it starts and names an admin still on the published password, which then doesn't sign in from the internet (`python -m app.manage new-secret` / `set-password EMAIL`). A Docker server would need its own compose file with real secrets, no published database or Redis ports, and `serve.py` rather than `--reload`.
 - Add **Caddy** (or nginx) reverse proxy with automatic TLS; expose only 80/443.
 - **Backups:** nightly `pg_dump` + media `rsync`/snapshot to a second location; documented restore.
 - **Resourcing:** if the server has a GPU, the AI worker uses it automatically (CUDA) — same code, faster; otherwise CPU as on the laptop.

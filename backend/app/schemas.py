@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict
 class LoginRequest(BaseModel):
     email: str
     password: str
+    # The known-phone mark this phone was given at its last sign-in (TokenResponse).
+    known_phone: str | None = None
 
 
 class TokenResponse(BaseModel):
@@ -15,6 +17,9 @@ class TokenResponse(BaseModel):
     # The photo pass (app.core.security): what photo addresses carry, never the
     # sign-in itself.
     image_token: str | None = None
+    # Kept by the phone and sent with its next sign-in: a phone that has signed in
+    # with this email before isn't held up by strangers guessing it (api/throttle.py).
+    known_phone: str | None = None
 
 
 class UserOut(BaseModel):
