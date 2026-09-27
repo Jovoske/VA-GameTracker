@@ -22,6 +22,21 @@ import { api } from './api'
  */
 export type Support = { ok: true } | { ok: false; reason: string }
 
+function iosDevice(): boolean {
+  return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+}
+
+/**
+ * Pushes to this device go through Apple's push service (an iPhone or iPad, or
+ * Safari on a Mac). It sounds every push as a new banner, so the server doesn't send
+ * it the quiet updates inside the two-hour cooldown (notifications/push.py, apple),
+ * and Settings says where the running total is instead.
+ */
+export function applePush(): boolean {
+  const ua = navigator.userAgent
+  return iosDevice() || (/Macintosh/.test(ua) && /Safari\//.test(ua) && !/Chrome|Chromium|Edg|Firefox/.test(ua))
+}
+
 export function pushSupport(): Support {
   if (!window.isSecureContext) {
     return {
@@ -29,9 +44,7 @@ export function pushSupport(): Support {
       reason: 'Notifications need an https connection. Open the app at its https address, not the LAN one.',
     }
   }
-  const ua = navigator.userAgent
-  const ios =
-    /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  const ios = iosDevice()
   const standalone =
     window.matchMedia?.('(display-mode: standalone)').matches ||
     (navigator as Navigator & { standalone?: boolean }).standalone === true

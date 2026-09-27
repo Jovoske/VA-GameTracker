@@ -268,36 +268,56 @@ def feed(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """What this user has been sent, newest first — the record behind every push."""
+    """What this user has been sent, newest first — the record behind every push.
+
+    A quiet update inside the two-hour cooldown is not listed on its own: it is shown
+    as the alert it updates, with the latest running total and how many updates there
+    were. One sounder all night used to fill the list with near-identical rows and
+    push the plan and the team's notes out of view.
+    """
+    update_of = Notification.detail["update_of"].astext
     rows = db.scalars(
         select(Notification)
-        .where(Notification.user_id == user.id)
+        .where(Notification.user_id == user.id, update_of.is_(None))
         .order_by(Notification.created_at.desc())
         .limit(limit)
     ).all()
+    latest: dict[str, Notification] = {}
+    count: dict[str, int] = {}
+    if rows:
+        for u in db.scalars(
+            select(Notification)
+            .where(Notification.user_id == user.id, update_of.in_([str(n.id) for n in rows]))
+            .order_by(Notification.created_at)
+        ).all():
+            key = u.detail["update_of"]
+            latest[key] = u
+            count[key] = count.get(key, 0) + 1
     unread = db.scalar(
         select(func.count(Notification.id)).where(
             Notification.user_id == user.id, Notification.read_at.is_(None)
         )
     ) or 0
-    return {
-        "unread": int(unread),
-        "items": [
-            {
-                "id": str(n.id),
-                "kind": n.kind,
-                "title": n.title,
-                "body": n.body,
-                "url": n.url,
-                "species_id": n.species_id,
-                "image_id": str(n.image_id) if n.image_id else None,
-                "push_status": n.push_status,
-                "created_at": n.created_at,
-                "read_at": n.read_at,
-            }
-            for n in rows
-        ],
-    }
+
+    def item(n: Notification) -> dict:
+        last = latest.get(str(n.id), n)
+        return {
+            "id": str(n.id),
+            "kind": n.kind,
+            "title": last.title,
+            "body": last.body,
+            "url": last.url,
+            "species_id": n.species_id,
+            "image_id": str(last.image_id) if last.image_id else None,
+            "push_status": n.push_status,
+            "created_at": n.created_at,
+            "read_at": n.read_at,
+            # Quiet updates folded into this alert, and when the last one was.
+            "updates": count.get(str(n.id), 0),
+            "updated_at": last.created_at if last is not n else None,
+        }
+
+    return {"unread": int(unread), "items": [item(n) for n in rows]}
 
 
 @router.post("/read")

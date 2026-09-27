@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -41,17 +42,38 @@ def _expired(s: PushSubscription, now: datetime) -> bool:
     return last is None or now - last > EXPIRE_AFTER
 
 
-def send_to_user(db: Session, user_id: uuid.UUID, payload: dict) -> dict:
+def apple(endpoint: str) -> bool:
+    """An iPhone or iPad (or Safari on a Mac): Apple's push service.
+
+    Safari shows every push as a new banner that sounds: it ignores `renotify`,
+    `silent` and `tag` (MDN browser-compat-data, api/Notification.json), so a quiet
+    update of a banner already on the phone is not a thing it can do.
+    """
+    host = (urlsplit(endpoint).hostname or "").lower()
+    return host == "push.apple.com" or host.endswith(".push.apple.com")
+
+
+def send_to_user(db: Session, user_id: uuid.UUID, payload: dict, quiet: bool = False) -> dict:
     """Push `payload` (title/body/url/tag, and renotify/silent) to each of the user's
     devices. The service worker buzzes again for a replaced banner only when the
     payload says `renotify` (sw.js).
 
-    Returns counts: sent, failed, removed, subscriptions (how many it started with).
+    `quiet`: a quiet update of the banner already on the phone. It goes to phones
+    that can update a banner without a sound, and not to Apple's (apple()), where it
+    would buzz as a new alert every 15 minutes all night (audit K-06): an iPhone gets
+    the buzz once per animal per cooldown, and the running total is in Recent.
+
+    Returns counts: sent, failed, removed, subscriptions (how many it started with),
+    and skipped (the Apple phones a quiet update left out).
     """
     subs = db.scalars(
         select(PushSubscription).where(PushSubscription.user_id == user_id)
     ).all()
-    out = {"sent": 0, "failed": 0, "removed": 0, "subscriptions": len(subs)}
+    out = {"sent": 0, "failed": 0, "removed": 0, "subscriptions": len(subs), "skipped": 0}
+    if quiet:
+        keep = [s for s in subs if not apple(s.endpoint)]
+        out["skipped"] = len(subs) - len(keep)
+        subs = keep
     if not subs:
         return out
 
@@ -107,7 +129,9 @@ def send_to_user(db: Session, user_id: uuid.UUID, payload: dict) -> dict:
 def delivery(result: dict, sent: str = "sent") -> str:
     """What the record says about a send_to_user() result: `sent` (or the word given
     for a quiet update), no_subscription when the person has no phone set up for
-    alerts, failed when every phone they have refused it."""
-    if result["sent"]:
+    alerts, failed when every phone they have refused it. A quiet update that only
+    had iPhones to go to, and so went to none on purpose, is still `sent`'s word:
+    it counts in the running total like any other."""
+    if result["sent"] or (result.get("skipped") and not result.get("failed")):
         return sent
     return "no_subscription" if result["subscriptions"] == 0 else "failed"

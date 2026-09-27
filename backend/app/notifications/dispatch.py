@@ -17,9 +17,15 @@ Guards keep this an alert rather than a firehose:
     at the feeder used to buzz the phone every 15 minutes all night (audit K-06).
     Inside the cooldown the push still goes, as a quiet update of the banner already
     on the phone with the running total ("4 visits since 00:55, last one 02:40."):
-    nothing is hidden, nothing wakes anyone;
+    nothing is hidden, nothing wakes anyone. Not to an iPhone: Safari sounds every
+    push as a new alert whatever it says (push.apple), so an iPhone gets the buzz
+    alone, and the running total is in Recent in Settings, where each update is
+    folded into the alert it updates (its detail names it, "update_of");
   * nothing is pushed while the person is sitting or inside their quiet hours: it
-    waits, and goes out as one message after (app.notifications.hold).
+    waits, and goes out as one message after (app.notifications.hold). When that is
+    over and the first new sighting comes in before the notify run has sent the
+    message, the message goes first and counts as the buzz, so the hunter isn't
+    buzzed twice about one animal minutes apart.
 
 It counts visits, as every other screen does: frames of one species at one camera
 within VISIT_GAP of each other are one visit, so a burst of three frames of one
@@ -129,9 +135,12 @@ class SpeciesDigest:
         return sum(self.cameras.values())
 
     def tally(self) -> dict:
-        """What this run counted, kept on the alert (words)."""
+        """What this run counted, kept on the alert (words). The photos are kept too,
+        so what waits for a sit or quiet hours can be checked again before it goes
+        (hold.still_there)."""
         return {
             "name": self.name, "visits": self.visits, "cameras": dict(self.cameras),
+            "images": sorted(str(i) for i in self.images),
             "spans": {c: [min(ts).isoformat(), max(ts).isoformat()]
                       for c, ts in self.frames.items()},
             "first_at": self.first_at.isoformat() if self.first_at else None,
@@ -212,21 +221,24 @@ def compose_summary(digests: list[SpeciesDigest], tz: ZoneInfo,
 
 
 def _recent_alerts(db: Session, user_id, now: datetime) -> list[Notification]:
-    """This person's sighting alerts that reached a phone inside the cooldown, oldest first."""
+    """This person's sighting alerts inside the cooldown that went out (or were meant
+    to: a quiet update a phone didn't take still counts in the running total), oldest
+    first."""
     return list(db.scalars(
         select(Notification).where(
             Notification.user_id == user_id,
             Notification.kind.in_(("sighting", "summary")),
             Notification.created_at > now - COOLDOWN,
-            Notification.push_status.in_(("sent", "updated")),
+            Notification.push_status.in_(("sent", "updated", "failed")),
         ).order_by(Notification.created_at)
     ).all())
 
 
-def _running(recent: list[Notification], key: str | None) -> list[dict] | None:
-    """The tallies since the alert that last buzzed for `key` (a species, or None for
-    the many-animals summary), that one included; None when nothing buzzed for it
-    inside the cooldown."""
+def _running(recent: list[Notification], key: str | None
+             ) -> tuple[Notification, list[dict]] | None:
+    """The alert that last buzzed for `key` (a species, or None for the many-animals
+    summary) inside the cooldown, and the tallies since, its own included; None when
+    nothing buzzed for it."""
     def about(n: Notification) -> bool:
         if key is None:
             return n.kind == "sighting" and n.species_id is None
@@ -239,8 +251,9 @@ def _running(recent: list[Notification], key: str | None) -> list[dict] | None:
     if loud is None:
         return None
     if key is None:
-        return []
-    return [words.tallies_of(n.species_id, n.detail)[key] for n in recent[loud:] if about(n)]
+        return recent[loud], []
+    return recent[loud], [words.tallies_of(n.species_id, n.detail)[key]
+                          for n in recent[loud:] if about(n)]
 
 
 def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
@@ -286,6 +299,7 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
             select(NotificationPref).where(NotificationPref.enabled.is_(True))
         ).all()
         on = hold.sitting(db, now, [p.user_id for p in prefs])
+        news: dict = {}
         for pref in prefs:
             wanted_ids = set(pref.species_ids or [])
             muted = set(pref.muted_camera_ids or [])
@@ -293,34 +307,56 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
             digests = group_by_species(
                 r[:5] for r in rows if r[0] in wanted_ids and str(r[5]) not in muted
             )
-            wanted = list(digests.values())
+            if digests:
+                news[pref.user_id] = list(digests.values())
+        # A sit or quiet hours just over, and the message about them not sent yet
+        # (the notify run sends it within 15 minutes): it goes now, before anything
+        # new, and is the buzz for the animals it names, so what this check saw of
+        # them is a quiet update rather than a second buzz minutes later. Sent before
+        # any row of this run is written, as it commits.
+        done = [p.user_id for p in prefs if p.user_id in news
+                and not hold.reason(p, p.user_id, now, on) and hold.has_held(db, p.user_id)]
+        if done:
+            hold.deliver_held(db, now, user_ids=done)
+        for pref in prefs:
+            wanted = news.get(pref.user_id)
             if not wanted:
                 continue
             wanted.sort(key=lambda d: d.latest_at or now, reverse=True)
             why = hold.reason(pref, pref.user_id, now, on)
             recent = [] if why else _recent_alerts(db, pref.user_id, now)
 
-            # (record, push payload flags)
+            # (record, whether it buzzes)
             notes: list[tuple[Notification, bool]] = []
             if len(wanted) > MAX_PER_USER:
                 title, body = compose_summary(wanted, tz, now)
-                loud = _running(recent, None) is None
+                running = _running(recent, None)
+                detail = {"species": {d.species_id: d.tally() for d in wanted}}
+                if running is not None:
+                    detail["update_of"] = str(running[0].id)
                 notes.append((Notification(
                     user_id=pref.user_id, kind="sighting", title=title, body=body,
                     url=summary_url([d.species_id for d in wanted]), created_at=now,
-                    detail={"species": {d.species_id: d.tally() for d in wanted}},
-                ), loud))
+                    detail=detail,
+                ), running is None))
             else:
                 for d in wanted:
                     title, body = compose(d, tz, now)
+                    detail = d.tally()
                     running = _running(recent, d.species_id)
                     if running is not None:
-                        title, body = compose_update(words.merge([*running, d.tally()]), tz, now)
+                        loud_row, tallies = running
+                        title, body = compose_update(words.merge([*tallies, detail]), tz, now)
+                        # Recent shows it as the alert it updates (routes_notifications),
+                        # when that alert is about this animal alone: not one that
+                        # named several, whose words it would take the place of.
+                        if loud_row.kind == "sighting" and loud_row.species_id == d.species_id:
+                            detail["update_of"] = str(loud_row.id)
                     notes.append((Notification(
                         user_id=pref.user_id, kind="sighting", title=title, body=body,
                         url=sighting_url(d.species_id, d.latest_image_id, d.latest_at),
                         species_id=d.species_id, image_id=d.latest_image_id,
-                        created_at=now, detail=d.tally(),
+                        created_at=now, detail=detail,
                     ), running is None))
             if why:
                 # In a stand, or quiet hours: kept, and sent as one message after.
@@ -343,7 +379,7 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
                     "tag": f"sighting-{n.species_id or 'summary'}",
                     "renotify": loud, "silent": not loud,
                     "at": now.isoformat(),
-                })
+                }, quiet=not loud)
                 n.push_status = push.delivery(result, sent="sent" if loud else "updated")
                 pushed += result["sent"]
                 quiet += 0 if loud else result["sent"]

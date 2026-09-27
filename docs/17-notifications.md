@@ -17,28 +17,38 @@ animals they hear about from **Settings → Notifications**.
 - **Tonight's plan before sunset** — opt-in: one push a day, about two hours
   before sunset, with the whole plan on the lock screen:
   "▲ Charca · wind right · sunset 19:56" / "Best odds. Wild boar, best 20:40 to
-  22:10." Every day, quiet nights too. See *Tonight's plan* below.
+  22:10." Every day, quiet nights too. See *Tonight's plan* below. It comes
+  through Alerts, so turning it on while Alerts are off turns Alerts on too, from
+  the same tap (permission asked, this phone subscribed), and says so: "Alerts are
+  on too; the plan comes with them. Switch off any animal below you don't want."
 - **Notify me about** — one switch per species, most-seen first. Defaults to the
   priority species (boar, red/roe/fallow deer, fox, mouflon, ibex, badger).
 - **Quiet hours** — optional, on the estate's clock (23:00 to 07:00 to start;
   either time can be changed, and they may run over midnight). Nothing buzzes
   inside them; what comes in waits and arrives as **one message** when they end
   ("During your quiet hours" / "Wild boar 3 visits and Red deer 1 visit, last one
-  04:10.").
+  04:10 last night."). If the photo check finds something new before the notify
+  run has sent that message, the message goes first and is the buzz: the new
+  sighting of the same animal is then a quiet update, not a second buzz.
 - **While you sit** — nothing buzzes from Start sit to End sit, whatever the
   settings: a phone lighting up in the high seat is the worst thing it can do.
   What came in arrives as one message ("While you sat") the moment END SIT is
   tapped; a sit nobody ended stops holding when it stops being on (06:00, or 12
   hours after it started), and the message goes on the next `notify` run.
 - **Send a test** — pushes a test message to every device they have subscribed.
-- **Recent** — the last few notifications, with how each one went: "quiet update",
-  "waiting", "in one message", "not sent", and "no device" / "not delivered" when
-  push did not reach anything. This is how a quiet night is told apart from a
-  broken subscription.
+- **Recent** — the last few notifications, with how each one went: "waiting", "in
+  one message", "not sent", and "no device" / "not delivered" when push did not
+  reach anything. This is how a quiet night is told apart from a broken
+  subscription. Quiet updates are not listed on their own: an alert shows its
+  latest running total and "2 quiet updates", so one sounder all night is one row
+  per buzz and the plan and team notes stay in view.
 
 The animal switches, quiet hours and the plan switch save a moment after the last
 tap, one save at a time; the screen says "Saving…" and then "Saved." under what
-changed, or, if a save fails, shows what the server has and says why.
+changed, or, if a save fails, shows what the server has and says why. With no
+signal the server can't be asked either: the switches go back to the last copy the
+server confirmed (on opening, or at the last save that went through), so the
+screen never shows a choice that wasn't saved.
 
 - **Cameras** — one switch per camera, all on to start. Muting one (the busy
   feeder) stops every alert from it for that person only; the rest of the team
@@ -59,7 +69,12 @@ all of them.
 ### iPhone
 
 Safari only delivers web push to an app installed on the Home Screen (iOS 16.4+),
-never to a tab. The settings card says so when it detects Safari-in-a-tab, and the
+never to a tab. It also shows every push as a new banner that sounds: it ignores
+`renotify`, `silent` and `tag` (MDN browser-compat-data). So an iPhone is not sent
+the quiet updates inside the two-hour cooldown (`push.apple()` spots Apple's push
+service, `web.push.apple.com`): it gets the buzz, once per animal per two hours,
+and the running total is in Recent. Settings says so on an iPhone ("One buzz per
+animal every two hours. On an iPhone the count goes on in Recent below."). The settings card says so when it detects Safari-in-a-tab, and the
 switch does the account half regardless, so the device can be subscribed later from
 the installed app. Push also needs a secure origin, so it works at
 `https://gamesense.daa-ops.com` and not at `http://db01:8090`.
@@ -97,14 +112,26 @@ fresh install has a season of photos and none of them are news.
   all night. Inside the two hours the push still goes, as a quiet update of the
   banner already on the phone (`renotify: false, silent: true`, same tag), with
   the running total since the buzz: "Wild boar at PL19" / "3 visits since 00:55,
-  last one 02:40." Each alert keeps what it counted (`notifications.detail`), and
-  a boar that stayed across two checks is one visit, not two;
+  last one 02:40." Not to an iPhone, which would sound it (see *iPhone*). Each
+  alert keeps what it counted (`notifications.detail`: visits, cameras, first and
+  last frame, the photos), a quiet update names the alert it updates
+  (`detail.update_of`), and a boar that stayed across two checks is one visit, not
+  two;
 - nothing is pushed while the person is sitting or inside their quiet hours: the
   record is kept as `held` and goes out as one message after
   (`app/notifications/hold.py`). Team notes ("Worth a look") wait the same way.
+  The message is about what is still there when it goes: each held alert kept its
+  photos, and they are looked up again under the rules every screen uses, so a
+  photo marked "nothing in it" while it waited, an animal hidden or no longer
+  picked, or a camera muted since, is left out and the visits counted again. If
+  nothing is left, no message goes (the records say `withdrawn`, "not sent" in
+  Recent).
 
-**The day in the text.** A time from an earlier day says so: an alert about a boar
-at 23:50 read the next morning says "1 visit at 23:50 yesterday.", not "23:50".
+**The day in the text.** The day goes by the night, as every screen counts nights
+(06:00 to 06:00), not by the calendar. A boar at 23:50 told of at 00:30 is the same
+night and says only "23:50"; read the next morning it says "1 visit at 23:50 last
+night." (one seen in daylight the day before, "yesterday"), and anything older has
+its date, "23:50 on Thu 24 Sep".
 
 **The photo's time in the link.** A sighting's link is
 `/photos?species=wild_boar&image=<id>&at=<captured_at>`. Photos opens the photo if
@@ -150,7 +177,10 @@ two hours before tonight's sunset, never after sunset, once per person per night
 (`app/notifications/plan.py`). Task Scheduler can't start a job at sunset, which
 moves by three hours over the season, hence the 15-minute run. The run writes a
 `plan` row per person and night under a per-night lock before pushing anything, so
-two runs at once can't both send it.
+two runs at once can't both send it. A send that reached no phone (`failed` or
+`no_subscription`: the server's internet down for a moment, or a phone whose copy
+was lost and not yet put back by the app) is tried again by the next run until
+sunset, on the same row (`detail.tries`).
 
 It reads the plan on record for tonight, the claim the 17:00 `plan` run writes (the
 one scored tomorrow): the top camera by verdict and odds, its animal and best hours.
@@ -184,7 +214,7 @@ Migration `0029_quiet_alerts_and_plan_push` adds `notification_prefs.quiet_start
 everyone until they turn it on) and `notifications.detail` (JSON: what a sighting
 counted, why one was held, a plan's night). `kind` gains `summary` (the one message
 after a sit or quiet hours) and `plan`; `push_status` gains `updated`, `held`,
-`in_summary` and `skipped`.
+`in_summary`, `skipped` and `withdrawn`.
 
 ## API
 
@@ -197,7 +227,7 @@ All per-user, any role.
 | `PUT /api/notifications/cameras/{id}` | `{alerts}`: one camera on or muted, for you; answers with `enabled` too |
 | `POST /api/notifications/subscriptions` | register this browser's `PushSubscription.toJSON()` (again on every app open); answers with the device count, the server's key and whether alerts are on |
 | `DELETE /api/notifications/subscriptions` | `{endpoint}` |
-| `GET /api/notifications?limit=` | the user's feed, newest first, with unread count |
+| `GET /api/notifications?limit=` | the user's feed, newest first, with unread count; quiet updates folded into the alert they update (`updates`, `updated_at`, and its latest title and body) |
 | `POST /api/notifications/read` | mark all read |
 | `POST /api/notifications/test` | push a test to the user's devices |
 

@@ -9,20 +9,15 @@ filtered by what each person asked to hear about.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.forecasting.exposure import current_night, night_key_start
+from app.forecasting.changes import quiet_cameras, usual
+from app.forecasting.exposure import current_night
 from app.forecasting.model import sentence_case
-from app.models import Camera, CameraNight, Species
-
-# A camera with at least this many visits in the last month is "usually busy", and
-# this many watched nights in a row without one is worth a look.
-QUIET_USUAL_VISITS = 15
-QUIET_NIGHTS = 3
-QUIET_LOOKBACK = 30
+from app.models import Camera, Species
 
 
 def _ago(dt: datetime | None, now: datetime) -> str:
@@ -49,7 +44,7 @@ def _dur(dt: datetime, now: datetime) -> str:
 def compute_alerts(db: Session) -> list[dict]:
     from app.forecasting.visits import visit_rows
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     alerts: list[dict] = []
     # A retired camera is in a drawer: nothing it did or didn't see is news.
     cams = db.scalars(select(Camera).where(Camera.retired_at.is_(None))).all()
@@ -92,45 +87,23 @@ def compute_alerts(db: Session) -> list[dict]:
 
     # 3. Pattern break: a usually-busy camera whose last few WATCHED nights had no
     # visit. Only a night the camera was demonstrably watching counts as quiet, so a
-    # flat battery or a backlog of unchecked photos is never "the animals left".
-    tonight = current_night(now)
-    since = tonight - timedelta(days=QUIET_LOOKBACK)
-    watched: dict = {}
-    for cam_id, night in db.execute(
-        select(CameraNight.camera_id, CameraNight.night).where(
-            CameraNight.camera_id.in_(cam_ids), CameraNight.night >= since,
-            CameraNight.night < tonight,
-            CameraNight.exposure_state.in_(("CONFIRMED", "PRESUMED_UP")),
-        )
-    ).all():
-        watched.setdefault(cam_id, set()).add(night)
-    recent = visit_rows(start=night_key_start(since - timedelta(days=1)),
-                        end=night_key_start(tonight), camera_ids=cam_ids)
-    busy = db.execute(
-        select(recent.c.camera_id, recent.c.night, func.count())
-        .where(recent.c.night >= since)
-        .group_by(recent.c.camera_id, recent.c.night)
-    ).all()
-    per_camera: dict = {}
-    for cam_id, night, n in busy:
-        per_camera.setdefault(cam_id, {})[night] = int(n)
+    # flat battery or a backlog of unchecked photos is never "the animals left". The
+    # rule is the Changed line's own (changes.quiet_cameras): it used to be a total
+    # over the month here and a nightly median there, so Tonight could say "Nothing
+    # changed" beside "Puente quiet" (G-23).
+    quiet = quiet_cameras(db, tonight=current_night(now))
     for c in cams:
-        nights = per_camera.get(c.id, {})
-        if not c.active or sum(nights.values()) < QUIET_USUAL_VISITS:
+        q = quiet.get(c.id)
+        if q is None:
             continue
-        run = 0
-        for night in sorted(watched.get(c.id, set()), reverse=True):
-            if nights.get(night):
-                break
-            run += 1
-        if run >= QUIET_NIGHTS:
-            last = max(nights)
-            # `camera` lets Tonight leave it out when its "Changed" line is already
-            # about this camera, rather than say it twice (or the opposite).
-            alerts.append({
-                "type": "quiet", "severity": "warn", "title": f"{c.name} quiet", "camera": c.name,
-                "text": f"Nothing on its last {run} watched nights, since the night of "
-                        f"{last.day} {last.strftime('%b')}. This camera usually sees more.",
-            })
+        last = q["last_seen"]
+        since = f", since the night of {last.day} {last.strftime('%b')}" if last else ""
+        # `camera` lets Tonight leave it out when its "Changed" line is already
+        # about this camera, rather than say it twice.
+        alerts.append({
+            "type": "quiet", "severity": "warn", "title": f"{c.name} quiet", "camera": c.name,
+            "text": f"Nothing on its last {q['silent']} watched nights{since}. "
+                    f"It usually sees {usual(q['usual'])} a night.",
+        })
 
     return alerts

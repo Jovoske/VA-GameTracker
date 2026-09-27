@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { ageLabel, api } from '../api'
 import {
   type DeviceState,
+  applePush,
   askPermission,
   checkThisDevice,
   permission,
@@ -29,7 +30,7 @@ type Settings = {
 }
 /** What PUT /notifications/settings takes, and answers with what it saved. */
 type Changes = { species_ids?: string[]; quiet?: boolean; quiet_start?: string; quiet_end?: string; plan_push?: boolean }
-type Saved = { species_ids: string[]; quiet_start: string | null; quiet_end: string | null; plan_push: boolean }
+type Saved = { enabled: boolean; species_ids: string[]; quiet_start: string | null; quiet_end: string | null; plan_push: boolean }
 type NotifRow = {
   id: string
   kind: string
@@ -39,6 +40,9 @@ type NotifRow = {
   push_status: string | null
   created_at: string
   read_at: string | null
+  /** Quiet updates folded into this alert (its title and body are the latest one's). */
+  updates?: number
+  updated_at?: string | null
 }
 type Feed = { unread: number; items: NotifRow[] }
 type Device = 'checking' | DeviceState
@@ -77,6 +81,7 @@ const DELIVERY: Record<string, { text: string; warn?: boolean; why: string }> = 
   held: { text: 'waiting', why: 'Held while you sit or during your quiet hours. It comes in one message after.' },
   in_summary: { text: 'in one message', why: 'Sent in the one message after your sit or quiet hours.' },
   skipped: { text: 'not sent', why: 'Not sent: you were sitting, in your quiet hours, or alerts were off.' },
+  withdrawn: { text: 'not sent', why: 'Not sent: by the time it could go, the photo was marked “nothing in it”, or the animal hidden or switched off.' },
   no_subscription: { text: 'no device', warn: true, why: 'No phone was set up to get alerts.' },
   failed: { text: 'not delivered', warn: true, why: 'The phone didn’t take it.' },
 }
@@ -87,6 +92,14 @@ function camerasHint(cameras: { alerts: boolean }[]): string {
   if (on === cameras.length) return 'Every camera is on. Mute a busy one, like a feeder, and you hear nothing from it. Only for you.'
   if (on === 0) return 'Every camera is muted, so you hear nothing from any of them. Only for you: the team still hears.'
   return `${on} of ${cameras.length} cameras on. A muted one sends you nothing; the team still hears from it. Only for you.`
+}
+
+/** Where the count goes while an animal stays: an iPhone buzzes for every push, so it
+ *  only gets the buzz (the server leaves it out of the quiet updates). */
+function rhythmHint(): string {
+  return applePush()
+    ? 'A message when a camera catches an animal you picked. One buzz per animal every two hours. On an iPhone, the count while it stays goes on in Recent below.'
+    : 'A message when a camera catches an animal you picked. One buzz per animal every two hours: if it stays, the same alert updates quietly.'
 }
 
 function failWords(e: unknown): string {
@@ -113,7 +126,13 @@ function failWords(e: unknown): string {
  * the last tap, one save at a time: quick taps used to cross on the way and leave the
  * server with a different list from the screen (audit D-14, I-14). When a save is
  * back the screen says so; when one fails it shows what the server has and says so,
- * rather than putting back a copy from before the tap.
+ * rather than putting back a copy from before the tap. With no signal the server
+ * can't be asked either, so the switches go back to the last copy it confirmed (on
+ * opening, or at the last save that went through): never a choice that wasn't saved.
+ *
+ * The plan comes through Alerts: turning it on with Alerts off turns Alerts on from
+ * the same tap, as the Alerts switch does, and says so. It used to say "Saved." and
+ * never come.
  */
 export default function NotificationSettings() {
   const [s, setS] = useState<Settings | null>(null)
@@ -134,16 +153,41 @@ export default function NotificationSettings() {
   const sending = useRef(false)
   const timer = useRef(0)
   const alive = useRef(true)
+  // What the server last said it has: from the last read, or the last save that
+  // went through. What a failed save goes back to when the server can't be asked.
+  const confirmed = useRef<Settings | null>(null)
 
   async function refreshSettings(): Promise<Settings | null> {
     try {
       const next = await api<Settings>('/notifications/settings')
+      confirmed.current = next
       if (alive.current) setS(next)
       return next
     } catch (e) {
       if (alive.current) setLoadErr((e as Error).message)
       return null
     }
+  }
+
+  /** A save went through: the server's copy, as it answered. */
+  function confirm(saved: Saved): Settings | null {
+    const cur = confirmed.current
+    if (!cur) return null
+    confirmed.current = {
+      ...cur,
+      enabled: saved.enabled,
+      species: cur.species.map((x) => ({ ...x, selected: saved.species_ids.includes(x.id) })),
+      quiet_start: saved.quiet_start, quiet_end: saved.quiet_end, plan_push: saved.plan_push,
+    }
+    return confirmed.current
+  }
+
+  /** After a failed save: the switches show what the server has, asked again, or with
+   *  no signal the last copy it confirmed. True when the server could be asked. */
+  async function showSaved(): Promise<boolean> {
+    const fresh = await refreshSettings()
+    if (!fresh && alive.current && confirmed.current) setS(confirmed.current)
+    return !!fresh
   }
 
   async function refreshFeed() {
@@ -216,6 +260,7 @@ export default function NotificationSettings() {
         void send()
         return
       }
+      confirm(saved)
       if (!alive.current) return
       // The server's copy is what the screen shows from here.
       setS((cur) => cur && {
@@ -229,16 +274,17 @@ export default function NotificationSettings() {
       // What the server has wins over any tap still waiting: the screen shows it.
       want.current = {}
       window.clearTimeout(timer.current)
-      const fresh = await refreshSettings()
+      const asked = await showSaved()
       if (!alive.current) return
       setSaid({
         part, err: true,
-        text: `${failWords(e)} ${fresh ? 'The switches show what is saved.' : 'Open this again when you have signal.'}`,
+        text: `${failWords(e)} ${asked ? 'The switches show what is saved.' : 'The switches show what was saved last.'}`,
       })
     }
   }
 
-  async function setEnabled(next: boolean) {
+  /** The Alerts switch; `withPlan` when the plan switch turned Alerts on with it. */
+  async function setEnabled(next: boolean, withPlan = false) {
     if (!s) return
     // Asked first, straight from the tap: an iPhone shows the prompt only while the
     // tap is fresh, and the save below can take a while on one bar (audit D-19).
@@ -246,9 +292,19 @@ export default function NotificationSettings() {
     asked?.catch(() => {})
     setBusy(true)
     setMsg('')
-    setS({ ...s, enabled: next })
+    setS({ ...s, enabled: next, plan_push: withPlan || s.plan_push })
+    if (withPlan) setSaid({ part: 'plan', text: 'Saving…', err: false })
+    let saved = false
     try {
-      await api('/notifications/settings', { method: 'PUT', body: JSON.stringify({ enabled: next }), timeoutMs: 20_000 })
+      const changes = withPlan ? { enabled: next, plan_push: true } : { enabled: next }
+      confirm(await api<Saved>('/notifications/settings', { method: 'PUT', body: JSON.stringify(changes), timeoutMs: 20_000 }))
+      saved = true
+      if (withPlan) {
+        setSaid({
+          part: 'plan', err: false,
+          text: 'Saved. Alerts are on too: the plan comes with them. Switch off any animal below you don’t want to hear about.',
+        })
+      }
       if (next) {
         if (support.ok) {
           await subscribeThisDevice(s.public_key, asked)
@@ -260,9 +316,11 @@ export default function NotificationSettings() {
         setDevice('not_subscribed')
       }
     } catch (e) {
-      setMsg((e as Error).message)
+      if (withPlan && !saved) setSaid({ part: 'plan', err: true, text: failWords(e) })
+      else setMsg(saved ? (e as Error).message : failWords(e))
     }
-    await refreshSettings()
+    if (saved) await refreshSettings()
+    else await showSaved()
     setBusy(false)
   }
 
@@ -305,6 +363,8 @@ export default function NotificationSettings() {
   function setPlan(on: boolean) {
     const cur = sRef.current
     if (!cur) return
+    // The plan is sent to people with Alerts on: turning it on turns Alerts on too.
+    if (on && !cur.enabled) return void setEnabled(true, true)
     setS({ ...cur, plan_push: on })
     save('plan', { plan_push: on })
   }
@@ -354,7 +414,7 @@ export default function NotificationSettings() {
   return (
     <SettingsSection id="notifications" title="Alerts on my phone"
       summary={s && s.species.length > 0 ? `${selected} of ${s.species.length} animals` : undefined}>
-      <p className="settings-hint">A message when a camera catches an animal you picked. One buzz per animal every two hours: if it stays, the same alert updates quietly.</p>
+      <p className="settings-hint">{rhythmHint()}</p>
 
       {loadErr && !s ? (
         <div role="alert" style={{ fontSize: 13, color: 'var(--skip)', padding: '8px 0' }}>
@@ -381,8 +441,10 @@ export default function NotificationSettings() {
             </div>
           )}
 
-          <SwitchRow label="Tonight's plan before sunset" on={s.plan_push} onChange={setPlan}
-            note="One message a day, about 2 hours before sunset: where, the wind and sunset. Quiet nights too." />
+          <SwitchRow label="Tonight's plan before sunset" on={s.enabled && s.plan_push} onChange={setPlan} disabled={busy}
+            note={s.enabled
+              ? 'One message a day, about 2 hours before sunset: where, the wind and sunset. Quiet nights too.'
+              : 'One message a day, about 2 hours before sunset. Turning it on turns Alerts on too.'} />
           {saidUnder('plan')}
 
           <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
@@ -412,9 +474,13 @@ export default function NotificationSettings() {
                   id={c.id}
                   name={c.name}
                   alerts={c.alerts}
-                  onSaved={(r) => setS((cur) => cur && {
-                    ...cur, cameras: cur.cameras.map((x) => (x.id === c.id ? { ...x, alerts: r.alerts } : x)),
-                  })}
+                  onSaved={(r) => {
+                    const mark = (cur: Settings) => ({
+                      ...cur, cameras: cur.cameras.map((x) => (x.id === c.id ? { ...x, alerts: r.alerts } : x)),
+                    })
+                    if (confirmed.current) confirmed.current = mark(confirmed.current)
+                    setS((cur) => cur && mark(cur))
+                  }}
                 />
               ))}
             </>
@@ -463,7 +529,13 @@ export default function NotificationSettings() {
                 Recent
               </div>
               {feed.items.map((n) => {
-                const how = n.push_status ? DELIVERY[n.push_status] : undefined
+                const how = n.updates
+                  ? {
+                      text: `${n.updates} quiet update${n.updates === 1 ? '' : 's'}`,
+                      why: 'The count while it stayed, without buzzing again. Not sent to an iPhone, which would buzz.',
+                      warn: false,
+                    }
+                  : n.push_status ? DELIVERY[n.push_status] : undefined
                 return (
                   <div key={n.id} style={{ ...row, alignItems: 'flex-start' }}>
                     <div style={{ minWidth: 0, flex: 1 }}>
@@ -475,7 +547,7 @@ export default function NotificationSettings() {
                       <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.4 }}>{n.body}</div>
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                      <div>{ageLabel(n.created_at)}</div>
+                      <div>{ageLabel(n.updated_at || n.created_at)}</div>
                       {how && (
                         <div title={how.why} style={{ color: how.warn ? 'var(--marginal)' : undefined }}>
                           {how.text}

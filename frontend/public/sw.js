@@ -287,8 +287,10 @@ self.addEventListener('fetch', (e) => {
 // rather than stacking under it. Whether the replacement buzzes again is the server's
 // call (`renotify`): once per animal per two hours, and a quiet update of the banner
 // in between (`silent`), so one sounder at the feeder no longer buzzes the phone every
-// 15 minutes all night (audit K-06). Anything unparseable still shows as a plain
-// notification — a push that arrived and was silently dropped is the worst outcome.
+// 15 minutes all night (audit K-06). Safari ignores all three and sounds every push,
+// so the server sends an iPhone the buzz alone. Anything unparseable still shows as a
+// plain notification — a push that arrived and was silently dropped is the worst
+// outcome. frontend/tests/sw-push.cjs checks this side.
 self.addEventListener('push', (e) => {
   let data = {}
   try {

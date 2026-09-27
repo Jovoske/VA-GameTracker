@@ -30,22 +30,29 @@ def visits(n: int) -> str:
 
 
 def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> str:
-    """"22:14", "23:50 yesterday" or "23:50 on Thu 24 Sep", on the estate's clock.
+    """"22:14", "23:50 last night" or "23:50 on Thu 24 Sep", on the estate's clock.
 
     An alert about last night read the next morning used to say only "23:50", which
-    reads as tonight (audit D-21). Without `now`, the time alone.
+    reads as tonight (audit D-21). The day goes by the night, as every screen counts
+    them (exposure.current_night, 06:00 to 06:00), not by the calendar: a boar at
+    23:50 told of at 00:30 is tonight's and says only "23:50". A photo from the night
+    before is "last night" (or "yesterday" for one taken in daylight), anything older
+    has its date. Without `now`, the time alone.
     """
+    from app.forecasting.exposure import current_night
+
     if at is None:
         return "just now"
     local = at.astimezone(tz)
     hhmm = local.strftime("%H:%M")
     if now is None:
         return hhmm
-    today = now.astimezone(tz).date()
-    if local.date() >= today:
+    seen, tonight = current_night(at), current_night(now)
+    if seen >= tonight:
         return hhmm
-    if local.date() == today - timedelta(days=1):
-        return f"{hhmm} yesterday"
+    if seen == tonight - timedelta(days=1):
+        dark = local.hour >= 18 or local.hour < 6
+        return f"{hhmm} {'last night' if dark else 'yesterday'}"
     return f"{hhmm} on {local.strftime('%a')} {local.day} {local.strftime('%b')}"
 
 

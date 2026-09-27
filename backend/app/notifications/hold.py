@@ -11,9 +11,15 @@ Two things hold a person's pushes:
 
 What waits keeps its record, marked "held", and goes out as one message when the
 sit ends (END SIT asks for it straight away, routes_stands.end_sit) or the quiet
-hours are over (`pipeline.py notify`, every 15 minutes): "While you sat" / "Wild
-boar: 3 visits at PL19 and Charca, last one 21:40." A sit nobody ended stops
-holding when it stops being on (06:00, or 12 hours after it started).
+hours are over (`pipeline.py notify`, every 15 minutes, or the photo check first if
+it has something new for the person): "While you sat" / "Wild boar: 3 visits at
+PL19 and Charca, last one 21:40." A sit nobody ended stops holding when it stops
+being on (06:00, or 12 hours after it started).
+
+The message is about what is still there when it goes: a photo marked "nothing in
+it" while it waited, an animal hidden or no longer picked, or a camera muted since,
+is left out as it is everywhere else (still_there), and when nothing is left no
+message goes at all.
 
 Several deliverers can run at once (the END SIT request and the scheduled run):
 each takes the held rows it sends with SKIP LOCKED and marks them before pushing,
@@ -29,14 +35,17 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.models import Notification, NotificationPref, Sit
+from app.models import Camera, Detection, Image, Notification, NotificationPref, Sit, Species
 from app.notifications import push, words
 
 log = get_logger(__name__)
 
 HELD = "held"
+# What waited and is no longer there to tell of when it could go (still_there).
+WITHDRAWN = "withdrawn"
 SUMMARY_URL = "/photos"
 
 
@@ -81,23 +90,69 @@ def has_held(db: Session, user_id) -> bool:
     ) is not None
 
 
-def compose_held(rows: list[Notification], why: str, now: datetime) -> tuple[str, str, str, dict]:
-    """(title, body, url, detail) for the one message about everything that waited.
+def still_there(db: Session, rows: list[Notification], pref: NotificationPref) -> dict[str, dict]:
+    """{species_id: tally} of what the held alerts were about, as it would be told
+    now. Each alert kept its photos: they are looked up again under the rules every
+    screen uses (api/visibility.py), the animals and cameras the person hears about
+    now, and the visits counted again from the photos left. A photo whose animal was
+    corrected counts as the animal it is now."""
+    from app.notifications.dispatch import group_by_species
 
-    What the cameras saw is added up per animal from each alert's tally, so three
-    alerts about one sounder read as its visits, not as three alerts.
-    """
-    tz = _tz()
-    per: dict[str, list[dict]] = {}
+    ids: set[uuid.UUID] = set()
+    kept: dict[str, list[dict]] = {}
     for r in rows:
         for sid, t in words.tallies_of(r.species_id, r.detail).items():
-            per.setdefault(sid, []).append(t)
-    tallies = {sid: words.merge(ts) for sid, ts in per.items()}
+            if t.get("images") is not None:
+                ids.update(uuid.UUID(i) for i in t["images"])
+            else:  # counted without its photos: kept as it was counted
+                kept.setdefault(sid, []).append(t)
+    out = {sid: words.merge(ts) for sid, ts in kept.items()}
+    if not ids:
+        return out
+    wanted = set(pref.species_ids or [])
+    muted = set(pref.muted_camera_ids or [])
+    found = db.execute(
+        select(Detection.species_id, Species.common_name, Image.id, Image.captured_at,
+               Camera.name, Camera.id)
+        .select_from(Detection)
+        .join(Image, Image.id == Detection.image_id)
+        .join(Species, Species.id == Detection.species_id)
+        .join(Camera, Camera.id == Image.camera_id)
+        .where(Image.id.in_(ids), Detection.species_id.isnot(None), VISIBLE_SIGHTING)
+        .order_by(Image.captured_at)
+    ).all()
+    digests = group_by_species(
+        r[:5] for r in found if r[0] in wanted and str(r[5]) not in muted
+    )
+    for sid, d in digests.items():
+        out[sid] = words.merge([out[sid], d.tally()]) if sid in out else d.tally()
+    return out
+
+
+def compose_held(rows: list[Notification], why: str, now: datetime,
+                 tallies: dict[str, dict] | None = None) -> tuple[str, str, str, dict] | None:
+    """(title, body, url, detail) for the one message about everything that waited,
+    or None when nothing in it is left to tell.
+
+    What the cameras saw is added up per animal (`tallies`, from still_there; the
+    alerts' own tallies when not given), so three alerts about one sounder read as
+    its visits, not as three alerts.
+    """
+    tz = _tz()
+    if tallies is None:
+        per: dict[str, list[dict]] = {}
+        for r in rows:
+            for sid, t in words.tallies_of(r.species_id, r.detail).items():
+                per.setdefault(sid, []).append(t)
+        tallies = {sid: words.merge(ts) for sid, ts in per.items()}
+    tallies = {sid: t for sid, t in tallies.items() if t.get("visits")}
     order = sorted(tallies, key=lambda s: (-tallies[s]["visits"], tallies[s]["name"]))
     notes = [r for r in rows if r.kind == "team_note"]
     # An alert kept from before alerts counted (no tally) still says it was there.
     bare = [r for r in rows
             if r.kind == "sighting" and not words.tallies_of(r.species_id, r.detail)]
+    if not order and not notes and not bare:
+        return None
 
     parts: list[str] = []
     if len(order) == 1 and not notes and not bare:
@@ -154,7 +209,16 @@ def deliver_held(db: Session, now: datetime | None = None, user_ids=None) -> dic
             continue
         whys = [(r.detail or {}).get("held") for r in rows]
         why = "sit" if "sit" in whys else "quiet"
-        title, body, url, detail = compose_held(rows, why, now)
+        told = compose_held(rows, why, now, still_there(db, rows, pref))
+        if told is None:
+            # Everything that waited was marked "nothing in it", hidden or muted
+            # since: no message about an animal no other screen shows.
+            for r in rows:
+                r.push_status = WITHDRAWN
+            db.commit()
+            out["withdrawn"] = out.get("withdrawn", 0) + 1
+            continue
+        title, body, url, detail = told
         for r in rows:
             r.push_status = "in_summary"
         n = Notification(user_id=user_id, kind="summary", title=title, body=body, url=url,

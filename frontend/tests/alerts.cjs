@@ -7,7 +7,12 @@
 // subscription with the leaving person's token (D-17); the plan switch and quiet
 // hours save and say so, glove-sized; Recent says what happened to each alert; an
 // alert's link opens its photo by its time however many photos came after (K-07);
-// Tonight doesn't say twice that a camera went quiet (G-23).
+// Tonight doesn't say twice that a camera went quiet (G-23). The plan switch turns
+// Alerts on when they are off (the plan comes through them); with no signal a
+// failed save goes back to what the server last confirmed; coming back to the app
+// after hours sends the subscription again; quiet updates fold into their alert in
+// Recent; the clock pickers stack on a narrow phone; an iPhone is told where the
+// count goes. The service worker's side is frontend/tests/sw-push.cjs.
 // Run like map-and-stands.cjs (BASE_URL, PW_CHANNEL).
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert=require('node:assert/strict');
@@ -35,7 +40,7 @@ const assert=require('node:assert/strict');
  const feed={unread:0,items:[
   {id:'n1',kind:'summary',title:'While you sat',body:'Wild boar 2 visits, last one 21:40.',url:'/photos?species=wild_boar',push_status:'sent',created_at:ago(1),read_at:ago(1)},
   {id:'n2',kind:'sighting',title:'Wild boar at Charca',body:'1 visit at 21:40.',url:'/photos?species=wild_boar',push_status:'in_summary',created_at:ago(2),read_at:ago(1)},
-  {id:'n3',kind:'sighting',title:'Wild boar at Charca',body:'3 visits since 00:55, last one 01:40.',url:'/photos?species=wild_boar',push_status:'updated',created_at:ago(20),read_at:ago(19)},
+  {id:'n3',kind:'sighting',title:'Wild boar at Charca',body:'3 visits since 00:55, last one 01:40.',url:'/photos?species=wild_boar',push_status:'sent',updates:2,updated_at:ago(19),created_at:ago(20),read_at:ago(19)},
  ]};
 
  // A stand-in for the browser's push API, kept in localStorage so it outlives a reload.
@@ -63,10 +68,11 @@ const assert=require('node:assert/strict');
   recommended:{camera:'Charca',camera_id:'c1',species:'Wild boar',runner_up:null,probability:0.7,best_window:win,expect:'Wild boar',classes:[],nights_present:21,active_nights:30,visits:13,photos:40,
    reason:'Wild boar seen 21 of 30 nights at this camera.',caveat:'The camera watches all night.'},
   conditions:{moon_phase:'New Moon',moon_illum:4,darkness_minutes:720,sunset_local:'19:54'},factors:[],where:[],alternates:[],alerts:[],nights_of_data:30,freshness:null};
- // How each PUT is to go, in order: 'ok' (default), 'slow' or 'fail'.
- const put={plan:[]};
- const newPage=async({token='alerts-fixture',perm=null,sub=null,photoFeed=null}={})=>{
-  const page=await browser.newPage({viewport:{width:390,height:844},serviceWorkers:'block',hasTouch:true,timezoneId:'Europe/Madrid',locale:'en-GB'});
+ // How each PUT is to go, in order: 'ok' (default), 'slow' or 'fail'; `offline`
+ // drops every settings request as no signal does.
+ const put={plan:[],offline:false};
+ const newPage=async({token='alerts-fixture',perm=null,sub=null,photoFeed=null,width=390,locale='en-GB',userAgent}={})=>{
+  const page=await browser.newPage({viewport:{width,height:844},serviceWorkers:'block',hasTouch:true,timezoneId:'Europe/Madrid',locale,...(userAgent?{userAgent}:{})});
   await page.addInitScript(([t,perm,sub])=>{
    if(!sessionStorage.getItem('seeded')){
     sessionStorage.setItem('seeded','1');localStorage.setItem('gs_token',t);
@@ -90,6 +96,7 @@ const assert=require('node:assert/strict');
     const b=req.postDataJSON();log.push(['unsubscribe',b.endpoint,req.headers()['authorization']]);
     server.subs=server.subs.filter(x=>x!==b.endpoint);return json({status:'removed',subscriptions:server.subs.length});
    }
+   if(p==='/api/notifications/settings'&&put.offline){log.push(['offline',m]);return route.abort('internetdisconnected')}
    if(p==='/api/notifications/settings'&&m==='PUT'){
     const b=req.postDataJSON();log.push(['put',b,Date.now()]);
     const how=put.plan.shift()??'ok';
@@ -147,9 +154,10 @@ const assert=require('node:assert/strict');
  await page.getByText('This phone gets alerts.').waitFor();
  assert.equal(await page.getByRole('button',{name:'Send a test'}).isEnabled(),true);
 
- // ── Recent says what happened to each alert ──
+ // ── Recent says what happened to each alert; quiet updates are in the alert ──
  const recent=await page.locator('.settings-section, section').filter({hasText:'Recent'}).last().innerText();
- assert.match(recent,/in one message/);assert.match(recent,/quiet update/);
+ assert.match(recent,/in one message/);assert.match(recent,/2 quiet updates/);
+ assert.match(recent,/3 visits since 00:55, last one 01:40\./);
  await page.screenshot({path:process.env.SHOT_DIR?process.env.SHOT_DIR+'/alerts-settings.png':'/dev/null',fullPage:true}).catch(()=>{});
 
  // ── D-14 / I-14: quick taps, a slow save, then a failed one ──
@@ -174,6 +182,16 @@ const assert=require('node:assert/strict');
  await page.getByRole('alert').filter({hasText:'That didn’t save.'}).waitFor();
  assert.equal(await row(page,'Wild boar').getAttribute('aria-checked'),'false','back to what is saved');
  assert.match(await page.getByRole('alert').filter({hasText:'That didn’t save.'}).innerText(),/The switches show what is saved\./);
+ // No signal: the save fails and so does asking the server again. The switches go
+ // back to what the server last confirmed, never the choice that wasn't saved.
+ put.offline=true;
+ await row(page,'Roe deer').click();
+ await page.getByRole('alert').filter({hasText:'No signal, so that didn’t save.'}).waitFor();
+ assert.ok(log.some(e=>e[0]==='offline'&&e[1]==='GET'),'it tried to ask the server again');
+ assert.equal(await row(page,'Roe deer').getAttribute('aria-checked'),'true','back to what is saved');
+ assert.equal(server.species.roe_deer,true);
+ assert.match(await page.getByRole('alert').filter({hasText:'No signal'}).innerText(),/The switches show what was saved last\./);
+ put.offline=false;
 
  // ── The plan before sunset and quiet hours save, and say so ──
  put.plan=[];log=[];
@@ -205,6 +223,65 @@ const assert=require('node:assert/strict');
  assert.ok(bye,'the server is told');
  assert.equal(bye[2],'Bearer alerts-fixture','with the token of the person signing out');
  assert.equal(await page.evaluate(()=>localStorage.getItem('fake_sub')),null,'and the phone forgets it');
+ await page.close();
+
+ // ── The plan comes through Alerts: turned on with Alerts off, it turns them on ──
+ reset();server.enabled=false;
+ page=await newPage();
+ await page.goto(base+'/settings#notifications');
+ await row(page,'Alerts').waitFor();
+ assert.equal(await row(page,'Tonight').getAttribute('aria-checked'),'false');
+ await page.getByText('Turning it on turns Alerts on too.').waitFor();
+ log=[];
+ await row(page,'Tonight').click();
+ await said(page).filter({hasText:'Alerts are on too'}).waitFor({timeout:8000});
+ assert.deepEqual(log.filter(e=>e[0]==='put').map(e=>e[1]),[{enabled:true,plan_push:true}],'one save, both on');
+ assert.ok((await page.evaluate(()=>window.__push)).some(e=>e[0]==='permission'),'permission asked from the same tap');
+ assert.deepEqual([server.enabled,server.plan_push],[true,true]);
+ assert.deepEqual(server.subs,['https://push.example/new'],'this phone subscribed');
+ assert.equal(await row(page,'Alerts').getAttribute('aria-checked'),'true');
+ assert.equal(await row(page,'Tonight').getAttribute('aria-checked'),'true');
+ await page.getByText('This phone gets alerts.').waitFor();
+ await page.close();
+
+ // ── An installed app brought back after hours sends its subscription again ──
+ reset();
+ page=await newPage({perm:'granted',sub:{endpoint:'https://push.example/phone',key:keyBytes}});
+ await page.goto(base+'/');
+ for(let i=0;i<40&&!log.some(e=>e[0]==='subscribe');i++)await sleep(100);
+ server.subs=[];log=[]; // the server lost it meanwhile
+ await page.evaluate(()=>{document.dispatchEvent(new Event('visibilitychange'))});
+ await sleep(500);
+ assert.equal(log.filter(e=>e[0]==='subscribe').length,0,'not on every flick back to the app');
+ await page.evaluate(()=>{const real=Date.now.bind(Date);Date.now=()=>real()+7*3600e3;document.dispatchEvent(new Event('visibilitychange'))});
+ for(let i=0;i<40&&!log.some(e=>e[0]==='subscribe');i++)await sleep(100);
+ assert.deepEqual(server.subs,['https://push.example/phone'],'back after hours: sent again');
+ await page.close();
+
+ // ── A narrow phone with a 12-hour clock: the clock pickers stack, AM/PM shows ──
+ reset();server.quiet_start='23:00';server.quiet_end='07:00';
+ page=await newPage({width:320,locale:'en-US'});
+ await page.goto(base+'/settings#notifications');
+ const pick=page.locator('.quiet-hours input');
+ await pick.first().waitFor();
+ const [a,b]=[await pick.nth(0).boundingBox(),await pick.nth(1).boundingBox()];
+ assert.ok(b.y>=a.y+a.height,`stacked at 320px (${JSON.stringify([a,b])})`);
+ assert.ok(a.width>=150&&b.width>=150,`wide enough for 11:00 PM (${a.width}, ${b.width})`);
+ assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth),'no sideways scroll at 320px');
+ await page.locator('#notifications').screenshot({path:(process.env.SHOT_DIR||'/tmp')+'/alerts-320.png'}).catch(()=>{});
+ await page.close();
+ page=await newPage({locale:'en-US'});
+ await page.goto(base+'/settings#notifications');
+ await page.locator('.quiet-hours input').first().waitFor();
+ const [c,d]=[await page.locator('.quiet-hours input').nth(0).boundingBox(),await page.locator('.quiet-hours input').nth(1).boundingBox()];
+ assert.equal(Math.round(c.y),Math.round(d.y),'side by side at 390px');
+ await page.close();
+
+ // ── An iPhone is told where the count goes while an animal stays ──
+ reset();
+ page=await newPage({userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'});
+ await page.goto(base+'/settings#notifications');
+ await page.getByText('On an iPhone, the count while it stays goes on in Recent below.').waitFor();
  await page.close();
 
  // ── D-19: turning alerts on asks for permission before anything is saved ──

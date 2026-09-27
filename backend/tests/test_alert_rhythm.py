@@ -30,15 +30,33 @@ NIGHT = datetime(2026, 9, 15, 22, 55, tzinfo=UTC)
 # ── words ──────────────────────────────────────────────────────────────────────
 
 
-def test_an_alert_about_last_night_says_yesterday():
+def test_an_alert_about_last_night_says_last_night():
     at = datetime(2026, 9, 25, 21, 50, tzinfo=UTC)  # 23:50 on the 25th in Madrid
     morning = datetime(2026, 9, 26, 5, 30, tzinfo=UTC)  # 07:30 the next day
     assert words.said_at(at, MADRID, at + timedelta(minutes=5)) == "23:50"
-    assert words.said_at(at, MADRID, morning) == "23:50 yesterday"
+    assert words.said_at(at, MADRID, morning) == "23:50 last night"
     assert words.said_at(at, MADRID, morning + timedelta(days=2)) == "23:50 on Fri 25 Sep"
     d = SpeciesDigest("wild_boar", "Wild boar")
     d.add("img", at, "PL19")
-    assert compose(d, MADRID, morning) == ("Wild boar at PL19", "1 visit at 23:50 yesterday.")
+    assert compose(d, MADRID, morning) == ("Wild boar at PL19", "1 visit at 23:50 last night.")
+
+
+def test_the_day_goes_by_the_night_not_the_calendar():
+    """A boar at 23:50 told of at 00:30 is the same night, 40 minutes ago: it used to
+    read "23:50 yesterday"."""
+    at = datetime(2026, 9, 25, 23, 50, tzinfo=MADRID)
+    assert words.said_at(at, MADRID, datetime(2026, 9, 26, 0, 30, tzinfo=MADRID)) == "23:50"
+    assert words.said_at(at, MADRID, datetime(2026, 9, 26, 5, 55, tzinfo=MADRID)) == "23:50"
+    # 06:00 is the turn of the night: from then on it is last night's.
+    assert words.said_at(at, MADRID, datetime(2026, 9, 26, 6, 5, tzinfo=MADRID)) == (
+        "23:50 last night")
+    dawn = datetime(2026, 9, 26, 5, 40, tzinfo=MADRID)
+    assert words.said_at(dawn, MADRID, datetime(2026, 9, 26, 8, 0, tzinfo=MADRID)) == (
+        "05:40 last night")
+    # One taken in daylight the day before is "yesterday".
+    noon = datetime(2026, 9, 25, 13, 10, tzinfo=MADRID)
+    assert words.said_at(noon, MADRID, datetime(2026, 9, 26, 7, 0, tzinfo=MADRID)) == (
+        "13:10 yesterday")
 
 
 def test_the_link_carries_the_photo_time():
@@ -123,8 +141,8 @@ class _Recorder:
         self.calls: list[tuple] = []
         self.sent, self.subscriptions = sent, subscriptions
 
-    def __call__(self, db, user_id, payload):
-        self.calls.append((user_id, payload))
+    def __call__(self, db, user_id, payload, quiet=False):
+        self.calls.append((user_id, {**payload, "quiet": quiet}))
         return {"sent": self.sent, "failed": 0, "removed": 0, "subscriptions": self.subscriptions}
 
     def payloads(self, user_id=None) -> list[dict]:
@@ -225,6 +243,117 @@ def test_a_second_visit_inside_the_cooldown_is_counted_quietly(db_session, rec):
 
 
 @requires_db
+def test_an_iphone_gets_the_buzz_and_never_the_quiet_updates(db_session, monkeypatch):
+    """Safari sounds every push as a new banner (renotify, silent and tag do nothing
+    there), so a quiet update would buzz an iPhone every 15 minutes all night."""
+    import json
+
+    import pywebpush
+
+    from app.models import PushSubscription
+
+    got: list[tuple[str, dict]] = []
+    monkeypatch.setattr(pywebpush, "webpush", lambda **kw: got.append(
+        (kw["subscription_info"]["endpoint"], json.loads(kw["data"]))))
+    _, cams, user = _world(db_session)
+    iphone = "https://web.push.apple.com/QGx1c2VyLXRva2Vu"
+    android = "https://fcm.googleapis.com/fcm/send/abc:def"
+    for endpoint in (iphone, android):
+        db_session.add(PushSubscription(user_id=user.id, endpoint=endpoint, p256dh="k", auth="a"))
+    db_session.commit()
+    dispatch_new_sightings(db_session, now=NIGHT - timedelta(minutes=30))
+    _checks(db_session, cams["PL19"], "wild_boar", NIGHT, timedelta(minutes=15), 12)
+
+    to = {e: [p for x, p in got if x == e] for e in (iphone, android)}
+    assert len(to[android]) == 12  # the buzz, and a quiet update at every check
+    assert [p["renotify"] for p in to[iphone]] == [True, True]  # 00:55 and 02:55 only
+    rows = _alerts(db_session, user)
+    assert [r.push_status for r in rows].count("updated") == 10  # still counted
+
+    # An iPhone alone: the update goes nowhere on purpose, and still counts.
+    db_session.query(PushSubscription).filter_by(endpoint=android).delete()
+    db_session.commit()
+    got.clear()
+    _checks(db_session, cams["PL19"], "wild_boar", NIGHT + timedelta(hours=3), timedelta(0), 1)
+    assert got == []
+    assert _alerts(db_session, user)[-1].push_status == "updated"
+    assert push.apple(iphone) and not push.apple(android)
+    assert not push.apple("https://push.apple.com.example.org/x")
+
+
+@requires_db
+def test_recent_shows_one_row_per_buzz_with_its_running_total(db_session, rec, api):
+    """A sounder all night used to fill Recent with near-identical "quiet update"
+    rows and push the plan and team notes out of view."""
+    from app.models import Notification
+
+    _, cams, user = _world(db_session)
+    dispatch_new_sightings(db_session, now=NIGHT - timedelta(minutes=30))
+    _checks(db_session, cams["PL19"], "wild_boar", NIGHT, timedelta(minutes=50), 3)
+    db_session.add(Notification(user_id=user.id, kind="plan", title="▲ Charca", body="Best odds.",
+                                push_status="sent", created_at=NIGHT + timedelta(hours=3)))
+    db_session.commit()
+    feed = api.get("/api/notifications?limit=8", headers=_headers(user)).json()["items"]
+    assert [i["kind"] for i in feed] == ["plan", "sighting"]
+    alert = feed[1]
+    assert alert["push_status"] == "sent" and alert["updates"] == 2
+    assert alert["body"] == "3 visits since 00:53, last one 02:33."
+    assert alert["updated_at"]
+
+
+@requires_db
+def test_what_was_marked_nothing_in_it_while_it_waited_is_not_told(db_session, rec):
+    from app.models import Image, Species
+
+    _, cams, user = _world(db_session, quiet_start=time(0, 0), quiet_end=time(7, 0))
+    dispatch_new_sightings(db_session, now=NIGHT - timedelta(minutes=30))
+    bush = _frame(db_session, cams["PL19"], "wild_boar", NIGHT - timedelta(minutes=2))
+    dispatch_new_sightings(db_session, now=NIGHT)
+    assert rec.calls == []
+    # A teammate marks it "nothing in it" before quiet hours end: nothing to tell.
+    db_session.get(Image, bush.id).is_empty_frame = True
+    db_session.commit()
+    out = hold.deliver_held(db_session, now=NIGHT + timedelta(hours=6, minutes=10))
+    assert rec.calls == [] and out["summaries"] == 0 and out["withdrawn"] == 1
+    assert [r.push_status for r in _alerts(db_session, user)] == ["withdrawn"]
+
+    # Two animals wait; one is hidden in Settings meanwhile: the other is told alone.
+    night2 = NIGHT + timedelta(days=1)
+    _frame(db_session, cams["PL19"], "wild_boar", night2 - timedelta(minutes=2))
+    dispatch_new_sightings(db_session, now=night2)
+    _frame(db_session, cams["Charca"], "red_deer", night2 + timedelta(minutes=40))
+    dispatch_new_sightings(db_session, now=night2 + timedelta(minutes=45))
+    db_session.get(Species, "red_deer").hidden = True
+    db_session.commit()
+    hold.deliver_held(db_session, now=night2 + timedelta(hours=6, minutes=10))
+    (_, msg), = rec.calls
+    assert msg["body"] == "Wild boar: 1 visit at PL19, last one 00:53 last night."
+
+
+@requires_db
+def test_quiet_hours_ending_is_one_buzz_not_two(db_session, rec):
+    """The first photo check after quiet hours used to buzz a new alert, and the
+    notify run the message about the hours minutes later."""
+    _, cams, user = _world(db_session, quiet_start=time(0, 0), quiet_end=time(7, 0))
+    dispatch_new_sightings(db_session, now=NIGHT - timedelta(minutes=30))
+    _frame(db_session, cams["PL19"], "wild_boar", NIGHT + timedelta(hours=2))
+    dispatch_new_sightings(db_session, now=NIGHT + timedelta(hours=2, minutes=5))  # held
+    # 07:05: the check sees a new boar; 07:15: the notify run.
+    _frame(db_session, cams["PL19"], "wild_boar", NIGHT + timedelta(hours=6, minutes=8))
+    dispatch_new_sightings(db_session, now=NIGHT + timedelta(hours=6, minutes=10))
+    hold.deliver_held(db_session, now=NIGHT + timedelta(hours=6, minutes=20))
+
+    first, update = rec.payloads(user.id)
+    assert first["title"] == "During your quiet hours" and first["renotify"] is True
+    assert first["body"] == "Wild boar: 1 visit at PL19, last one 02:55 last night."
+    assert update["renotify"] is False and update["quiet"] is True
+    assert update["body"] == "2 visits since 02:55 last night, last one 07:03."
+    # In Recent it is a row of its own: the message it follows may name other animals.
+    summary, quiet = [r for r in _alerts(db_session, user) if r.push_status != "in_summary"]
+    assert summary.kind == "summary" and "update_of" not in quiet.detail
+
+
+@requires_db
 def test_quiet_hours_hold_everything_then_send_one_message(db_session, rec):
     from app.models import Notification
 
@@ -245,7 +374,7 @@ def test_quiet_hours_hold_everything_then_send_one_message(db_session, rec):
     assert out["summaries"] == 1 and out["pushed"] == 1
     (_, msg), = rec.calls
     assert msg["title"] == "During your quiet hours" and msg["renotify"] is True
-    assert msg["body"] == "Wild boar 3 visits and Red deer 1 visit, last one 03:55."
+    assert msg["body"] == "Wild boar 3 visits and Red deer 1 visit, last one 03:55 last night."
     assert msg["url"] == "/photos?species=wild_boar%2Cred_deer"
     assert db_session.query(Notification).filter_by(push_status="held").count() == 0
     assert db_session.query(Notification).filter_by(push_status="in_summary").count() == 4
@@ -506,6 +635,36 @@ def test_the_plan_push_goes_once_before_sunset_from_the_plan_on_record(
     db_session.commit()
     late = plan.send_daily_plan(db_session, now=sunset + timedelta(minutes=1))
     assert late["status"] == "not_due"
+
+
+@requires_db
+def test_a_plan_push_that_reached_no_phone_is_tried_again_before_sunset(
+    db_session, monkeypatch,
+):
+    """The server's internet blips as the plan goes: the next run, 15 minutes on,
+    sends it again, on the same row; once it is through, nothing more."""
+    from app.models import Notification
+
+    night = date(2026, 9, 27)
+    sunset = plan.sunset_of(night)
+    _, cams, user = _world(db_session, plan_push=True)
+    _claim(db_session, cams, night)
+    monkeypatch.setattr(plan, "_wind", lambda db, p, now: {"status": "clean"})
+    monkeypatch.setattr(push, "send_to_user", _Recorder(sent=0, subscriptions=1))
+    plan.send_daily_plan(db_session, now=sunset - timedelta(hours=1, minutes=55))
+    row = db_session.query(Notification).filter_by(kind="plan").one()
+    assert row.push_status == "failed"
+
+    up = _Recorder()
+    monkeypatch.setattr(push, "send_to_user", up)
+    out = plan.send_daily_plan(db_session, now=sunset - timedelta(hours=1, minutes=40))
+    assert out["status"] == "done" and len(up.calls) == 1
+    db_session.expire_all()
+    row = db_session.query(Notification).filter_by(kind="plan").one()
+    assert row.push_status == "sent" and row.detail["tries"] == 2
+    assert plan.send_daily_plan(db_session, now=sunset - timedelta(hours=1, minutes=25))[
+        "status"] == "nobody_waiting"
+    assert len(up.calls) == 1
 
 
 @requires_db

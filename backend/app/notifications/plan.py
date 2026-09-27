@@ -10,7 +10,10 @@ Task Scheduler can't start a job at sunset, and sunset at Alatoz moves by three
 hours over the season, so `pipeline.py notify` runs every 15 minutes and this sends
 once it is PLAN_LEAD before tonight's sunset, never after sunset, and once per
 person per night: each send is a row per person and night, written under a per-night
-lock before anything is pushed, so two runs at once can't both send it.
+lock before anything is pushed, so two runs at once can't both send it. A send that
+reached no phone (the server's internet down for a moment, or the phone's copy lost
+and not yet put back by the app) is tried again by the next run until sunset, on
+the same row.
 
 What it says is the plan on record for tonight: the claim `plan` writes
 (scoring.persist_tonight), the same one that is scored tomorrow. From late October
@@ -184,12 +187,21 @@ def _opted_in(db: Session) -> list[NotificationPref]:
     ).all())
 
 
+# How a send went that the next run tries again.
+RETRY = ("failed", "no_subscription")
+
+
+def _tonights(night: date):
+    return select(Notification).where(
+        Notification.kind == "plan", Notification.detail["night"].astext == night.isoformat())
+
+
 def _sent_for(db: Session, night: date) -> set:
+    """Who has had tonight's plan, or is being sent it now, or was skipped (sitting,
+    quiet hours): everyone with a row for tonight but one to try again."""
     return set(db.scalars(
-        select(Notification.user_id).where(
-            Notification.kind == "plan",
-            Notification.detail["night"].astext == night.isoformat(),
-        )
+        _tonights(night).with_only_columns(Notification.user_id).where(
+            Notification.push_status.is_(None) | Notification.push_status.notin_(RETRY))
     ).all())
 
 
@@ -218,17 +230,25 @@ def send_daily_plan(db: Session, now: datetime | None = None) -> dict:
         db.commit()
         return {"status": "nobody_waiting", "night": night.isoformat()}
     on = hold.sitting(db, now, [p.user_id for p in prefs])
+    # A send that reached no phone earlier this evening is sent again on its own row.
+    again = {n.user_id: n for n in db.scalars(
+        _tonights(night).where(Notification.push_status.in_(RETRY))).all()}
     notes: list[Notification] = []
     for p in prefs:
         why = hold.reason(p, p.user_id, now, on)
         detail = {"night": night.isoformat(), "source": plan["source"]}
-        n = Notification(user_id=p.user_id, kind="plan", title=title, body=body, url=PLAN_URL,
-                         created_at=now, detail={**detail, "skipped": why} if why else detail)
-        if why:
-            n.push_status = "skipped"
+        n = again.get(p.user_id)
+        if n is None:
+            n = Notification(user_id=p.user_id, kind="plan", url=PLAN_URL)
+            db.add(n)
         else:
+            detail["tries"] = int((n.detail or {}).get("tries") or 1) + 1
+        n.title, n.body, n.created_at = title, body, now
+        n.detail = {**detail, "skipped": why} if why else detail
+        # None while it is on its way: a run after this one finds the row and stops.
+        n.push_status = "skipped" if why else None
+        if not why:
             notes.append(n)
-        db.add(n)
     db.commit()  # written before any push: a run after this one finds them and stops
 
     pushed = 0

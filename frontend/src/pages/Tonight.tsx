@@ -359,9 +359,12 @@ export default function Tonight() {
   const old = fromEarlierNight(plan!.at)
   const oldWords = nightOf(plan!.at) === nightOf(Date.now() - 86_400_000) ? 'last night' : 'an earlier night'
   const hasNumbers = !!(f.where && f.where.length > 0) || !!f.calibration?.statement || !!d
-  // A camera the Changed line is already about isn't said again (or the opposite)
-  // under Alerts as "quiet" (audit G-23).
-  const shownAlerts = alerts.filter((a) => !(a.type === 'quiet' && a.camera && a.camera === f.changed?.camera))
+  // A camera the Changed line is already about isn't said again under Alerts as
+  // "quiet" (audit G-23). The server uses one rule for both, so "Nothing changed"
+  // never has a quiet camera beside it; a plan kept from earlier (no signal) could,
+  // and then the line wins.
+  const nothingChanged = f.changed?.kind === 'none' && !!f.changed.text
+  const shownAlerts = alerts.filter((a) => !(a.type === 'quiet' && (nothingChanged || (a.camera && a.camera === f.changed?.camera))))
 
   return (
     <div className="tonight">

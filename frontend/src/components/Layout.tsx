@@ -9,6 +9,7 @@ import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHor
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { signOut } from '../api'
+import { useRefetchOnReturn } from '../hooks'
 import { confirmLeave } from '../map/draftGuard'
 import { checkThisDevice, listenForNewSubscriptions } from '../push'
 import { useNewerBuild } from '../serviceWorker'
@@ -38,6 +39,10 @@ const TABS: { to: string; label: string; Ico: Icon; end?: boolean }[] = [
   { to: '/settings', label: 'Settings', Ico: SlidersHorizontalIcon },
 ]
 
+// How long the app can sit in the background before coming back to it checks this
+// phone's alerts again.
+const RECHECK_MS = 6 * 3600_000
+
 const linkStyle = (isActive: boolean) => ({
   padding: '7px 11px',
   borderRadius: 'var(--r-ctl)',
@@ -59,11 +64,14 @@ export default function Layout() {
 
   // Alerts keep coming: this phone's subscription is sent again every time the app
   // opens, which puts back a server copy lost to anything (audit D-04), and again
-  // whenever the browser replaces it.
+  // whenever the browser replaces it. An installed app is rarely opened afresh: the
+  // phone keeps it in memory for days and brings it back, so coming back to it after
+  // a few hours counts as opening it.
   useEffect(() => {
     void checkThisDevice()
     return listenForNewSubscriptions()
   }, [])
+  useRefetchOnReturn(() => void checkThisDevice(), RECHECK_MS)
 
   // The map fills the screen down to the tab bar, so it needs the bar's real height:
   // it changes with the home-indicator inset and with the text size.

@@ -113,4 +113,4 @@ The agent deploying this integration should start with the [Suntek server handof
 - **M2** — AI: MegaDetector + DeepFaune (European), bounding boxes, annotated images.
 - **M3** — the Tonight card: per-stand forecast, wind-safe analysis, GO/MARGINAL/SKIP with reasons.
 - **Tier 2+** — individual re-ID, movement inference, correlations, alerts, Git self-update panel.
-- **Notifications** — per-species push to the phone (Settings → Alerts on my phone): one buzz per animal every two hours with quiet updates between, nothing while you sit or in your quiet hours (one message after), and an opt-in plan push about two hours before sunset; see [docs/17-notifications.md](docs/17-notifications.md).
+- **Notifications** — per-species push to the phone (Settings → Alerts on my phone): one buzz per animal every two hours with quiet updates between (an iPhone, which would buzz for each, gets the buzz alone), nothing while you sit or in your quiet hours (one message after), and an opt-in plan push about two hours before sunset; see [docs/17-notifications.md](docs/17-notifications.md).
