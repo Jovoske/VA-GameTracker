@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.db import get_db
-from app.forecasting.model import class_label
+from app.forecasting.model import class_label, sentence_case
 from app.models import Camera, Detection, Image, PhotoNote, Species, User
 from app.notes import note_counts, notes_for
 
@@ -48,7 +48,9 @@ def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
     ).all()
     return {
         "species": [
-            {"id": sid, "common_name": name, "count": int(n)} for sid, name, n in sp_rows if n
+            # Written as every tile and the map write it: "Roe deer", not "Roe Deer".
+            {"id": sid, "common_name": sentence_case(name), "count": int(n)}
+            for sid, name, n in sp_rows if n
         ],
         "cameras": [{"id": str(cid), "name": name, "count": int(n)} for cid, name, n in cam_rows],
     }

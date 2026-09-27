@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import jwt
@@ -12,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from PIL import Image as PImage
 from PIL import ImageOps
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -43,7 +45,9 @@ def download_name(camera_name: str | None, captured_at) -> str:
     return f"{stem}_{captured_at:%Y-%m-%d_%H-%M}.jpg"
 
 
-def _require_token(creds: HTTPAuthorizationCredentials | None, token: str | None) -> None:
+def _require_user(
+    db: Session, creds: HTTPAuthorizationCredentials | None, token: str | None,
+) -> User:
     # Trail cameras photograph people, not only animals, so photos are not open to
     # anyone holding a UUID. An <img> tag cannot send an Authorization header, so
     # the token may arrive as ?token= instead. Query-string tokens can leak via proxy
@@ -52,12 +56,28 @@ def _require_token(creds: HTTPAuthorizationCredentials | None, token: str | None
     raw = (creds.credentials if creds else None) or token
     if not raw:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to view photos.")
+    expired = HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired. Sign in again.")
     try:
-        decode_token(raw)
-    except jwt.PyJWTError:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "Session expired. Sign in again."
-        ) from None
+        user_id = uuid.UUID(decode_token(raw).get("sub"))
+    except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
+        raise expired from None
+    # A login the admin removed stops working for photos too, as it does everywhere.
+    user = db.get(User, user_id)
+    if user is None:
+        raise expired
+    return user
+
+
+def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
+    """The photo and its camera, if it is on this person's estate; 404 otherwise."""
+    row = db.execute(
+        select(Image, Camera)
+        .join(Camera, Camera.id == Image.camera_id)
+        .where(Image.id == image_id, Camera.estate_id == user.estate_id)
+    ).first()
+    if row is None:
+        raise HTTPException(404, "Photo not found.")
+    return row[0], row[1]
 
 
 @router.get("/{image_id}/file")
@@ -68,18 +88,16 @@ def image_file(
     creds: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
 ) -> FileResponse:
-    _require_token(creds, token)
-    image = db.get(Image, image_id)
-    if image is None or not image.original_path or not os.path.exists(image.original_path):
+    image, cam = _estate_image(db, image_id, _require_user(db, creds, token))
+    if not image.original_path or not os.path.exists(image.original_path):
         raise HTTPException(404, "Photo not found.")
     if download:
         # Content-Disposition: attachment, so the lightbox's Download button saves
         # a file instead of opening the photo in a tab the user then has to leave.
-        cam = db.get(Camera, image.camera_id)
         return FileResponse(
             image.original_path,
             media_type="image/jpeg",
-            filename=download_name(cam.name if cam else None, image.captured_at),
+            filename=download_name(cam.name, image.captured_at),
         )
     return FileResponse(image.original_path, media_type="image/jpeg")
 
@@ -140,10 +158,7 @@ def image_thumb(
     the small copy cannot be made the original is sent instead, uncached, so the
     tile still shows and the next request tries again.
     """
-    _require_token(creds, token)
-    image = db.get(Image, image_id)
-    if image is None:
-        raise HTTPException(404, "Photo not found.")
+    image, _ = _estate_image(db, image_id, _require_user(db, creds, token))
     cached = Path(image.thumbnail_path) if image.thumbnail_path else thumb_path(image.id)
     # The small copy may outlive the original (originals are pruned after a while).
     if cached.is_file():
@@ -180,9 +195,11 @@ def flag_image(
     db: Session = Depends(get_db),
 ) -> dict:
     """Manual override of the detector. Sticky — the auto-scan won't touch it again."""
-    image = db.get(Image, image_id)
-    if image is None:
-        raise HTTPException(404, "Photo not found.")
+    image, _ = _estate_image(db, image_id, user)
+    if not body.is_empty and image.is_empty_frame is not False:
+        # Kept by hand: it shows on the map from now, so it is new to whoever hasn't
+        # opened its camera since (routes_map.shown_after).
+        image.processed_at = datetime.now(UTC)
     image.is_empty_frame = body.is_empty
     image.reviewed = True
     db.commit()

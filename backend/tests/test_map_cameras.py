@@ -16,7 +16,8 @@ from fastapi.testclient import TestClient
 from PIL import Image as PImage
 from sqlalchemy import create_engine, insert, select, text
 
-from app.api import routes_images
+from app.ai import empty_filter
+from app.api import routes_images, routes_map
 from app.api.routes_map import NEW_CAP, last_completed_night, night_window
 from app.core.config import settings
 from app.core.security import create_access_token
@@ -148,6 +149,33 @@ def test_thumb_takes_the_token_in_the_query_like_the_file_does(
     assert client.get(f"/api/images/{img.id}/thumb").status_code == 401
     assert client.get(f"/api/images/{img.id}/thumb?token=not-a-token").status_code == 401
     assert client.get(f"/api/images/{img.id}/thumb?token={token}").status_code == 200
+
+
+def test_photo_files_are_for_this_estates_logins_only(client, db_session, estate, media, tmp_path):
+    """A removed login stops seeing photos at once, and another estate never does.
+
+    An <img> can't send a header, so these check the token themselves; they must
+    still look the person up, as every other endpoint does.
+    """
+    cam = _camera(db_session, estate)
+    img = _photo(db_session, cam, datetime.now(UTC), path=_jpeg(tmp_path / "a.jpg"))
+    guest, guest_h = _user(db_session, estate, "viewer")
+    urls = [f"/api/images/{img.id}/thumb", f"/api/images/{img.id}/file"]
+    assert [client.get(u, headers=guest_h).status_code for u in urls] == [200, 200]
+
+    other = Estate(name="Elsewhere", timezone="Europe/Madrid")
+    db_session.add(other)
+    db_session.commit()
+    _, stranger = _user(db_session, other, "admin")
+    assert [client.get(u, headers=stranger).status_code for u in urls] == [404, 404]
+    assert client.post(f"/api/images/{img.id}/flag", headers=stranger,
+                       json={"is_empty": True}).status_code == 404
+
+    token = guest_h["Authorization"].split()[1]
+    db_session.delete(guest)
+    db_session.commit()
+    assert [client.get(u, headers=guest_h).status_code for u in urls] == [401, 401]
+    assert [client.get(f"{u}?token={token}").status_code for u in urls] == [401, 401]
 
 
 def test_thumb_404s_for_an_unknown_photo_or_a_missing_file(client, db_session, estate, media):
@@ -306,6 +334,88 @@ def test_a_photo_stored_while_you_look_still_counts_as_new(client, db_session, e
         select(CameraView).where(CameraView.user_id == member.id)).all()) == 2
 
 
+def _detector(monkeypatch, *, animal: bool):
+    """What the detector pass does to a frame: judge it and stamp it (empty_filter)."""
+    monkeypatch.setattr(empty_filter, "detect_animals",
+                        lambda path: [{"confidence": 0.9}] if animal else [])
+
+
+def test_a_frame_still_being_checked_when_you_open_the_camera_is_new_once_kept(
+    client, db_session, estate, monkeypatch,
+):
+    """Opening a camera while its newest frames wait for the detector must not
+    swallow them: they weren't on the map to see. Once the detector keeps them they
+    are new to everyone who hasn't opened the camera since, the opener included."""
+    _, admin = _user(db_session, estate, "admin")
+    _, member = _user(db_session, estate, "member")
+    cam = _camera(db_session, estate)
+    now = datetime.now(UTC)
+    _photo(db_session, cam, now - timedelta(hours=3), created=now - timedelta(hours=3))
+    for h in (admin, member):
+        client.post(f"/api/cameras/{cam.id}/seen", headers=h)
+
+    # A sync stores a burst of three frames and one that will turn out empty.
+    burst = [_photo(db_session, cam, now - timedelta(minutes=30), (), empty=None,
+                    created=now - timedelta(minutes=5)) for _ in range(3)]
+    grass = _photo(db_session, cam, now - timedelta(minutes=20), (), empty=None,
+                   created=now - timedelta(minutes=5))
+    assert _map(client, member)["Charca"]["new_count"] == 0  # not checked, not on the map
+
+    # The member opens Charca before the detector gets there.
+    assert client.post(f"/api/cameras/{cam.id}/seen", headers=member).status_code == 200
+
+    _detector(monkeypatch, animal=True)
+    for img in burst:
+        empty_filter.scan_image(db_session, img)
+    _detector(monkeypatch, animal=False)
+    empty_filter.scan_image(db_session, grass)
+    db_session.commit()
+    for h in (admin, member):
+        got = _map(client, h)["Charca"]
+        assert got["latest"]["image_id"] in {str(i.id) for i in burst}
+        assert got["new_count"] == 3, "photos they could not have seen are marked seen"
+
+    # Opening it now clears it: the check stamps are behind the new mark.
+    client.post(f"/api/cameras/{cam.id}/seen", headers=member)
+    assert _map(client, member)["Charca"]["new_count"] == 0
+    assert _map(client, admin)["Charca"]["new_count"] == 3
+
+
+def test_a_photo_kept_by_hand_is_new_to_whoever_had_opened_the_camera(client, db_session, estate):
+    """The detector said "nothing in it"; a hunter looks and keeps it. It shows on the
+    map from then, so it is news to a teammate who had already opened the camera."""
+    _, member = _user(db_session, estate, "member")
+    _, admin = _user(db_session, estate, "admin")
+    cam = _camera(db_session, estate)
+    now = datetime.now(UTC)
+    missed = _photo(db_session, cam, now - timedelta(hours=1), ("red_deer",), empty=True,
+                    created=now - timedelta(minutes=50))
+    missed.processed_at = now - timedelta(minutes=45)
+    db_session.commit()
+    client.post(f"/api/cameras/{cam.id}/seen", headers=member)
+    assert _map(client, member)["Charca"]["new_count"] == 0
+
+    r = client.post(f"/api/images/{missed.id}/flag", headers=admin, json={"is_empty": False})
+    assert r.status_code == 200
+    got = _map(client, member)["Charca"]
+    assert got["latest"]["image_id"] == str(missed.id) and got["new_count"] == 1
+
+
+def test_a_photo_checked_after_it_arrived_is_not_new_once_you_have_looked(
+    client, db_session, estate,
+):
+    """The mark covers what was checked before you looked, not only what had arrived."""
+    _, member = _user(db_session, estate, "member")
+    cam = _camera(db_session, estate)
+    now = datetime.now(UTC)
+    img = _photo(db_session, cam, now - timedelta(hours=1), created=now - timedelta(minutes=50))
+    img.processed_at = now - timedelta(minutes=10)  # a long detector backlog
+    db_session.commit()
+    assert _map(client, member)["Charca"]["new_count"] == 1
+    client.post(f"/api/cameras/{cam.id}/seen", headers=member)
+    assert _map(client, member)["Charca"]["new_count"] == 0
+
+
 def test_a_history_import_does_not_light_up_the_badge(client, db_session, estate):
     """A backfill stores months-old photos today. They are new to the app, not news."""
     _, headers = _user(db_session, estate, "member")
@@ -388,6 +498,75 @@ def test_last_night_counts_visits_not_frames(client, db_session, estate):
         {"species_id": "wild_boar", "label": "Wild boar", "visits": 2},
         {"species_id": "red_deer", "label": "Red deer", "visits": 1},
     ]
+
+
+def test_the_sheet_the_activity_map_and_the_replay_agree_on_a_dawn_visit(
+    client, db_session, estate, monkeypatch,
+):
+    """Last night runs to 08:00 on every map view: a boar heading to bed at 07:10 is
+    on the camera's sheet, in the activity circle and in the replay alike."""
+    _, headers = _user(db_session, estate, "member")
+    night = last_completed_night()
+    start, end = night_window(night)
+    assert (end - start) == timedelta(hours=14)
+    cam = _camera(db_session, estate)
+    dawn = _camera(db_session, estate, "Dawn only", lat=39.1, lon=-1.37)
+    at = end - timedelta(minutes=50)  # 07:10 local
+    for _ in range(3):
+        _photo(db_session, cam, at)
+    _photo(db_session, cam, start + timedelta(hours=2), ("red_deer",))
+    # Only a frame at 06:30 that the detector hasn't reached: the night isn't all known.
+    _photo(db_session, dawn, end - timedelta(minutes=90), (), empty=None)
+
+    sheet = _map(client, headers)
+    assert sheet["Charca"]["last_night"] == [
+        {"species_id": "red_deer", "label": "Red deer", "visits": 1},
+        {"species_id": "wild_boar", "label": "Wild boar", "visits": 1},
+    ]
+    assert sheet["Dawn only"]["last_night_status"] == "checking"
+    assert isinstance(sheet["Charca"]["last_night_so_far"], bool)
+
+    act = client.get("/api/map/activity?nights=1", headers=headers).json()
+    charca = next(c for c in act["cameras"] if c["name"] == "Charca")
+    assert {(s["label"], s["visits"]) for s in charca["by_species"]} == {
+        ("Red deer", 1), ("Wild boar", 1),
+    }
+    replay = client.get(f"/api/map/replay?night={night.isoformat()}", headers=headers).json()
+    assert sorted(v["label"] for v in replay["visits"] if v["camera_id"] == str(cam.id)) == [
+        "Red deer", "Wild boar",
+    ]
+
+    # From 06:00 to 08:00 last night is still going, and the sheet says "so far".
+    monkeypatch.setattr(routes_map, "still_running", lambda n: n == night)
+    assert _map(client, headers)["Charca"]["last_night_so_far"] is True
+
+
+def test_every_species_reads_in_sentence_case(client, db_session, estate):
+    """"Roe deer", not the stored "Roe Deer", wherever the map names it."""
+    db_session.add(Species(id="roe_deer", common_name="Roe Deer"))
+    db_session.commit()
+    _, headers = _user(db_session, estate)
+    cam = _camera(db_session, estate)
+    start, _ = night_window(last_completed_night())
+    _photo(db_session, cam, start + timedelta(hours=3), ("roe_deer",))
+    got = _map(client, headers)["Charca"]
+    assert got["latest"]["label"] == "Roe deer"
+    assert got["last_night"] == [{"species_id": "roe_deer", "label": "Roe deer", "visits": 1}]
+    act = client.get("/api/map/activity?nights=1", headers=headers).json()
+    assert act["species_options"][0]["label"] == "Roe deer"
+    one = client.get("/api/map/activity?nights=1&species=roe_deer", headers=headers).json()
+    assert one["species_label"] == "Roe deer"
+
+
+def test_bad_input_on_the_map_is_refused_in_words_not_a_server_error(client, db_session, estate):
+    _, headers = _user(db_session, estate)
+    r = client.get("/api/map/activity?species=%00", headers=headers)
+    assert r.status_code == 404 and r.json()["detail"] == "No such species."
+    for night in ("9999-12-31", "1900-01-01"):
+        r = client.get(f"/api/map/replay?night={night}", headers=headers)
+        assert r.status_code == 422 and r.json()["detail"] == "There is no replay for that night."
+    last = last_completed_night().isoformat()
+    assert client.get(f"/api/map/replay?night={last}", headers=headers).status_code == 200
 
 
 def test_last_night_says_how_far_to_trust_it(client, db_session, estate):

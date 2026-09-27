@@ -66,6 +66,8 @@ def test_name_for_nobody_is_hunter():
 
 
 def test_note_text_is_one_trimmed_line_of_at_most_140():
+    with pytest.raises(ValueError, match="characters"):
+        clean_text("boar \ud83d")
     assert clean_text(None) is None
     assert clean_text("   ") is None
     assert clean_text("  Big boar,\nthird night\trunning  ") == "Big boar, third night running"
@@ -236,6 +238,10 @@ def test_a_note_is_at_most_140_and_only_on_this_estates_photos(client, db_sessio
     r = _note(client, member, img, "x" * 141)
     assert r.status_code == 422 and "140" in r.json()["detail"]
     assert _note(client, member, img, "x" * 140).status_code == 201
+    # Half an emoji (a lone surrogate) can't be stored: said in words, not a server error.
+    r = client.post(f"/api/images/{img.id}/notes", content=b'{"text": "boar \\ud83d"}',
+                    headers={**member, "Content-Type": "application/json"})
+    assert r.status_code == 422 and "characters" in r.json()["detail"]
 
     other = Estate(name="Elsewhere", timezone="Europe/Madrid")
     db_session.add(other)
@@ -324,6 +330,8 @@ def test_tell_the_team_reaches_everyone_else_with_alerts_on(client, db_session, 
 
     r = _note(client, pedro_h, img, "Big boar, third night running", tell=True)
     assert r.status_code == 201 and r.json()["told"] == 1
+    # Luis has alerts on but muted Charca: the phone can say so, not "nobody has alerts on".
+    assert r.json()["muted"] == 1
 
     notes = db_session.query(Notification).all()
     assert [n.user_id for n in notes] == [ana.id]  # not the author, not Luis (muted Charca)
@@ -342,12 +350,41 @@ def test_tell_the_team_reaches_everyone_else_with_alerts_on(client, db_session, 
     # Luis still hears about the camera he didn't mute.
     other = _photo(db_session, feeder, species=("red_deer",))
     r = _note(client, pedro_h, other, None, tell=True)
-    assert r.json()["told"] == 2
+    assert r.json()["told"] == 2 and r.json()["muted"] == 0
     told = {x.user_id: x for x in db_session.query(Notification).filter_by(image_id=other.id)}
     assert set(told) == {ana.id, luis.id}
     assert told[luis.id].body == "Pedro marked a photo"
     assert told[luis.id].title == "Worth a look: Red deer at Feeder"
     assert off.id not in told and never.id not in told
+
+
+@requires_db
+def test_a_note_taken_back_leaves_no_words_in_the_teams_alerts(client, db_session, estate, pushes):
+    charca = _camera(db_session, estate, "Charca")
+    _, pedro_h = _user(db_session, estate, "member", "pedro.garcia@x.es", alerts=True)
+    _, ana_h = _user(db_session, estate, "viewer", "ana@x.es", alerts=True)
+    _, admin_h = _user(db_session, estate, "admin", "luis@x.es", alerts=True)
+    img = _photo(db_session, charca)
+
+    def ana_reads():
+        r = client.get("/api/notifications", headers=ana_h)
+        assert r.status_code == 200, r.text
+        return [n["body"] for n in r.json()["items"]]
+
+    rude = _note(client, pedro_h, img, "Big boar, rude words here", tell=True).json()
+    kept = _note(client, pedro_h, img, "Second look: a sow too", tell=True).json()
+    assert rude["told"] == 2 and kept["told"] == 2
+    assert "Pedro: Big boar, rude words here" in ana_reads()
+
+    def remove(note, headers):
+        return client.delete(f"/api/photo-notes/{note['note']['id']}", headers=headers)
+
+    assert remove(rude, pedro_h).status_code == 200
+    assert ana_reads() == ["Pedro: Second look: a sow too"]
+    # An admin taking one back clears it for everyone too.
+    assert remove(kept, admin_h).status_code == 200
+    assert ana_reads() == []
+    assert db_session.query(Notification).filter_by(kind="team_note").count() == 0
 
 
 @requires_db
@@ -584,11 +621,11 @@ def test_dispatch_never_pushes_a_muted_camera(db_session, estate, pushes):
 
     got = {n.user_id: n for n in db_session.query(Notification).all()}
     # The muter hears about Charca only, as if the feeder had seen nothing.
-    assert got[muter.id].title == "Wild Boar at Charca"  # the stored name, as ever
-    assert got[muter.id].body.startswith("1 photo at ")
+    assert got[muter.id].title == "Wild boar at Charca"  # as every other screen writes it
+    assert got[muter.id].body.startswith("1 visit at ")
     assert got[muter.id].image_id == at_charca.id
     # Everyone else still hears from the feeder.
-    assert got[other.id].title == "Wild Boar on 2 cameras"
+    assert got[other.id].title == "Wild boar on 2 cameras"
     assert sorted(u for u, _ in pushes.calls) == sorted([muter.id, other.id])
 
     # A run with only the muted camera tells the muter nothing at all.

@@ -4,6 +4,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -176,15 +177,16 @@ def rename_camera(
 @router.post("/{camera_id}/seen")
 def mark_seen(
     camera_id: uuid.UUID,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> dict:
     """You opened this camera: its photos so far are no longer new to you.
 
     Any signed-in role, viewers included: it records what this person has looked
-    at, not anything about the camera. What it records is the arrival stamp of the
-    camera's newest photo, not the time now, so a photo a running sync is still
-    storing counts as new once it shows (routes_map.seen_mark).
+    at, not anything about the camera. What it records is the newest arrival or
+    check stamp among the camera's photos, not the time now, so a photo a running
+    sync is still storing, or one the detector hasn't passed yet, counts as new
+    once it shows (routes_map.seen_mark).
     """
     camera = db.scalar(select(Camera.id).where(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,

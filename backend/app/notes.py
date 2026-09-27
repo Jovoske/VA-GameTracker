@@ -87,10 +87,16 @@ def clean_text(value: str | None) -> str | None:
 
     Line breaks and tabs become spaces, since the note is shown as one line under the
     photo and in the strip. Other invisible characters stay: emoji are built from them.
+    Half an emoji (a lone surrogate, which a broken keyboard or paste can send) can't
+    be stored, so it is refused in words rather than failing the save.
     """
     if value is None:
         return None
     text = " ".join("".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in value).split())
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("That note has characters it can’t save. Type it again.") from None
     if len(text) > MAX_TEXT:
         raise ValueError(f"Keep the note to {MAX_TEXT} characters.")
     return text or None
@@ -118,20 +124,13 @@ def told_about(db: Session, note: PhotoNote) -> list[Notification]:
     ).all())
 
 
-def tell_team(
-    db: Session, note: PhotoNote, author: User, image: Image, camera: Camera, label: str,
-    species_id: str | None = None, now: datetime | None = None,
-) -> list[Notification]:
-    """One in-app record for every other person who has alerts on, ready to push.
+def listeners(db: Session, camera: Camera, author: User) -> tuple[list, int]:
+    """Who a note on this camera's photo would reach: ([user_id, ...], muted).
 
-    Everyone on the estate with alerts switched on hears it, whichever animals they
-    picked: a teammate pointing at a photo is not a species alert. Not the author,
-    and not anyone who muted this camera. Nothing is pushed here (see deliver): a
-    phone that doesn't answer must not hold up the person saving the note. The
-    records carry the note's time (see told_about).
+    Everyone else on the estate with alerts switched on, less those who muted this
+    camera; `muted` is how many of them did, so the author can be told why nobody
+    heard rather than that nobody has alerts on.
     """
-    now = now or note.created_at or datetime.now(UTC)
-    title, body = compose(label, camera.name, author, note.text)
     prefs = db.execute(
         select(NotificationPref.user_id, NotificationPref.muted_camera_ids)
         .join(User, User.id == NotificationPref.user_id)
@@ -141,13 +140,30 @@ def tell_team(
             User.estate_id == camera.estate_id,
         )
     ).all()
+    reached = [user_id for user_id, muted in prefs if str(camera.id) not in set(muted or [])]
+    return reached, len(prefs) - len(reached)
+
+
+def tell_team(
+    db: Session, note: PhotoNote, author: User, image: Image, camera: Camera, label: str,
+    species_id: str | None = None, now: datetime | None = None,
+) -> list[Notification]:
+    """One in-app record for every other person who has alerts on, ready to push.
+
+    Everyone on the estate with alerts switched on hears it, whichever animals they
+    picked: a teammate pointing at a photo is not a species alert. Not the author,
+    and not anyone who muted this camera (see listeners). Nothing is pushed here (see
+    deliver): a phone that doesn't answer must not hold up the person saving the
+    note. The records carry the note's time (see told_about).
+    """
+    now = now or note.created_at or datetime.now(UTC)
+    title, body = compose(label, camera.name, author, note.text)
     out = [
         Notification(
             user_id=user_id, kind="team_note", title=title, body=body,
             url=photo_url(image.id), species_id=species_id, image_id=image.id, created_at=now,
         )
-        for user_id, muted in prefs
-        if str(camera.id) not in set(muted or [])
+        for user_id in listeners(db, camera, author)[0]
     ]
     db.add_all(out)
     db.flush()

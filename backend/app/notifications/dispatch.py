@@ -14,6 +14,10 @@ Two guards keep this an alert rather than a firehose:
     and when one run has more than MAX_PER_USER species for a person it collapses
     into a single summary.
 
+It counts visits, as every other screen does: frames of one species at one camera
+within VISIT_GAP of each other are one visit, so a burst of three frames of one
+boar reads "1 visit", not "3 photos".
+
 A camera someone muted is left out of what they are told, as if it had seen
 nothing: no push and no in-app record, because the reason to mute the busy feeder
 is to stop hearing about it. Everyone else still hears from it.
@@ -32,6 +36,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.forecasting.exposure import VISIT_GAP
+from app.forecasting.model import class_label
 from app.models import (
     AppSetting,
     Camera,
@@ -63,7 +69,8 @@ class SpeciesDigest:
     species_id: str
     name: str
     images: set = field(default_factory=set)
-    cameras: Counter = field(default_factory=Counter)
+    # {camera: [captured_at, ...]} of the frames, for counting visits.
+    frames: dict = field(default_factory=dict)
     latest_at: datetime | None = None
     latest_image_id: uuid.UUID | None = None
 
@@ -71,10 +78,26 @@ class SpeciesDigest:
         if image_id in self.images:
             return  # two animals in one frame are one sighting
         self.images.add(image_id)
-        self.cameras[camera] += 1
+        self.frames.setdefault(camera, []).append(captured_at)
         if self.latest_at is None or captured_at > self.latest_at:
             self.latest_at = captured_at
             self.latest_image_id = image_id
+
+    @property
+    def cameras(self) -> Counter:
+        """{camera: visits}: a frame more than VISIT_GAP after the one before is a new arrival."""
+        out: Counter = Counter()
+        for camera, times in self.frames.items():
+            prev = None
+            for at in sorted(times):
+                if prev is None or at - prev > VISIT_GAP:
+                    out[camera] += 1
+                prev = at
+        return out
+
+    @property
+    def visits(self) -> int:
+        return sum(self.cameras.values())
 
 
 def _cursor(db: Session) -> datetime | None:
@@ -93,12 +116,15 @@ def _set_cursor(db: Session, at: datetime) -> None:
 
 
 def group_by_species(rows) -> dict[str, SpeciesDigest]:
-    """rows: (species_id, common_name, image_id, captured_at, camera_name)."""
+    """rows: (species_id, common_name, image_id, captured_at, camera_name).
+
+    Named as the app writes it ("Wild boar", "Roe deer"), not as it is stored.
+    """
     out: dict[str, SpeciesDigest] = {}
     for sid, name, image_id, captured_at, camera in rows:
         d = out.get(sid)
         if d is None:
-            d = out[sid] = SpeciesDigest(species_id=sid, name=name)
+            d = out[sid] = SpeciesDigest(species_id=sid, name=class_label(sid, name, None, None))
         d.add(image_id, captured_at, camera)
     return out
 
@@ -116,23 +142,23 @@ def _join(names: list[str]) -> str:
 def compose(d: SpeciesDigest, tz: ZoneInfo) -> tuple[str, str]:
     """(title, body) for one species in one run.
 
-    Reads like a text from a friend: "Wild boar at PL19" / "2 photos, last one 22:14."
+    Reads like a text from a friend: "Wild boar at PL19" / "2 visits, last one 22:14."
     Camera in the title when there is one, the count when there are several.
     """
     cams = [c for c, _ in d.cameras.most_common()]
-    n = len(d.images)
+    n = d.visits
     when = d.latest_at.astimezone(tz).strftime("%H:%M") if d.latest_at else "just now"
     if n == 1:
-        return f"{d.name} at {cams[0]}", f"1 photo at {when}."
-    photos = f"{n} photos"
+        return f"{d.name} at {cams[0]}", f"1 visit at {when}."
+    visits = f"{n} visits"
     if len(cams) == 1:
-        return f"{d.name} at {cams[0]}", f"{photos}, last one {when}."
-    return f"{d.name} on {len(cams)} cameras", f"{photos} at {_join(cams)}, last one {when}."
+        return f"{d.name} at {cams[0]}", f"{visits}, last one {when}."
+    return f"{d.name} on {len(cams)} cameras", f"{visits} at {_join(cams)}, last one {when}."
 
 
 def compose_summary(digests: list[SpeciesDigest], tz: ZoneInfo) -> tuple[str, str]:
-    n = sum(len(d.images) for d in digests)
-    names = [d.name for d in sorted(digests, key=lambda d: -len(d.images))]
+    n = sum(d.visits for d in digests)
+    names = [d.name for d in sorted(digests, key=lambda d: -d.visits)]
     latest = max((d.latest_at for d in digests if d.latest_at), default=None)
     when = latest.astimezone(tz).strftime("%H:%M") if latest else "just now"
     return (

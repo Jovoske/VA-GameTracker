@@ -168,7 +168,11 @@ def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, 
     assert camera.ubox_uid == "cam-1" and camera.spypoint_id is None
     assert camera.battery_pct == 82 and camera.photo_limit is None
     assert camera.last_report_at and camera.last_sync_at
-    user = User(id=setup.id, estate_id=setup.estate_id)
+    # A real login: the photo endpoints look the person up, as every other one does.
+    user = User(estate_id=setup.estate_id, email="viewer@ubox.local", password_hash="x",
+                role="viewer")
+    db_session.add(user)
+    db_session.commit()
     gallery = camera_images(camera.id, limit=40, include_empty=False, user=user, db=db_session)
     assert len(gallery) == 2 and all(i["file_url"] for i in gallery)
     for image in db_session.scalars(select(Image)):

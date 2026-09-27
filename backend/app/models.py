@@ -130,12 +130,14 @@ class Camera(Base):
 class CameraView(Base):
     """What each person had of each camera when they last opened it on the map.
 
-    seen_at is the arrival stamp (images.created_at) of the camera's newest photo at
-    that moment, not the clock: a photo stored by a sync that began before you looked
-    carries an earlier stamp than your look, and must still count as new (see
-    routes_map.seen_mark). The count on a camera's map callout is its photos that
-    arrived after it. Per person, because the team does not look at the same cameras
-    at the same time. No row means never opened.
+    seen_at is the newest arrival or check stamp (images.created_at, processed_at)
+    among the camera's photos at that moment, not the clock: a photo stored by a sync
+    that began before you looked carries an earlier stamp than your look, and must
+    still count as new (see routes_map.seen_mark). The count on a camera's map
+    callout is its photos that became showable after it: arrived, or were passed by
+    the detector or kept by a hunter (routes_map.shown_after). Per person, because
+    the team does not look at the same cameras at the same time. No row means never
+    opened.
     """
 
     __tablename__ = "camera_views"

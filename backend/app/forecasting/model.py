@@ -164,8 +164,18 @@ def _camera_forecast(
     }
 
 
+def sentence_case(name: str) -> str:
+    """"Roe Deer" -> "Roe deer". The classifier stores names in title case; the app
+    writes them as words in a sentence, the way "Wild boar" and "Red deer" read."""
+    return name[:1].upper() + name[1:].lower()
+
+
 def class_label(species_id: str | None, common_name: str | None, sex: str | None, group_type: str | None) -> str:
-    """Human class from species + sex + group composition (mirrors the gallery chip)."""
+    """Human class from species + sex + group composition (mirrors the gallery chip).
+
+    Every other species is its name in sentence case ("Roe deer", "Fallow deer"), so
+    the Photos tiles, the map and the alerts all write it the same way.
+    """
     if species_id == "red_deer":
         if group_type == "hind_with_calf":
             return "Hind + calf"
@@ -182,7 +192,7 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
         if sex == "female":
             return "Sow"
         return "Sounder" if group_type == "sounder" else "Wild boar"
-    return common_name or (species_id or "Animal")
+    return sentence_case(common_name) if common_name else (species_id or "Animal")
 
 
 def _expectations(

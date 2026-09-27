@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.db import get_db
+from app.forecasting.model import sentence_case
 from app.models import (
     Camera,
     Detection,
@@ -54,7 +55,7 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
     species = [
         {
             "id": s.id,
-            "common_name": s.common_name,
+            "common_name": sentence_case(s.common_name),  # "Roe deer", as the app writes it
             "selected": s.id in chosen,
             "detections": int(counts.get(s.id, 0)),
         }

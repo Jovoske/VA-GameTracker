@@ -7,6 +7,7 @@ don't write. The author or an admin removes one. The strips that gather them
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -25,6 +26,7 @@ from app.notes import (
     can_write,
     clean_text,
     deliver_in_background,
+    listeners,
     notes_for,
     serialize,
     tell_team,
@@ -94,6 +96,7 @@ def _markable(db: Session, image: Image, keep: bool) -> bool:
         raise HTTPException(409, EMPTY_FRAME)
     image.is_empty_frame = False
     image.reviewed = True  # sticky, like the Keep button: the auto-scan leaves it be
+    image.processed_at = datetime.now(UTC)  # on the map from now, so new (routes_map.shown_after)
     return True
 
 
@@ -104,7 +107,8 @@ def add_note(
     """Mark the photo "Worth a look", with an optional note of up to 140 characters.
 
     With tell_team, everyone else who has alerts on gets one push (unless they muted
-    this camera); `told` is how many people that is. The push goes out after this
+    this camera); `told` is how many people that is, and `muted` how many with alerts
+    on were left out because they muted this camera. The push goes out after this
     answers, so a slow phone never holds up the save. A second save with the same
     `id` is the same note: its words are updated, and the team is told once.
     """
@@ -133,6 +137,7 @@ def add_note(
         note.text = text  # the words on the last try are the ones meant
     told = told_about(db, note)
     new_told = []
+    muted = listeners(db, camera, user)[1] if body.tell_team else 0
     if body.tell_team and not told:
         shown = latest_photos(db, [image.id]).get(image.id)
         new_told = told = tell_team(
@@ -147,6 +152,7 @@ def add_note(
         "note": serialize(note, user, user),
         **_notes(db, image.id, user),
         "told": len(told),
+        "muted": muted,
         "kept": kept,
         "again": not fresh,
     }
@@ -154,7 +160,11 @@ def add_note(
 
 @router.delete("/photo-notes/{note_id}")
 def remove_note(note_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
-    """Take a note back: your own, or anyone's if you are an admin."""
+    """Take a note back: your own, or anyone's if you are an admin.
+
+    The alerts "Tell the team" made from it go too, so its words don't stay in
+    everyone's alert list. A push already on someone's phone can't be called back.
+    """
     note = db.get(PhotoNote, note_id)
     if note is None:
         raise HTTPException(404, "That note is already gone.")
@@ -162,6 +172,8 @@ def remove_note(note_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
     if not can_remove(note, user):
         raise HTTPException(403, "Only the person who wrote it or an admin can remove a note.")
     image_id = note.image_id
+    for told in told_about(db, note):
+        db.delete(told)
     db.delete(note)
     db.commit()
     return _notes(db, image_id, user)
