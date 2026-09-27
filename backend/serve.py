@@ -5,8 +5,13 @@ the native Windows build. pydantic-settings reads .env for its own fields, but i
 NOT populate os.environ — so values read directly from the environment (FRONTEND_DIST in
 app.main, ANTHROPIC_API_KEY in the Anthropic SDK) would be missing. This entrypoint loads
 .env into os.environ first, then starts uvicorn, so every consumer sees the same config.
+
+It is how Db01 runs the API, so it is also where the server refuses to start with the
+secrets published in this repository (app.core.startup): the fix is printed, and the
+service log keeps it. APP_ENV=development skips that, for a laptop.
 """
 import os
+import sys
 from pathlib import Path
 
 _env = Path(__file__).with_name(".env")
@@ -19,7 +24,29 @@ if _env.exists():
         os.environ.setdefault(_key.strip(), _val.strip())
 
 
+def refusals() -> list[str]:
+    """Why the server must not start, in words (the database part is skipped when
+    it can't be reached: the app then says so itself)."""
+    from app.core.db import SessionLocal
+    from app.core.startup import refusals as check
+
+    try:
+        with SessionLocal() as db:
+            return check(db)
+    except Exception as e:  # the database is down or not migrated yet
+        print(f"Could not check the admin passwords: {type(e).__name__}", file=sys.stderr)
+        return check(None)
+
+
 if __name__ == "__main__":
+    problems = refusals()
+    if problems:
+        print("GameSense will not start:", file=sys.stderr)
+        for line in problems:
+            print(f"  - {line}", file=sys.stderr)
+        print("Then restart the GameSense service.", file=sys.stderr)
+        sys.exit(2)
+
     import uvicorn
 
     uvicorn.run(

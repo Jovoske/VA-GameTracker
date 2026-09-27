@@ -168,7 +168,7 @@ def setup(db_session, monkeypatch, tmp_path):
 def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, setup):
     from app.api.routes_cameras import camera_images
     from app.api.routes_images import image_file
-    from app.core.security import create_access_token
+    from app.core.security import image_token
 
     FakeClient.events = [event("2", 120), event("1")]
     result = sync.sync_ubox_all(db_session)
@@ -189,7 +189,7 @@ def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, 
         assert image.width == 24 and image.height == 12
         assert Path(image.original_path).name.startswith("ubox_")
         assert ":" not in Path(image.original_path).name
-        response = image_file(image.id, token=create_access_token(str(user.id)),
+        response = image_file(image.id, token=image_token(user),
                               download=False, creds=None, db=db_session)
         assert Path(response.path).read_bytes() in (jpeg("red"), jpeg("blue"))
     second = sync.sync_ubox_all(db_session)

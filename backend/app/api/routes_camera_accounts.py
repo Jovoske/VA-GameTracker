@@ -1,8 +1,9 @@
 """Camera accounts — guests connect a provider login and its cameras join the estate.
 
-Credentials are verified against their provider before saving
-and stored encrypted. Any signed-in user can add an account; only the owner or an admin
-can remove it or re-enter its password. Removing stops future syncing but keeps the
+Credentials are verified against their provider before saving and stored encrypted.
+Members and admins can add an account (viewers only look); only the owner or an admin
+can remove it or re-enter its password. A login added by someone since removed keeps
+fetching, owned by the admin who removed them. Removing stops future syncing but keeps the
 photos already ingested; its cameras show as not connected until a login lists them.
 
 The list also says, per login, whether it is working, in words (app.ingestion.logins),
@@ -106,7 +107,8 @@ def _primary_row(db: Session, user: User, now: datetime, failing: dict) -> dict 
     return {
         "id": "primary", "label": logins.PRIMARY_LABEL,
         "username": settings.spypoint_username if user.role == "admin" else None,
-        "provider": "spypoint", "owner": None, "active": True, "primary": True,
+        "provider": "spypoint", "owner": None, "added_by_removed": None, "active": True,
+        "primary": True,
         "cameras": int(linked), "importing": False, "last_sync_at": None,
         "can_remove": False, "can_edit": False, "status": _status(entry, failing.get(None)),
         "ubox_min_interval_seconds": None, "ubox_max_images_per_day": None,
@@ -151,6 +153,9 @@ def list_accounts(
             "username": a.username,
             "provider": a.provider,
             "owner": owners.get(a.owner_user_id),
+            # Added by someone since removed: it kept fetching, the admin who removed
+            # them owns it, and Settings says who added it (routes_users.delete_user).
+            "added_by_removed": a.former_owner,
             "active": a.active,
             "primary": False,
             "cameras": max(linked, a.reported_cameras or 0) if importing else linked,
@@ -187,6 +192,8 @@ def add_account(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    if user.role == "viewer":
+        raise HTTPException(403, "Viewers can see the camera logins but can't add one.")
     username = body.username.strip()
     provider_label = "UBox Pro" if body.provider == "ubox" else "SPYPOINT"
     if not username or not body.password:

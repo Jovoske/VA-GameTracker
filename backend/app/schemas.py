@@ -12,6 +12,9 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # The photo pass (app.core.security): what photo addresses carry, never the
+    # sign-in itself.
+    image_token: str | None = None
 
 
 class UserOut(BaseModel):

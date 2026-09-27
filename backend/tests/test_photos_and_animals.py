@@ -19,7 +19,7 @@ from app.ai import species as species_ai
 from app.ai.checking import WAITING
 from app.ai.classifier import ESTATE_KEYS, common_name, default_name
 from app.api.routes_species import class_filter
-from app.core.security import create_access_token
+from app.core.security import create_access_token, image_token
 from app.forecasting.model import class_label, sentence_case
 from app.models import (
     Camera,
@@ -415,7 +415,7 @@ def test_a_photo_file_is_kept_by_the_phone(client, db_session, estate, tmp_path)
     img.original_path = str(tmp_path / "a.jpg")
     PImage.new("RGB", (64, 48), (90, 120, 60)).save(img.original_path, "JPEG")
     db_session.commit()
-    token = create_access_token(str(user.id))
+    token = image_token(user)
     for url in (f"/api/images/{img.id}/file", f"/api/images/{img.id}/file?download=1"):
         r = client.get(f"{url}{'&' if '?' in url else '?'}token={token}")
         assert r.status_code == 200

@@ -1,11 +1,15 @@
 import { type FormEvent, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { login } from '../api'
+import { LAST_EMAIL_KEY, login } from '../api'
 
 export default function Login() {
   const nav = useNavigate()
   const expired = new URLSearchParams(window.location.search).has('expired')
-  const [email, setEmail] = useState('admin@gamesense.local')
+  // Whoever signed in last on this phone, never a guess: the admin's address used to
+  // be filled in for every visitor to the public page (audit D-06).
+  const [email, setEmail] = useState(() => {
+    try { return localStorage.getItem(LAST_EMAIL_KEY) ?? '' } catch { return '' }
+  })
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -57,6 +61,9 @@ export default function Login() {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          autoFocus={!email}
         />
 
         <label htmlFor="login-password" style={{ fontSize: 12, color: 'var(--text-dim)' }}>Password</label>

@@ -1,7 +1,7 @@
 import { CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { type Failure, api, getFresh, peek, thumbUrl, whoAmI } from '../api'
+import { type Failure, api, getFresh, peek, peekMe, thumbUrl, whoAmI } from '../api'
 import Overlay from '../components/Overlay'
 import type { PhotoFix } from '../components/PhotoFix'
 import PhotoLightbox, { morePhotosFailed } from '../components/PhotoLightbox'
@@ -107,7 +107,7 @@ export default function Animals() {
   const [zoom, setZoom] = useState<number | null>(null)
   // Photos a fix in the viewer took out of this gallery: they go when it closes.
   const leaving = useRef(new Set<string>())
-  const [me, setMe] = useState<{ role: string } | null>(null)
+  const [me, setMe] = useState<{ role: string } | null>(() => peekMe())
   useEffect(() => { whoAmI().then(setMe).catch(() => {}) }, [])
   const admin = me?.role === 'admin'
 
@@ -463,7 +463,9 @@ export default function Animals() {
 
         <div className="an-fold-body">
           <p className="an-fold-note">
-            Matching is rough. Pick the sightings you know are the same animal and tap Merge.
+            {admin
+              ? 'Matching is rough. Pick the sightings you know are the same animal and tap Merge.'
+              : 'Matching is rough. Only an admin can merge or confirm them.'}
           </p>
 
           <div className="an-toolbar">
@@ -475,15 +477,17 @@ export default function Animals() {
                 {showAll ? 'Repeat visitors only' : `Show all ${items.length}`}
               </button>
             )}
-            <button onClick={recompute} disabled={!!busy} className="an-btn an-btn--right" title="Scan new photos for repeat visitors">
-              {busy === 'Looking…' ? 'Looking…' : 'Look for repeats'}
-            </button>
+            {admin && (
+              <button onClick={recompute} disabled={!!busy} className="an-btn an-btn--right" title="Scan new photos for repeat visitors">
+                {busy === 'Looking…' ? 'Looking…' : 'Look for repeats'}
+              </button>
+            )}
           </div>
 
           {repeatMsg && <div className="an-dim" role="status" data-repeats>{repeatMsg}</div>}
           {err && <div className="an-error" role="alert">{err}</div>}
 
-          {sel.size > 0 && (
+          {admin && sel.size > 0 && (
             <div className="card an-selbar">
               <span>{sel.size} picked</span>
               <button onClick={() => mergeSelected()} disabled={sel.size < 2 || !!busy} className="an-btn" style={{ opacity: sel.size < 2 ? 0.4 : 1 }}>
@@ -506,11 +510,11 @@ export default function Animals() {
             <div className="an-dim">Loading…</div>
           ) : items.length === 0 ? (
             <div className="card an-empty">
-              Nothing yet. Tap <b className="an-strong">Look for repeats</b>. It takes a few minutes.
+              {admin ? <>Nothing yet. Tap <b className="an-strong">Look for repeats</b>. It takes a few minutes.</> : 'Nothing yet. An admin looks for repeat visitors.'}
             </div>
           ) : shown.length === 0 ? (
             <div className="an-dim">
-              No repeat visitors found. Tap Show all to browse single sightings and merge the ones you recognise.
+              {admin ? 'No repeat visitors found. Tap Show all to browse single sightings and merge the ones you recognise.' : 'No repeat visitors found. Tap Show all to browse single sightings.'}
             </div>
           ) : (
             <div className="an-grid">
@@ -519,8 +523,8 @@ export default function Animals() {
                 return (
                   <div
                     key={a.id}
-                    onClick={() => toggle(a.id)}
-                    className="card pressable an-animal"
+                    onClick={admin ? () => toggle(a.id) : undefined}
+                    className={`card an-animal${admin ? ' pressable' : ''}`}
                     style={{ outline: on ? '2px solid var(--teal)' : '2px solid transparent' }}
                   >
                     <div className="an-animal-photo">
@@ -531,9 +535,9 @@ export default function Animals() {
                           alt={a.label}
                         />
                       )}
-                      <div className="an-animal-check" style={{ background: on ? 'var(--teal)' : 'rgba(0,0,0,.5)' }}>
+                      {admin && <div className="an-animal-check" style={{ background: on ? 'var(--teal)' : 'rgba(0,0,0,.5)' }}>
                         {on ? <CheckIcon size={13} weight="bold" /> : null}
-                      </div>
+                      </div>}
                       {a.confirmed && <div className="an-animal-confirmed">confirmed</div>}
                       {a.sightings >= 2 && <div className="an-animal-count">{a.sightings} visits</div>}
                     </div>

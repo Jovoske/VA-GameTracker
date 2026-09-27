@@ -7,6 +7,7 @@ import { RouterProvider, createBrowserRouter } from 'react-router-dom'
 // Spanish estate from ever downloading the Cyrillic subset.
 import '@fontsource-variable/ibm-plex-sans/wght.css'
 import App from './App'
+import { installPhotoRetry } from './api'
 import { RouteCrash } from './components/ErrorBoundary'
 import { installCrashReporting } from './crash'
 import { registerServiceWorker } from './serviceWorker'
@@ -14,6 +15,8 @@ import './theme.css'
 
 // First, so a crash while the app starts is reported too.
 installCrashReporting()
+// A photo whose pass ran out loads again with a new one instead of showing broken.
+installPhotoRetry()
 
 // A data router, so a page can hold back a navigation it would lose work to: the
 // map asks before Back or a tab throws away an unsaved outline (useBlocker needs

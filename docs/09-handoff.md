@@ -114,6 +114,13 @@ passwords and live rows behind it, and only one of the two could survive.
    let one photo fetch run (it saves every password again under that key), or put
    the old value in `PREVIOUS_JWT_SECRET`. A password no key can read shows in
    Settings as "re-enter the password"; it is never dropped silently.
+   `python -m app.manage new-secret` (from `backend\`) does all of that: a fresh
+   `JWT_SECRET`, the old one kept as `PREVIOUS_JWT_SECRET`, a fresh
+   `CREDENTIALS_KEY`. Everyone signs in again once; camera logins keep working.
+   `serve.py` refuses to start while `JWT_SECRET` is a published value or shorter
+   than 32 characters, or while an admin still has the published password
+   (`python -m app.manage set-password EMAIL`): the reason is in the service log.
+   Check `backend\.env` on Db01 before deploying plan item 12.
 2. **`0001` runs `create_all()` against the current ORM**, so every later
    revision must be idempotent — `IF NOT EXISTS`, or an explicit no-op — or
    fresh installs break. `backend/tests/test_migrations.py` enforces this, and

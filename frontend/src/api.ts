@@ -1,5 +1,6 @@
 const TOKEN_KEY = 'gs_token'
 const ME_KEY = 'gs_me'
+const PASS_KEY = 'gs_img'
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -10,7 +11,28 @@ export function setToken(token: string | null): void {
   else {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(ME_KEY)
+    setImagePass(null)
   }
+}
+
+/**
+ * The same person's sign-in, renewed by the server (X-Session-Token): a sign-in a
+ * week old is swapped for a fresh one as it is used, so a hunter using the app
+ * daily is never sent to the sign-in page at the 30-day mark (audit D-11). Who is
+ * signed in stays known under the new token, so nothing on screen changes.
+ */
+function renewToken(next: string): void {
+  const old = getToken()
+  if (!old || old === next) return
+  try {
+    localStorage.setItem(TOKEN_KEY, next)
+    const saved = JSON.parse(localStorage.getItem(ME_KEY) || 'null')
+    if (saved && saved.token === old) localStorage.setItem(ME_KEY, JSON.stringify({ ...saved, token: next }))
+  } catch {
+    // Storage blocked: the old sign-in keeps working until it runs out.
+  }
+  if (meKnown?.token === old) meKnown = { ...meKnown, token: next }
+  if (meCache?.token === old) meCache = { ...meCache, token: next }
 }
 
 /** Who the stored token belongs to (its `sub`), without asking the server. */
@@ -24,6 +46,10 @@ export function tokenSubject(): string | null {
     return null
   }
 }
+
+/** The service worker's stores of photos (THUMB_CACHE, PHOTO_CACHE in public/sw.js),
+ *  kept by address without the photo pass. */
+export const PHOTO_CACHES = ['gamesense-thumbs-v1', 'gamesense-photos-v1']
 
 /** Sit reports waiting for signal. Written by sits.ts; named here so sign-out can clear it. */
 export const SIT_QUEUE_KEY = 'gs_sit_queue'
@@ -51,20 +77,110 @@ export function signOut(): void {
     caches.open(WORKER_API_CACHE)
       .then(async (c) => Promise.all((await c.keys()).filter((r) => new URL(r.url).pathname.startsWith('/api/sits')).map((r) => c.delete(r))))
       .catch(() => {})
+    // The photos this phone kept open without a pass; the next person signs in for theirs.
+    PHOTO_CACHES.forEach((name) => { caches.delete(name).catch(() => {}) })
   }
 }
 
-/** Authenticated URL for a photo.
+/**
+ * The photo pass: what a photo's address carries so an <img> can open it.
  *
- * `/api/images/{id}/file` used to be open to anyone holding the UUID. Trail cameras
- * photograph people as well as animals, so it now requires a token — and an <img>
- * tag cannot send an Authorization header, so the token rides in the query string.
- * Every photo `src` in the app must go through here or it renders as a broken image.
+ * An <img> tag can't send the sign-in header, so the address has to hold something.
+ * It used to hold the 30-day sign-in itself, which then sat in server logs and in
+ * any copied photo link as a working login to the whole app (audit C-19, D-08,
+ * H-13). The pass opens photos and nothing else, for hours. The server sends it on
+ * every answer (X-Image-Token) and with the sign-in, the same text all through a
+ * 6-hour window so photo addresses, and what the phone keeps of them, hold still.
+ */
+let pass: string | null = null
+try { pass = localStorage.getItem(PASS_KEY) } catch { /* private mode: kept in memory */ }
+
+export function setImagePass(next: string | null): void {
+  if (next === pass) return
+  pass = next
+  try {
+    if (next) localStorage.setItem(PASS_KEY, next)
+    else localStorage.removeItem(PASS_KEY)
+  } catch {
+    // Storage blocked: it lives in memory for this session.
+  }
+}
+
+/** When a token stops working (its `exp`), in ms; 0 when it can't be read. */
+function expiresAt(token: string | null): number {
+  try {
+    const part = token?.split('.')[1]
+    const exp = part ? (JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as { exp?: unknown }).exp : null
+    return typeof exp === 'number' ? exp * 1000 : 0
+  } catch {
+    return 0
+  }
+}
+
+/** The pass the phone has, if it has a few minutes left in it. */
+function livePass(): string | null {
+  return pass && expiresAt(pass) > Date.now() + 5 * 60_000 ? pass : null
+}
+
+let passAsked: Promise<string | null> | null = null
+
+/** Ask for a new pass (once, however many photos want one), or null with no answer. */
+export function freshPass(): Promise<string | null> {
+  if (!getToken()) return Promise.resolve(null)
+  if (!passAsked) {
+    passAsked = api<{ image_token: string }>('/auth/image-token', { timeoutMs: 15_000 })
+      .then((r) => { setImagePass(r.image_token); return r.image_token })
+      .catch(() => null)
+      .finally(() => { window.setTimeout(() => { passAsked = null }, 10_000) })
+  }
+  return passAsked
+}
+
+/** A photo's address, with the photo pass on it.
+ *
+ * Every photo `src` in the app goes through here (and thumbUrl). With no pass yet,
+ * or one about to run out, a new one is asked for and the address goes without:
+ * the photo that fails for it is loaded again once the pass comes
+ * (installPhotoRetry). Never the sign-in itself.
  */
 export function imageUrl(path: string): string {
-  const token = getToken()
-  if (!token) return path
-  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+  const p = livePass()
+  if (!p) {
+    if (getToken()) void freshPass()
+    return path
+  }
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(p)}`
+}
+
+const PHOTO_PATH = /^\/api\/images\/[^/]+\/(thumb|file)$/
+
+/**
+ * A photo that didn't load for want of a pass (none yet, or it ran out while the
+ * app sat in a pocket) is loaded again with a new one, once. Its page never sees
+ * that first failure. A photo that fails with a good pass (gone from the server,
+ * no signal) fails as before, and the page says so.
+ */
+export function installPhotoRetry(): void {
+  document.addEventListener('error', (e) => {
+    const img = e.target
+    if (!(img instanceof HTMLImageElement) || !getToken()) return
+    let url: URL
+    try { url = new URL(img.currentSrc || img.src, location.href) } catch { return }
+    if (url.origin !== location.origin || !PHOTO_PATH.test(url.pathname)) return
+    const tried = url.searchParams.get('token')
+    const have = livePass()
+    if ((tried && tried === have) || img.dataset.gsRetried === url.pathname) return
+    img.dataset.gsRetried = url.pathname
+    e.stopPropagation()
+    void (have ? Promise.resolve(have) : freshPass()).then((next) => {
+      if (next && next !== tried) {
+        url.searchParams.set('token', next)
+        img.src = url.pathname + url.search
+      } else {
+        img.dispatchEvent(new Event('error'))
+      }
+    })
+  }, true)
 }
 
 /** A photo's small copy, for every grid, strip and the map.
@@ -127,6 +243,13 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
 
   try {
     const resp = await guard(() => fetch(`/api${path}`, { ...init, headers, signal: ctl?.signal ?? outer }))
+    // The photo pass and a renewed sign-in ride on every answer (backend deps.py).
+    if (token && resp.ok) {
+      const img = resp.headers.get('X-Image-Token')
+      if (img) setImagePass(img)
+      const renewed = resp.headers.get('X-Session-Token')
+      if (renewed && getToken() === token) renewToken(renewed)
+    }
 
     // An expired or revoked session is not a data-loading failure — showing it as one
     // leaves the user staring at a red error with no way forward. Clear the dead token
@@ -437,10 +560,27 @@ function savedMe(token: string | null): Me | null {
   }
 }
 
+/** Who signed in last on this phone, to fill the sign-in form (never a guess). */
+export const LAST_EMAIL_KEY = 'gs_last_email'
+
 export async function login(email: string, password: string): Promise<void> {
-  const data = await api<{ access_token: string }>('/auth/login', {
+  const data = await api<{ access_token: string; image_token?: string | null }>('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   })
   setToken(data.access_token)
+  setImagePass(data.image_token ?? null)
+  try { localStorage.setItem(LAST_EMAIL_KEY, email.trim()) } catch { /* private mode */ }
+}
+
+/** A password change: this phone gets a new sign-in and pass in the answer; every
+ *  other phone signed in as this person is signed out (backend routes_auth). */
+export async function changePassword(current: string, next: string): Promise<string> {
+  const r = await api<{ access_token: string; image_token: string; note: string }>('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ current_password: current, new_password: next }),
+  })
+  renewToken(r.access_token)
+  setImagePass(r.image_token)
+  return r.note
 }

@@ -26,7 +26,13 @@ avoid. The product is the **Tonight card** and the **Map**, not a photo gallery.
 3. Open **http://localhost:8080** and sign in with the credentials from `.env`
    (`ADMIN_EMAIL` / `ADMIN_PASSWORD`, default `admin@gamesense.local` / `changeme`).
 
-The API is at **http://localhost:8000** (interactive docs at `/docs`).
+The API is at **http://localhost:8000** (interactive docs at `/docs` when `ENABLE_API_DOCS=1`;
+they are off by default so the public address doesn't hand out a map of every endpoint).
+
+The server itself (`backend/serve.py`, how Db01 runs it) refuses to start with the
+published `JWT_SECRET` or while an admin still has the published password. The fixes
+are one command each, from `backend/`: `python -m app.manage new-secret` and
+`python -m app.manage set-password EMAIL`. `APP_ENV=development` skips the check on a laptop.
 
 Edit `.env` (created from `.env.example` on first run) to set your SPYPOINT credentials and secrets.
 

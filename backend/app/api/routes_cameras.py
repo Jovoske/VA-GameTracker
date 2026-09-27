@@ -290,8 +290,13 @@ def mark_seen(
 
 @router.post("/sync")
 def trigger_sync(
-    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
 ) -> dict:
+    """"Check for new photos": members and admins (audit C-09, E-09). It is harmless
+    to ask twice: the pipeline lock serves one fetch at a time, and one with nothing
+    new is quick. Viewers wait for the fetch every 15 minutes."""
+    if user.role not in {"admin", "member"}:
+        raise HTTPException(403, "New photos come in by themselves every 15 minutes.")
     # `since` is what the Check button waits for: a fetch summary started after it
     # is this check's result; an older one is somebody else's.
     holder = jobs.holder("pipeline")

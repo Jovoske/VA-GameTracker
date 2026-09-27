@@ -44,6 +44,8 @@
 }
 .cam-sync-btn:hover:not(:disabled) { background: var(--surface-2); }
 .cam-sync-btn:disabled { color: var(--text-dim); border-color: var(--border); cursor: default; }
+/* A viewer can't ask for a check: said where the button would be. */
+.cam-sync-note { font-size: 13px; color: var(--text-dim); text-align: right; }
 /* The result line: always present so the list never jumps, coloured by outcome. */
 .cam-sync-status { display: flex; align-items: center; gap: 8px; min-height: 22px; margin-bottom: 12px; font-size: 13px; color: var(--text-dim); }
 .cam-sync-status--ok { color: var(--go); }

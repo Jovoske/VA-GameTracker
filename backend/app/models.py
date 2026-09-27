@@ -44,6 +44,12 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False, default="admin")
+    # Every sign-in token carries the version it was made under (app.core.security);
+    # one from an older version is refused. Changing the password moves it on, so the
+    # phone that was lost is signed out everywhere with it (audit D-07).
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),)
 
@@ -57,7 +63,13 @@ class CameraAccount(Base):
     __tablename__ = "camera_accounts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
-    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # Who added it, when that person has since been removed (their email): the login
+    # keeps fetching, the admin who removed them owns it now, and Settings says
+    # "Added by <them>" so the owner can decide later (routes_users.delete_user).
+    former_owner: Mapped[str | None] = mapped_column(String)
     label: Mapped[str | None] = mapped_column(String)
     provider: Mapped[str] = mapped_column(
         String, nullable=False, default="spypoint", server_default="spypoint"
@@ -256,7 +268,10 @@ class Zone(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     polygon: Mapped[dict] = mapped_column(JSONB, nullable=False)  # GeoJSON Polygon
     notes: Mapped[str | None] = mapped_column(Text)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Removing the person keeps the area (it is the estate's), with no name on it.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("kind IN ('bedding','feeding','water','no_go')", name="zone_kind_valid"),
@@ -559,7 +574,11 @@ class Sit(Base):
     __tablename__ = "sits"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     stand_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stands.id"), nullable=False)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Removing the person keeps their sits and what they reported: the ground truth
+    # is the estate's. Only who sat goes (routes_users.delete_user).
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     night: Mapped[date] = mapped_column(Date, nullable=False)
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
