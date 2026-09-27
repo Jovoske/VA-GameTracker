@@ -21,7 +21,6 @@ $venv  = 'C:\GameSense\venv\Scripts'
 $web   = 'C:\GameSense\web'
 $logs  = 'C:\GameSense\logs'
 $log   = "$logs\update.log"
-$lock  = 'C:\GameSense\data\pipeline.lock'
 $env:PATH = "C:\GameSense\tools\node;C:\GameSense\tools\git\cmd;$env:PATH"
 
 function Note($msg) {
@@ -29,8 +28,14 @@ function Note($msg) {
 }
 
 # A sync/AI run in progress is holding the database and the models; let it finish.
-if ((Test-Path $lock) -and ((Get-Date) - (Get-Item $lock).LastWriteTime).TotalHours -lt 3) {
-    Note 'skip: pipeline busy'
+# pipeline.py knows its own lock (owner, process, heartbeat): exit 3 while a live run
+# holds it. A run that died no longer counts within minutes, not after 3 hours.
+function PipelineBusy {
+    & "$venv\python.exe" "$repo\backend\pipeline.py" busy *> "$logs\update-busy.log"
+    return ($LASTEXITCODE -eq 3)
+}
+if (PipelineBusy) {
+    Note "skip: pipeline busy ($((Get-Content "$logs\update-busy.log" -EA SilentlyContinue) -join ' '))"
     exit 0
 }
 
@@ -148,6 +153,9 @@ if ($migrated -ne 0) {
 Select-String -Path "$logs\update-alembic.log" -Pattern 'Running upgrade' -EA SilentlyContinue |
     ForEach-Object { Note ($_.Line.Trim()) }
 
+# The build and the migration take minutes; a job the app started meanwhile (a Check
+# button press runs pipeline.py) is let finish before the service it came from restarts.
+for ($i = 0; ($i -lt 20) -and (PipelineBusy); $i++) { Start-Sleep -Seconds 30 }
 Restart-Service GameSenseAPI
 # The Suntek FTP/mail services (deploy/install-ftp.ps1, install-mail.ps1) run repo code too; restart them when present
 # so the importer never keeps an old module loaded. A restart mid-upload is safe: the receiver

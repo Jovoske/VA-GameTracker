@@ -25,15 +25,15 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, or_, select, text
+from sqlalchemy import and_, case, func, literal, or_, select, text
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.forecasting.exposure import VISIT_GAP, night_expr
-from app.forecasting.model import class_label
-from app.models import Detection, Image, Species
+from app.forecasting.model import class_label, class_label_sql
+from app.models import Camera, Detection, Image, Species
 
 # A photo the detector has checked and kept, of something that is not a hidden species.
 CHECKED_ANIMAL = and_(Image.is_empty_frame.is_(False), VISIBLE_ANIMAL)
@@ -96,21 +96,12 @@ def part_hours(part: str) -> list[int]:
     return hours
 
 
-def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
-               camera_ids: list | None = None, species_id: str | None = None,
-               map_nights: bool = False):
-    """One row per visit, as a subquery.
-
-    Columns: camera_id, species_id, common_name, night (the app's night key of its
-    first frame), first_at, last_at, frames, max_group (the largest group seen in
-    it, 1 when nobody counted), image_id (its first frame).
-
-    Only frames in [start, end) are read, so a visit that began before `start` is
-    counted from its first frame inside the range. With `map_nights`, only frames
-    inside the map's nights (18:00-08:00) are, so however many nights the range
-    spans, each visit is what reading its own night alone would give. A photo
-    holding a hidden species and a visible one counts once, as the visible one.
-    """
+def _visit_frames(*, start: datetime | None = None, end: datetime | None = None,
+                  camera_ids: list | None = None, species_id: str | None = None,
+                  map_nights: bool = False, species_ids=None):
+    """One row per frame and species, numbered by the visit it belongs to (visit_no,
+    per camera and species): the step visit_rows and class_visits share, so the two
+    always cut a night into the same visits. See visit_rows for the arguments."""
     named = (
         select(Detection.image_id, Detection.species_id, Species.common_name, Detection.group_size)
         .join(Species, Species.id == Detection.species_id)
@@ -128,6 +119,8 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
         conditions.append(Image.camera_id.in_(camera_ids))
     if species_id is not None:
         conditions.append(named.c.species_id == species_id)
+    if species_ids is not None:
+        conditions.append(named.c.species_id.in_(species_ids))
     # One row per photo and species: two boxes of the same boar are one frame.
     frames = (
         select(
@@ -155,7 +148,7 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
         (or_(lagged.c.prev_at.is_(None), lagged.c.captured_at - lagged.c.prev_at > VISIT_GAP), 1),
         else_=0,
     )
-    numbered = select(
+    return select(
         lagged,
         func.sum(arrival).over(
             partition_by=(lagged.c.camera_id, lagged.c.species_id),
@@ -163,6 +156,29 @@ def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
             rows=(None, 0),
         ).label("visit_no"),
     ).subquery()
+
+
+def visit_rows(*, start: datetime | None = None, end: datetime | None = None,
+               camera_ids: list | None = None, species_id: str | None = None,
+               map_nights: bool = False, species_ids=None):
+    """One row per visit, as a subquery.
+
+    Columns: camera_id, species_id, common_name, night (the app's night key of its
+    first frame), first_at, last_at, frames, max_group (the largest group seen in
+    it, 1 when nobody counted), image_id (its first frame).
+
+    Only frames in [start, end) are read, so a visit that began before `start` is
+    counted from its first frame inside the range. With `map_nights`, only frames
+    inside the map's nights (18:00-08:00) are, so however many nights the range
+    spans, each visit is what reading its own night alone would give. A photo
+    holding a hidden species and a visible one counts once, as the visible one.
+    `species_ids` (a list, or a subquery of ids) keeps only those species' visits,
+    read from their sightings rather than from every photo in the range: over a
+    season that is what keeps Tonight quick.
+    """
+    numbered = _visit_frames(start=start, end=end, camera_ids=camera_ids,
+                             species_id=species_id, map_nights=map_nights,
+                             species_ids=species_ids)
     first_at = func.min(numbered.c.captured_at)
     return (
         select(
@@ -211,6 +227,86 @@ def list_visits(db: Session, *, start: datetime, end: datetime, camera_ids: list
             "frames": int(r.frames),
             "max_group": int(r.max_group),
             "image_id": r.image_id,
+        }
+        for r in rows
+    ]
+
+
+def class_visits(db: Session, *, start: datetime | None = None, end: datetime | None = None,
+                 camera_ids: list | None = None, species_ids: list | None = None) -> list[dict]:
+    """Visits per camera, class ("Stag", "Sow + piglets", "Roe deer") and night,
+    photos alongside.
+
+    The species' own visits (visit_rows), each given one class: the most telling
+    label among its frames, a sexed or grouped one ("Sow + piglets") over the plain
+    species ("Wild boar"), then the label most of its frames carry. The sex and group
+    pass looks at only some frames, so the frames of one arrival can carry two labels;
+    counted per label, that arrival was a visit of each, and the classes added up to
+    twice the visits Tonight, the map and Insights show. Split this way they always
+    add up to the species' visits, and "Sow + piglets: 12 visits" still counts
+    arrivals, not the forty frames of one family loitering at the feeder. A visit's
+    photos are all its frames, so the photos add up too.
+
+    Only named sightings of species that are not hidden, in photos the detector kept
+    and nobody marked "nothing in it", from cameras nobody retired. Each row is
+    {camera_id, species_id, label, night, visits, photos}; the night is the app's
+    night key of the visit's first frame, so a caller can keep the nights it counts.
+    """
+    n = _visit_frames(start=start, end=end, camera_ids=camera_ids, species_ids=species_ids)
+    visit = (n.c.camera_id, n.c.species_id, n.c.visit_no)
+    visits = (
+        select(*visit, n.c.common_name,
+               night_expr(func.min(n.c.captured_at)).label("night"),
+               func.count().label("frames"))
+        .where(n.c.species_id.isnot(None))
+        .group_by(*visit, n.c.common_name)
+        .subquery()
+    )
+    # The labels each frame carries: a frame with a stag and a hind in it is a frame
+    # of each, and the visit takes the one that tells most.
+    label = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type,
+                            n.c.common_name)
+    frame_labels = (
+        select(*visit, n.c.image_id, func.coalesce(label, literal("")).label("cls"))
+        .select_from(n)
+        .join(Detection, and_(Detection.image_id == n.c.image_id,
+                              Detection.species_id == n.c.species_id))
+        .distinct()
+        .subquery()
+    )
+    fl = frame_labels.c
+    per_label = (
+        select(fl.camera_id, fl.species_id, fl.visit_no, fl.cls, func.count().label("frames"))
+        .group_by(fl.camera_id, fl.species_id, fl.visit_no, fl.cls)
+        .subquery()
+    )
+    pl = per_label.c
+    plain = pl.cls == ""
+    chosen = (
+        select(pl.camera_id, pl.species_id, pl.visit_no, pl.cls)
+        .distinct(pl.camera_id, pl.species_id, pl.visit_no)
+        .order_by(pl.camera_id, pl.species_id, pl.visit_no, plain, pl.frames.desc(), pl.cls)
+        .subquery()
+    )
+    v, c = visits.c, chosen.c
+    rows = db.execute(
+        select(v.camera_id, v.species_id, v.common_name, c.cls, v.night,
+               func.count().label("visits"), func.sum(v.frames).label("photos"))
+        .select_from(visits)
+        .join(chosen, and_(c.camera_id == v.camera_id, c.species_id == v.species_id,
+                           c.visit_no == v.visit_no))
+        .join(Camera, Camera.id == v.camera_id)
+        .where(Camera.retired_at.is_(None))
+        .group_by(v.camera_id, v.species_id, v.common_name, c.cls, v.night)
+    ).all()
+    return [
+        {
+            "camera_id": r.camera_id,
+            "species_id": r.species_id,
+            "label": r.cls or class_label(r.species_id, r.common_name, None, None),
+            "night": r.night,
+            "visits": int(r.visits),
+            "photos": int(r.photos),
         }
         for r in rows
     ]

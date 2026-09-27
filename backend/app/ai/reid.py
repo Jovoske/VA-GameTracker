@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import delete, distinct, select, update
+from sqlalchemy import delete, distinct, func, select, update
 from sqlalchemy.orm import Session
 
+from app import jobs
 from app.core.logging import get_logger
 from app.models import (
     Detection,
@@ -41,18 +42,41 @@ log = get_logger(__name__)
 DEFAULT_THRESHOLD = 0.94
 
 
-def embed_detections(db: Session, *, limit: int = 5000) -> int:
+# Crops embedded per run, newest first. The species pass stores the embedding with
+# each new sighting, so this is only the ones from before it did; capped so one tap
+# never holds the photo fetch up for more than a quarter of an hour.
+EMBED_PER_RUN = 600
+
+
+class ModelUnavailable(RuntimeError):
+    """The species model could not start: nothing can be embedded, so say so."""
+
+
+def embed_detections(db: Session, *, limit: int = EMBED_PER_RUN) -> int:
     """Compute + store the 1024-dim embedding for detections that lack one."""
-    from app.ai.classifier import embed_crop
+    from app.ai.classifier import embed_crop, load
 
     rows = db.execute(
         select(Detection.id, Image.original_path, Detection.bbox)
         .join(Image, Detection.image_id == Image.id)
-        .where(Detection.embedding.is_(None), Image.original_path.isnot(None))
+        .where(Detection.embedding.is_(None), Image.original_path.isnot(None),
+               Detection.species_id.isnot(None))
+        .order_by(Image.captured_at.desc())
         .limit(limit)
     ).all()
+    if rows:
+        # Once, before any crop: a model that cannot load would otherwise fail on
+        # every crop in turn and the run would end "done" with nothing embedded.
+        try:
+            load()
+        except Exception as e:
+            raise ModelUnavailable(
+                f"The species model could not start ({type(e).__name__}: {str(e)[:150]})."
+            ) from e
     done = 0
     for det_id, path, bbox in rows:
+        if jobs.lock_lost():
+            break  # stalled, and another run has the lock now: stop here
         try:
             xyxy = bbox.get("xyxy") if isinstance(bbox, dict) else None
             emb = embed_crop(path, xyxy)
@@ -135,7 +159,10 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
             Image.captured_at,
         )
         .join(Image, Detection.image_id == Image.id)
-        .where(Detection.embedding.isnot(None))
+        .join(Species, Species.id == Detection.species_id)
+        # Hidden species and photos marked "nothing in it" make no animals.
+        .where(Detection.embedding.isnot(None), Species.hidden.is_(False),
+               Image.is_empty_frame.isnot(True))
         .order_by(Detection.species_id, Image.captured_at)
     ).all()
 
@@ -150,19 +177,31 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
     for species_id, items in by_species.items():
         clusters = [dict(s) for s in seeds.get(species_id, [])]  # start from confirmed centroids
         n_seeds = len(clusters)
+        # Every cluster's unit centroid, one row each, kept up to date as members join:
+        # one matrix product per sighting instead of renormalising every centroid for
+        # every sighting, which made the first run after a busy week take minutes.
+        dim = len(items[0].embedding)
+        centroids = np.zeros((max(16, n_seeds * 2), dim), dtype=np.float32)
+        for ci, c in enumerate(clusters):
+            centroids[ci] = c["sum"] / (np.linalg.norm(c["sum"]) + 1e-8)
         for r in items:
             v = np.asarray(list(r.embedding), dtype=np.float32)
+            k = len(clusters)
             best_i, best_s = -1, -1.0
-            for ci, c in enumerate(clusters):
-                centroid = c["sum"] / (np.linalg.norm(c["sum"]) + 1e-8)
-                s = float(centroid @ v)
-                if s > best_s:
-                    best_s, best_i = s, ci
+            if k:
+                sims = centroids[:k] @ v
+                best_i = int(np.argmax(sims))
+                best_s = float(sims[best_i])
             if best_i >= 0 and best_s >= threshold:
-                clusters[best_i]["sum"] = clusters[best_i]["sum"] + v
-                clusters[best_i]["members"].append((r, best_s))
+                c = clusters[best_i]
+                c["sum"] = c["sum"] + v
+                c["members"].append((r, best_s))
+                centroids[best_i] = c["sum"] / (np.linalg.norm(c["sum"]) + 1e-8)
             else:
                 clusters.append({"sum": v.copy(), "members": [(r, 1.0)], "individual_id": None})
+                if k >= len(centroids):
+                    centroids = np.vstack([centroids, np.zeros_like(centroids)])
+                centroids[k] = v / (np.linalg.norm(v) + 1e-8)
 
         sp = db.get(Species, species_id)
         sp_name = sp.common_name if sp else species_id
@@ -221,8 +260,20 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
 
 
 def recompute(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
-    """Full re-ID pass: embed any new detections, then (re)cluster into individuals."""
+    """Full re-ID pass: embed any new detections, then (re)cluster into individuals.
+
+    `stopped` is true when the run lost its lock partway (it stalled and another run
+    took over): what was embedded is kept, and the regrouping waits for the next run.
+    """
     embedded = embed_detections(db)
+    if jobs.lock_lost():
+        return {"embedded": embedded, "stopped": True}
     out = cluster(db, threshold=threshold)
     out["embedded"] = embedded
+    out["still_to_embed"] = db.scalar(
+        select(func.count(Detection.id))
+        .join(Image, Detection.image_id == Image.id)
+        .where(Detection.embedding.is_(None), Image.original_path.isnot(None),
+               Detection.species_id.isnot(None))
+    ) or 0
     return out

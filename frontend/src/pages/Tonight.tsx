@@ -12,22 +12,26 @@ import {
   peek,
 } from '../api'
 import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
+import SitPrompts from '../components/SitPrompts'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
 type Overview = {
   totals: { sightings: number; empty: number; nights: number; cameras: number }
   by_hour: { hour: number; count: number }[]
-  by_camera: { name: string; sightings: number }[]
+  by_camera: { id?: string; name: string; sightings: number }[]
   by_species: { species: string; count: number }[]
   best_window: { start_hour: number; end_hour: number; share_pct: number }
 }
 
-type ClassCount = { label: string; count: number }
+// Visits: arrivals at the camera, so one sow loitering for forty frames counts once.
+// `count` is what a plan saved before visits were counted still carries.
+type ClassCount = { label: string; visits?: number; photos?: number; count?: number }
 type Verdict = 'BEST_ODDS' | 'WORTH_A_LOOK' | 'QUIET' | 'NO_DATA'
 type Changed = { kind: string; camera: string | null; text: string }
 type Wind = { status: string; text: string; is_advice: boolean }
-type Calibration = { available: boolean; n_evaluated: number; statement?: string; beats_baseline?: boolean }
+// How each verdict turned out: "When it said Best odds, animals came 7 of 9 nights."
+type Calibration = { available: boolean; n_evaluated: number; statement?: string; lines?: string[]; beats_baseline?: boolean | null }
 type Forecast = {
   verdict: Verdict
   reason?: string
@@ -36,6 +40,7 @@ type Forecast = {
   calibration?: Calibration
   recommended?: {
     camera: string
+    camera_id?: string
     species: string
     runner_up: string | null
     probability: number
@@ -57,7 +62,10 @@ type Forecast = {
   factors?: { text: string; impact: string }[]
   where?: {
     camera: string
+    camera_id?: string
     verdict: Verdict
+    visits?: number
+    photos?: number
     probability: number
     nights_present: number
     active_nights: number
@@ -66,12 +74,15 @@ type Forecast = {
   }[]
   alternates: {
     camera: string
+    camera_id?: string
     species: string
     verdict: Verdict
     nights_present: number
     active_nights: number
   }[]
-  alerts?: { camera: string; status: string; detail: string }[]
+  // `ranked`: still in the plan on what it saw before it stopped; false once it has
+  // sent nothing for over a week.
+  alerts?: { camera: string; camera_id?: string; status: string; detail: string; ranked?: boolean }[]
   exposure?: { excluded_nights: number; note: string }
   nights_of_data: number
   freshness?: Freshness | null
@@ -82,6 +93,8 @@ type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detectio
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
 const hours = (w: { start_hour: number; end_hour: number }) => `${hh(w.start_hour)} to ${hh(w.end_hour)}`
+const visitsOf = (cl: ClassCount) => cl.visits ?? cl.count ?? 0
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 // Verdict states are carried by word and shape; colour is a third channel.
 const VERDICTS: Record<Verdict, { label: string; glyph: string; color: string }> = {
@@ -301,14 +314,21 @@ export default function Tonight() {
   )
   const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>
 
+  // Your sit, before the plan: "Back to sit" after the phone closed the app mid-sit,
+  // and "What happened last night?" in the morning. With no plan saved and no
+  // signal, the way back into the seat must still be there. Same place in every
+  // state below, so the plan arriving doesn't start it over.
+  const top = <><h1 className="page-title">Tonight</h1><SitPrompts page="tonight" /></>
+
   if (!f && err) return (
     <div className="tonight">
+      {top}
       <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
       {noticeLine}
       {chips}
     </div>
   )
-  if (!f) return <div className="status-panel" role="status">Working out tonight…</div>
+  if (!f) return <div className="tonight">{top}<div className="status-panel" role="status">Working out tonight…</div></div>
 
   const c = f.conditions
   const r = f.recommended
@@ -316,9 +336,11 @@ export default function Tonight() {
   const maxH = Math.max(...(d?.by_hour ?? []).map((x) => x.count), 1)
   const maxCam = Math.max(...(d?.by_camera ?? []).map((x) => x.sightings), 1)
   const maxSp = Math.max(...(d?.by_species ?? []).map((x) => x.count), 1)
-  const bw = d?.best_window ?? { start_hour: 0, end_hour: 0, share_pct: 0 }
-  const inWindow = (hr: number) =>
-    bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour
+  // The green band is the headline's Best hours, so the chart can't name other ones
+  // (audit A-26). Without a recommendation there is no band.
+  const bw = r?.best_window
+  const inWindow = (hr: number) => !!bw && (
+    bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour)
   // Made before this morning's 06:00: that was an earlier night's plan.
   const old = fromEarlierNight(plan!.at)
   const oldWords = nightOf(plan!.at) === nightOf(Date.now() - 86_400_000) ? 'last night' : 'an earlier night'
@@ -326,7 +348,7 @@ export default function Tonight() {
 
   return (
     <div className="tonight">
-      <h1 className="page-title">Tonight</h1>
+      {top}
       {err && <div className="status-panel" role="alert">Could not refresh: {err} Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
       {noticeLine}
       {chips}
@@ -413,7 +435,7 @@ export default function Tonight() {
                 <div className="tn-classes" style={{ marginTop: 0 }}>
                   {r.classes.map((cl) => (
                     <span key={cl.label} className="tn-class">
-                      {cl.label} <span>×{cl.count}</span>
+                      {cl.label} <span>{plural(visitsOf(cl), 'visit')}</span>
                     </span>
                   ))}
                 </div>
@@ -427,7 +449,7 @@ export default function Tonight() {
             <h3 className="sect" style={{ marginBottom: 8 }}>Other places</h3>
             <div className="tn-alts">
               {f.alternates.map((a) => (
-                <div key={a.camera} className="tn-alt">
+                <div key={a.camera_id ?? a.camera} className="tn-alt">
                   <span className="tn-alt-glyph" style={{ color: verdictColor(a.verdict) }} aria-hidden="true">
                     {verdictOf(a.verdict).glyph}
                   </span>
@@ -440,7 +462,9 @@ export default function Tonight() {
         )}
 
         <div className="tn-foot">
-          From {f.nights_of_data} nights of camera photos.
+          {f.nights_of_data > 0
+            ? `From ${plural(f.nights_of_data, 'night')} the cameras were watching.`
+            : 'No nights of camera photos yet.'}
           {f.exposure?.note && <> {f.exposure.note}</>}
         </div>
       </section>
@@ -451,12 +475,18 @@ export default function Tonight() {
         <section className="card tn-card" aria-labelledby="tn-cams-h">
           <h2 id="tn-cams-h" className="sect">Cameras not sending</h2>
           {f.alerts.map((a) => (
-            <div key={a.camera} className="tn-camrow">
+            <div key={a.camera_id ?? a.camera} className="tn-camrow">
               <span className="tn-camrow-name">{a.camera}</span>
               <span className="tn-camrow-detail">{a.detail}</span>
             </div>
           ))}
-          <div className="tn-note">These are ranked on what they saw before they stopped.</div>
+          {f.alerts.some((a) => a.ranked !== false) && (
+            <div className="tn-note">
+              {f.alerts.every((a) => a.ranked !== false)
+                ? 'These are ranked on what they saw before they stopped.'
+                : 'Those still in the plan are ranked on what they saw before they stopped.'}
+            </div>
+          )}
         </section>
       )}
 
@@ -488,7 +518,7 @@ export default function Tonight() {
             <div className={`block${settling ? ' settling' : ''}`}>
               <h2 className="sect">Every camera</h2>
               {f.where.map((w) => (
-                <div key={w.camera} className="tn-where">
+                <div key={w.camera_id ?? w.camera} className="tn-where">
                   <span className="tn-where-glyph" style={{ color: verdictColor(w.verdict) }} aria-hidden="true">
                     {verdictOf(w.verdict).glyph}
                   </span>
@@ -505,7 +535,7 @@ export default function Tonight() {
                       {w.classes.length === 0 && <span className="tn-where-meta">No group type identified</span>}
                       {w.classes.map((cl) => (
                         <span key={cl.label} className="tn-class">
-                          {cl.label} <span>×{cl.count}</span>
+                          {cl.label} <span>{plural(visitsOf(cl), 'visit')}{cl.photos != null && ` (${plural(cl.photos, 'photo')})`}</span>
                         </span>
                       ))}
                     </div>
@@ -513,7 +543,7 @@ export default function Tonight() {
                 </div>
               ))}
               <div className="tn-note" style={{ marginTop: 4 }}>
-                Counts are photos, not animals. The same animal can show up many times.
+                A visit is one arrival: photos of the same animal less than half an hour apart count once.
               </div>
             </div>
           )}
@@ -521,14 +551,16 @@ export default function Tonight() {
           {f.calibration?.statement && (
             <div className="block">
               <h2 className="sect">How often this has been right</h2>
-              <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>
+              {f.calibration.lines && f.calibration.lines.length > 0
+                ? <ul className="tn-record">{f.calibration.lines.map((line) => <li key={line}>{line}</li>)}</ul>
+                : <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>}
             </div>
           )}
 
           {d && (
             <>
               <div className="block">
-                <h2 className="sect">Sightings by hour <span className="sect-note">busiest hours in green</span></h2>
+                <h2 className="sect">Photos by hour {bw && <span className="sect-note">tonight’s best hours in green</span>}</h2>
                 <div className="tn-bars-y">
                   {d.by_hour.map((x) => (
                     <div key={x.hour} title={`${hh(x.hour)}: ${x.count}`}>
@@ -544,9 +576,9 @@ export default function Tonight() {
               </div>
 
               <div className="block">
-                <h2 className="sect">Sightings by camera</h2>
+                <h2 className="sect">Photos by camera</h2>
                 {d.by_camera.map((cam) => (
-                  <div key={cam.name} className="tn-hrow">
+                  <div key={cam.id ?? cam.name} className="tn-hrow">
                     <div className="tn-hrow-name">{cam.name}</div>
                     <div className="tn-hrow-track">
                       <div className="bar-x" style={{ width: '100%', height: '100%', background: 'var(--teal)', transform: `scaleX(${grown ? cam.sightings / maxCam : 0})` }} />
@@ -558,7 +590,7 @@ export default function Tonight() {
 
               {d.by_species.length > 0 && (
                 <div className="block">
-                  <h2 className="sect">Sightings by animal</h2>
+                  <h2 className="sect">Photos by animal</h2>
                   {d.by_species.slice(0, 8).map((s) => (
                     <div key={s.species} className="tn-hrow">
                       <div className="tn-hrow-name">{s.species}</div>

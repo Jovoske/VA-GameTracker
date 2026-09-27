@@ -75,6 +75,11 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
             "happened_at", "created_at",
         }
         assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
+        assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(images)
+        assert "reported_at" in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
+        assert _columns(eng, "cameras")["retired_at"] == "timestamp with time zone"
+        assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
     finally:
         eng.dispose()
 
@@ -134,6 +139,11 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "photos_listed_to" in _columns(eng, "cameras")
         assert "download_attempts" in _columns(eng, "images")
         assert _columns(eng, "client_errors")
+        assert "ai_failed_at" in _columns(eng, "images")
+        assert "reported_at" in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live")
+        assert "retired_at" in _columns(eng, "cameras")
+        assert "corrected_by" in _columns(eng, "detections")
     finally:
         eng.dispose()
 
@@ -705,5 +715,338 @@ def test_client_errors_upgrade_down_and_up_again(fresh_db):
         command.stamp(cfg, "0020_camera_login_status")
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert _index(eng, "client_errors", "ix_client_errors_created_at") == ["created_at"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_ai_checking_upgrade_puts_old_misreads_right_and_goes_down_and_up_again(fresh_db):
+    """0022 on a real 0021 database: the new columns arrive with their defaults, a photo
+    flagged before the detector saw it stops blinding its night, a detector failure
+    stored as "kept" goes back to be checked, spring "hinds" are judged again, and
+    nothing else moves."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0021_client_errors")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0021 shape first.
+            for col in ("ai_attempts", "ai_error", "ai_failed_at", "detector_conf"):
+                c.execute(text(f"ALTER TABLE images DROP COLUMN {col}"))
+            c.execute(text("DROP INDEX uq_sits_stand_night_live"))  # 0023, after this one
+            c.execute(text("ALTER TABLE sits DROP COLUMN reported_at"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active) "
+                "VALUES (gen_random_uuid(),:e,'Charca',false,true) RETURNING id"
+            ), {"e": estate_id}).scalar_one()
+            c.execute(text("INSERT INTO species (id,common_name,is_priority,huntable,hidden) "
+                           "VALUES ('red_deer','Red Deer',true,true,false)"))
+
+            def image(**kw):
+                cols = {"captured_at": "2026-03-10 21:00+00", "original_path": "p.jpg",
+                        "reviewed": False, "created_at": "2026-03-10 21:05+00", **kw}
+                names = ",".join(cols)
+                marks = ",".join(f":{k}" for k in cols)
+                return c.execute(text(
+                    f"INSERT INTO images (id,camera_id,{names}) "
+                    f"VALUES (gen_random_uuid(),:cam,{marks}) RETURNING id"
+                ), {"cam": camera_id, **cols}).scalar_one()
+
+            flagged = image(reviewed=True, is_empty_frame=True)
+            failed = image(is_empty_frame=False, processed_at="2026-03-10 22:00+00")
+            named = image(is_empty_frame=False, processed_at="2026-03-10 22:00+00")
+            clean = image(is_empty_frame=True, animal_conf=0.02,
+                          processed_at="2026-03-10 22:00+00")
+            autumn = image(captured_at="2026-10-10 21:00+00", is_empty_frame=False,
+                           animal_conf=0.9, processed_at="2026-10-10 22:00+00")
+
+            def deer(img, sex):
+                return c.execute(text(
+                    "INSERT INTO detections (id,image_id,species_id,species_conf,sex,sex_conf,"
+                    "sex_attempts,age_class) VALUES (gen_random_uuid(),:i,'red_deer',0.9,:s,"
+                    "0.8,1,'unknown') RETURNING id"), {"i": img, "s": sex}).scalar_one()
+
+            spring_hind = deer(named, "female")
+            autumn_hind = deer(autumn, "female")
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            def row(i):
+                return c.execute(text(
+                    "SELECT processed_at, is_empty_frame, ai_attempts, ai_failed_at, "
+                    "detector_conf FROM images WHERE id=:i"), {"i": i}).one()
+
+            assert str(row(flagged)[0]).startswith("2026-03-10 21:05")  # its arrival, not now
+            assert row(failed)[:3] == (None, None, 0)
+            assert row(named)[1] is False and row(named)[0] is not None
+            assert row(clean)[1] is True and row(clean)[3:] == (None, None)
+            sexes = dict(c.execute(text(
+                "SELECT id, sex || ':' || sex_attempts FROM detections")).all())
+            assert sexes == {spring_hind: "unknown:0", autumn_hind: "female:1"}
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0021_client_errors")
+        assert not {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} & set(
+            _columns(eng, "images"))
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 5
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0021_client_errors")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"ai_attempts", "ai_error", "ai_failed_at", "detector_conf"} <= set(
+            _columns(eng, "images"))
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_sit_reports_upgrade_down_and_up_again(fresh_db):
+    """0023 on a real 0022 database: two live reservations of one stand on one night
+    (possible before the lock) become one, keeping the sit somebody used and saying in
+    the other's notes what it was; the unique index then refuses a second one; going
+    back down keeps every row."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0022_ai_checking")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0022 shape first.
+            c.execute(text("DROP INDEX uq_sits_stand_night_live"))
+            c.execute(text("ALTER TABLE sits DROP COLUMN reported_at"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            alice, bob = (c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,:m,'h','member') RETURNING id"
+            ), {"e": estate_id, "m": m}).scalar_one() for m in ("alice@x.local", "bob@x.local"))
+            ridge, oak, pine = (c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,:n) "
+                "RETURNING id"
+            ), {"e": estate_id, "n": n}).scalar_one() for n in ("Ridge", "Oak", "Pine"))
+
+            def sit(stand, user, night, outcome="unreported", started=False, mins=0, notes=None):
+                return c.execute(text(
+                    "INSERT INTO sits (id,stand_id,user_id,night,claimed_at,started_at,"
+                    "outcome,notes) VALUES (gen_random_uuid(),:s,:u,:n,"
+                    "now() - make_interval(mins => :m),"
+                    "CASE WHEN :st THEN now() ELSE NULL END,:o,:notes) RETURNING id"
+                ), {"s": stand, "u": user, "n": night, "o": outcome, "st": started,
+                    "m": mins, "notes": notes}).scalar_one()
+
+            # Ridge, one night: Alice reserved first, Bob sat it and reported.
+            first = sit(ridge, alice, "2026-09-20", mins=30)
+            used = sit(ridge, bob, "2026-09-20", outcome="seen", started=True, mins=10)
+            dropped = sit(ridge, alice, "2026-09-20", outcome="cancelled", mins=40)
+            # Oak: neither reported; the started one is kept, the other's note stays.
+            idle = sit(oak, alice, "2026-09-21", mins=30, notes="Bring the chair")
+            sat = sit(oak, bob, "2026-09-21", started=True, mins=5)
+            alone = sit(pine, alice, "2026-09-20")
+
+        command.upgrade(cfg, "head")
+        with eng.begin() as c:
+            rows = {r[0]: r[1:] for r in c.execute(text(
+                "SELECT id, outcome, notes, reported_at FROM sits")).all()}
+            assert len(rows) == 6
+            assert rows[used][:2] == ("seen", None)
+            assert rows[sat][:2] == ("unreported", None)
+            assert rows[alone][:2] == ("unreported", None)
+            assert rows[dropped][0] == "cancelled" and rows[dropped][1] is None
+            assert rows[first][0] == "cancelled"
+            assert rows[first][1] == (
+                "Cancelled by the upgrade: a second reservation of this stand that night. "
+                "Nothing was reported."
+            )
+            assert rows[idle][0] == "cancelled"
+            assert rows[idle][1].startswith("Bring the chair\nCancelled by the upgrade")
+            assert all(r[2] is None for r in rows.values()), "old sits let the next report in"
+            # One live reservation per stand and night from now on; cancelled ones are history.
+            with pytest.raises(IntegrityError), c.begin_nested():
+                c.execute(text(
+                    "INSERT INTO sits (id,stand_id,night,outcome) "
+                    "VALUES (gen_random_uuid(),:s,'2026-09-20','unreported')"), {"s": ridge})
+            c.execute(text(
+                "INSERT INTO sits (id,stand_id,night,outcome) "
+                "VALUES (gen_random_uuid(),:s,'2026-09-20','cancelled')"), {"s": ridge})
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0022_ai_checking")
+        assert "reported_at" not in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live") is None
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 7
+            assert c.execute(text("SELECT outcome FROM sits WHERE id=:s"),
+                             {"s": first}).scalar_one() == "cancelled"
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0022_ai_checking")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "reported_at" in _columns(eng, "sits")
+        assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_retired_upgrade_down_and_up_again(fresh_db):
+    """0024 on a real 0023 database: every camera arrives not retired, its photos and
+    nights untouched; going down drops only the column; up again is a no-op."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0023_sit_reports")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0023 shape first.
+            c.execute(text("ALTER TABLE cameras DROP COLUMN retired_at"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Madrid') RETURNING id"
+            )).scalar_one()
+            cams = [c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,active,name_is_custom,import_failures) "
+                "VALUES (gen_random_uuid(),:e,:n,:a,false,'{}') RETURNING id"
+            ), {"e": estate_id, "n": n, "a": a}).scalar_one()
+                for n, a in (("PL07", True), ("PL19", False))]
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,reviewed) "
+                "VALUES (gen_random_uuid(),:c,now(),false)"), {"c": cams[0]})
+            c.execute(text(
+                "INSERT INTO camera_nights (id,camera_id,night,exposure_state,frames,"
+                "empty_frames) VALUES (gen_random_uuid(),:c,'2026-09-20','CONFIRMED',1,0)"),
+                {"c": cams[0]})
+
+        command.upgrade(cfg, "0024_camera_retired")
+        with eng.connect() as c:
+            rows = c.execute(text(
+                "SELECT name, active, retired_at FROM cameras ORDER BY name")).all()
+            assert [tuple(r) for r in rows] == [("PL07", True, None), ("PL19", False, None)]
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM camera_nights")).scalar_one() == 1
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        with eng.begin() as c:
+            c.execute(text("UPDATE cameras SET retired_at = now() WHERE name = 'PL07'"))
+        command.downgrade(cfg, "0023_sit_reports")
+        assert "retired_at" not in _columns(eng, "cameras")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 2
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0023_sit_reports")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "retired_at" in _columns(eng, "cameras")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_species_fixes_upgrade_down_and_up_again(fresh_db):
+    """0025 on a real 0024 database: the classifier's old names become the app's
+    ("Wild Boar" -> "Wild boar", "Rabbit" -> "Hare or rabbit", "Micromammal" -> "Mouse
+    or rat"), a name somebody chose stays, hidden stays hidden, sightings are kept;
+    a fix records who made it and outlives that login; down and up again is safe."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0024_camera_retired")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0024 shape first.
+            c.execute(text("ALTER TABLE detections DROP COLUMN corrected_by"))
+            c.execute(text("ALTER TABLE detections DROP COLUMN corrected_at"))
+            for key, name, hidden in (
+                ("wild_boar", "Wild Boar", False), ("red_deer", "Red Deer", False),
+                ("lagomorph", "Rabbit", True), ("micromammal", "Micromammal", False),
+                ("mustelid", "Mustelid", False), ("fox", "Fox", False),
+                ("roe_deer", "Corzo", False), ("moose", "Moose", False),
+            ):
+                c.execute(text("INSERT INTO species (id, common_name, is_priority, huntable, "
+                               "hidden) VALUES (:k, :n, false, true, :h)"),
+                          {"k": key, "n": name, "h": hidden})
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            cam = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active,import_failures) "
+                "VALUES (gen_random_uuid(),:e,'PL19',false,true,'{}') RETURNING id"),
+                {"e": estate}).scalar_one()
+            img = c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,reviewed,download_attempts,"
+                "ai_attempts) VALUES (gen_random_uuid(),:c,now(),false,0,0) RETURNING id"),
+                {"c": cam}).scalar_one()
+            c.execute(text(
+                "INSERT INTO detections (id,image_id,species_id,sex,sex_attempts,age_class) "
+                "VALUES (gen_random_uuid(),:i,'lagomorph','unknown',0,'unknown')"), {"i": img})
+
+        command.upgrade(cfg, "head")
+        names = {}
+        with eng.begin() as c:
+            names = dict(c.execute(text("SELECT id, common_name FROM species")).all())
+            assert names == {
+                "wild_boar": "Wild boar", "red_deer": "Red deer", "lagomorph": "Hare or rabbit",
+                "micromammal": "Mouse or rat", "mustelid": "Marten or weasel", "fox": "Fox",
+                "roe_deer": "Corzo", "moose": "Moose",
+            }
+            assert c.execute(text("SELECT hidden FROM species WHERE id='lagomorph'")).scalar()
+            assert c.execute(text("SELECT count(*) FROM detections")).scalar_one() == 1
+            user = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'pedro@x.es','h','member') RETURNING id"),
+                {"e": estate}).scalar_one()
+            c.execute(text("UPDATE detections SET species_id='wild_boar', corrected_at=now(), "
+                           "corrected_by=:u"), {"u": user})
+            # A removed login leaves the fix, without a name.
+            c.execute(text("DELETE FROM users WHERE id=:u"), {"u": user})
+            fixed = c.execute(text("SELECT species_id, corrected_at IS NOT NULL, corrected_by "
+                                   "FROM detections")).one()
+            assert tuple(fixed) == ("wild_boar", True, None)
+        with eng.connect() as c:
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0024_camera_retired")
+        assert "corrected_at" not in _columns(eng, "detections")
+        with eng.connect() as c:
+            back = dict(c.execute(text("SELECT id, common_name FROM species")).all())
+            assert back["wild_boar"] == "Wild Boar" and back["lagomorph"] == "Rabbit"
+            assert back["roe_deer"] == "Corzo"
+            assert c.execute(text("SELECT species_id FROM detections")).scalar_one() == "wild_boar"
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0024_camera_retired")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
+        with eng.connect() as c:
+            assert dict(c.execute(text("SELECT id, common_name FROM species")).all()) == names
     finally:
         eng.dispose()

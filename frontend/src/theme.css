@@ -368,6 +368,25 @@ main.page { padding: 16px; }
 .lb-sheet-err { margin: 6px 0 0; font-size: 13px; line-height: 1.45; color: var(--skip); }
 .lb-sheet-save { min-height: 56px; margin-top: 10px; font-size: 16px; }
 
+/* "Wrong?": what the animal really is. The likely ones as big buttons, two a row,
+   the rest behind "More animals", and "Nothing here" on its own at the bottom. */
+.lb-fix { max-height: min(86dvh, 640px); }
+.lb-fix-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lb-fix-choice { min-height: 56px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--surface-2); color: var(--text); font: inherit; font-size: 15px; line-height: 1.2; text-align: center; cursor: pointer; }
+.lb-fix-choice small { color: var(--text-dim); font-size: 11px; }
+.lb-fix-choice[aria-pressed='true'] { border-color: var(--go); color: var(--go); }
+.lb-fix-choice:disabled { opacity: 0.6; cursor: default; }
+.lb-fix-more { display: block; width: 100%; min-height: 44px; margin: 8px 0; background: none; border: 0; color: var(--go); font: inherit; font-size: 14px; cursor: pointer; }
+.lb-fix-nothing { width: 100%; margin-top: 4px; }
+.lb-fix-link { color: var(--text); }
+/* The line after a fix, with its Undo, over the bottom of the photo. */
+.lb-toast { position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 1; display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; background: rgba(21, 26, 24, 0.94); border: 1px solid #69766e; border-radius: var(--r-ctl); color: #fff; font-size: 13px; line-height: 1.35; }
+.lb-toast > span { flex: 1; min-width: 0; }
+.lb-fixed-by { opacity: 0.75; font-style: italic; }
+.lb-status--more { bottom: 12px; }
+/* The next page failed: said at the top of the stage, clear of an Undo at the bottom. */
+.lb-more-err { top: 8px; bottom: auto; }
+
 /* ── overlays ──
    One implementation behind every full-screen panel: the photo lightbox, the
    herd-makeup gallery, the species gallery, the bare image zooms. They used to
@@ -450,6 +469,7 @@ main.page { padding: 16px; }
 .ov-tools { flex-shrink: 0; display: flex; gap: 8px; }
 .ov-tool { width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid #69766e; border-radius: 8px; background: #27312b; color: #fff; cursor: pointer; }
 .ov-tool:disabled { opacity: 0.5; cursor: default; }
+.ov-tool--text { width: auto; padding: 0 12px; font: inherit; font-size: 14px; }
 .ov .card.ov-panel { max-height: calc(100dvh - 112px) !important; }
 .page-intro { font-size: 14px; line-height: 1.6; color: var(--text-dim); margin: 0 0 20px; max-width: 65ch; }
 .status-panel { padding: 18px; margin-bottom: 16px; background: var(--surface-2); border-radius: 10px; font-size: 14px; line-height: 1.6; }
@@ -558,3 +578,8 @@ main.page { padding: 16px; }
 @media (max-width: 640px) {
   .layout--map > main.page > .crashed, .layout--map > main.page > .update-ready { margin: 12px 16px; }
 }
+
+/* An animal's name in Settings, which an admin taps to change. */
+.species-name { display: block; min-height: 44px; margin: -10px 0 -6px; padding: 10px 0 4px; background: none; border: 0; font: inherit; text-align: left; text-decoration: underline dotted var(--text-dim); text-underline-offset: 3px; cursor: pointer; }
+.species-name-form { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+.species-name-form .input { font-size: 16px; min-height: 44px; }

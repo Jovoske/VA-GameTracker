@@ -2,9 +2,11 @@ import { DownloadSimpleIcon } from '@phosphor-icons/react/dist/csr/DownloadSimpl
 import { MagnifyingGlassMinusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassMinus'
 import { MagnifyingGlassPlusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassPlus'
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
-import { imageUrl } from '../api'
+import { type Failure, imageUrl, plainWords, whoAmI } from '../api'
 import { useReducedMotion } from '../hooks'
+import { estateStamp } from '../night'
 import Overlay from './Overlay'
+import { FixSheet, type PhotoFix, type Saved, fixSpecies, markEmpty, undoFix } from './PhotoFix'
 import PhotoNotesPanel from './PhotoNotes'
 
 /**
@@ -18,7 +20,26 @@ import PhotoNotesPanel from './PhotoNotes'
  * keeps its place as you page between photos with and without notes. On a phone
  * turned on its side (and a wide screen) the band goes beside the photo instead,
  * where it costs width the photo has to spare rather than height it hasn't.
+ *
+ * Members and admins also have "Wrong?" (PhotoFix): say what the animal really is,
+ * or that there's nothing in it. The viewer shows the new name at once, with Undo,
+ * on the photo and on the other photos of its visit that followed it; the list that
+ * opened it hears of each through `onFixed`.
+ *
+ * A list that has more photos than it has loaded (Photos, the species gallery, a
+ * camera's strip) says so with `hasMore`, and the viewer asks for the next page
+ * (`onNeedMore`) as you swipe towards the end, rather than stopping at "Photo 60 of
+ * 60" (audit C-13). When that page can't come, the list says why (`moreError`) and
+ * the viewer says so at the end, with Try again, rather than waiting on it.
  */
+
+/** Why the next page of photos didn't come, in words, for `moreError`. */
+export function morePhotosFailed(e: unknown): string {
+  const x = e as Failure
+  if (x.offline) return 'No signal, so older photos didn’t load.'
+  if (x.timeout) return 'No answer from the server, so older photos didn’t load.'
+  return `Older photos didn’t load. ${plainWords(x.message || '')}`.trim()
+}
 
 export type LightboxPhoto = {
   id: string
@@ -31,7 +52,14 @@ export type LightboxPhoto = {
   notes_count?: number
   /** Marked "nothing in it" (Cameras shows these on request). A note on it keeps it. */
   empty?: boolean
+  /** The species it shows, when the list knows, to mark it on "Wrong?". */
+  species_id?: string | null
+  /** Who said what it is, when a hunter did ("Fixed by Pedro"). */
+  fixed_by?: string | null
 }
+
+/** A fix made in this viewer, and how to take it back. */
+type Change = { id: string; fix: Saved; before: PhotoFix; choice: string }
 
 /**
  * Where the photo sits on the stage: scale, and offset from centre in px.
@@ -46,13 +74,23 @@ type Pt = { x: number; y: number }
 const dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y)
 const mid = (a: Pt, b: Pt): Pt => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
 
-/** `PL19_2026-09-04_22-05.jpg`: the camera and the moment, in local time. */
+/** `PL19_2026-09-04_22-05-07.jpg`: the camera and the moment on the estate's clock,
+ * as the server names the same photo (routes_images.download_name). */
 function downloadName(cam: string, capturedAt: string): string {
-  const d = new Date(capturedAt)
-  const p = (n: number) => String(n).padStart(2, '0')
   const stem = cam.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'camera'
-  return `${stem}_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}.jpg`
+  return `${stem}_${estateStamp(capturedAt)}.jpg`
 }
+
+/** ", with the 2 other photos of this visit": the rest of a burst followed the fix. */
+function visitWords(n: number): string {
+  if (!n) return ''
+  return n === 1 ? ', with the other photo of this visit' : `, with the ${n} other photos of this visit`
+}
+
+/** A phone with a share sheet: that is where "Save image" lives. */
+const canShareFiles = () =>
+  typeof navigator.share === 'function' && typeof navigator.canShare === 'function'
+  && window.matchMedia('(pointer: coarse)').matches
 
 export default function PhotoLightbox({
   photos,
@@ -62,6 +100,10 @@ export default function PhotoLightbox({
   onClose,
   onNotesChange,
   onKept,
+  onFixed,
+  hasMore = false,
+  onNeedMore,
+  moreError,
 }: {
   photos: LightboxPhoto[]
   start?: number
@@ -72,6 +114,14 @@ export default function PhotoLightbox({
   onNotesChange?: (imageId: string, count: number) => void
   /** A note kept a photo that was marked "nothing in it": it is an animal photo now. */
   onKept?: (imageId: string) => void
+  /** "Wrong?" (or its Undo) changed what the photo is. A list drops a photo that no
+   *  longer belongs in it when the viewer closes, never under it. */
+  onFixed?: (imageId: string, fix: PhotoFix) => void
+  /** The list has older photos than these; `onNeedMore` asks for the next page. */
+  hasMore?: boolean
+  onNeedMore?: () => void
+  /** The next page didn't come, in words (morePhotosFailed); empty while it is asked again. */
+  moreError?: string | null
 }) {
   // The photo on show, by id: a list refreshed underneath (a new photo on top, a page
   // dropped) keeps showing the same photo instead of whatever took its place. When it
@@ -90,8 +140,17 @@ export default function PhotoLightbox({
   // The note sheet is open: no paging, swiping or zooming until it is done, so a
   // note being written stays with its photo (PhotoNotes asks before throwing it away).
   const [sheetOpen, setSheetOpen] = useState(false)
+  // "Wrong?": its sheet, the fixes made here (by photo), and the last one, for Undo.
+  const [fixing, setFixing] = useState(false)
+  const [fixes, setFixes] = useState<Record<string, PhotoFix>>({})
+  const [change, setChange] = useState<Change | null>(null)
+  const [undoing, setUndoing] = useState(false)
+  const [changeErr, setChangeErr] = useState('')
+  const [writer, setWriter] = useState(false)
+  // Next was pressed at the end of what is loaded: go on once the next page is in.
+  const [waitingMore, setWaitingMore] = useState(false)
   const holding = useRef(false)
-  holding.current = sheetOpen
+  holding.current = sheetOpen || fixing
   const [imgReady, setImgReady] = useState(false)
   const [imgError, setImgError] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -108,6 +167,40 @@ export default function PhotoLightbox({
   const pinch = useRef<{ d0: number; q0: Pt; s0: number } | null>(null)
   const pan = useRef<{ x: number; y: number; v0: View; moved: boolean } | null>(null)
   const lastTap = useRef<{ t: number; x: number; y: number } | null>(null)
+
+  useEffect(() => {
+    let live = true
+    whoAmI().then((me) => { if (live) setWriter(me.role !== 'viewer') }).catch(() => {})
+    return () => { live = false }
+  }, [])
+
+  // Near the end of what is loaded, ask for the next page while this photo is looked at.
+  const needMore = useRef(onNeedMore)
+  needMore.current = onNeedMore
+  useEffect(() => {
+    if (hasMore && idx >= photos.length - 3) needMore.current?.()
+  }, [idx, photos.length, hasMore])
+  // Next pressed at the end: the next page came, so go on to it. None came: stop.
+  useEffect(() => {
+    if (!waitingMore) return
+    if (idx < photos.length - 1) { setWaitingMore(false); step(1, true) } else if (!hasMore) setWaitingMore(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photos.length, hasMore, waitingMore])
+  // The page failed (no signal): stop waiting at once and say so at the end; the list
+  // also gives up on one that never answers (its timeout), so this is a last resort.
+  useEffect(() => { if (waitingMore && moreError) setWaitingMore(false) }, [waitingMore, moreError])
+  useEffect(() => {
+    if (!waitingMore) return
+    const t = window.setTimeout(() => setWaitingMore(false), 25_000)
+    return () => window.clearTimeout(t)
+  }, [waitingMore])
+
+  // "Changed to Fox. Undo" stays a while, then goes; a failed Undo stays until the next.
+  useEffect(() => {
+    if (!change || undoing || changeErr) return
+    const t = window.setTimeout(() => setChange(null), 10_000)
+    return () => window.clearTimeout(t)
+  }, [change, undoing, changeErr])
 
   // The photos either side load while this one is looked at, so a swipe on a weak
   // signal shows the next at once rather than "Loading photo…" (audit C-04).
@@ -156,10 +249,16 @@ export default function PhotoLightbox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /** Move through the photos, stopping at both ends. */
-  function step(d: number) {
+  /** Move through the photos, stopping at both ends, or asking for more at the end. */
+  function step(d: number, force = false) {
     const i = idx + d
-    if (holding.current || i < 0 || i >= photos.length) return
+    if (!force && holding.current) return
+    if (i >= photos.length && hasMore) {
+      setWaitingMore(true)
+      onNeedMore?.()
+      return
+    }
+    if (i < 0 || i >= photos.length) return
     // The next photo fades in once it has actually decoded. Swapping src alone
     // gave a blank frame and then a jump as the stage resized to fit it.
     setImgReady(false)
@@ -304,60 +403,132 @@ export default function PhotoLightbox({
     setView(v.s > 1 ? FIT : zoomAt(TAP_ZOOM, { x: 0, y: 0 }, v, true))
   }
 
+  // On a phone, the photo on show is also read into a file for the share sheet once
+  // it has loaded (from the browser's cache, so it costs nothing more). The share has
+  // to start inside the tap: it used to download the photo first, and on a slow link
+  // the tap had expired by then and the phone opened the photo in a tab (C-29).
+  const shareFile = useRef<{ id: string; file: File } | null>(null)
+  useEffect(() => {
+    if (!imgReady || !im || !canShareFiles()) return
+    if (shareFile.current?.id === im.id) return
+    let live = true
+    const { id, file_url, camera, captured_at } = im
+    fetch(imageUrl(file_url))
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then((blob) => {
+        if (live) shareFile.current = { id, file: new File([blob], downloadName(camera, captured_at), { type: blob.type || 'image/jpeg' }) }
+      })
+      .catch(() => {})
+    return () => { live = false }
+  }, [imgReady, im])
+
   // Nothing left to show (the list emptied under the viewer): close rather than crash.
   useEffect(() => { if (!im) onClose() }, [im, onClose])
   if (!im) return null
 
-  async function download() {
+  function download() {
     if (saving || !im) return
     const src = imageUrl(im.file_url)
     const name = downloadName(im.camera, im.captured_at)
-    setSaving(true)
+    const ready = shareFile.current?.id === im.id ? shareFile.current.file : null
+    // On a phone the share sheet is where "Save Image" lives; a download link
+    // on iOS opens the photo in a tab the user then has to find a way out of.
+    if (ready && canShareFiles() && navigator.canShare({ files: [ready] })) {
+      setSaving(true)
+      navigator.share({ files: [ready], title: name })
+        .catch(() => { /* dismissed, or refused: nothing to say */ })
+        .finally(() => setSaving(false))
+      return
+    }
+    // Everywhere else (and a phone still reading the photo): the server marks it as
+    // an attachment and names it.
+    const a = document.createElement('a')
+    a.href = `${src}${src.includes('?') ? '&' : '?'}download=1`
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  }
+
+  /** What the photo is now, as this viewer knows it. */
+  const current = (p: LightboxPhoto): PhotoFix => fixes[p.id] ?? {
+    label: p.empty && kept[p.id] ? 'Animal' : p.label,
+    species_id: p.species_id ?? null,
+    empty: !!p.empty && !kept[p.id],
+    hidden: false,
+    fixed_by: p.fixed_by ?? null,
+  }
+
+  /** The photo is `fix` now, and the other photos of its visit what `fix.visit` says. */
+  function apply(id: string, fix: Saved) {
+    const { visit, ...mine } = fix
+    setFixes((f) => ({ ...f, [id]: mine, ...Object.fromEntries(visit.map((v) => [v.id, v.fix])) }))
+    onFixed?.(id, mine)
+    for (const v of visit) onFixed?.(v.id, v.fix)
+  }
+
+  function fixed(id: string, fix: Saved, before: PhotoFix, choice: string) {
+    apply(id, fix)
+    setChange({ id, fix, before, choice })
+    setChangeErr('')
+  }
+
+  /** Take the last fix back: "nothing here" is kept again; a species goes back to
+   *  what it was (a hunter's earlier fix), or to what the AI said. */
+  async function undo() {
+    if (!change || undoing) return
+    const { id, before, choice } = change
+    setUndoing(true)
+    setChangeErr('')
     try {
-      // On a phone the share sheet is where "Save Image" lives; a download link
-      // on iOS opens the photo in a tab the user then has to find a way out of.
-      if (navigator.share && navigator.canShare && window.matchMedia('(pointer: coarse)').matches) {
-        try {
-          const blob = await (await fetch(src)).blob()
-          const file = new File([blob], name, { type: 'image/jpeg' })
-          if (navigator.canShare({ files: [file] })) {
-            await navigator.share({ files: [file], title: name })
-            return
-          }
-        } catch (e) {
-          if ((e as Error).name === 'AbortError') return // sheet dismissed: not an error
-        }
+      let back: Saved
+      if (choice === 'nothing') {
+        await markEmpty(id, false)
+        back = { ...before, empty: false, visit: [] }
+      } else if (!before.empty && before.fixed_by && before.species_id) {
+        back = await fixSpecies(id, before.species_id)
+      } else {
+        back = await undoFix(id)
       }
-      // Everywhere else: the server marks it as an attachment and names it.
-      const a = document.createElement('a')
-      a.href = `${src}${src.includes('?') ? '&' : '?'}download=1`
-      a.download = name
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
+      apply(id, back)
+      setChange(null)
+    } catch (e) {
+      const x = e as Failure
+      setChangeErr(x.offline ? 'No signal, so it wasn’t undone. Try again.' : x.timeout
+        ? 'No answer from the server, so it wasn’t undone. Try again.' : `It wasn’t undone. ${x.message}`)
     } finally {
-      setSaving(false)
+      setUndoing(false)
     }
   }
 
   // Kept by a note here: no longer "No animal", and nothing for the sheet to keep.
-  const empty = !!im.empty && !kept[im.id]
-  const label = im.empty && !empty ? 'Animal' : im.label
+  // A fix made here wins over what the list said.
+  const now = current(im)
+  const empty = now.empty
+  const label = now.label
+  const shownChange = change && change.id === im.id ? change : null
   const when = new Date(im.captured_at).toLocaleString(undefined, {
     weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   })
 
   return (
     <Overlay
-      label={`${im.camera} · Photo ${idx + 1} of ${photos.length}`}
+      label={`${im.camera} · Photo ${idx + 1} of ${photos.length}${hasMore ? '+' : ''}`}
       backLabel={backLabel}
       onClose={onClose}
       backdrop="rgba(0, 0, 0, 0.92)"
       zIndex={zIndex}
       style={{ flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 12 }}
       tools={
-        // The two things you do with a photo once it is big: get closer, and keep it.
+        // The things you do with a photo once it is big: put its name right, get
+        // closer, and keep it.
         <>
+          {writer && (
+            <button className="ov-tool ov-tool--text" onClick={() => { setChange(null); setFixing(true) }}
+              disabled={sheetOpen || fixing} aria-label="Wrong animal? Fix it" title="Wrong animal, or nothing in it? Fix it">
+              Wrong?
+            </button>
+          )}
           <button
             className="ov-tool"
             onClick={toggleZoom}
@@ -392,6 +563,25 @@ export default function PhotoLightbox({
             >
               {imgError && <div role="alert" className="lb-status">This photo did not load. Try the next one.</div>}
               {!imgReady && !imgError && <span role="status" className="lb-status">Loading photo…</span>}
+              {shownChange && (
+                <div className="lb-toast" role={changeErr ? 'alert' : 'status'}
+                  onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                  <span>
+                    {changeErr || (shownChange.choice === 'nothing'
+                      ? 'Marked: nothing here. It leaves the photo lists.'
+                      : `Changed to ${shownChange.fix.label}${visitWords(shownChange.fix.visit.length)}.${shownChange.fix.hidden ? ' That animal is hidden in Settings, so the photo leaves the lists.' : ''}`)}
+                  </span>
+                  <button type="button" className="lb-note-btn" onClick={undo} disabled={undoing}>{undoing ? 'Undoing…' : 'Undo'}</button>
+                </div>
+              )}
+              {waitingMore && <span role="status" className="lb-status lb-status--more">Loading older photos…</span>}
+              {!waitingMore && moreError && hasMore && idx === photos.length - 1 && (
+                <div className="lb-toast lb-more-err" role="alert"
+                  onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                  <span>{moreError}</span>
+                  <button type="button" className="lb-note-btn" onClick={() => step(1, true)}>Try again</button>
+                </div>
+              )}
               <img
                 ref={imgRef}
                 key={im.id}
@@ -418,10 +608,11 @@ export default function PhotoLightbox({
             <div className="lb-side">
               <div className="lb-caption" onClick={(e) => e.stopPropagation()}>
                 <b>{im.camera}</b>
-                <span>{label}</span>
+                <span data-label>{label}</span>
+                {now.fixed_by && <span className="lb-fixed-by">fixed by {now.fixed_by}</span>}
                 <span style={{ opacity: 0.75 }}>{when}</span>
                 <span style={{ opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
-                  {idx + 1} / {photos.length}
+                  {idx + 1} / {photos.length}{hasMore ? '+' : ''}
                 </span>
               </div>
               <PhotoNotesPanel
@@ -438,14 +629,33 @@ export default function PhotoLightbox({
                 onSheet={setSheetOpen}
                 onKept={(id) => {
                   setKept((k) => ({ ...k, [id]: true }))
+                  setFixes((f) => {
+                    if (!f[id]) return f
+                    const { [id]: _gone, ...rest } = f
+                    return rest
+                  })
                   onKept?.(id)
                 }}
               />
             </div>
           </div>
+          {fixing && (
+            <FixSheet
+              imageId={im.id}
+              label={label}
+              camera={im.camera}
+              speciesId={now.species_id}
+              empty={empty}
+              onClose={() => setFixing(false)}
+              onFixed={(fix, choice) => {
+                setFixing(false)
+                fixed(im.id, fix, now, choice)
+              }}
+            />
+          )}
           <button
             className="lb-nav lb-nav--prev"
-            disabled={idx === 0 || sheetOpen}
+            disabled={idx === 0 || sheetOpen || fixing}
             onClick={(e) => { e.stopPropagation(); step(-1) }}
             aria-label="Previous photo"
           >
@@ -453,7 +663,7 @@ export default function PhotoLightbox({
           </button>
           <button
             className="lb-nav lb-nav--next"
-            disabled={idx === photos.length - 1 || sheetOpen}
+            disabled={(idx === photos.length - 1 && !hasMore) || sheetOpen || fixing || waitingMore}
             onClick={(e) => { e.stopPropagation(); step(1) }}
             aria-label="Next photo"
           >

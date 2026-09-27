@@ -3,6 +3,9 @@
 // calls a plan made before this morning's 06:00 "made for last night", and Stands
 // drops an earlier night's reservations, so one hour off at a clock change would
 // show last night's copy as tonight's for an hour, or tonight's as last night's.
+// A sit started and not ended is on while its night lasts; after 06:00 only a dawn
+// sit (reserved before 06:00, started from 03:00) is, for 6 hours, as the server's
+// routes_stands._live says. An evening sit nobody ended must be over at 06:00.
 // No browser: node tests/night-rule.cjs (esbuild, which Vite brings, reads the .ts).
 const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path')
 const { transformSync } = require('esbuild')
@@ -10,7 +13,7 @@ const { transformSync } = require('esbuild')
 const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'night.ts'), 'utf8')
 const mod = { exports: {} }
 new Function('module', 'exports', transformSync(src, { loader: 'ts', format: 'cjs' }).code)(mod, mod.exports)
-const { nightOf, fromEarlierNight } = mod.exports
+const { nightOf, fromEarlierNight, nightBefore, startedSitIsOn, nightLabel, photoHeading, whenSeen, estateStamp } = mod.exports
 
 // On each clock-change morning, 05:59 is still the night before and 06:00 is the new one.
 const cases = [
@@ -53,4 +56,72 @@ assert.equal(fromEarlierNight('2026-10-25T05:00:00Z', Date.parse('2026-10-25T20:
 assert.equal(fromEarlierNight('2026-03-28T20:00:00Z', Date.parse('2026-03-29T03:30:00Z')), false)
 assert.equal(fromEarlierNight('2026-03-28T20:00:00Z', Date.parse('2026-03-29T04:00:00Z')), true)
 
-console.log(`PASS: the night turns at 06:00 Madrid time on both clock-change mornings (${cases.length} named moments, ${checked} five-minute steps), and a copy made before 06:00 is last night's after it.`)
+assert.equal(nightBefore('2026-03-01'), '2026-02-28')
+assert.equal(nightBefore('2026-09-27', 3), '2026-09-24')
+
+// [night, started, now, on?, what]
+const sits = [
+  // A normal autumn morning (CEST, UTC+2).
+  ['2026-09-26', '2026-09-26T19:00:00Z', '2026-09-27T03:59:00Z', true, 'evening sit, 05:59'],
+  ['2026-09-26', '2026-09-26T19:00:00Z', '2026-09-27T04:00:00Z', false, 'evening sit nobody ended, 06:00'],
+  ['2026-09-26', '2026-09-27T03:30:00Z', '2026-09-27T05:30:00Z', true, 'dawn sit from 05:30, 07:30'],
+  ['2026-09-26', '2026-09-27T03:30:00Z', '2026-09-27T09:29:00Z', true, 'dawn sit, 5 h 59 in'],
+  ['2026-09-26', '2026-09-27T03:30:00Z', '2026-09-27T09:30:00Z', false, 'dawn sit, 6 h in'],
+  ['2026-09-26', '2026-09-27T01:00:00Z', '2026-09-27T05:30:00Z', true, 'started 03:00: a dawn sit'],
+  ['2026-09-26', '2026-09-27T00:59:00Z', '2026-09-27T05:30:00Z', false, 'started 02:59: the end of a night sit'],
+  ['2026-09-27', '2026-09-27T17:00:00Z', '2026-09-28T03:59:00Z', true, 'tonight, 11 h in'],
+  ['2026-09-27', '2026-09-27T05:00:00Z', '2026-09-27T17:00:00Z', false, 'tonight, 12 h in'],
+  ['2026-09-25', '2026-09-27T03:30:00Z', '2026-09-27T05:30:00Z', false, 'two nights ago'],
+  // 25 Oct: 03:00 is CET (02:00 UTC); 02:30 comes twice and is never a dawn start.
+  ['2026-10-24', '2026-10-24T19:00:00Z', '2026-10-25T04:59:00Z', true, '25 Oct, evening sit, 05:59 CET'],
+  ['2026-10-24', '2026-10-24T19:00:00Z', '2026-10-25T05:00:00Z', false, '25 Oct, evening sit, 06:00 CET'],
+  ['2026-10-24', '2026-10-25T00:30:00Z', '2026-10-25T06:30:00Z', false, '25 Oct, started 02:30 CEST'],
+  ['2026-10-24', '2026-10-25T01:30:00Z', '2026-10-25T06:30:00Z', false, '25 Oct, started 02:30 CET'],
+  ['2026-10-24', '2026-10-25T02:00:00Z', '2026-10-25T06:30:00Z', true, '25 Oct, started 03:00 CET'],
+  // 29 Mar: 02:00 CET jumps to 03:00 CEST (01:00 UTC).
+  ['2026-03-28', '2026-03-29T00:59:00Z', '2026-03-29T05:30:00Z', false, '29 Mar, started 01:59 CET'],
+  ['2026-03-28', '2026-03-29T01:00:00Z', '2026-03-29T05:30:00Z', true, '29 Mar, started 03:00 CEST'],
+]
+for (const [night, started, now, on, what] of sits) assert.equal(startedSitIsOn(night, started, Date.parse(now)), on, what)
+
+// Photos are filed by night, and Animals and Cameras say when in the same words: at
+// 08:00 on Sat 26 Sep, a boar at 21:30 or 00:40 was "last night", not "today" (C-14).
+const sat8 = Date.parse('2026-09-26T06:00:00Z')
+const weekday = (night, style) => new Date(`${night}T12:00:00Z`).toLocaleDateString(undefined, { weekday: style, timeZone: 'UTC' })
+assert.equal(nightLabel(nightOf('2026-09-25T19:30:00Z'), sat8), 'Last night')
+assert.equal(nightLabel(nightOf('2026-09-25T22:40:00Z'), sat8), 'Last night', '00:40 is still last night')
+assert.equal(nightLabel(nightOf('2026-09-26T05:00:00Z'), sat8), 'Today', '07:00 this morning')
+assert.equal(nightLabel(nightOf('2026-09-26T05:00:00Z'), Date.parse('2026-09-26T17:00:00Z')), 'Tonight')
+assert.equal(nightLabel('2026-09-24', sat8), `${weekday('2026-09-24', 'short')} night`)
+assert.match(nightLabel('2026-09-10', sat8), /^Night of /)
+assert.equal(whenSeen('2026-09-25T19:30:00Z', sat8), 'last night')
+assert.equal(whenSeen('2026-09-25T22:40:00Z', sat8), 'last night')
+assert.equal(whenSeen('2026-09-25T12:00:00Z', sat8), 'yesterday')
+assert.equal(whenSeen('2026-09-26T05:00:00Z', sat8), 'today')
+assert.equal(whenSeen('2026-09-24T19:30:00Z', sat8), `${weekday('2026-09-24', 'long')} night`)
+assert.equal(whenSeen('2026-09-26T19:30:00Z', Date.parse('2026-09-26T20:00:00Z')), 'tonight')
+// Photos heads a night's dark hours and its daytime apart, in whenSeen's words: at
+// 19:30 on Sun 27 Sep this morning's 10:15 deer is "Today", not "Tonight", and
+// yesterday's 10:00 one "Yesterday", not "Last night".
+const sun1930 = Date.parse('2026-09-27T17:30:00Z')
+const heads = [
+  ['2026-09-27T08:15:00Z', 'Today', 'today'],
+  ['2026-09-27T17:00:00Z', 'Tonight', 'tonight'],
+  ['2026-09-26T08:00:00Z', 'Yesterday', 'yesterday'],
+  ['2026-09-26T20:00:00Z', 'Last night', 'last night'],
+  ['2026-09-26T23:30:00Z', 'Last night', 'last night'],
+  ['2026-09-24T08:00:00Z', weekday('2026-09-24', 'long'), weekday('2026-09-24', 'long')],
+  ['2026-09-24T20:00:00Z', `${weekday('2026-09-24', 'short')} night`, `${weekday('2026-09-24', 'long')} night`],
+]
+for (const [iso, label, seen] of heads) {
+  assert.equal(photoHeading(iso, sun1930).label, label, iso)
+  assert.equal(whenSeen(iso, sun1930), seen, iso)
+}
+assert.notEqual(photoHeading('2026-09-27T08:15:00Z', sun1930).key, photoHeading('2026-09-27T17:00:00Z', sun1930).key)
+assert.equal(photoHeading('2026-09-26T20:00:00Z', sun1930).key, photoHeading('2026-09-26T23:30:00Z', sun1930).key)
+assert.match(photoHeading('2026-09-10T08:00:00Z', sun1930).label, /10/)
+// Saved photos are named on the estate's clock, to the second, like the server's.
+assert.equal(estateStamp('2026-09-25T20:05:07Z'), '2026-09-25_22-05-07')
+assert.equal(estateStamp('2026-11-25T20:05:00Z'), '2026-11-25_21-05-00')
+
+console.log(`PASS: the night turns at 06:00 Madrid time on both clock-change mornings (${cases.length} named moments, ${checked} five-minute steps), a copy made before 06:00 is last night's after it, a sit nobody ended is over at 06:00 unless it is a dawn sit (${sits.length} sits), and photos are filed and dated by night, their daytime by day.`)

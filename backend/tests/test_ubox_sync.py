@@ -332,20 +332,20 @@ def test_unchanged_snapshots_do_not_move_existing_capture_times(db_session, setu
 
 @requires_db
 def test_ubox_enters_normal_classification_and_animals_gallery(db_session, setup, monkeypatch):
-    from app.ai import empty_filter, species
+    from app.ai import checking, species
     from app.api.routes_species import species_images, spotted
     from app.notifications import dispatch
 
     FakeClient.events = [event("1")]
     sync.sync_ubox_all(db_session)
     boxes = [{"confidence": 0.95, "bbox": [0.1, 0.1, 0.9, 0.9]}]
-    monkeypatch.setattr(empty_filter, "detect_animals", lambda _: boxes)
-    monkeypatch.setattr(species, "detect_animals", lambda _: boxes)
+    monkeypatch.setattr(checking, "load_models", lambda: None)
+    monkeypatch.setattr(checking, "detect_animals", lambda _: boxes)
     monkeypatch.setattr(species, "classify_crop", lambda *_: ("fox", "Fox", 0.97))
     notified = []
     monkeypatch.setattr(dispatch, "dispatch_new_sightings", lambda db: notified.append(True))
-    assert empty_filter.scan_unprocessed(db_session)["animal"] == 1
-    assert species.classify_unclassified(db_session)["by_species"] == {"fox": 1}
+    result = checking.check_photos(db_session)
+    assert (result["animal"], result["by_species"]) == (1, {"fox": 1})
     assert notified == [True]
     user = User(id=setup.id, estate_id=setup.estate_id)
     animals = spotted(_=user, db=db_session)

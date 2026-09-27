@@ -8,9 +8,10 @@ import { ImagesIcon } from '@phosphor-icons/react/dist/csr/Images'
 import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { setToken } from '../api'
+import { signOut } from '../api'
 import { confirmLeave } from '../map/draftGuard'
 import { useNewerBuild } from '../serviceWorker'
+import { confirmSignOut } from '../sits'
 import { PageBoundary } from './ErrorBoundary'
 
 /**
@@ -69,8 +70,8 @@ export default function Layout() {
   }, [])
 
   function logout() {
-    if (!confirmLeave()) return
-    setToken(null)
+    if (!confirmLeave() || !confirmSignOut()) return
+    signOut()
     nav('/login')
   }
   const onMap = loc.pathname === '/map'

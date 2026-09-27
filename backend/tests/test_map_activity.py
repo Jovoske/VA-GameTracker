@@ -311,6 +311,25 @@ def test_nights_a_camera_was_down_are_left_out_not_counted_as_quiet(db_session, 
     assert q["read"] == "No animals on the 7 nights."
 
 
+def test_nights_the_ai_gave_up_on_are_left_out_not_counted_as_quiet(db_session, estate):
+    """A night whose frames the AI could not check is not "watched, nothing came", even
+    where the hourly rebuild of camera_nights called it watched before the AI gave up."""
+    week = _week()
+    cam = _camera(db_session, estate)
+    _watched(db_session, cam, week)
+    for n in (week[1], week[5]):
+        _photo(db_session, cam, _at(n, 21, 30))
+    for n in (week[2], week[3]):
+        img = _photo(db_session, cam, _at(n, 22, 0), (), empty=None)
+        img.ai_attempts, img.ai_failed_at = 3, datetime.now(UTC)
+    db_session.commit()
+
+    got = _cam(activity(db_session, cameras=[cam], last_night=NIGHT, nights=7, part="all"), cam)
+    numbers = ("visits", "watched_nights", "unreadable_nights", "blind_nights", "per_night")
+    assert [got[k] for k in numbers] == [2, 5, 2, 0, 0.4]
+    assert got["read"] == "Animals on 2 of 5 nights that could be checked, at 21:30 and 21:30"
+
+
 def test_the_parts_of_the_night_run_past_midnight_and_dawn_belongs_to_the_night_before(
     db_session, estate,
 ):

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
 
@@ -115,7 +114,6 @@ def test_failed_ubox_verification_never_saves_credentials(
             accounts.AddAccountBody(
                 username="cam@example.test", password="secret", provider="ubox"
             ),
-            BackgroundTasks(),
             _user(),
             db,
         )
@@ -126,65 +124,36 @@ def test_failed_ubox_verification_never_saves_credentials(
     db.commit.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "provider,backfill_name",
-    [
-        ("ubox", "backfill_ubox_account"),
-        ("spypoint", "backfill_account"),
-    ],
-)
-def test_connection_queues_matching_backfill_and_ai_under_pipeline_lock(
-    monkeypatch,
-    provider_clients,
-    provider,
-    backfill_name,
+@pytest.mark.parametrize("provider", ["ubox", "spypoint"])
+def test_connection_starts_its_first_import_as_a_pipeline_job(
+    monkeypatch, provider_clients, spawned, provider,
 ):
+    """The new login's history and the AI pass over it run as `pipeline.py login <id>`,
+    a process of its own under the pipeline lock, never inside the web server."""
     from app.api import routes_cameras
 
     monkeypatch.setattr(routes_cameras, "_pipeline_busy", lambda: False)
-    calls = []
-    for module, name in [
-        ("app.ai.empty_filter", "scan_unprocessed"),
-        ("app.ai.species", "classify_unclassified"),
-        ("app.forecasting.exposure", "recompute_camera_nights"),
-        ("app.ingestion.ubox_sync" if provider == "ubox" else "app.ingestion.sync", backfill_name),
-    ]:
-
-        def record(*args, _name=name):
-            calls.append((_name, args))
-
-        monkeypatch.setitem(__import__("sys").modules, module, SimpleNamespace(**{name: record}))
     db = Mock()
     db.scalar.return_value = None
     account_id = uuid.uuid4()
     db.add.side_effect = lambda account: setattr(account, "id", account_id)
-    background = BackgroundTasks()
     result = accounts.add_account(
         accounts.AddAccountBody(username="cam@example.test", password="secret", provider=provider),
-        background,
         _user(),
         db,
     )
     assert result["import_started"]
     provider_label = "UBox Pro" if provider == "ubox" else "SPYPOINT"
     assert result["note"].startswith(f"Connected — {provider_label} reports ")
-    assert len(background.tasks) == 1
-    queued = background.tasks[0]
-    assert queued.func is routes_cameras._run_locked
-    session = object()
-    queued.args[0](session)
-    assert calls == [
-        (backfill_name, (session, str(account_id))),
-        ("scan_unprocessed", (session,)),
-        ("classify_unclassified", (session,)),
-        ("recompute_camera_nights", (session,)),
-    ]
+    assert result["note"].endswith("Fetching photos now.")
+    assert spawned == [("login", str(account_id))]
 
 
 @requires_db
-def test_verified_account_encrypts_password_and_keeps_limits(db_session, provider_clients):
+def test_verified_account_encrypts_password_and_keeps_limits(
+    db_session, provider_clients, spawned,
+):
     user = _seed(db_session)
-    background = BackgroundTasks()
     result = accounts.add_account(
         accounts.AddAccountBody(
             username=" camera@example.test ",
@@ -193,7 +162,6 @@ def test_verified_account_encrypts_password_and_keeps_limits(db_session, provide
             ubox_min_interval_seconds=120,
             ubox_max_images_per_day=250,
         ),
-        background,
         user,
         db_session,
     )
@@ -211,8 +179,8 @@ def test_verified_account_encrypts_password_and_keeps_limits(db_session, provide
         ("closed",),
     ]
     assert result["cameras"] == 2
-    assert not result["import_started"]
-    assert background.tasks == []
+    assert not result["import_started"]  # the pipeline is busy: the next sync imports it
+    assert spawned == []
 
 
 @requires_db
@@ -223,7 +191,6 @@ def test_same_email_is_allowed_for_different_providers(db_session, provider_clie
             accounts.AddAccountBody(
                 username="same@example.test", password="secret", provider=provider
             ),
-            BackgroundTasks(),
             user,
             db_session,
         )
@@ -234,7 +201,6 @@ def test_same_email_is_allowed_for_different_providers(db_session, provider_clie
             accounts.AddAccountBody(
                 username="same@example.test", password="secret", provider="ubox"
             ),
-            BackgroundTasks(),
             user,
             db_session,
         )
@@ -246,7 +212,6 @@ def test_list_is_estate_scoped_and_reports_skips_without_credentials(db_session,
     owner = _seed(db_session)
     result = accounts.add_account(
         accounts.AddAccountBody(username="cam@example.test", password="secret", provider="ubox"),
-        BackgroundTasks(),
         owner,
         db_session,
     )
@@ -317,7 +282,6 @@ def test_import_settings_require_owner_or_estate_admin(db_session, provider_clie
     owner = _seed(db_session)
     result = accounts.add_account(
         accounts.AddAccountBody(username="cam@example.test", password="secret", provider="ubox"),
-        BackgroundTasks(),
         owner,
         db_session,
     )
@@ -345,7 +309,6 @@ def test_disconnect_keeps_cameras_and_photos(db_session, provider_clients):
     owner = _seed(db_session)
     result = accounts.add_account(
         accounts.AddAccountBody(username="cam@example.test", password="secret", provider="ubox"),
-        BackgroundTasks(),
         owner,
         db_session,
     )

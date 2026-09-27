@@ -1,103 +1,112 @@
 """Camera routes — list (with location), images, sync/backfill/scan, review, map placement."""
-import time
 import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app import jobs
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
+from app.api.routes_photos import _items, after_cursor
 from app.api.visibility import VISIBLE_ANIMAL
-from app.core.config import settings
 from app.core.db import get_db
 from app.health import camera_health
 from app.ingestion.logins import camera_logins
-from app.models import Camera, CameraView, Detection, Image, Species, User
-from app.notes import note_counts
+from app.models import Camera, CameraView, Image, User
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 
-# ── native-build task runner ─────────────────────────────────
-# The Docker build queued these to Celery; the native build has no broker, so they run
-# as FastAPI background tasks in the api process. The same lock file the scheduled
-# pipeline uses keeps a button press from overlapping the 15-min sync.
-def _lock_path() -> Path:
-    return Path(settings.models_root).parent / "pipeline.lock"
+# ── background jobs ───────────────────────────────────────────
+# The Docker build queued these to Celery; the native build has no broker. The buttons
+# start `pipeline.py` as a process of its own (app.jobs.spawn), under the same lock
+# as the scheduled runs, so the AI models never load into the web server and a press
+# can never overlap the 15-min sync.
+FETCH_REQUEST = "fetch_request"  # app_settings: when the Check button last asked
+# How long a requested check reads as "running" before its process has taken the lock.
+REQUEST_GRACE = timedelta(minutes=2)
 
 
 def _pipeline_busy() -> bool:
-    p = _lock_path()
-    return p.exists() and (time.time() - p.stat().st_mtime) < 3 * 3600
+    return jobs.holder("pipeline") is not None
 
 
-def _run_locked(work) -> None:
-    lock = _lock_path()
-    try:
-        lock.write_text(f"api {int(time.time())}")
-        from app.core.db import SessionLocal
+# What a job that holds the photo fetch up is doing, in words, by its lock's owner.
+BUSY_WITH = {
+    "reid": "looking for repeat visitors",
+    "plan": "writing tonight’s plan",
+    "score": "checking last night’s plan against the cameras",
+    "scan": "checking photos for animals",
+}
 
-        with SessionLocal() as db:
-            work(db)
-    finally:
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+
+def _busy_words() -> str:
+    """Why a one-off can't start now, in words: what holds the lock."""
+    holder = jobs.holder("pipeline")
+    what = "fetching photos" if holder is None or holder.owner in jobs.FETCH_MODES else (
+        BUSY_WITH.get(holder.owner, "busy with another job"))
+    return f"The server is {what}. Try again in a few minutes."
 
 
 def _lock_started() -> datetime | None:
     """When the run holding the pipeline lock began, or None when nothing holds it."""
-    try:
-        return datetime.fromtimestamp(_lock_path().stat().st_mtime, UTC)
-    except FileNotFoundError:
-        return None
+    return jobs.busy_since("pipeline")
 
 
-def _sync_work(db: Session) -> None:
-    # The same run as the scheduled fetch (pipeline.py): both providers, then the AI
-    # pass, with one summary row the Check button reads (app.ingestion.fetch).
-    from app.ingestion.fetch import run_fetch
-
-    run_fetch(db)
+def _start(db: Session, mode: str, *args: str) -> None:
+    """Start a pipeline job, or say in words that it could not be started."""
+    if not jobs.spawn(mode, *args):
+        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
 
 
 @router.get("")
 def list_cameras(
     user: User = Depends(get_current_user), db: Session = Depends(get_db)
 ) -> list[dict]:
+    """The estate's cameras, each with its photo counts as the strip shows them.
+
+    The strip lists `animal_count` + `unchecked_count` photos: the checked ones with
+    an animal in them (not only a hidden animal, with a picture), and the ones the AI
+    has not checked yet (or couldn't), which are often grass, so they are counted
+    apart. `empty_count` is the "nothing in it" ones "Show empty photos" brings up.
+    They used to be every frame minus the empty ones, so hidden rabbits and frames
+    not checked yet counted as animals, and it took four queries a camera; now it is
+    one for them all.
+    """
     rows = db.scalars(
         select(Camera).where(Camera.estate_id == user.estate_id).order_by(Camera.name)
     ).all()
     now = datetime.now(UTC)
     login_states = camera_logins(db, rows, now)
+    has_file = Image.original_path.isnot(None)
+    counts = {r.camera_id: r for r in db.execute(
+        select(
+            Image.camera_id,
+            func.max(Image.captured_at).label("last"),
+            func.count(Image.id).label("count"),
+            func.count(Image.id).filter(
+                has_file, Image.is_empty_frame.is_(False), VISIBLE_ANIMAL).label("animals"),
+            func.count(Image.id).filter(
+                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL).label("unchecked"),
+            func.count(Image.id).filter(has_file, Image.is_empty_frame.is_(True)).label("empty"),
+        )
+        .where(Image.camera_id.in_([c.id for c in rows]))
+        .group_by(Image.camera_id)
+    ).all()}
     out = []
     for c in rows:
-        last = db.scalar(
-            select(Image.captured_at)
-            .where(Image.camera_id == c.id)
-            .order_by(Image.captured_at.desc())
-            .limit(1)
-        )
-        count = db.scalar(select(func.count(Image.id)).where(Image.camera_id == c.id))
-        empty = db.scalar(
-            select(func.count(Image.id)).where(
-                Image.camera_id == c.id, Image.is_empty_frame.is_(True)
-            )
-        )
-        coords = db.execute(
-            select(Camera.lat, Camera.lon).where(Camera.id == c.id)
-        ).first()
-        lat = float(coords[0]) if coords and coords[0] is not None else None
-        lng = float(coords[1]) if coords and coords[1] is not None else None
-        sightings = (count or 0) - (empty or 0)
+        n = counts.get(c.id)
+        last, count = (n.last, n.count) if n else (None, 0)
+        animals, unchecked, empty = (n.animals, n.unchecked, n.empty) if n else (0, 0, 0)
+        lat = float(c.lat) if c.lat is not None else None
+        lng = float(c.lon) if c.lon is not None else None
         out.append({
             "id": str(c.id), "name": c.name, "battery_pct": c.battery_pct,
             "provider_name": c.provider_name or c.name,
@@ -105,12 +114,15 @@ def list_cameras(
             "can_rename": user.role in {"admin", "member"},
             "battery_level": c.battery_level,
             "signal_pct": c.signal_pct, "model": c.model, "active": c.active,
+            "retired_at": c.retired_at,
             "last_sync_at": c.last_sync_at, "last_capture": last,
             "last_report_at": c.last_report_at,
             "photo_count": c.photo_count, "photo_limit": c.photo_limit,
             "plan_name": c.plan_name, "cycle_end": c.cycle_end,
             "sd_used_mb": c.sd_used_mb, "sd_total_mb": c.sd_total_mb,
-            "image_count": count or 0, "empty_count": empty or 0, "sightings": sightings,
+            "image_count": count, "empty_count": empty, "animal_count": animals,
+            "unchecked_count": unchecked,
+            "sightings": animals,
             "lat": lat, "lng": lng,
             "health": camera_health(c, now, login_states.get(c.id)),
         })
@@ -151,7 +163,22 @@ def rename_camera(
     # Local imports have no vendor label, so retain their initial name as default.
     if not camera.provider_name:
         camera.provider_name = camera.name
-    camera.name = camera.provider_name if body.name is None else body.name
+    name = camera.provider_name if body.name is None else body.name
+    # Two cameras with one name merge into one row wherever sightings are counted by
+    # camera, and nobody can tell which "Feeder" a photo came from (audit I-26).
+    taken = db.scalar(select(Camera.id).where(
+        Camera.estate_id == user.estate_id, Camera.id != camera.id,
+        func.lower(Camera.name) == name.lower(),
+    ).limit(1))
+    if taken is not None:
+        # Going back to the vendor's name too: two SPYPOINTs called "SPYPOINT" are the
+        # same trap as two cameras a hunter called "Feeder".
+        raise HTTPException(409, (
+            f"Another camera is already called {name}. Pick another name."
+            if body.name is not None else
+            f"Another camera is already called {name}, so this one keeps its own name."
+        ))
+    camera.name = name
     camera.name_is_custom = body.name is not None
     db.commit()
     return {
@@ -159,6 +186,41 @@ def rename_camera(
         "provider_name": camera.provider_name,
         "name_is_custom": camera.name_is_custom, "can_rename": True,
     }
+
+
+class RetireBody(BaseModel):
+    retired: bool
+
+
+@router.patch("/{camera_id}/retired")
+def retire_camera(
+    camera_id: uuid.UUID,
+    body: RetireBody,
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Retire a camera that was taken down, or bring it back. Admins only.
+
+    Retired, it is left out of tonight's plan, the alerts, Insights and the track
+    record, instead of topping Tonight for weeks on what it saw before it went in a
+    drawer (audit K-01). Its photos stay in Photos, and its login keeps fetching.
+    """
+    camera = db.scalar(select(Camera).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ))
+    if camera is None:
+        raise HTTPException(404, "Camera not found.")
+    if body.retired and camera.retired_at is None:
+        camera.retired_at = datetime.now(UTC)
+    elif not body.retired and camera.retired_at is not None:
+        camera.retired_at = None
+        db.commit()
+        # Back in the plan: its nights are counted again from where they stood.
+        from app.forecasting.exposure import recompute_camera_nights
+
+        recompute_camera_nights(db, camera_id=camera.id)
+    db.commit()
+    return {"id": str(camera.id), "name": camera.name, "retired_at": camera.retired_at}
 
 
 @router.post("/{camera_id}/seen")
@@ -194,49 +256,54 @@ def mark_seen(
 
 
 @router.post("/sync")
-def trigger_sync(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+def trigger_sync(
+    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
+) -> dict:
     # `since` is what the Check button waits for: a fetch summary started after it
     # is this check's result; an older one is somebody else's.
-    if _pipeline_busy():
-        return {"status": "busy", "since": _lock_started(),
+    holder = jobs.holder("pipeline")
+    if holder is not None and holder.owner in jobs.FETCH_MODES:
+        return {"status": "busy", "since": holder.started,
                 "note": "Already checking. New photos will show shortly."}
+    if jobs.holder("fetchqueue") is not None:
+        asked = jobs.read_note(db, FETCH_REQUEST).get("at")
+        return {"status": "queued", "since": asked,
+                "note": "Already asked. New photos come in as soon as the server is free."}
     since = datetime.now(UTC)
-    background.add_task(_run_locked, _sync_work)
-    return {"status": "started", "since": since}
+    if holder is None:
+        _start(db, "sync")
+        jobs.note(db, FETCH_REQUEST, at=since)
+        return {"status": "started", "since": since}
+    # Something else holds the fetch up (Look for repeats, tonight's plan): the fetch
+    # waits for it and runs the moment it ends. It used to say "Already checking"
+    # although no fetch had been asked for, and none came.
+    _start(db, "sync", "queued")
+    jobs.note(db, FETCH_REQUEST, at=since)
+    what = BUSY_WITH.get(holder.owner, "busy with another job")
+    return {"status": "queued", "since": since,
+            "note": f"The server is {what}. New photos come in when it finishes."}
 
 
 @router.post("/backfill")
 def trigger_backfill(
-    background: BackgroundTasks,
-    months: int = Query(13, ge=1, le=24),
-    _: User = Depends(get_current_admin),
+    _: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    months: Annotated[int, Query(ge=1, le=24)] = 13,
 ) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
-
-    def work(db: Session) -> None:
-        from app.ingestion.sync import backfill_all
-
-        backfill_all(db, months=months)
-        _sync_work(db)
-
-    background.add_task(_run_locked, work)
+        return {"status": "busy", "note": _busy_words()}
+    _start(db, "backfill", str(months))
+    jobs.note(db, FETCH_REQUEST, at=datetime.now(UTC))
     return {"status": "started", "months": months}
 
 
 @router.post("/scan")
-def trigger_scan(background: BackgroundTasks, _: User = Depends(get_current_admin)) -> dict:
+def trigger_scan(
+    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
+) -> dict:
     if _pipeline_busy():
-        return {"status": "busy", "note": "A sync is already running. Try again in a few minutes."}
-
-    def work(db: Session) -> None:
-        from app.ai.empty_filter import scan_unprocessed
-        from app.ai.species import classify_unclassified
-
-        scan_unprocessed(db)
-        classify_unclassified(db)
-
-    background.add_task(_run_locked, work)
+        return {"status": "busy", "note": _busy_words()}
+    _start(db, "scan")
     return {"status": "started"}
 
 
@@ -247,6 +314,15 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
     from app.ingestion.fetch import latest_run
 
     row = latest_run(db)
+    asked = jobs.read_note(db, FETCH_REQUEST).get("at")
+    asked = datetime.fromisoformat(asked) if asked else None
+    if not _pipeline_busy() and asked is not None and (
+        # Queued behind another job, which has just ended: it takes the lock next.
+        jobs.holder("fetchqueue") is not None
+        or datetime.now(UTC) - asked < REQUEST_GRACE
+    ) and (row is None or row.started_at is None or row.started_at < asked):
+        # Asked for, and its process is still starting: not yet anyone's result.
+        return {"status": "running", "started_at": asked}
     if _pipeline_busy():
         started = _lock_started()
         details = (row.details or {}) if row is not None else {}
@@ -300,40 +376,45 @@ def camera_images(
     include_empty: bool = False,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    before: Annotated[datetime | None, Query(description="the last photo's time")] = None,
+    before_id: Annotated[uuid.UUID | None, Query(description="the last photo's id")] = None,
 ) -> list[dict]:
-    q = select(Image).where(Image.camera_id == camera_id)
+    """The camera's photos, newest first; empties too with `include_empty`. Older ones
+    a page at a time with the last photo's time and id (`before`, `before_id`).
+
+    `label` is the photo's name as Photos and Animals write it: its surest sighting
+    of a species that isn't hidden (routes_photos._items). This page used to build
+    its own ("Boar ♂", "Red Deer herd (3)") from whichever sighting came last.
+    """
+    # A photo with no picture yet (still to download) has nothing to show.
+    q = select(Image).where(Image.camera_id == camera_id, Image.original_path.isnot(None))
     # Photos of nothing but hidden species never show; empties only on request.
     q = q.where(or_(Image.is_empty_frame.is_(True), VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
-    rows = db.scalars(q.order_by(Image.captured_at.desc()).limit(limit)).all()
-    ids = [i.id for i in rows]
-    det_map: dict = {}
-    if ids:
-        drows = db.execute(
-            select(
-                Detection.image_id, Species.common_name,
-                Detection.group_type, Detection.group_size, Detection.sex,
-            )
-            .join(Species, Detection.species_id == Species.id)
-            .where(Detection.image_id.in_(ids))
-        ).all()
-        det_map = {
-            r.image_id: {
-                "species": r.common_name, "group_type": r.group_type,
-                "group_size": r.group_size, "sex": r.sex,
-            }
-            for r in drows
-        }
-    counts = note_counts(db, ids)
-    return [{
-        "id": str(i.id),
-        "captured_at": i.captured_at,
-        "file_url": f"/api/images/{i.id}/file" if i.original_path else None,
-        "species": det_map.get(i.id, {}).get("species"),
-        "group_type": det_map.get(i.id, {}).get("group_type"),
-        "group_size": det_map.get(i.id, {}).get("group_size"),
-        "sex": det_map.get(i.id, {}).get("sex"),
-        "is_empty_frame": i.is_empty_frame,
-        "reviewed": i.reviewed,
-        "animal_conf": i.animal_conf,
-        "notes_count": counts.get(i.id, 0),
-    } for i in rows]
+    q = after_cursor(q, before, before_id)
+    rows = db.scalars(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit)).all()
+    cam_name = db.scalar(select(Camera.name).where(Camera.id == camera_id))
+    items = _items(db, [
+        SimpleNamespace(id=i.id, captured_at=i.captured_at, camera_id=camera_id, name=cam_name)
+        for i in rows
+    ])
+    out = []
+    for i, it in zip(rows, items, strict=True):
+        named = it["species_id"] is not None
+        out.append({
+            "id": str(i.id),
+            "captured_at": i.captured_at,
+            "file_url": f"/api/images/{i.id}/file" if i.original_path else None,
+            # None while nobody has named it ("checking" says why, when the AI hasn't).
+            "label": it["label"] if named else None,
+            "species": it["label"] if named else None,  # what an older app reads
+            "species_id": it["species_id"],
+            "group_size": it["group_size"],
+            "fixed_by": it["fixed_by"],
+            "is_empty_frame": i.is_empty_frame,
+            "reviewed": i.reviewed,
+            "animal_conf": i.animal_conf,
+            "notes_count": it["notes_count"],
+            # "waiting" / "failed" while the AI has not finished with it (checking.photo_states).
+            "checking": it["checking"],
+        })
+    return out

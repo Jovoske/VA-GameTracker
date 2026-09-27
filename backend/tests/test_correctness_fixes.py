@@ -188,7 +188,7 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
     db_session.flush()
     img = Image(
         camera_id=cam.id,
-        captured_at=datetime(2025, 10, 4, 22, 0, tzinfo=timezone.utc),
+        captured_at=datetime(2025, 10, 4, 20, 0, tzinfo=timezone.utc),  # 22:00 in Madrid
         original_path=str(photo),
     )
     db_session.add(img)
@@ -214,10 +214,12 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
 def test_download_name_is_camera_and_moment():
     from app.api.routes_images import download_name
 
-    when = datetime(2025, 10, 4, 22, 5, tzinfo=timezone.utc)
-    assert download_name("Ridge", when) == "Ridge_2025-10-04_22-05.jpg"
-    assert download_name("MP14 waterhole / east", when) == "MP14-waterhole-east_2025-10-04_22-05.jpg"
-    assert download_name(None, when) == "camera_2025-10-04_22-05.jpg"
+    # 20:05 UTC is 22:05 on the estate's clock (Madrid, summer time).
+    when = datetime(2025, 10, 4, 20, 5, tzinfo=timezone.utc)
+    assert download_name("Ridge", when) == "Ridge_2025-10-04_22-05-00.jpg"
+    assert download_name("MP14 waterhole / east", when) == (
+        "MP14-waterhole-east_2025-10-04_22-05-00.jpg")
+    assert download_name(None, when) == "camera_2025-10-04_22-05-00.jpg"
 
 
 @requires_db
@@ -244,7 +246,7 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
     db_session.flush()
     img = Image(
         camera_id=cam.id,
-        captured_at=datetime(2025, 10, 4, 22, 0, tzinfo=timezone.utc),
+        captured_at=datetime(2025, 10, 4, 20, 0, tzinfo=timezone.utc),  # 22:00 in Madrid
         original_path=str(photo),
     )
     db_session.add(img)
@@ -258,7 +260,8 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
         assert "attachment" not in plain.headers.get("content-disposition", "")
         saved = client.get(f"/api/images/{img.id}/file?token={token}&download=1")
         assert saved.status_code == 200
-        assert saved.headers["content-disposition"] == 'attachment; filename="Ridge_2025-10-04_22-00.jpg"'
+        assert saved.headers["content-disposition"] == (
+            'attachment; filename="Ridge_2025-10-04_22-00-00.jpg"')
         assert saved.content == photo.read_bytes()
     finally:
         app.dependency_overrides.pop(get_db, None)

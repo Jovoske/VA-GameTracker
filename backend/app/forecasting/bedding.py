@@ -26,9 +26,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import geo
+from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
 from app.forecasting.wind import SCENT_CONE_DEG
-from app.models import Camera, Detection, Image, Zone
+from app.models import Camera, Detection, Image, Species, Zone
 
 # How far a hunter's scent stays concentrated enough for a deer to act on it. A
 # working figure, not a measurement: it varies with humidity, cover and the animal.
@@ -372,10 +373,13 @@ def routes(db: Session) -> list[dict]:
     if not cams:
         return []
 
+    # Hidden species and photos marked "nothing in it" are not evidence of a route.
     counts = dict(
         db.execute(
             select(Image.camera_id, func.count(Detection.id))
             .join(Detection, Detection.image_id == Image.id)
+            .join(Species, Species.id == Detection.species_id)
+            .where(VISIBLE_SIGHTING)
             .group_by(Image.camera_id)
         ).all()
     )
@@ -388,6 +392,8 @@ def routes(db: Session) -> list[dict]:
         db.execute(
             select(Image.camera_id, hour_expr)
             .join(Detection, Detection.image_id == Image.id)
+            .join(Species, Species.id == Detection.species_id)
+            .where(VISIBLE_SIGHTING)
             .group_by(Image.camera_id)
         ).all()
     )

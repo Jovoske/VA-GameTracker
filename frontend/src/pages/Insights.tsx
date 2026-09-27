@@ -17,10 +17,13 @@ type Insights = {
     sunset: string | null
     civil_twilight_end: string | null
   }[]
-  composition: { label: string; count: number; top_camera: string | null }[]
+  // count = visits; photos behind the fold.
+  composition: { label: string; count: number; visits?: number; photos?: number; top_camera: string | null }[]
   correlations: { kind?: string; statement: string; strength: number; sample: number }[]
 }
 type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
+// A page of a class's photos, newest first; next_before (and _id) ask for the next.
+type ClassPage = { items: ClassImg[]; next_before: string | null; next_before_id: string | null }
 const dayName =(iso: string) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
 const clock = (iso: string | null) =>
@@ -29,11 +32,12 @@ const clock = (iso: string | null) =>
 // The numbers behind a finding, for the "Show the numbers" fold.
 function backing(c: Insights['correlations'][number]) {
   const pct = Math.round(c.strength * 100)
-  const sightings = `${c.sample.toLocaleString()} sightings`
-  if (c.kind === 'time') return `${pct}% of ${sightings} fell in these hours.`
-  if (c.kind === 'location') return `${pct}% of ${sightings} were on these two cameras.`
-  return `From ${sightings}.`
+  const visits = `${c.sample.toLocaleString()} visits`
+  if (c.kind === 'time') return `${pct}% of ${visits} began in these hours.`
+  if (c.kind === 'location') return `${pct}% of ${visits} were at these two cameras.`
+  return `From ${visits}.`
 }
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
 
 // The findings read every photo on the estate box: slower than a page, but never forever.
 const SLOW_MS = 30_000
@@ -46,6 +50,9 @@ export default function Insights() {
   const classRequest = useRef(0)
   const [openClass, setOpenClass] = useState<string | null>(null)
   const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
+  // Where the next page of the open class starts; null when there is no more.
+  const [classNext, setClassNext] = useState<{ before: string; id: string | null } | null>(null)
+  const [classMore, setClassMore] = useState(false)
   // Index into classImgs of the photo open in the viewer.
   const [zoom, setZoom] = useState<number | null>(null)
   const [pat, setPat] = useState<Patterns | null>(() => peek<Patterns>('/insights/patterns')?.data ?? null)
@@ -88,22 +95,57 @@ export default function Insights() {
   useEffect(load, [])
   useRefetchOnReturn(load, 120_000)
 
+  function classPath(label: string, from: { before: string; id: string | null } | null) {
+    const q = new URLSearchParams({ label })
+    if (from) {
+      q.set('before', from.before)
+      if (from.id) q.set('before_id', from.id)
+    }
+    return '/insights/class?' + q.toString()
+  }
+  function nextOf(page: ClassPage | ClassImg[]) {
+    // An older server sent every photo as one list.
+    if (Array.isArray(page) || !page.next_before) return null
+    return { before: page.next_before, id: page.next_before_id }
+  }
   async function openClassImages(label: string) {
     const request = ++classRequest.current
     setClassErr('')
     setOpenClass(label)
     setClassImgs(null)
+    setClassNext(null)
     try {
-      const photos = await api<ClassImg[]>('/insights/class?label=' + encodeURIComponent(label), { signal: signal(), timeoutMs: SLOW_MS })
-      if (request === classRequest.current) setClassImgs(photos)
+      const page = await api<ClassPage | ClassImg[]>(classPath(label, null), { signal: signal(), timeoutMs: SLOW_MS })
+      if (request !== classRequest.current) return
+      setClassImgs(Array.isArray(page) ? page : page.items)
+      setClassNext(nextOf(page))
     } catch {
       if (request === classRequest.current) setClassErr('Could not load the photos. Check your connection and try again.')
+    }
+  }
+  async function moreClassImages() {
+    if (!openClass || !classNext || classMore) return
+    const request = classRequest.current
+    setClassMore(true)
+    setClassErr('')
+    try {
+      const page = await api<ClassPage | ClassImg[]>(classPath(openClass, classNext), { signal: signal(), timeoutMs: SLOW_MS })
+      if (request !== classRequest.current) return
+      const items = Array.isArray(page) ? page : page.items
+      setClassImgs((prev) => [...(prev ?? []), ...items])
+      setClassNext(nextOf(page))
+    } catch {
+      if (request === classRequest.current) setClassErr('Could not load older photos. Check your connection and try again.')
+    } finally {
+      if (request === classRequest.current) setClassMore(false)
     }
   }
   function closeClass() {
     classRequest.current++
     setOpenClass(null)
     setClassImgs(null)
+    setClassNext(null)
+    setClassMore(false)
   }
   // During a rolling update the old API may still send untyped moon summaries.
   // Typed location summaries can legitimately include camera names like Moon Meadow.
@@ -143,15 +185,16 @@ export default function Insights() {
                 tabIndex={0}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => openClassImages(x.label)}
-                title={`See the ${x.count} ${x.label} photos`}
+                title={`See the ${x.label} photos`}
               >
                 <div className="insights-class-main">
                   <span className="insights-class-label">{x.label}</span>
-                  <span className="insights-class-where">{x.count} {x.count === 1 ? 'photo' : 'photos'}{x.top_camera && `, mostly at ${x.top_camera}`}</span>
+                  <span className="insights-class-where">{plural(x.visits ?? x.count, 'visit')}{x.top_camera && `, mostly at ${x.top_camera}`}</span>
                 </div>
                 {showBars && <div className="insights-class-bar" aria-hidden="true">
                   <div className="bar-x" style={{ transform: `scaleX(${grown ? x.count / maxCount : 0})` }} />
                 </div>}
+                {showBars && x.photos != null && <span className="insights-class-photos">{plural(x.photos, 'photo')}</span>}
                 <span className="insights-class-chevron" aria-hidden="true">›</span>
               </div>
             ))}
@@ -195,7 +238,7 @@ export default function Insights() {
 
       {d && <details className="block insights-how">
         <summary>How to read this</summary>
-        <p>A sighting is one animal in one photo, so the same animal can be counted more than once, and a camera that fires often counts for more. The weather and moon findings show what the conditions were on busy nights; they do not prove the weather caused it.</p>
+        <p>A visit is one arrival at a camera: photos of the same animal less than half an hour apart count once, so a boar that sat in front of the camera for twenty minutes is one visit, not thirty photos. Only nights a camera was watching are counted; a night it was down or its photos weren't checked yet is left out, not counted as quiet. A weather or moon difference is only called a finding when it beats chance: the same nights shuffled 200 times rarely show one that big. Even then it shows what the conditions were on busy nights, not that the weather caused it.</p>
       </details>}
 
       {openClass && (
@@ -208,7 +251,7 @@ export default function Insights() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
               <span style={{ fontWeight: 700, fontSize: 15 }}>{openClass}</span>
               <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-                {classImgs ? `${classImgs.length} photo${classImgs.length === 1 ? '' : 's'}` : 'loading…'}
+                {classImgs ? `${classImgs.length}${classNext ? '+' : ''} photo${classImgs.length === 1 && !classNext ? '' : 's'}` : 'loading…'}
               </span>
               <button
                 onClick={close}
@@ -242,6 +285,11 @@ export default function Insights() {
                   </div>
                 ))}
               </div>
+              {classImgs && classNext && (
+                <button type="button" className="insights-more" onClick={() => void moreClassImages()} disabled={classMore} aria-busy={classMore}>
+                  {classMore ? 'Loading older photos…' : 'Show older photos'}
+                </button>
+              )}
             </div>
           </div>
         )}</Overlay>

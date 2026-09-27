@@ -25,7 +25,10 @@ const STRIP = 12
 const FRAMES = 36
 const LOAD_TIMEOUT_MS = 20_000
 
-type Photo = { image_id: string; file_url: string; captured_at: string; camera: string; label: string; notes_count: number }
+type Photo = {
+  image_id: string; file_url: string; captured_at: string; camera: string; label: string; notes_count: number
+  species_id?: string | null; fixed_by?: string | null
+}
 type Failure = Error & { offline?: boolean; timeout?: boolean }
 
 const batteryWords = (pct: number | null) => pct == null ? 'Battery unknown' : pct < 20 ? 'Battery low' : pct < 50 ? 'Battery half' : 'Battery good'
@@ -46,10 +49,13 @@ export function lastNightLine(c: Camera): NightLine {
   const Night = night[0].toUpperCase() + night.slice(1)
   if (c.last_night.length) {
     const note = s === 'checking' ? 'Still checking the rest of last night’s photos.'
+      : s === 'unreadable' ? `Some photos from ${night} couldn’t be checked, so this may not be everything.`
       : s === 'incomplete' ? 'Out of photo credits last night, so this may not be everything.' : null
     return { text: `${Night}: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
   }
   if (s === 'checking') return { text: 'Still checking last night’s photos.', note: null, tone: 'quiet' }
+  // Photos the AI gave up on are not "nothing there": a broken AI read as a quiet night.
+  if (s === 'unreadable') return { text: `Nothing found ${night}, but some photos couldn’t be checked, so this may not be everything.`, note: null, tone: 'warn' }
   if (s === 'incomplete') return { text: `Nothing on camera ${night}, but it was out of photo credits, so this may not be everything.`, note: null, tone: 'warn' }
   // A camera that was down saw nothing because it couldn't, not because nothing came.
   const blind = s === 'blind' || (s == null && !c.health.producing)
@@ -70,6 +76,7 @@ function trouble(c: Camera): ReactNode | null {
         : 'Photos not coming in. No photo fetch has worked for over 2 hours.'}{' '}
     <Link className="map-link" to="/settings#accounts">Camera logins</Link>
   </>
+  if (h.status === 'retired') return 'Retired. Left out of tonight’s plan, the alerts and Insights; its photos stay.'
   if (h.status === 'disconnected') return 'Not connected. No camera login here fetches it now; its photos so far stay.'
   if (h.status === 'quiet') return `${h.detail}. It sends photos only, so check it on your next visit.`
   if (h.status === 'offline') return c.last_report_at ? `Not checking in. Last heard ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'
@@ -94,6 +101,8 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
   const [err, setErr] = useState('')
   const [zoom, setZoom] = useState<number | null>(null)
   const request = useRef(0)
+  // A fix in the viewer ("Wrong?"): the strip is asked again once the viewer closes.
+  const fixed = useRef(false)
   // Asked again when a newer photo arrives, not on every map refresh.
   const newest = camera.latest?.image_id
 
@@ -115,7 +124,10 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
   if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={() => { load(); onRetry() }}>Try again</button></p>
   if (!photos) return <p className="cam-strip-msg" role="status">Loading photos…</p>
   if (!photos.length) return <p className="cam-strip-msg">No animal photos from this camera yet.</p>
-  const viewer: LightboxPhoto[] = photos.map(p => ({ id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count }))
+  const viewer: LightboxPhoto[] = photos.map(p => ({
+    id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label,
+    notes_count: p.notes_count, species_id: p.species_id, fixed_by: p.fixed_by,
+  }))
   // One tile per burst (frames stamped the same second), opening on its first frame;
   // the viewer still pages through every frame.
   const tiles: { at: number; frames: number }[] = []
@@ -142,7 +154,9 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
       })}
     </ul>
     {/* Over everything, the tab bar included: the sheet sits inside the map. */}
-    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel="Back to the map" onClose={() => setZoom(null)}
+    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel="Back to the map"
+      onClose={() => { setZoom(null); if (fixed.current) { fixed.current = false; load() } }}
+      onFixed={() => { fixed.current = true }}
       onNotesChange={(id, n) => { setPhotos(ps => ps && ps.map(p => p.image_id === id ? { ...p, notes_count: n } : p)); onNotes() }} />, document.body)}
   </>
 }

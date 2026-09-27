@@ -16,7 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.ai.checking import hunter_decided
 from app.api.deps import get_current_user
+from app.api.routes_images import recount_after_flag
 from app.api.routes_map import latest_photos
 from app.api.visibility import ONLY_HIDDEN_SPECIES
 from app.core.db import get_db
@@ -97,6 +99,7 @@ def _markable(db: Session, image: Image, keep: bool) -> bool:
     image.is_empty_frame = False
     image.reviewed = True  # sticky, like the Keep button: the auto-scan leaves it be
     image.processed_at = datetime.now(UTC)  # on the map from now, so new (routes_map.shown_after)
+    hunter_decided(image, keep=True)
     return True
 
 
@@ -146,6 +149,10 @@ def add_note(
             species_id=shown["species_id"] if shown else None,
         )
     db.commit()
+    if kept:
+        # Kept as an animal photo, as the Keep button does: the nights it was left
+        # out of are counted again, and a night already graded without it graded again.
+        recount_after_flag(db, image.camera_id, image.captured_at)
     if new_told:
         background.add_task(deliver_in_background, [n.id for n in new_told])
     return {

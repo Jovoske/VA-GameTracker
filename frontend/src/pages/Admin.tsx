@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ageLabel, api, setToken } from '../api'
+import { ageLabel, api, plainWords, signOut } from '../api'
+import { confirmSignOut } from '../sits'
 import NotificationSettings from '../components/NotificationSettings'
+import { resetChoices } from '../components/PhotoFix'
 import PhoneProblems from '../components/PhoneProblems'
 import SettingsSection from '../components/SettingsSection'
 import Toggle from '../components/Toggle'
@@ -15,6 +17,34 @@ type Status = {
   // Suntek (FTP or email) photos waiting to be imported and parked after failing;
   // null when this server has no Suntek spool.
   suntek: { ready: number | null; failed: number | null } | null
+  ai?: AiStatus
+  sex_pass?: SexStatus
+  // Free space where the photos are kept; `low` under 2 GB. Null when unreadable.
+  disk?: { free_gb: number; total_gb: number; low: boolean } | null
+}
+/** The AI pass (app.ai.checking): its backlog, what it gave up on, why it stopped. */
+type AiStatus = {
+  waiting: number
+  failed: number
+  running_since: string | null
+  last_run_at: string | null
+  last_ok_at: string | null
+  stopped: string | null
+  last_error: string | null
+  last_error_at: string | null
+  // Where the whole story is on the server (pipeline.log).
+  log_file?: string
+}
+/** The cloud stag/hind pass (app.ai.vision_sex). */
+type SexStatus = {
+  enabled: boolean
+  running: boolean
+  waiting: number
+  last_run_at: string | null
+  labelled: number | null
+  stopped: string | null
+  last_error: string | null
+  last_error_at: string | null
 }
 type Check = {
   current: string
@@ -26,9 +56,14 @@ type Check = {
 type Species = {
   id: string
   common_name: string
+  /** What the app calls it unless an admin names it otherwise. */
+  default_name?: string
   huntable: boolean
   hidden: boolean
   is_priority: boolean
+  // The big game the evening advice is for (boar, deer, mouflon, ibex): anything else
+  // in the advice was switched on by an older build.
+  big_game?: boolean
   detections: number
 }
 type Me = { id: string; email: string; role: string }
@@ -80,6 +115,19 @@ type CamAccount = {
 const FETCH_WORDS: Record<string, string> = {
   ok: 'Worked', partial: 'Partly worked', error: 'Failed',
   skipped: 'No camera logins', running: 'Running', never: 'Never run',
+}
+const NUDGE_KEY = 'gs.settings.advice-nudge-done'
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+/** One short line on the AI pass for the folded section: what matters first. */
+/** "Fox, Rabbit and Badger". */
+const andList = (names: string[]) =>
+  names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] ?? ''
+
+function aiSummary(ai: AiStatus): { text: string; warn: boolean } {
+  if (ai.stopped) return { text: 'Stopped', warn: true }
+  if (ai.failed > 0) return { text: `${ai.failed} couldn’t be checked`, warn: true }
+  if (ai.waiting > 0) return { text: `${ai.waiting} waiting`, warn: false }
+  return { text: 'All checked', warn: false }
 }
 const providerName = (provider: CameraProvider) => provider === 'ubox' ? 'UBox Pro' : 'SPYPOINT'
 const needsLook = (a: CamAccount) => a.active
@@ -162,6 +210,70 @@ const smallBtn = {
 // Glove-sized: the buttons a hunter needs when a login breaks.
 const loginBtn = { ...smallBtn, minHeight: 44, padding: '8px 14px', fontSize: 13, color: 'var(--text)' } as const
 
+/**
+ * An animal's name in the app, which an admin can change: "Hare" for the hares and
+ * rabbits the model can't tell apart, on an estate that has no rabbits. Every list,
+ * chip, alert and gallery uses it. Tap the name to change it; "Use the app's name"
+ * goes back to the one it started with.
+ */
+function SpeciesName({ sp, canEdit, onSaved }: { sp: Species; canEdit: boolean; onSaved: (s: Species) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(sp.common_name)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const field = `species-name-${sp.id}`
+
+  async function save(name: string | null) {
+    if (saving) return
+    const clean = name === null ? null : name.replace(/\s+/g, ' ').trim()
+    if (clean !== null && !clean) { setErr('Type a name first.'); return }
+    if (clean === sp.common_name) { setEditing(false); return }
+    setSaving(true)
+    setErr('')
+    try {
+      const r = await api<Species>(`/species/${sp.id}`, { method: 'PATCH', body: JSON.stringify({ common_name: clean }), timeoutMs: 20_000 })
+      // The photo viewer's "Wrong?" list offers it by its new name from now on.
+      resetChoices()
+      onSaved({ ...sp, common_name: r.common_name, default_name: r.default_name ?? sp.default_name })
+      setEditing(false)
+    } catch (e) {
+      const x = e as Error & { offline?: boolean; timeout?: boolean }
+      setErr(x.offline ? 'No signal, so the name wasn’t saved.' : x.timeout ? 'No answer from the server, so the name wasn’t saved.' : `The name wasn’t saved. ${x.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const style = { fontSize: 14, color: sp.huntable ? 'var(--text)' : 'var(--text-dim)' }
+  if (!canEdit) return <div style={style}>{sp.common_name}</div>
+  if (!editing) {
+    return (
+      <button type="button" className="species-name" style={style} aria-label={`Rename ${sp.common_name}`}
+        onClick={() => { setDraft(sp.common_name); setErr(''); setEditing(true) }}>
+        {sp.common_name}
+      </button>
+    )
+  }
+  return (
+    <form className="species-name-form" aria-busy={saving} onSubmit={(e) => { e.preventDefault(); void save(draft) }}
+      onKeyDown={(e) => { if (e.key === 'Escape' && !saving) { e.preventDefault(); setEditing(false) } }}>
+      <label htmlFor={field} className="sr-only">Name for {sp.common_name}</label>
+      <input id={field} className="input" value={draft} maxLength={40} autoFocus disabled={saving}
+        aria-invalid={!!err} onChange={(e) => { setDraft(e.target.value); setErr('') }} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <button type="submit" style={loginBtn} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+        <button type="button" style={loginBtn} disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
+        {sp.default_name && sp.default_name !== sp.common_name && (
+          <button type="button" style={loginBtn} disabled={saving} onClick={() => void save(null)}>
+            Use the app’s name ({sp.default_name})
+          </button>
+        )}
+      </div>
+      {err && <p role="alert" style={{ margin: 0, fontSize: 13, color: 'var(--skip)' }}>{err}</p>}
+    </form>
+  )
+}
+
 export default function Admin() {
   const nav = useNavigate()
   const [version, setVersion] = useState('')
@@ -170,6 +282,11 @@ export default function Admin() {
   const [checking, setChecking] = useState(false)
   const [sexMsg, setSexMsg] = useState('')
   const [sexBusy, setSexBusy] = useState(false)
+  const [retryBusy, setRetryBusy] = useState(false)
+  const [retryMsg, setRetryMsg] = useState('')
+  const [nudgeGone, setNudgeGone] = useState(() => {
+    try { return localStorage.getItem(NUDGE_KEY) === '1' } catch { return false }
+  })
   const [species, setSpecies] = useState<Species[]>([])
   const [speciesErr, setSpeciesErr] = useState('')
   const [savingId, setSavingId] = useState<string | null>(null)
@@ -199,15 +316,52 @@ export default function Admin() {
     try {
       const r = await api<{ note?: string }>('/admin/sex-pass', { method: 'POST' })
       setSexMsg(r.note || 'Started.')
+      loadStatus()
     } catch (e) {
       setSexMsg((e as Error).message)
     }
     setSexBusy(false)
   }
 
+  function loadStatus() {
+    api<Status>('/admin/status').then(setStatus).catch(() => {})
+  }
+
+  async function retryFailed() {
+    setRetryBusy(true)
+    try {
+      const r = await api<{ note: string }>('/admin/ai/retry', { method: 'POST' })
+      setRetryMsg(r.note)
+      loadStatus()
+    } catch (e) {
+      setRetryMsg((e as Error).message)
+    }
+    setRetryBusy(false)
+  }
+
+  // Once, for the animals an older build put in the advice (dogs, sheep, birds…).
+  async function adviceGameOnly(list: Species[]) {
+    setSavingId('nudge')
+    try {
+      for (const sp of list) {
+        await api(`/species/${sp.id}`, { method: 'PATCH', body: JSON.stringify({ huntable: false }) })
+        setSpecies((all) => all.map((x) => (x.id === sp.id ? { ...x, huntable: false } : x)))
+      }
+      dismissNudge()
+    } catch (e) {
+      setSpeciesErr((e as Error).message)
+    }
+    setSavingId(null)
+  }
+
+  function dismissNudge() {
+    setNudgeGone(true)
+    try { localStorage.setItem(NUDGE_KEY, '1') } catch { /* private window: asks again next time */ }
+  }
+
   useEffect(() => {
     api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
-    api<Status>('/admin/status').then(setStatus).catch(() => {})
+    loadStatus()
     loadSpecies()
     api<Me>('/auth/me').then(setMe).catch(() => {})
     api<UserRow[]>('/users').then(setUsers).catch(() => {})
@@ -371,6 +525,7 @@ export default function Admin() {
     setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, hidden, huntable: hidden ? false : x.huntable } : x)))
     try {
       await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ hidden }) })
+      resetChoices()
     } catch {
       setSpecies((list) => list.map((x) => (x.id === s.id ? before : x)))
     }
@@ -397,6 +552,7 @@ export default function Admin() {
     : []
 
   const shown = species.filter((s) => !s.hidden)
+  const notGame = shown.filter((s) => s.huntable && s.big_game === false)
   const hiddenOnes = species.filter((s) => s.hidden)
   const onCount = shown.filter((s) => s.huntable).length
 
@@ -406,7 +562,19 @@ export default function Admin() {
 
       <SettingsSection id="advice" title="Animals in the advice"
         summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
-        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
+        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.{me?.role === 'admin' ? ' Tap a name to change what the app calls it.' : ''}</p>
+        {!nudgeGone && me?.role === 'admin' && notGame.length > 0 && (
+          <div className="status-panel" data-nudge style={{ marginBottom: 10 }}>
+            {andList(notGame.map((sp) => sp.common_name))} {notGame.length === 1 ? 'is' : 'are'} in the evening
+            advice, which is meant for big game. Other animals new to the cameras now start switched off.
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+              <button type="button" style={loginBtn} disabled={savingId === 'nudge'} onClick={() => adviceGameOnly(notGame)}>
+                {savingId === 'nudge' ? 'Turning off…' : 'Turn them off'}
+              </button>
+              <button type="button" style={loginBtn} onClick={dismissNudge}>Keep them</button>
+            </div>
+          </div>
+        )}
         {species.length === 0 ? (
           speciesErr ? (
             <div role="alert" style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>
@@ -428,10 +596,9 @@ export default function Admin() {
                 borderTop: '1px solid var(--border)',
               }}
             >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 14, color: s.huntable ? 'var(--text)' : 'var(--text-dim)' }}>
-                  {s.common_name}
-                </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <SpeciesName sp={s} canEdit={me?.role === 'admin'}
+                  onSaved={(next) => setSpecies((list) => list.map((x) => (x.id === next.id ? next : x)))} />
                 <div style={{ fontSize: 11, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
                   {s.detections} sighting{s.detections === 1 ? '' : 's'}
                 </div>
@@ -692,18 +859,76 @@ export default function Admin() {
         )}
       </SettingsSection>
 
-      <SettingsSection id="ai" title="Photo labelling">
-        <p className="settings-hint">Marks red deer as stag or hind, and wild boar as male or female, on photos not labelled yet.</p>
-        <button
-          className="btn"
-          style={{ width: 'auto', padding: '8px 14px' }}
-          onClick={runSexPass}
-          disabled={sexBusy}
-        >
-          {sexBusy ? 'Starting…' : 'Label stags, hinds and boar'}
-        </button>
-        {sexMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
-      </SettingsSection>
+      {status?.ai && (() => {
+        const ai = status.ai
+        const sex = status.sex_pass
+        const sum = aiSummary(ai)
+        return (
+          <SettingsSection id="ai" title="Photo checking"
+            summary={<span style={{ color: sum.warn ? 'var(--skip)' : undefined }}>{sum.text}</span>}>
+            {ai.stopped ? (
+              <div role="alert" data-ai="stopped" style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--skip)' }}>
+                New photos aren’t being checked for animals. {plainWords(ai.stopped)} They show as “Not checked
+                yet” until it’s fixed. It tries again on every fetch. If it keeps happening, the detail is
+                below{ai.log_file ? <> and in <span style={{ overflowWrap: 'anywhere' }}>{ai.log_file}</span> on the server</> : null}.
+              </div>
+            ) : ai.waiting > 0 ? (
+              <div data-ai="waiting" style={{ fontSize: 14, lineHeight: 1.5 }}>
+                {plural(ai.waiting, 'photo')} waiting to be checked for animals.{' '}
+                {ai.running_since ? 'Checking now.' : 'A few hundred go through on every fetch, newest first.'}
+              </div>
+            ) : ai.failed === 0 ? (
+              <div data-ai="ok" style={{ fontSize: 14, lineHeight: 1.5 }}>
+                Every photo has been checked for animals{ai.last_run_at ? `. Last look ${ageLabel(ai.last_run_at)}.` : '.'}
+              </div>
+            ) : null}
+            {ai.failed > 0 && (
+              // The lead when nothing is waiting: never under "every photo has been checked".
+              <div data-ai="failed" style={{ marginTop: ai.stopped || ai.waiting > 0 ? 10 : 0, fontSize: ai.stopped || ai.waiting > 0 ? 13 : 14, lineHeight: 1.5 }}>
+                <div>
+                  {plural(ai.failed, 'photo')} couldn’t be checked after 3 tries. They count as not checked, never as
+                  empty nights.
+                </div>
+                <button type="button" style={{ ...loginBtn, marginTop: 8 }} onClick={retryFailed} disabled={retryBusy}>
+                  {retryBusy ? 'Starting…' : 'Try them again'}
+                </button>
+              </div>
+            )}
+            {retryMsg && <div role="status" style={{ marginTop: 8, fontSize: 13, color: 'var(--text-dim)' }}>{retryMsg}</div>}
+            {(ai.stopped || ai.last_error) && (
+              <details style={{ marginTop: 10, fontSize: 12, color: 'var(--text-dim)' }}>
+                <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>
+                  {ai.stopped ? 'The detail' : 'Last problem'}{ai.last_error_at ? `, ${ageLabel(ai.last_error_at)}` : ''}
+                </summary>
+                <div style={{ overflowWrap: 'anywhere' }}>{ai.stopped ?? ai.last_error}</div>
+              </details>
+            )}
+
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Stags, hinds and boar</div>
+              <p className="settings-hint" style={{ marginTop: 4 }}>Marks red deer as stag or hind, and wild boar as male or female, every hour.</p>
+              {sex && !sex.enabled ? (
+                <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>Needs an Anthropic key (ANTHROPIC_API_KEY) in the server’s .env.</div>
+              ) : sex?.stopped ? (
+                <div role="alert" data-sex="stopped" style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--skip)' }}>
+                  Labelling stopped{sex.last_run_at ? ` ${ageLabel(sex.last_run_at)}` : ''}: {sex.stopped}
+                </div>
+              ) : sex ? (
+                <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
+                  {sex.running ? 'Labelling now…' : sex.waiting > 0 ? `${plural(sex.waiting, 'photo')} to label.` : 'All labelled.'}
+                </div>
+              ) : null}
+              {sex?.enabled && (
+                <button className="btn" style={{ width: 'auto', padding: '8px 14px', marginTop: 10, minHeight: 44 }}
+                  onClick={runSexPass} disabled={sexBusy || sex.running}>
+                  {sexBusy ? 'Starting…' : sex.running ? 'Labelling…' : 'Label stags, hinds and boar now'}
+                </button>
+              )}
+              {sexMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{sexMsg}</div>}
+            </div>
+          </SettingsSection>
+        )
+      })()}
 
       <SettingsSection id="account" title="Signed in as" defaultOpen>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -712,7 +937,8 @@ export default function Admin() {
           </div>
           <button
             onClick={() => {
-              setToken(null)
+              if (!confirmSignOut()) return
+              signOut()
               nav('/login')
             }}
             style={{ ...smallBtn, padding: '9px 16px', fontSize: 14 }}
@@ -736,6 +962,16 @@ export default function Admin() {
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
               <span style={{ color: 'var(--text-dim)' }}>Last photo fetch</span>
               <span>{FETCH_WORDS[status.last_sync.status] ?? status.last_sync.status}{status.last_sync.at ? `, ${ageLabel(status.last_sync.at)}` : ''}</span>
+            </div>
+          )}
+          {status.disk && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, padding: '4px 0' }}
+              role={status.disk.low ? 'alert' : undefined} data-disk={status.disk.low ? 'low' : 'ok'}>
+              <span style={{ color: 'var(--text-dim)' }}>Space for photos</span>
+              <span style={{ textAlign: 'right', color: status.disk.low ? 'var(--skip)' : undefined }}>
+                {status.disk.free_gb} GB free{status.disk.low
+                  ? '. Nearly full: new photos can’t be saved once it is. Ask whoever runs the server to free some space.' : ''}
+              </span>
             </div>
           )}
           {status.suntek && (

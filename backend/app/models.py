@@ -139,6 +139,11 @@ class Camera(Base):
     # False once no login reaches the camera (its login was removed); a login that
     # lists it again switches it back on. Its photos stay either way.
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # When an admin retired it (taken down, in a drawer). A retired camera is left out
+    # of tonight's plan, the alerts, the Insights and the track record; its photos
+    # stay. Its own column, not `active`: a login that still lists a camera in a
+    # drawer would switch that straight back on.
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
     # pages back to it (less an overlap) rather than reading only the newest page.
     photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -287,6 +292,16 @@ class Image(Base):
     animal_conf: Mapped[float | None] = mapped_column(Float)
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The AI pass (app.ai.checking): how often checking this photo failed, the last
+    # error, and when it was given up on (after MAX_AI_ATTEMPTS). A given-up photo is
+    # "not checked", never "checked, nothing in it".
+    ai_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    ai_error: Mapped[str | None] = mapped_column(Text)
+    ai_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The box confidence the detector ran at; NULL = an older build, at its 0.25.
+    detector_conf: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         Index("ix_images_camera_captured", "camera_id", "captured_at"),
@@ -319,6 +334,13 @@ class Detection(Base):
     # DINOv2-L embedding stored as a JSON list (no pgvector).
     embedding: Mapped[list[float] | None] = mapped_column(JSONB)
     model_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("model_runs.id"))
+    # A hunter said what this is from the photo viewer (routes_images.set_species): the
+    # species is theirs, and the AI never changes it again (the burst vote leaves it
+    # be). Who, for "Fixed by Pedro"; a removed login leaves the fix and no name.
+    corrected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    corrected_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("sex IN ('male','female','unknown')", name="sex_valid"),
@@ -461,9 +483,12 @@ class CameraNight(Base):
 
     exposure_state:
       CONFIRMED    — frames exist inside the night window and have been processed.
-      PRESUMED_UP  — no frames, but frames exist either side; admitted as a true zero.
-      UNPROCESSED  — frames exist but have not been through the detector yet. NULL:
-                     counting these as zero animals is the backlog artefact.
+      PRESUMED_UP  — no frames, but frames on the nights either side of a gap of at
+                     most two nights; admitted as a true zero. A longer silence is
+                     UNKNOWN: a flat battery is not a run of empty nights.
+      UNPROCESSED  — frames exist that the AI has not checked yet, or gave up on after
+                     failing. NULL: counting these as zero animals is the backlog
+                     artefact.
       UNKNOWN      — anything else, including nights the camera was out of photo
                      credits. NULL, and the excluded count is reported.
     """
@@ -504,6 +529,11 @@ class Sit(Base):
     `outcome` is never silently 'nothing': a sit nobody reported on is UNREPORTED.
     Conflating "I saw nothing" with "I didn't say" would poison the only ground
     truth this system will ever have.
+
+    The outcome only goes up (shot > shootable_no_shot > seen > nothing): a glove
+    brushing SAW ANIMALS after a shot must not turn the shot into a sighting. Only
+    the hunter's own "What happened?" correction lowers it. `ended_at` is set by END
+    SIT, never by a report: seeing animals at 20:15 does not end the sit.
     """
 
     __tablename__ = "sits"
@@ -515,6 +545,9 @@ class Sit(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str] = mapped_column(String, nullable=False, default="unreported")
+    # The phone's time of the report the server kept. A tap saved with no signal can
+    # arrive an hour late; anything older than this is ignored.
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     species_seen: Mapped[str | None] = mapped_column(String)
     # What the app told them about the wind, kept verbatim so the advice can later
     # be scored against what actually happened instead of quietly rewritten.
@@ -528,6 +561,13 @@ class Sit(Base):
         ),
         Index("ix_sits_night", "night"),
         Index("ix_sits_stand_night", "stand_id", "night"),
+        # One live reservation per stand and night. The per-night lock in
+        # routes_stands.claim_stand is the real guard (it also keeps fire lanes
+        # apart); this is the backstop.
+        Index(
+            "uq_sits_stand_night_live", "stand_id", "night",
+            unique=True, postgresql_where=text("outcome <> 'cancelled'"),
+        ),
     )
 
 

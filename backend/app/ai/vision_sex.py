@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import base64
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typing_extensions import Literal
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.models import Detection, Image
 
@@ -30,18 +32,46 @@ MODEL = "claude-opus-5"  # best vision / high-res perception; one-time labelling
 MAX_SEX_ATTEMPTS = 1
 _DEER = {"red_deer", "roe_deer", "fallow_deer"}
 _BOAR = {"wild_boar"}
+STATUS = "sex_status"  # app_settings key the admin status reads
 
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August",
+           "September", "October", "November", "December")
+# What red stags' antlers look like through the year in Spain, by capture month. The
+# old prompt said "hinds never have antlers" and nothing else, so from February to
+# April, while stags have cast, a stag with a clear head read as a hind.
+_ANTLER_SEASON = {
+    **dict.fromkeys((2, 3, 4), (
+        "Stags cast their antlers from late winter into spring, so in this month a "
+        "stag may have NO antlers, or only short stumps. 'No antlers' alone is NOT "
+        "enough to call a hind now: only answer hind when the top of the head is "
+        "clearly visible and shows no pedicles (the two short bony stumps antlers "
+        "grow from) and the neck is slender; otherwise answer 'unknown'.")),
+    **dict.fromkeys((5, 6, 7, 8), (
+        "Stags are regrowing their antlers in velvet this month: soft, rounded, "
+        "sometimes short, but still showing as beams or knobs above the head.")),
+    **dict.fromkeys((9, 10, 11, 12, 1), (
+        "Stags carry hard, branched antlers this month, and in autumn a thick maned "
+        "neck.")),
+}
 _DEER_PROMPT = (
-    "This is a single red deer in a European trail-camera photo — often night-time "
-    "infrared (grayscale). Decide if it is a STAG (male) or a HIND (female). The "
-    "reliable cue is ANTLERS: stags carry antlers (in June they are growing and "
-    "velvet-covered, but still show as branched beams above the head); hinds never have "
-    "antlers. Body bulk and neck thickness are weak secondary cues. If the head/antler "
-    "area is not clearly visible, or the animal is too distant or blurred to judge, "
-    "answer sex='unknown'. Map stag->male, hind->female. Set label to 'stag', 'hind', or "
-    "'unknown'. cues = exactly what you saw (e.g. 'branched antlers above head', 'no "
-    "antlers, slender head', 'rump only, head out of frame')."
+    "This is a single red deer in a Spanish trail-camera photo taken in {month}, often "
+    "night-time infrared (grayscale). Decide if it is a STAG (male) or a HIND (female). "
+    "The reliable cue is ANTLERS: {season} Hinds never grow antlers. Body bulk and neck "
+    "thickness are weak secondary cues. If the head/antler area is not clearly visible, "
+    "or the animal is too distant or blurred to judge, answer sex='unknown'. Map "
+    "stag->male, hind->female. Set label to 'stag', 'hind', or 'unknown'. cues = exactly "
+    "what you saw (e.g. 'branched antlers above head', 'no antlers or pedicles, slender "
+    "head', 'rump only, head out of frame')."
 )
+
+
+def deer_prompt(month: int | None) -> str:
+    """The stag/hind prompt for a photo taken in `month` (1-12; None: unknown)."""
+    if month is None:
+        return _DEER_PROMPT.format(month="an unknown month", season=_ANTLER_SEASON[3])
+    return _DEER_PROMPT.format(month=_MONTHS[month - 1], season=_ANTLER_SEASON[month])
+
+
 _BOAR_PROMPT = (
     "This is a single wild boar in a European trail-camera photo, often night-time "
     "infrared. Decide if it is a male BOAR or a female SOW. This is genuinely hard from "
@@ -96,10 +126,14 @@ def _b64_crop(image_path: str, bbox: list[float] | None) -> str:
     return base64.standard_b64encode(buf.getvalue()).decode()
 
 
-def classify_sex(image_path: str, bbox: list[float] | None, species_key: str | None) -> SexCall | None:
-    """Ask the vision model for sex/class of one animal crop. None if species isn't supported."""
+def classify_sex(
+    image_path: str, bbox: list[float] | None, species_key: str | None,
+    month: int | None = None,
+) -> SexCall | None:
+    """Ask the vision model for sex/class of one animal crop. None if species isn't
+    supported or the model gave no answer. `month` is when the photo was taken, local."""
     if species_key in _DEER:
-        prompt = _DEER_PROMPT
+        prompt = deer_prompt(month)
     elif species_key in _BOAR:
         prompt = _BOAR_PROMPT
     else:
@@ -145,7 +179,7 @@ def sample(db: Session, species_key: str, n: int = 12) -> list[dict]:
     out = []
     for det, img in rows:
         try:
-            r = classify_sex(img.original_path, _bbox_of(det), species_key)
+            r = classify_sex(img.original_path, _bbox_of(det), species_key, _month(img))
             out.append({
                 "image_id": str(img.id), "captured_at": img.captured_at.isoformat(),
                 "sex": r.sex, "label": r.label,
@@ -156,11 +190,55 @@ def sample(db: Session, species_key: str, n: int = 12) -> list[dict]:
     return out
 
 
+class PassStopped(Exception):
+    """The cloud refused or could not be reached: the pass stops, and says why."""
+
+
+def _month(img: Image) -> int | None:
+    if img.captured_at is None:
+        return None
+    return img.captured_at.astimezone(ZoneInfo(settings.estate_timezone)).month
+
+
+def _stop_words(e: Exception) -> str | None:
+    """Why the whole pass must stop, in words, or None when only this photo failed.
+
+    Nothing that goes wrong on Anthropic's side (a refused key, no credit, no answer
+    or a busy service) says anything about the photo, so it is never counted as the
+    photo's one attempt, and trying the rest of the batch would only fail the same way.
+    """
+    import anthropic
+
+    if isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return "Anthropic refused the API key. Check ANTHROPIC_API_KEY in the server's .env."
+    if isinstance(e, anthropic.BadRequestError):
+        if "credit" in str(e).lower():
+            return ("The Anthropic account is out of credit. "
+                    "Top it up to label stags and hinds again.")
+        return None  # something about this photo's request
+    if isinstance(e, anthropic.NotFoundError):
+        return (f"Anthropic does not know the model {MODEL}. "
+                "Ask whoever runs the server to update it.")
+    if isinstance(e, anthropic.RateLimitError):
+        return "Anthropic is limiting requests just now. It tries again next hour."
+    if isinstance(e, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
+        return "Couldn't reach Anthropic. It tries again next hour."
+    if isinstance(e, anthropic.APIStatusError):
+        return f"Anthropic had a problem (HTTP {e.status_code}). It tries again next hour."
+    if isinstance(e, anthropic.APIError):
+        return "Anthropic did not answer properly. It tries again next hour."
+    return None
+
+
 def sex_unclassified(db: Session, species_key: str, *, limit: int = 500) -> dict:
     """Store sex + sex_conf for detections of a species that haven't been checked yet.
 
-    Every crop is marked as attempted whatever the answer, so an inconclusive result is
-    remembered instead of being re-sent (and re-billed) on the next scheduled run.
+    Newest first, so tonight's stag is labelled before last month's backlog. A crop
+    counts as attempted once the model has answered, whatever the answer, so an
+    inconclusive result is remembered instead of being re-sent (and re-billed) on the
+    next scheduled run. A photo the request itself failed on (an unreadable file) is
+    counted too. Anything that goes wrong on the cloud's side is not, and stops the
+    pass (PassStopped) with what to do about it.
     """
     rows = db.execute(
         select(Detection, Image)
@@ -171,25 +249,68 @@ def sex_unclassified(db: Session, species_key: str, *, limit: int = 500) -> dict
             Detection.sex_attempts < MAX_SEX_ATTEMPTS,
             Image.original_path.isnot(None),
         )
+        .order_by(Image.captured_at.desc())
         .limit(limit)
     ).all()
     counts: dict[str, int] = {}
-    undetermined = 0
-    for i, (det, img) in enumerate(rows, 1):
-        # Count the attempt up-front: a crash mid-call must not leave it retryable forever.
-        det.sex_attempts = (det.sex_attempts or 0) + 1
-        det.sex_checked_at = datetime.now(timezone.utc)
+    undetermined = processed = 0
+    for det, img in rows:
         try:
-            r = classify_sex(img.original_path, _bbox_of(det), species_key)
-            if r and r.sex != "unknown":
-                det.sex, det.sex_conf = r.sex, round(r.confidence, 4)
-                counts[r.label] = counts.get(r.label, 0) + 1
-            else:
-                undetermined += 1
+            r = classify_sex(img.original_path, _bbox_of(det), species_key, _month(img))
         except Exception as e:
-            log.warning("vision_sex.failed", detection=str(det.id), error=str(e))
-        if i % 20 == 0:
-            db.commit()
-    db.commit()
+            words = _stop_words(e)
+            if words:
+                db.commit()
+                log.error("vision_sex.stopped", species=species_key, error=str(e)[:300])
+                raise PassStopped(words) from e
+            log.warning("vision_sex.failed", detection=str(det.id), error=str(e)[:300])
+            r = None
+        det.sex_attempts = (det.sex_attempts or 0) + 1
+        det.sex_checked_at = datetime.now(UTC)
+        processed += 1
+        if r and r.sex != "unknown":
+            det.sex, det.sex_conf = r.sex, round(r.confidence, 4)
+            counts[r.label] = counts.get(r.label, 0) + 1
+        else:
+            undetermined += 1
+        db.commit()
     log.info("vision_sex.done", species=species_key, undetermined=undetermined, **counts)
-    return {"processed": len(rows), "undetermined": undetermined, "by_label": counts}
+    return {"processed": processed, "undetermined": undetermined, "by_label": counts}
+
+
+def waiting(db: Session) -> int:
+    """Crops the pass has not judged yet (red deer and wild boar)."""
+    return db.scalar(
+        select(func.count(Detection.id))
+        .join(Image, Detection.image_id == Image.id)
+        .where(Detection.species_id.in_(("red_deer", "wild_boar")), Detection.sex == "unknown",
+               Detection.sex_attempts < MAX_SEX_ATTEMPTS, Image.original_path.isnot(None))
+    ) or 0
+
+
+def sex_pass(db: Session, *, limit: int = 150) -> dict:
+    """Red deer then wild boar, up to `limit` each; stops at the first cloud refusal.
+
+    What came of it is kept in app_settings ("sex_status") for the admin status: when
+    it last ran, what it labelled, and why it stopped, if it did.
+    """
+    from app import jobs
+
+    now = datetime.now(UTC)
+    out: dict = {}
+    stopped = None
+    for sp in ("red_deer", "wild_boar"):
+        try:
+            out[sp] = sex_unclassified(db, sp, limit=limit)
+        except PassStopped as e:
+            stopped = str(e)
+            break
+    labelled = sum(sum(r["by_label"].values()) for r in out.values())
+    fields = {"last_run_at": now, "stopped": stopped, "labelled": labelled,
+              "waiting": waiting(db)}
+    if stopped:
+        fields.update(last_error=stopped, last_error_at=now)
+    else:
+        fields["last_ok_at"] = now
+    jobs.note(db, STATUS, **fields)
+    return {**out, "stopped": stopped}
