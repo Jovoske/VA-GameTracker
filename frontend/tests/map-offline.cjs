@@ -18,11 +18,16 @@
 // Env: API_URL (required), EMAIL / MEMBER_EMAIL / PASSWORD (devstack logins),
 // PLAYWRIGHT_MODULE, PW_CHANNEL (as the other tests), DIST (default ../dist),
 // UX_SCREENSHOTS (a folder for screenshots).
-// The worker's own requests are taken offline like the page's only with this set
+// The worker's own requests are routed like the page's only with this set
 // (Chromium, Playwright 1.4x-1.5x). A route on the page's requests goes round the
 // worker, so the stubbed pictures are routed only while there is signal: with none,
 // the worker alone answers, as on a phone in the valley.
+// Going offline doesn't stop the worker's own requests: a picture it hasn't saved
+// still went out to the network, and where the real IGN answers (CI) the map had it.
+// So the picture servers don't resolve in this browser at all; with signal the route
+// answers their pictures before any lookup.
 process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS='1';
+const NO_PICTURE_SERVERS='--host-resolver-rules='+['www.ign.es','server.arcgisonline.com','ovc.catastro.meh.es'].map(h=>`MAP ${h} ~NOTFOUND`).join(', ');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert=require('node:assert/strict'),fs=require('node:fs'),http=require('node:http'),path=require('node:path'),zlib=require('node:zlib');
 const dist=process.env.DIST||path.join(__dirname,'..','dist');
@@ -73,7 +78,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  const base=`http://127.0.0.1:${server.address().port}`;
  const channel=process.env.PW_CHANNEL??'msedge';
- const browser=await chromium.launch({headless:true,...(channel?{channel}:{}),args:['--enable-unsafe-swiftshader','--use-gl=swiftshader']});
+ const browser=await chromium.launch({headless:true,...(channel?{channel}:{}),args:['--enable-unsafe-swiftshader','--use-gl=swiftshader',NO_PICTURE_SERVERS]});
  const admin=await login(process.env.EMAIL||'admin@gamesense.local');
  const member=await login(process.env.MEMBER_EMAIL||'member@gamesense.local');
  await call(admin,'/estate/box',{method:'DELETE'});
@@ -96,6 +101,8 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  const sheet=async page=>{await page.getByRole('button',{name:'Map type, layers and tools'}).click();await page.locator('.msheet-offline').waitFor()};
  const status=async page=>{await page.waitForFunction(()=>!/^Checking this phone/.test(document.querySelector('.msheet-offline .msheet-status')?.textContent||'Checking this phone'));return page.locator('.msheet-offline .msheet-status').innerText()};
  const notices=page=>page.locator('.map-notices').innerText().catch(()=>'');
+ // What a camera sheet shows and how its photo requests went (none listed: still waiting), for a failure's log.
+ const sheetState=page=>page.evaluate(()=>({age:document.querySelector('.cam-strip-age')?.textContent??null,sheet:(document.querySelector('.bsheet')?.innerText||'').slice(0,400),worker:!!navigator.serviceWorker.controller,photos:performance.getEntriesByType('resource').filter(r=>r.name.includes('/api/photos')).map(r=>({url:r.name.replace(location.origin,''),ms:Math.round(r.duration),status:r.responseStatus}))})).catch(e=>e.message);
  // Watch the map's notices for a while: each different text, in order.
  const watch=async(page,ms)=>{const seen=[];for(const end=Date.now()+ms;Date.now()<end;){const t=await notices(page);if(seen[seen.length-1]!==t)seen.push(t);await page.waitForTimeout(250)}return seen};
  const ready=async page=>{await page.evaluate(()=>navigator.serviceWorker.ready);await page.waitForFunction(async()=>{const k=(await caches.keys()).find(n=>n.startsWith('gamesense-shell-'));if(!k||!navigator.serviceWorker.controller)return false;return (await (await caches.open(k)).keys()).some(r=>/\/assets\/Map-.*\.js$/.test(r.url))},null,{timeout:30000,polling:500})};
@@ -186,14 +193,14 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
  await page.waitForTimeout(400);const pickRow=page.locator('.map-pick-row',{hasText:'Camera'}).first();if(await pickRow.count())await pickRow.click();
  await page.locator('.cam-strip-row img').first().waitFor({timeout:15000});
  await page.waitForFunction(()=>[...document.querySelectorAll('.cam-strip-row img')].slice(0,3).every(i=>i.complete&&i.naturalWidth>0),null,{timeout:15000});
- await page.waitForFunction(()=>/^No signal\. These photos were saved on this phone (just now|\d+ min ago)\.$/.test(document.querySelector('.cam-strip-age')?.textContent||''),null,{timeout:15000});
+ await page.waitForFunction(()=>/^No signal\. These photos were saved on this phone (just now|\d+ min ago)\.$/.test(document.querySelector('.cam-strip-age')?.textContent||''),null,{timeout:15000}).catch(async e=>{console.log('The camera sheet:',JSON.stringify(await sheetState(page)),'page errors:',JSON.stringify(errors));throw e});
  assert.equal(await page.locator('.bsheet .map-inline-error').count(),0,'no "No signal, so the photos didn’t load"');
  if(shots)await page.screenshot({path:shots+'/offline-camera.png'});
  await page.keyboard.press('Escape');
  // Zoomed in past the closest level saved: that needs signal, and it says so (R4FE-5).
  await page.locator('.bsheet').waitFor({state:'detached'});
  for(let i=0;i<6;i++){await page.getByRole('button',{name:'Zoom in'}).click();await page.waitForTimeout(400)}
- await page.waitForFunction(()=>/This close needs signal\. Zoom out a little for the map saved on this phone\./.test(document.querySelector('.map-notices')?.textContent||''),null,{timeout:15000});
+ await page.waitForFunction(()=>/This close needs signal\. Zoom out a little for the map saved on this phone\./.test(document.querySelector('.map-notices')?.textContent||''),null,{timeout:15000}).catch(async e=>{console.log('Zoomed in:',JSON.stringify({scale:await page.locator('.map-scale').innerText().catch(()=>null),notices:await notices(page),online:await page.evaluate(()=>navigator.onLine)}),'page errors:',JSON.stringify(errors));throw e});
  assert.doesNotMatch(await notices(page),/past the estate/,'the view is on the estate');
  if(shots)await page.screenshot({path:shots+'/offline-too-close.png'});
  // The Map sheet says what the phone has.

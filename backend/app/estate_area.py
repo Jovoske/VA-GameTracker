@@ -165,7 +165,7 @@ def saved_box(db: Session) -> dict | None:
 def check_box(box: Box) -> Box:
     """A box an admin asked for, or ValueError saying what is wrong with it."""
     s, w, n, e = (box.get(k) for k in ("south", "west", "north", "east"))
-    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (s, w, n, e)):
+    if not all(isinstance(v, int | float) and math.isfinite(v) for v in (s, w, n, e)):
         raise ValueError(t("box.four_numbers"))
     if not (-90 <= s < n <= 90 and -180 <= w < e <= 180):
         raise ValueError(t("box.off_map"))

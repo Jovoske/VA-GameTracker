@@ -20,7 +20,7 @@ def plausible_position(lat: object, lon: object) -> bool:
     (0, 0) is what a camera with no GPS lock reports, and it is in the Gulf of
     Guinea, not on anybody's estate.
     """
-    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon)):
+    if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in (lat, lon)):
         return False
     if not (math.isfinite(lat) and math.isfinite(lon)):
         return False
@@ -264,7 +264,7 @@ MAX_SPAN_M = 20_000.0
 
 
 def _number(v: object) -> float | None:
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
+    if isinstance(v, bool) or not isinstance(v, int | float):
         return None
     f = float(v)
     return f if math.isfinite(f) else None
@@ -336,7 +336,7 @@ def clean_polygon(polygon: object) -> dict:
         raise ShapeError(t("shape.too_many", n=len(rings[0]), limit=MAX_CORNERS))
     points: list[tuple[float, float]] = []
     for pt in rings[0]:
-        if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
+        if not isinstance(pt, list | tuple) or len(pt) not in (2, 3):
             raise ShapeError(t("shape.two_numbers"))
         lon, lat = _number(pt[0]), _number(pt[1])
         if lon is None or lat is None:

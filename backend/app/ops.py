@@ -119,12 +119,12 @@ def backup(now: datetime | None = None) -> dict | None:
         "at": at, "ok": ok, "last_ok_at": last_ok,
         "late": last_ok is None or now - last_ok > BACKUP_LATE,
         "target": _text(s.get("target"), 200),
-        "dump_mb": s.get("dump_mb") if isinstance(s.get("dump_mb"), (int, float)) else None,
+        "dump_mb": s.get("dump_mb") if isinstance(s.get("dump_mb"), int | float) else None,
         # Photos in the media folder and in its copy: the copy never has fewer.
         "photos_on_server": _int(s.get("photos_on_server")),
         "photos_in_backup": _int(s.get("photos_in_backup")),
         "target_free_gb": (s.get("target_free_gb")
-                           if isinstance(s.get("target_free_gb"), (int, float)) else None),
+                           if isinstance(s.get("target_free_gb"), int | float) else None),
         "error": localize(_text(s.get("error"))) or (t("ops.unreadable")
                                                      if s.get("unreadable") else None),
     }
