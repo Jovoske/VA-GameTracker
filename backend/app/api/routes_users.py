@@ -47,14 +47,21 @@ def create_user(
         raise HTTPException(400, "Password must be at least 8 characters")
     if body.role not in ("member", "admin"):
         raise HTTPException(400, "Pick Member or Admin")
+    taken = "Someone with that email already has a login"
     if db.scalar(select(User.id).where(func.lower(User.email) == email).limit(1)):
-        raise HTTPException(400, "Someone with that email already has a login")
+        raise HTTPException(400, taken)
     u = User(
         estate_id=admin.estate_id, email=email,
         password_hash=hash_password(body.password), role=body.role,
     )
     db.add(u)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # A second tap on a slow link got past the check with the first (audit D-24):
+        # the same answer as the check's, not a server error.
+        db.rollback()
+        raise HTTPException(400, taken) from None
     return {"id": str(u.id), "email": u.email, "role": u.role}
 
 
