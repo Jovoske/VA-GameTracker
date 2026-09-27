@@ -19,14 +19,17 @@ The phone has to be able to *open* the URL. Three options, easiest first:
 ### A. Same Wi-Fi (quick test, today)
 While the laptop is running the stack:
 1. Find the laptop's LAN IP: `ipconfig` → the IPv4 address (e.g. `192.168.1.40`).
-2. On the phone (same Wi-Fi), open `http://192.168.1.40:8080`.
+2. Start the stack with `WEB_BIND=0.0.0.0` (compose.yaml publishes only on this
+   machine otherwise), then on the phone (same Wi-Fi) open `http://192.168.1.40:8080`.
 3. Add to Home Screen as above.
 
 Works for testing. Caveats: only while the laptop is on and on the same network, and it's
 HTTP (basic install works; full offline caching wants HTTPS — see below).
 
 ### B. Always-on host + HTTPS (the real setup)
-Run the **same `compose.yaml`** on a home server or a cheap VPS, behind automatic HTTPS:
+`compose.yaml` is the development stack (default database credentials, `--reload`,
+ports on 127.0.0.1 only): don't run it as a server as it stands. The estate's server is
+Db01, native Windows (`docs/09-handoff.md`). For another always-on host, behind HTTPS:
 - Add a **Caddy** reverse proxy (a few lines) — it gets a free Let's Encrypt cert and
   serves the frontend + API on your domain. Then the phone opens `https://your-domain`.
 - No code changes — that's the portability test from `docs/07-deployment.md`.

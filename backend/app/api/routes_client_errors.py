@@ -14,22 +14,19 @@ from __future__ import annotations
 
 import threading
 import time
-import uuid
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_admin
+from app.api.deps import get_current_admin, user_from_token
 from app.core.db import get_db
 from app.core.logging import get_logger
-from app.core.security import decode_token
 from app.models import ClientError, User
 from app.people import name_for
 
@@ -149,9 +146,8 @@ def _reporter(creds: HTTPAuthorizationCredentials | None, db: Session) -> User |
     if creds is None:
         return None
     try:
-        sub = decode_token(creds.credentials).get("sub")
-        return db.get(User, uuid.UUID(sub)) if sub else None
-    except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
+        return user_from_token(creds.credentials, db)[0]
+    except HTTPException:
         return None
 
 

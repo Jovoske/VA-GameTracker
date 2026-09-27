@@ -166,12 +166,13 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
 
     Trail cameras photograph people as well as animals. The endpoint now demands a
     token — and because an <img> tag cannot set an Authorization header, it must
-    accept `?token=` too, which is what the frontend's `imageUrl()` sends.
+    accept `?token=` too, which is what the frontend's `imageUrl()` sends: a photo
+    pass there, never the sign-in itself (audit C-19, H-13).
     """
     from fastapi.testclient import TestClient
 
     from app.core.db import get_db
-    from app.core.security import create_access_token
+    from app.core.security import create_access_token, image_token
     from app.main import app
     from app.models import Camera, Estate, Image, User
 
@@ -201,12 +202,17 @@ def test_image_file_requires_a_token_and_accepts_it_in_the_query_string(db_sessi
         assert client.get(url).status_code == 401, "an unauthenticated photo fetch must be refused"
         assert client.get(f"{url}?token=not-a-jwt").status_code == 401
 
-        # A well-signed token for a login that doesn't exist (removed) is refused too.
-        removed = create_access_token(str(uuid.uuid4()))
+        # A well-signed pass for a login that doesn't exist (removed) is refused too.
+        from types import SimpleNamespace
+
+        removed = image_token(SimpleNamespace(id=uuid.uuid4(), token_version=0))
         assert client.get(f"{url}?token={removed}").status_code == 401
+        assert client.get(f"{url}?token={image_token(user)}").status_code == 200
         token = create_access_token(str(user.id))
-        assert client.get(f"{url}?token={token}").status_code == 200
         assert client.get(url, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        # The sign-in itself in the address is an old link now: refused, in words.
+        old = client.get(f"{url}?token={token}")
+        assert old.status_code == 401 and "Open the photo in the app" in old.json()["detail"]
     finally:
         app.dependency_overrides.pop(get_db, None)
 
@@ -230,7 +236,7 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
     from fastapi.testclient import TestClient
 
     from app.core.db import get_db
-    from app.core.security import create_access_token
+    from app.core.security import image_token
     from app.main import app
     from app.models import Camera, Estate, Image, User
 
@@ -255,7 +261,7 @@ def test_image_file_download_flag_sends_an_attachment(db_session, tmp_path):
     app.dependency_overrides[get_db] = lambda: db_session
     try:
         client = TestClient(app)
-        token = create_access_token(str(user.id))
+        token = image_token(user)
         plain = client.get(f"/api/images/{img.id}/file?token={token}")
         assert "attachment" not in plain.headers.get("content-disposition", "")
         saved = client.get(f"/api/images/{img.id}/file?token={token}&download=1")

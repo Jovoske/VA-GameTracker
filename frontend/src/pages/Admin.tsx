@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ageLabel, api, plainWords, signOut } from '../api'
+import { ageLabel, api, changePassword, peekMe, plainWords, signOut, whoAmI } from '../api'
 import { confirmSignOut } from '../sits'
 import NotificationSettings from '../components/NotificationSettings'
 import { resetChoices } from '../components/PhotoFix'
@@ -89,6 +89,9 @@ type CamAccount = {
   username: string | null
   provider: CameraProvider
   owner: string | null
+  // Added by someone since removed (their email): it kept fetching, and the admin
+  // who removed them owns it now.
+  added_by_removed?: string | null
   active: boolean
   // The estate's main SPYPOINT login, from the server's .env: shown, not removable here.
   primary: boolean
@@ -290,7 +293,7 @@ export default function Admin() {
   const [species, setSpecies] = useState<Species[]>([])
   const [speciesErr, setSpeciesErr] = useState('')
   const [savingId, setSavingId] = useState<string | null>(null)
-  const [me, setMe] = useState<Me | null>(null)
+  const [me, setMe] = useState<Me | null>(() => peekMe())
   const [users, setUsers] = useState<UserRow[]>([])
   const [newUser, setNewUser] = useState({ email: '', password: '', role: 'member' })
   const [userMsg, setUserMsg] = useState('')
@@ -310,6 +313,10 @@ export default function Admin() {
   const importPoll = useRef<number | null>(null)
   const [pw, setPw] = useState({ current: '', next: '' })
   const [pwMsg, setPwMsg] = useState('')
+  // Only an admin changes the animals, the people and the server's own settings; the
+  // server refuses anyone else, so nobody else is offered them (audit D-12, I-15).
+  const admin = me?.role === 'admin'
+  const viewer = me?.role === 'viewer'
 
   async function runSexPass() {
     setSexBusy(true)
@@ -360,14 +367,18 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
-    loadStatus()
     loadSpecies()
-    api<Me>('/auth/me').then(setMe).catch(() => {})
-    api<UserRow[]>('/users').then(setUsers).catch(() => {})
+    whoAmI().then(setMe).catch(() => {})
     api<CamAccount[]>('/camera-accounts').then(setAccounts).catch(() => {})
     return () => { if (importPoll.current) window.clearTimeout(importPoll.current) }
   }, [])
+  // The admin-only parts, once it is known this is an admin: nobody else is answered.
+  useEffect(() => {
+    if (!admin) return
+    api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
+    loadStatus()
+    api<UserRow[]>('/users').then(setUsers).catch(() => {})
+  }, [admin])
 
   // A login just added imports in the background: look again every few seconds, for
   // two minutes at most, so its cameras and "Working" show without a reload.
@@ -423,11 +434,13 @@ export default function Admin() {
   }
 
   async function delUser(u: UserRow) {
-    if (!window.confirm(`Remove ${u.email}? They will no longer be able to sign in.`)) return
+    if (!window.confirm(`Remove ${u.email}? They can't sign in any more, on any phone. What they recorded stays, and camera logins they added keep fetching photos, under your name.`)) return
     setUserMsg('')
     try {
-      await api(`/users/${u.id}`, { method: 'DELETE' })
+      const r = await api<{ note: string; camera_logins_moved: number }>(`/users/${u.id}`, { method: 'DELETE' })
       setUsers(await api<UserRow[]>('/users'))
+      setUserMsg(r.note)
+      if (r.camera_logins_moved) setAccounts(await api<CamAccount[]>('/camera-accounts'))
     } catch (e) {
       setUserMsg((e as Error).message)
     }
@@ -494,12 +507,9 @@ export default function Admin() {
   async function changePw() {
     setPwMsg('')
     try {
-      await api('/auth/change-password', {
-        method: 'POST',
-        body: JSON.stringify({ current_password: pw.current, new_password: pw.next }),
-      })
+      const note = await changePassword(pw.current, pw.next)
       setPw({ current: '', next: '' })
-      setPwMsg('Password changed')
+      setPwMsg(note)
     } catch (e) {
       setPwMsg((e as Error).message)
     }
@@ -509,11 +519,13 @@ export default function Admin() {
     const next = !s.huntable
     setSavingId(s.id)
     setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, huntable: next } : x)))
+    setSpeciesErr('')
     try {
       await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ huntable: next }) })
-    } catch {
-      // revert on failure
+    } catch (e) {
+      // Back as it was, and why: a switch that just flips back reads as a bug.
       setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, huntable: !next } : x)))
+      setSpeciesErr(`${s.common_name} wasn’t changed. ${(e as Error).message}`)
     }
     setSavingId(null)
   }
@@ -523,11 +535,13 @@ export default function Admin() {
     setSavingId(s.id)
     const before = s
     setSpecies((list) => list.map((x) => (x.id === s.id ? { ...x, hidden, huntable: hidden ? false : x.huntable } : x)))
+    setSpeciesErr('')
     try {
       await api(`/species/${s.id}`, { method: 'PATCH', body: JSON.stringify({ hidden }) })
       resetChoices()
-    } catch {
+    } catch (e) {
       setSpecies((list) => list.map((x) => (x.id === s.id ? before : x)))
+      setSpeciesErr(`${s.common_name} wasn’t changed. ${(e as Error).message}`)
     }
     setSavingId(null)
   }
@@ -536,8 +550,8 @@ export default function Admin() {
     setChecking(true)
     try {
       setCheck(await api<Check>('/admin/version/check'))
-    } catch {
-      /* ignore */
+    } catch (e) {
+      setCheck({ current: version, latest: null, error: (e as Error).message })
     }
     setChecking(false)
   }
@@ -562,8 +576,13 @@ export default function Admin() {
 
       <SettingsSection id="advice" title="Animals in the advice"
         summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
-        <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.{me?.role === 'admin' ? ' Tap a name to change what the app calls it.' : ''}</p>
-        {!nudgeGone && me?.role === 'admin' && notGame.length > 0 && (
+        {admin || !me ? (
+          <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.{admin ? ' Tap a name to change what the app calls it.' : ''}</p>
+        ) : (
+          <p className="settings-hint" data-readonly="advice">The animals the evening advice is about. Only an admin can change them.</p>
+        )}
+        {speciesErr && species.length > 0 && <p role="alert" style={{ margin: '0 0 8px', fontSize: 13, color: 'var(--skip)' }}>{speciesErr}</p>}
+        {!nudgeGone && admin && notGame.length > 0 && (
           <div className="status-panel" data-nudge style={{ marginBottom: 10 }}>
             {andList(notGame.map((sp) => sp.common_name))} {notGame.length === 1 ? 'is' : 'are'} in the evening
             advice, which is meant for big game. Other animals new to the cameras now start switched off.
@@ -597,24 +616,30 @@ export default function Admin() {
               }}
             >
               <div style={{ minWidth: 0, flex: 1 }}>
-                <SpeciesName sp={s} canEdit={me?.role === 'admin'}
+                <SpeciesName sp={s} canEdit={admin}
                   onSaved={(next) => setSpecies((list) => list.map((x) => (x.id === next.id ? next : x)))} />
                 <div style={{ fontSize: 11, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
                   {s.detections} sighting{s.detections === 1 ? '' : 's'}
                 </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <button type="button" style={smallBtn} disabled={savingId === s.id}
-                  aria-label={`Hide ${s.common_name} everywhere`} onClick={() => hideSpecies(s, true)}>
-                  Hide
-                </button>
-                <Toggle
-                  on={s.huntable}
-                  disabled={savingId === s.id}
-                  onChange={() => toggleSpecies(s)}
-                  label={`${s.common_name} in the advice`}
-                />
-              </div>
+              {admin ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button type="button" style={smallBtn} disabled={savingId === s.id}
+                    aria-label={`Hide ${s.common_name} everywhere`} onClick={() => hideSpecies(s, true)}>
+                    Hide
+                  </button>
+                  <Toggle
+                    on={s.huntable}
+                    disabled={savingId === s.id}
+                    onChange={() => toggleSpecies(s)}
+                    label={`${s.common_name} in the advice`}
+                  />
+                </div>
+              ) : (
+                <span style={{ fontSize: 13, color: s.huntable ? 'var(--text)' : 'var(--text-dim)' }}>
+                  {s.huntable ? 'In the advice' : 'Off'}
+                </span>
+              )}
             </div>
           ))
         )}
@@ -624,10 +649,10 @@ export default function Admin() {
             {hiddenOnes.map((s) => (
               <div key={s.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '6px 0' }}>
                 <div style={{ fontSize: 14, color: 'var(--text-dim)' }}>{s.common_name}</div>
-                <button type="button" style={smallBtn} disabled={savingId === s.id}
+                {admin && <button type="button" style={smallBtn} disabled={savingId === s.id}
                   aria-label={`Show ${s.common_name} again`} onClick={() => hideSpecies(s, false)}>
                   Show again
-                </button>
+                </button>}
               </div>
             ))}
           </div>
@@ -654,8 +679,13 @@ export default function Admin() {
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-dim)', overflowWrap: 'anywhere' }}>
-                  {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.primary ? ' · the estate’s own' : a.owner ? ` · added by ${a.owner}` : ''}
+                  {a.cameras} camera{a.cameras === 1 ? '' : 's'}{a.primary ? ' · the estate’s own' : a.added_by_removed ? '' : a.owner ? ` · added by ${a.owner}` : ''}
                 </div>
+                {a.added_by_removed && (
+                  <div data-removed-owner style={{ fontSize: 12, color: 'var(--sand)', overflowWrap: 'anywhere', marginTop: 2 }}>
+                    Added by {a.added_by_removed}, who was removed. It still fetches photos{a.owner ? `; ${a.owner} looks after it now` : ''}.
+                  </div>
+                )}
                 <div className="login-status" data-state={a.importing ? 'importing' : a.status.state} role={line.warn ? 'alert' : undefined}
                   style={{ fontSize: 13, lineHeight: 1.45, marginTop: 4, color: line.warn ? 'var(--skip)' : 'var(--text-dim)' }}>
                   {line.text}
@@ -727,6 +757,9 @@ export default function Admin() {
           </div>
           )
         })}
+        {viewer ? (
+          <p className="settings-hint" style={{ marginTop: 10 }}>Members and admins add camera logins.</p>
+        ) : (
         <form onSubmit={(e) => { e.preventDefault(); void addAccount() }}
           style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
           <label htmlFor="camera-provider" style={{ fontSize: 13 }}>
@@ -765,13 +798,14 @@ export default function Admin() {
             {acctBusy ? `Checking with ${providerName(newAcct.provider)}…` : 'Add login'}
           </button>
         </form>
+        )}
         {acctMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}
       </SettingsSection>
 
-      {me?.role === 'admin' && (
+      {admin && (
         <SettingsSection id="people" title="Who can sign in"
           summary={users.length > 0 ? `${users.length} ${users.length === 1 ? 'person' : 'people'}` : undefined}>
-          <p className="settings-hint">Members see everything and can add camera logins. Admins can also change settings.</p>
+          <p className="settings-hint">Members see everything, reserve stands and add camera logins. Admins can also change settings. Removing someone keeps what they recorded.</p>
           {users.map((u) => (
             <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderTop: '1px solid var(--border)' }}>
               <div style={{ flex: 1, minWidth: 0, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -800,7 +834,7 @@ export default function Admin() {
               </button>
             </div>
           </div>
-          {userMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{userMsg}</div>}
+          {userMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{userMsg}</div>}
         </SettingsSection>
       )}
 
@@ -815,10 +849,10 @@ export default function Admin() {
             Change password
           </button>
         </div>
-        {pwMsg && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
+        {pwMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{pwMsg}</div>}
       </SettingsSection>
 
-      <SettingsSection id="version" title="App version" summary={version ? `v${version}` : undefined}>
+      {admin && <SettingsSection id="version" title="App version" summary={version ? `v${version}` : undefined}>
         <div style={{ fontSize: 16, fontWeight: 600 }}>GameSense v{version || '…'}</div>
         <button
           className="btn"
@@ -831,7 +865,7 @@ export default function Admin() {
         {check && (
           <div style={{ marginTop: 12, fontSize: 13 }}>
             {check.error ? (
-              <span style={{ color: 'var(--text-dim)' }}>Couldn't reach GitHub: {check.error}</span>
+              <span style={{ color: 'var(--text-dim)' }}>Couldn't check for updates: {check.error}</span>
             ) : check.update_available ? (
               <>
                 <div style={{ color: 'var(--go)' }}>
@@ -857,9 +891,9 @@ export default function Admin() {
             )}
           </div>
         )}
-      </SettingsSection>
+      </SettingsSection>}
 
-      {status?.ai && (() => {
+      {admin && status?.ai && (() => {
         const ai = status.ai
         const sex = status.sex_pass
         const sum = aiSummary(ai)
@@ -948,9 +982,9 @@ export default function Admin() {
         </div>
       </SettingsSection>
 
-      {me?.role === 'admin' && <PhoneProblems />}
+      {admin && <PhoneProblems />}
 
-      {status && (
+      {admin && status && (
         <SettingsSection id="system" title="System" style={{ marginBottom: 0 }}>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>

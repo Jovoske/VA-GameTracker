@@ -20,7 +20,7 @@ from app.ai import empty_filter
 from app.api import routes_images, routes_map
 from app.api.routes_map import NEW_CAP, last_completed_night, night_window
 from app.core.config import settings
-from app.core.security import create_access_token
+from app.core.security import create_access_token, image_token
 from app.models import Camera, CameraNight, CameraView, Detection, Estate, Image, Species, User
 
 from .conftest import requires_db
@@ -138,17 +138,19 @@ def test_thumb_is_a_small_upright_webp_made_once_and_cached(
     assert again.status_code == 200 and again.content == r.content
 
 
-def test_thumb_takes_the_token_in_the_query_like_the_file_does(
+def test_thumb_takes_the_photo_pass_in_the_query_like_the_file_does(
     client, db_session, estate, media, tmp_path,
 ):
     user, _ = _user(db_session, estate, "member")
     cam = _camera(db_session, estate)
     img = _photo(db_session, cam, datetime.now(UTC), path=_jpeg(tmp_path / "a.jpg"))
-    token = create_access_token(str(user.id))
 
     assert client.get(f"/api/images/{img.id}/thumb").status_code == 401
     assert client.get(f"/api/images/{img.id}/thumb?token=not-a-token").status_code == 401
-    assert client.get(f"/api/images/{img.id}/thumb?token={token}").status_code == 200
+    assert client.get(f"/api/images/{img.id}/thumb?token={image_token(user)}").status_code == 200
+    # The sign-in itself is not taken in an address (audit C-19, H-13).
+    signin = create_access_token(str(user.id))
+    assert client.get(f"/api/images/{img.id}/thumb?token={signin}").status_code == 401
 
 
 def test_photo_files_are_for_this_estates_logins_only(client, db_session, estate, media, tmp_path):
@@ -171,7 +173,8 @@ def test_photo_files_are_for_this_estates_logins_only(client, db_session, estate
     assert client.post(f"/api/images/{img.id}/flag", headers=stranger,
                        json={"is_empty": True}).status_code == 404
 
-    token = guest_h["Authorization"].split()[1]
+    token = image_token(guest)
+    assert [client.get(f"{u}?token={token}").status_code for u in urls] == [200, 200]
     db_session.delete(guest)
     db_session.commit()
     assert [client.get(u, headers=guest_h).status_code for u in urls] == [401, 401]

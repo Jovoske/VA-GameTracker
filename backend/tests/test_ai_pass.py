@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -20,6 +21,9 @@ from app.forecasting.exposure import recompute_camera_nights
 from app.models import Camera, CameraNight, Detection, Estate, Image, Species
 
 from .conftest import requires_db
+
+# Members press Check for new photos too (audit C-09, E-09).
+MEMBER = SimpleNamespace(role="member")
 
 BOAR = [{"confidence": 0.93, "bbox": [100.0, 100.0, 400.0, 300.0]}]
 
@@ -838,12 +842,12 @@ def test_the_check_button_starts_a_job_and_reads_running_until_it_has_the_lock(
 ):
     from app.api.routes_cameras import sync_status, trigger_sync
 
-    assert trigger_sync(None, db_session)["status"] == "started"
+    assert trigger_sync(MEMBER, db_session)["status"] == "started"
     assert spawned == [("sync",)]
     # Its process is still starting: not someone else's old result.
     assert sync_status(None, db_session)["status"] == "running"
     held = jobs.try_acquire("pipeline", "sync")
-    assert trigger_sync(None, db_session)["status"] == "busy"
+    assert trigger_sync(MEMBER, db_session)["status"] == "busy"
     assert spawned == [("sync",)]
     held.release()
 
@@ -857,14 +861,14 @@ def test_the_check_button_queues_a_fetch_behind_another_job_and_says_so(
     from app.api.routes_cameras import sync_status, trigger_sync
 
     reid = jobs.try_acquire("pipeline", "reid")
-    r = trigger_sync(None, db_session)
+    r = trigger_sync(MEMBER, db_session)
     assert r["status"] == "queued" and r["since"] is not None
     assert r["note"] == ("The server is looking for repeat visitors. "
                          "New photos come in when it finishes.")
     assert spawned == [("sync", "queued")]
     assert sync_status(None, db_session)["status"] == "running"
     queued = jobs.try_acquire("fetchqueue", "sync")  # its process, waiting for the lock
-    again = trigger_sync(None, db_session)
+    again = trigger_sync(MEMBER, db_session)
     assert again["status"] == "queued" and "Already asked" in again["note"]
     assert spawned == [("sync", "queued")]  # one is on its way: not a second
     reid.release()

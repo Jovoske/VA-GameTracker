@@ -42,11 +42,17 @@ def tonight(now: datetime | None = None) -> date:
     return (local - timedelta(hours=6)).date()
 
 
+# Finite and on the planet, as for a camera: one pin at latitude 1000 took the map
+# down for everyone (audit B-08).
+Lat = Annotated[float | None, Field(ge=-90, le=90, allow_inf_nan=False)]
+Lon = Annotated[float | None, Field(ge=-180, le=180, allow_inf_nan=False)]
+
+
 class StandIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     camera_id: uuid.UUID | None = None
-    lat: float | None = None
-    lon: float | None = None
+    lat: Lat = None
+    lon: Lon = None
     shooting_dirs_deg: list[int] | None = None
     approach_dirs_deg: list[int] | None = None
     notes: str | None = None
@@ -55,8 +61,8 @@ class StandIn(BaseModel):
 class StandPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     camera_id: uuid.UUID | None = None
-    lat: float | None = None
-    lon: float | None = None
+    lat: Lat = None
+    lon: Lon = None
     shooting_dirs_deg: list[int] | None = None
     approach_dirs_deg: list[int] | None = None
     notes: str | None = None

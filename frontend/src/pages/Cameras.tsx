@@ -679,9 +679,14 @@ export default function Cameras() {
           check gets its own line underneath, where it can be read and coloured. */}
       <div className="cam-head">
         <h1 className="page-title cam-head-title">Cameras</h1>
-        <button type="button" className="cam-sync-btn" onClick={syncNow} disabled={syncing} aria-busy={syncing}>
-          {syncing ? 'Checking…' : 'Check for new photos'}
-        </button>
+        {/* Members and admins can ask; a viewer is told it happens by itself (E-09). */}
+        {writer ? (
+          <button type="button" className="cam-sync-btn" onClick={syncNow} disabled={syncing} aria-busy={syncing}>
+            {syncing ? 'Checking…' : 'Check for new photos'}
+          </button>
+        ) : (
+          <span className="cam-sync-note" data-viewer-sync>New photos come in every 15 minutes.</span>
+        )}
       </div>
       <div className={`cam-sync-status cam-sync-status--${sync.state}`} role="status" aria-live="polite">
         {sync.state === 'running' && <span className="cam-sync-spinner" aria-hidden="true" />}
@@ -706,7 +711,7 @@ export default function Cameras() {
       )}
       {actionErr && <div className="status-panel" role="alert">{actionErr}<button className="text-action" onClick={() => { setActionErr(''); loadCameras() }}>Reload</button></div>}
       {loading && cameras.length === 0 && <div className="status-panel" role="status">Loading cameras…</div>}
-      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras yet</strong><p>Add your camera login in Settings, then tap Check for new photos.</p><a href="/settings">Open Settings</a></div>}
+      {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>No cameras yet</strong><p>{writer ? 'Add your camera login in Settings, then tap Check for new photos.' : 'An admin or member adds the camera logins in Settings.'}</p><a href="/settings">Open Settings</a></div>}
 
       <div className="cam-list">
         {cameras.map((c) => {
@@ -791,7 +796,7 @@ export default function Cameras() {
                     </div>
                   )
                 })}
-                {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? 'Loading photos…' : hidden ? 'No photos yet.' : 'No animal photos yet. Tap Check for new photos.'}</div>}
+                {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? 'Loading photos…' : hidden ? 'No photos yet.' : 'No animal photos yet.' + (writer ? ' Tap Check for new photos.' : '')}</div>}
               </div>
               {olderErr[c.id] && older[c.id] && olderBusy !== c.id && <p className="cam-health-note cam-health-note--warn" role="alert">{olderErr[c.id]}</p>}
               {older[c.id] && imgs.length > 0 && (

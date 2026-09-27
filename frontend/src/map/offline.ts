@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { ESTATE_CACHE, getFresh, getToken, thumbUrl } from '../api'
+import { ESTATE_CACHE, getFresh, getToken } from '../api'
 import { MAX_ZOOM, TILES, type BaseId } from './basemaps'
 import type { Camera } from './geometry'
 
@@ -224,12 +224,14 @@ async function keepJson(cache: Cache, path: string, signal: AbortSignal): Promis
   return JSON.parse(body)
 }
 
-/** A small photo, kept under its address without the sign-in token (which changes). */
+/** A small photo, kept under its address without the photo pass (which changes).
+ *  Asked for with the sign-in header, so it comes whether or not a pass is at hand. */
 async function keepThumb(cache: Cache, id: string, signal: AbortSignal): Promise<number> {
   const key = `/api/images/${id}/thumb`
   const had = await cache.match(key)
   if (had) return bytesOf(had)
-  const res = await fetch(thumbUrl(id), { signal })
+  const token = getToken()
+  const res = await fetch(key, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal })
   if (!res.ok) return 0
   const blob = await res.blob()
   await cache.put(key, new Response(blob, { headers: { 'Content-Type': blob.type || 'image/webp', 'X-GameSense-Bytes': String(blob.size) } }))

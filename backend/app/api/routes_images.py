@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -20,11 +19,11 @@ from sqlalchemy.orm import Session
 from app.ai import species as species_ai
 from app.ai.checking import hunter_decided
 from app.ai.classifier import ESTATE_KEYS
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, user_from_token
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.logging import get_logger
-from app.core.security import decode_token
+from app.core.security import IMAGE_SCOPE
 from app.forecasting.model import class_label
 from app.models import Camera, Detection, Image, Species, User
 from app.thumbs import make_thumb, thumb_path
@@ -41,6 +40,7 @@ _optional_bearer = HTTPBearer(auto_error=False)
 PHOTO_CACHE = "private, max-age=31536000, immutable"
 
 VIEWERS_LOOK = "Viewers can look at the photos but can't change them."
+OLD_LINK = "This photo link has run out. Open the photo in the app again."
 
 
 def download_name(camera_name: str | None, captured_at) -> str:
@@ -61,24 +61,24 @@ def download_name(camera_name: str | None, captured_at) -> str:
 def _require_user(
     db: Session, creds: HTTPAuthorizationCredentials | None, token: str | None,
 ) -> User:
-    # Trail cameras photograph people, not only animals, so photos are not open to
-    # anyone holding a UUID. An <img> tag cannot send an Authorization header, so
-    # the token may arrive as ?token= instead. Query-string tokens can leak via proxy
-    # logs and Referer, so this is a deliberate trade rather than a clean win;
-    # short-lived per-image signed URLs remain the better answer.
-    raw = (creds.credentials if creds else None) or token
-    if not raw:
+    """Who is asking for a photo: the sign-in in the Authorization header (a fetch
+    can send one), or a photo pass in ?token= (an <img> tag can't).
+
+    Trail cameras photograph people, not only animals, so photos are not open to
+    anyone holding a UUID. The query string used to carry the 30-day sign-in itself,
+    which then sat in server logs and copied links as a working login (audit C-19,
+    H-13); only a photo pass is taken there now (app.core.security), and a link made
+    the old way is refused in words. A removed person, or one whose password changed
+    since, is refused either way (deps.user_from_token).
+    """
+    if creds is not None:
+        return user_from_token(creds.credentials, db)[0]
+    if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to view photos.")
-    expired = HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired. Sign in again.")
     try:
-        user_id = uuid.UUID(decode_token(raw).get("sub"))
-    except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
-        raise expired from None
-    # A login the admin removed stops working for photos too, as it does everywhere.
-    user = db.get(User, user_id)
-    if user is None:
-        raise expired
-    return user
+        return user_from_token(token, db, scope=IMAGE_SCOPE)[0]
+    except HTTPException:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, OLD_LINK) from None
 
 
 def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:

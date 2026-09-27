@@ -1,10 +1,16 @@
+# The DEVELOPMENT stack, for a laptop. Production (Db01) runs natively on Windows,
+# not from this file (docs/09-handoff.md). Every port is published on 127.0.0.1 only:
+# the database password and Redis here are defaults with no business on a network
+# (audit H-23). Services come back after a reboot unless stopped by hand.
 name: gamesense
 
 x-backend: &backend
   build:
     context: ./backend
   env_file: .env
+  restart: unless-stopped
   environment:
+    APP_ENV: development
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-gamesense}:${POSTGRES_PASSWORD:-gamesense}@db:5432/${POSTGRES_DB:-gamesense}
     REDIS_URL: redis://redis:6379/0
   volumes:
@@ -21,6 +27,7 @@ services:
   db:
     build:
       context: ./docker/postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-gamesense}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gamesense}
@@ -28,7 +35,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gamesense}"]
       interval: 5s
@@ -37,8 +44,9 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -49,7 +57,7 @@ services:
     <<: *backend
     command: api
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health').status==200 else 1)"]
       interval: 10s
@@ -67,13 +75,16 @@ services:
   frontend:
     build:
       context: ./frontend
+    restart: unless-stopped
     environment:
       VITE_API_PROXY: http://api:8000
     volumes:
       - ./frontend:/app          # live source — edits show up on refresh
       - /app/node_modules        # keep the image's installed deps (don't shadow with host)
     ports:
-      - "${WEB_PORT:-8080}:5173"
+      # WEB_BIND=0.0.0.0 to try the app from a phone on the same Wi-Fi; the rest
+      # stays on this machine either way.
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:5173"
     depends_on:
       - api
 

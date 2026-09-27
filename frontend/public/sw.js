@@ -23,6 +23,11 @@
 //   * A small set of read-only API answers is kept and replayed when the network
 //     is gone or the server is down, tagged with when it was stored, so the page
 //     says how old it is. An /api/ request is never answered with HTML.
+//   * Photos are kept by their address without the photo pass (?token=), which
+//     changes every few hours (audit C-19): a photo never changes, so one seen
+//     yesterday opens from the phone today, pass or no pass, signal or none. The
+//     newest few hundred small copies and few dozen full photos are kept; signing
+//     out clears them (src/api.ts). A download (?download=1) always asks the server.
 //   * "Download the estate" (src/map/offline.ts) keeps the estate's map pictures,
 //     the likely paths and each camera's sheet (its photo strip, marked photos and
 //     small photos) in ESTATE_CACHE. Saved map pictures and small photos are served
@@ -45,6 +50,11 @@ const SAVED_TILES = ['https://www.ign.es/wmts/']
 // photos), the likely paths, the estate's box, and small photos.
 const SAVED_API = ['/api/photos', '/api/photos/highlights', '/api/map/paths', '/api/estate']
 const THUMB = /^\/api\/images\/[^/]+\/thumb$/
+const PHOTO = /^\/api\/images\/[^/]+\/file$/
+// Photos opened on this phone, by address without the pass; the newest kept.
+const THUMB_CACHE = 'gamesense-thumbs-v1'
+const PHOTO_CACHE = 'gamesense-photos-v1'
+const KEEP = { [THUMB_CACHE]: 800, [PHOTO_CACHE]: 60 }
 // The one cache the worker before this one kept everything in.
 const LEGACY_CACHE = 'gamesense-v2'
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png']
@@ -96,7 +106,7 @@ self.addEventListener('activate', (e) => {
         const keepPrevious = older[older.length - 1]
         return Promise.all(
           keys
-            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== ESTATE_CACHE && k !== keepPrevious)
+            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== ESTATE_CACHE && !(k in KEEP) && k !== keepPrevious)
             .map((k) => caches.delete(k)),
         )
       })
@@ -171,11 +181,34 @@ async function savedTile(req) {
   return fetch(req)
 }
 
-/** A small photo: the saved copy first (a photo never changes; the saved key has no
- *  sign-in token in it), else the network. */
-async function savedThumb(req) {
-  const hit = await caches.match(req.url, { cacheName: ESTATE_CACHE, ignoreSearch: true })
-  return hit || fetch(req)
+/** A photo, or its small copy: the copy on the phone first (a photo never changes),
+ *  looked up without the photo pass, which changes; else the network, keeping what
+ *  comes for next time. A refusal (an old pass) is passed on, never kept: the page
+ *  asks for a new pass and loads it again. */
+async function savedPhoto(req, url) {
+  const key = url.origin + url.pathname
+  const name = THUMB.test(url.pathname) ? THUMB_CACHE : PHOTO_CACHE
+  const hit = (name === THUMB_CACHE && (await caches.match(key, { cacheName: ESTATE_CACHE, ignoreSearch: true })))
+    || (await caches.match(key, { cacheName: name }))
+  if (hit) return hit
+  const res = await fetch(req)
+  // Only a photo the server says never changes; a stand-in (a small copy it couldn't
+  // make) is asked for again next time.
+  if (res.ok && (res.headers.get('Cache-Control') || '').includes('immutable')) {
+    const copy = res.clone()
+    caches.open(name).then((c) => c.put(key, copy)).then(() => trim(name)).catch(() => {})
+  }
+  return res
+}
+
+// Checked every so many new photos, not on each: listing a big cache costs.
+const trimEvery = { [THUMB_CACHE]: 0, [PHOTO_CACHE]: 0 }
+async function trim(name) {
+  if (++trimEvery[name] % 20 !== 1) return
+  const c = await caches.open(name)
+  const keys = await c.keys()
+  // Oldest first, as they were put: those go.
+  await Promise.all(keys.slice(0, Math.max(0, keys.length - KEEP[name])).map((k) => c.delete(k)))
 }
 
 /** The network first. An answer the estate keeps is kept fresh while there is
@@ -272,7 +305,7 @@ self.addEventListener('fetch', (e) => {
 
   if (url.pathname.startsWith('/api/')) {
     if (isCacheableApi(url)) e.respondWith(apiWithFallback(req))
-    else if (THUMB.test(url.pathname)) e.respondWith(savedThumb(req))
+    else if ((THUMB.test(url.pathname) || PHOTO.test(url.pathname)) && !url.searchParams.has('download')) e.respondWith(savedPhoto(req, url))
     else if (SAVED_API.includes(url.pathname)) e.respondWith(savedApi(req))
     return // other API calls pass through untouched
   }

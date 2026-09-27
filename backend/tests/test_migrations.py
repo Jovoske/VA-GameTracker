@@ -33,6 +33,19 @@ def _columns(engine, table: str) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
+def _user_keys(engine) -> list[tuple[str, str, str]]:
+    """[(table, key name, on-delete code)] of the keys to users that removing a person
+    must not trip over: sits.user_id, zones.created_by, camera_accounts.owner_user_id."""
+    with engine.connect() as c:
+        return [tuple(r) for r in c.execute(text(
+            "SELECT c.conrelid::regclass::text, c.conname, c.confdeltype::text "
+            "FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid "
+            "AND a.attnum = ANY (c.conkey) WHERE c.contype = 'f' "
+            "AND c.confrelid = 'users'::regclass AND (c.conrelid::regclass::text, a.attname) "
+            "IN (('sits','user_id'),('zones','created_by'),('camera_accounts','owner_user_id')) "
+            "ORDER BY 1")).all()]
+
+
 def _index(engine, table: str, name: str) -> list[str] | None:
     """The columns of index `name` on `table`, or None when there is no such index."""
     for ix in inspect(engine).get_indexes(table):
@@ -82,6 +95,9 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
         assert _columns(eng, "sits")["wind_at"] == "timestamp with time zone"
         assert _columns(eng, "cameras")["clock_ahead_min"] == "integer"
+        assert _columns(eng, "users")["token_version"] == "integer"
+        assert "former_owner" in _columns(eng, "camera_accounts")
+        assert {code for _, _, code in _user_keys(eng)} == {"n"}
     finally:
         eng.dispose()
 
@@ -149,6 +165,8 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert "wind_at" in _columns(eng, "sits")
         assert {"clock_ahead_min", "clock_ok_photos"} <= set(_columns(eng, "cameras"))
         assert "received_at" in _columns(eng, "images")
+        assert "token_version" in _columns(eng, "users")
+        assert {code for _, _, code in _user_keys(eng)} == {"n"}
     finally:
         eng.dispose()
 
@@ -1184,5 +1202,93 @@ def test_camera_location_custom_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert {"location_is_custom", "provider_lat", "provider_lon"} <= set(
             _columns(eng, "cameras"))
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_access_security_upgrade_lets_a_person_go_and_goes_down_and_up_again(fresh_db):
+    """0028 on a real 0027 database, with the keys production has (Postgres' default
+    names from the raw SQL of 0006 and 0010, and no ON DELETE): removing a guest
+    who reserved a stand, drew an area and added a camera login failed; after it the
+    removal works and their sit, area and login stay. Existing sign-ins carry no
+    token version and keep working (version 0)."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0027_camera_location_custom")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0027 shape first.
+            c.execute(text("ALTER TABLE users DROP COLUMN token_version"))
+            c.execute(text("ALTER TABLE camera_accounts DROP COLUMN former_owner"))
+            for table, name, _ in _user_keys(eng):
+                c.execute(text(f'ALTER TABLE {table} DROP CONSTRAINT "{name}"'))
+            c.execute(text("ALTER TABLE camera_accounts ADD CONSTRAINT "
+                           "camera_accounts_owner_user_id_fkey FOREIGN KEY (owner_user_id) "
+                           "REFERENCES users(id)"))
+            c.execute(text("ALTER TABLE zones ADD CONSTRAINT zones_created_by_fkey "
+                           "FOREIGN KEY (created_by) REFERENCES users(id)"))
+            c.execute(text("ALTER TABLE sits ADD CONSTRAINT fk_sits_user_id_users "
+                           "FOREIGN KEY (user_id) REFERENCES users(id)"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            guest = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) VALUES "
+                "(gen_random_uuid(),:e,'guest@e.local','x','member') RETURNING id"),
+                {"e": estate}).scalar_one()
+            stand = c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,'Ridge') "
+                "RETURNING id"), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO sits (id,stand_id,user_id,night,outcome) VALUES "
+                "(gen_random_uuid(),:s,:u,'2026-09-20','seen')"), {"s": stand, "u": guest})
+            c.execute(text(
+                "INSERT INTO zones (id,estate_id,kind,name,polygon,created_by) VALUES "
+                "(gen_random_uuid(),:e,'bedding','Pinar','{}'::jsonb,:u)"),
+                {"e": estate, "u": guest})
+            c.execute(text(
+                "INSERT INTO camera_accounts (id,estate_id,owner_user_id,username,password_enc,"
+                "active,provider,ubox_min_interval_seconds,ubox_max_images_per_day) VALUES "
+                "(gen_random_uuid(),:e,:u,'g@spy.es','x',true,'spypoint',60,500)"),
+                {"e": estate, "u": guest})
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id = :u"), {"u": guest})
+
+        command.upgrade(cfg, "0028_access_security")
+        assert {(t, n, code) for t, n, code in _user_keys(eng)} == {
+            ("camera_accounts", "fk_camera_accounts_owner_user_id_users", "n"),
+            ("sits", "fk_sits_user_id_users", "n"),
+            ("zones", "fk_zones_created_by_users", "n"),
+        }
+        with eng.connect() as c:
+            assert c.execute(text("SELECT token_version FROM users")).scalar_one() == 0
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id = :u"), {"u": guest})
+        with eng.connect() as c:
+            assert c.execute(text("SELECT outcome, user_id FROM sits")).one() == ("seen", None)
+            assert c.execute(text("SELECT name, created_by FROM zones")).one() == ("Pinar", None)
+            assert c.execute(text(
+                "SELECT username, owner_user_id FROM camera_accounts")).one() == ("g@spy.es", None)
+
+        command.downgrade(cfg, "0027_camera_location_custom")
+        assert "token_version" not in _columns(eng, "users")
+        assert "former_owner" not in _columns(eng, "camera_accounts")
+        assert {code for _, _, code in _user_keys(eng)} == {"a"}
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0027_camera_location_custom")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "token_version" in _columns(eng, "users")
+        assert len(_user_keys(eng)) == 3
     finally:
         eng.dispose()

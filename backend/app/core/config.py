@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     previous_jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 43200  # 30 days — a field app shouldn't log you out weekly
+    # "development" lets serve.py start with the secrets published in this repo
+    # (app.core.startup). Anything else, including unset, is treated as the real server.
+    app_env: str = "production"
+    # Peers whose CF-Connecting-IP header is believed: the Cloudflare tunnel, which on
+    # Db01 connects from this machine. Anyone else could write any address there.
+    trusted_proxies: list[str] = ["127.0.0.1", "::1"]
+    # The interactive API docs (/docs, /redoc, /openapi.json) are off unless this is
+    # set: on the public address they were a map of every endpoint to probe (K-12).
+    enable_api_docs: bool = False
 
     # Initial admin + estate (seeded on first start)
     admin_email: str = "admin@gamesense.local"

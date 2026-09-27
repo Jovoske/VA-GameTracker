@@ -65,6 +65,22 @@ if (($changed -match '(?m)^ftp-receiver/requirements\.txt$') -and (Test-Path 'C:
     if ($LASTEXITCODE -ne 0) { Note 'ERROR: receiver pip install failed - see update-pip-ftp.log' }
 }
 
+# Before anything else changes: does the new version load, and what will it do about
+# the secrets published with GameSense as it starts (backend/serve.py check, which
+# changes nothing)? A version that would not start is never swapped in for the one
+# that is running: the code goes back and the reason stays in update-check.log.
+Push-Location "$repo\backend"
+& "$venv\python.exe" "$repo\backend\serve.py" check *> "$logs\update-check.log"
+$loads = $LASTEXITCODE
+Pop-Location
+if ($loads -ne 0) {
+    Note 'ERROR: the new version does not load - rolling code back, not deploying (see update-check.log)'
+    & $git reset --hard $before --quiet *>> "$logs\update-git.log"
+    exit 1
+}
+Get-Content "$logs\update-check.log" -EA SilentlyContinue |
+    Where-Object { $_.Trim() } | ForEach-Object { Note ("check: " + $_.Trim()) }
+
 # Rebuild the SPA only when the frontend moved (npm + vite is the slow part).
 if ($changed -match '(?m)^frontend/') {
     Note 'npm build'
