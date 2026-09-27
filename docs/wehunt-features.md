@@ -12,7 +12,10 @@ safety come later. This document records what GameSense borrows now, what waits,
 
 ## Built now
 
-### 1. The map, WeHunt-style
+All six are built (September 2026), each marked **Built** below, with the fixes from the final review
+(see `docs/map-ux-update.md` for how each one behaves).
+
+### 1. The map, WeHunt-style — **Built**
 - **Controls and panels.**
   - Round 48px floating buttons: Map sheet, North and Fit estate on the right; Measure and Me on the left.
   - A scale pill.
@@ -36,20 +39,21 @@ safety come later. This document records what GameSense borrows now, what waits,
   - North reset (B-23).
   - A zoom cap on the satellite layer (B-24).
 
-### 2. Photos on the map
+### 2. Photos on the map — **Built**
 - Each camera shows its **latest animal photo** as a small framed thumbnail pointing at the camera, with a
-  **"new" count**. "New" means photos since *you* last opened that camera, and it is tracked per person on the
-  server.
+  **"new" count**. "New" means photos the map could show only after *you* last opened that camera (a frame
+  the detector was still checking counts once it is kept), and it is tracked per person on the server.
 - Tapping a camera opens its sheet:
   - last photo time, battery and signal;
-  - **"Last night: Wild boar · 2 visits, Red deer · 1 visit"** (visits, not photos);
+  - **"Last night: Wild boar · 2 visits, Red deer · 1 visit"** (visits, not photos, over the same 18:00–08:00
+    night as the activity map and the replay);
   - a strip of recent photos that opens the photo viewer;
   - "See all photos" (that camera's photos);
   - the camera's alert switch.
 - **Small thumbnails.** Photos are served as cached 320 px WebP, so the map and the grids stop downloading
   originals (part of plan item 13).
 
-### 3. Activity map ("where the game is")
+### 3. Activity map ("where the game is") — **Built**
 - A map mode with a circle at each camera, sized by **animal visits per watched night**. Nights a camera wasn't
   working don't count as quiet.
 - Filters:
@@ -60,18 +64,18 @@ safety come later. This document records what GameSense borrows now, what waits,
 - Tapping a circle gives a one-line read, e.g. "Charca: boar on 5 of 7 nights, mostly 21–23 h", and opens the
   camera sheet.
 
-### 4. Replay a night
+### 4. Replay a night — **Built**
 - Pick a night from the last 14. A timeline from 18:00 to 08:00 plays the camera visits on the map in order:
   - each visit pops at its camera with the species and a thumbnail;
   - play/pause, ±5 min jumps, and 1×/10×/60× speed.
 - When the same species reaches another camera within 3 h, a faint arrow connects the two: **"likely went this
-  way"**. It is labelled as a guess.
+  way"**. It is labelled as a guess, and with the animal ("Wild boar likely went this way (a guess)").
 
-### 5. Per-camera alerts
+### 5. Per-camera alerts — **Built**
 - On top of the per-species alerts, each person can **mute a camera** (e.g. the busy feeder) or keep it on. The
   switch is in Settings → Alerts and in the camera's sheet.
 
-### 6. Team notes on photos ("Worth a look")
+### 6. Team notes on photos ("Worth a look") — **Built**
 - In the photo viewer, anyone except viewers can tap **"Worth a look"** and add an optional short note (≤ 140),
   e.g. "Big boar, third night running".
 - **Worth a look** strips appear on Photos and in the camera sheet. The whole team sees them, newest first, with

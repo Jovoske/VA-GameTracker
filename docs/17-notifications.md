@@ -46,7 +46,7 @@ pipeline sync (every 15 min)
   └─ classify_unclassified()            new Detection rows
        └─ dispatch_new_sightings()      app/notifications/dispatch.py
             ├─ detections created since the watermark, photos < 24h old
-            ├─ grouped per species: cameras, photo count, latest time
+            ├─ grouped per species: cameras, visits (not frames), latest time
             ├─ one Notification row per (user, species) for users whose prefs match
             └─ push.send_to_user()      pywebpush, VAPID-signed, aes128gcm
 ```
@@ -66,6 +66,12 @@ fresh install has a season of photos and none of them are news.
 - one notification per species per run however many frames a sounder produced,
   and a run with more than five species for one person collapses into a single
   summary ("12 new sightings, 6 species").
+
+**Visits, not photos.** The count in a push is visits, as on every other screen:
+frames of one species at one camera within 30 minutes of each other are one visit.
+One boar's burst of three frames reads "Wild boar at PL19 Charca / 1 visit at
+03:00.", not "3 photos". The species is written as the app writes it ("Wild boar",
+"Roe deer"), not as stored.
 
 **Muted cameras.** Each person's digest is built only from their unmuted cameras,
 so a muted camera is as if it saw nothing: no push and no line in Recent (the
