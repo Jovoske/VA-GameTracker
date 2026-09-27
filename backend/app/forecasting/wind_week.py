@@ -52,6 +52,9 @@ UNJUDGED = ("no_position", "no_bedding", "no_geometry")
 # for a request between midnight and 06:00, when tonight is still the evening before.
 FORECAST_DAYS = EVENINGS + 2
 
+# The evenings by name, whatever language the server's own clock speaks.
+DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
 _CACHE: dict = {}
 _CACHE_GUARD = threading.Lock()
 
@@ -138,7 +141,7 @@ def _judge(
     nights = nights[:EVENINGS]
     evenings = [{
         "night": n.isoformat(),
-        "day": "Tonight" if n == tonight else datetime.combine(n, time(12)).strftime("%a"),
+        "day": "Tonight" if n == tonight else DAYS[n.weekday()],
         "tonight": n == tonight,
         "sunset_local": sun_times(n)["sunset_local"],
     } for n in nights]
