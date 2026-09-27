@@ -210,4 +210,28 @@ def flag_image(
     # A photo the AI gave up on is judged now: not "couldn't check" any more.
     hunter_decided(image, keep=not body.is_empty)
     db.commit()
+    recount_after_flag(db, image.camera_id, image.captured_at)
     return {"id": str(image.id), "is_empty_frame": image.is_empty_frame, "reviewed": True}
+
+
+def recount_after_flag(db: Session, camera_id: uuid.UUID, captured_at: datetime) -> None:
+    """The hunter corrected the AI: count that camera's nights again, and grade again
+    a plan already graded on that night, so Tonight, the Changed line and the track
+    record stop counting a bush as a boar (audit K-05). The photo's sighting row is
+    kept, so "Keep this photo" brings it straight back. A failure here is logged: the
+    correction itself is saved either way, and the next fetch recounts."""
+    from app.forecasting.exposure import current_night, recompute_camera_nights
+    from app.forecasting.scoring import evaluate_night
+    from app.models import Forecast
+
+    try:
+        recompute_camera_nights(db, camera_id=camera_id)
+        night = current_night(captured_at)
+        if night < current_night() and db.scalar(
+            select(Forecast.id).where(Forecast.target_date == night,
+                                      Forecast.camera_id == camera_id).limit(1)
+        ):
+            evaluate_night(db, night=night)
+    except Exception as e:
+        db.rollback()
+        log.warning("flag.recount_failed", camera_id=str(camera_id), error=str(e))

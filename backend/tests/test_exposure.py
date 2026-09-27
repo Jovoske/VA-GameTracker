@@ -211,11 +211,13 @@ def test_excluded_nights_are_reported_not_hidden(db_session, monkeypatch):
     db_session.add(cam)
     db_session.flush()
 
-    base = datetime(2025, 10, 1, 21, 0, tzinfo=timezone.utc)
+    base = datetime.now(UTC).replace(hour=21, minute=0, second=0, microsecond=0)
+    base -= timedelta(days=7)
     for i in range(6):
         img = Image(
             camera_id=cam.id,
             captured_at=base + timedelta(days=i),
+            is_empty_frame=None if i >= 4 else False,
             # The last two nights are still queued for the classifier, so they are
             # not observations yet.
             processed_at=None if i >= 4 else base + timedelta(days=i),
@@ -228,9 +230,11 @@ def test_excluded_nights_are_reported_not_hidden(db_session, monkeypatch):
     recompute_camera_nights(db_session)
 
     out = forecast_tonight(db_session)
+    # Left out of the count, not averaged in as empty: seen 4 of the 4 nights watched.
+    assert out["recommended"]["reason"] == "Wild boar seen 4 of 4 nights at this camera."
+    # Said for the camera it is about, with the reason, not as an estate-wide tally.
     assert out["exposure"]["excluded_nights"] == 2
-    assert "2 nights left out" in out["exposure"]["note"]
-    assert "camera was not watching" in out["exposure"]["note"]
+    assert out["exposure"]["note"] == "2 nights at Ridge left out: photos not checked yet."
 
 
 @requires_db
@@ -259,9 +263,25 @@ def test_a_clock_running_ahead_does_not_presume_nights_that_have_not_happened(
     _, cam = estate_and_camera
     today = datetime.now(UTC).replace(hour=21, minute=0, second=0, microsecond=0)
     _frame(db_session, cam, today - timedelta(days=2), empty=True)
-    _frame(db_session, cam, today + timedelta(days=5), empty=True)
+    _frame(db_session, cam, today + timedelta(days=1), empty=True)
     recompute_camera_nights(db_session)
     states = _states(db_session, cam)
-    future = [n for n, s in states.items() if n > today.date() and s == "PRESUMED_UP"]
+    future = [n for n, s in states.items() if n >= today.date() and s == "PRESUMED_UP"]
     assert future == []
     assert states[(today - timedelta(days=1)).date()] == "PRESUMED_UP"
+
+
+@requires_db
+def test_a_long_silence_is_not_presumed_watched(db_session, estate_and_camera):
+    """G-12: frames on 1 Oct and 31 Oct only are a flat battery in between, not 29
+    watched nights with no animals. Two quiet nights between busy ones still are."""
+    _, cam = estate_and_camera
+    _frame(db_session, cam, datetime(2025, 10, 1, 21, 0, tzinfo=UTC), empty=True)
+    _frame(db_session, cam, datetime(2025, 10, 31, 21, 0, tzinfo=UTC), empty=True)
+    _frame(db_session, cam, datetime(2025, 11, 3, 21, 0, tzinfo=UTC), empty=True)
+    recompute_camera_nights(db_session)
+    states = _states(db_session, cam)
+    october = [states[date(2025, 10, d)] for d in range(2, 31)]
+    assert set(october) == {"UNKNOWN"} and len(october) == 29
+    assert states[date(2025, 11, 1)] == states[date(2025, 11, 2)] == "PRESUMED_UP"
+    assert observed_nights(db_session, cam.id) == 5

@@ -159,7 +159,10 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
             Image.captured_at,
         )
         .join(Image, Detection.image_id == Image.id)
-        .where(Detection.embedding.isnot(None))
+        .join(Species, Species.id == Detection.species_id)
+        # Hidden species and photos marked "nothing in it" make no animals.
+        .where(Detection.embedding.isnot(None), Species.hidden.is_(False),
+               Image.is_empty_frame.isnot(True))
         .order_by(Detection.species_id, Image.captured_at)
     ).all()
 

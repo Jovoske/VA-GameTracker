@@ -23,7 +23,7 @@ counts arrivals instead, and `group_size` recovers the herd.
 from __future__ import annotations
 
 from bisect import bisect_left
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Integer, cast, func, select, text
@@ -52,14 +52,27 @@ VISIT_GAP = timedelta(minutes=30)
 # throttled camera's silence as an observation of absence.
 CREDIT_BLIND_DAYS = 7
 
-# A camera silent for longer than this, frames on both sides or not, is not presumed
-# to have been watching: two weeks of nothing is a fault or a wrong clock.
-MAX_PRESUMED_GAP_DAYS = 14
+# The longest run of frameless nights still presumed watched, with frames on the
+# nights either side. A live camera fires on wind and sun most days, so a longer
+# silence is a flat battery, a full card or a wrong clock, and counting it as
+# "watched, saw nothing" is how a dead week became a run of empty nights.
+MAX_PRESUMED_GAP_NIGHTS = 2
 
 
 def night_expr(col=Image.captured_at):
     """SQL expression for the night an image belongs to."""
     return func.date(func.timezone(_TZ, col) - NIGHT_SHIFT)
+
+
+def current_night(now: datetime | None = None) -> date:
+    """The night key of `now`: before 06:00 it is still last evening's night.
+
+    Nights before this one are over; this one is still to come, or under way. Never
+    date.today(): the server's clock need not be on Madrid time, and between midnight
+    and 06:00 the calendar date is already the next night.
+    """
+    now = now or datetime.now(UTC)
+    return (now.astimezone(ZoneInfo(_TZ)) - timedelta(hours=6)).date()
 
 
 def night_key_start(night: date) -> datetime:
@@ -76,8 +89,11 @@ def local_hour(col=Image.captured_at):
 
 def recompute_camera_nights(db: Session, *, camera_id=None) -> dict:
     """Rebuild the exposure table. Idempotent — safe to run as often as you like."""
+    # A retired camera is left out of everything that reads this table, so the
+    # routine rebuild skips it; asked for by name (a hidden photo), it is rebuilt.
     cameras = db.scalars(
-        select(Camera).where(Camera.id == camera_id) if camera_id else select(Camera)
+        select(Camera).where(Camera.id == camera_id) if camera_id
+        else select(Camera).where(Camera.retired_at.is_(None))
     ).all()
 
     totals: dict[str, int] = {}
@@ -113,7 +129,7 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
     by_night = {r.night: r for r in rows}
     first, last = rows[0].night, rows[-1].night
     observed = sorted(by_night)
-    today = datetime.now(ZoneInfo(_TZ)).date()
+    tonight = current_night()
 
     # SPYPOINT reports each camera's photo-credit usage and billing cycle. A camera
     # that hit its monthly limit stopped *sending*, not necessarily stopped seeing —
@@ -138,18 +154,18 @@ def _recompute_one(db: Session, cam: Camera) -> dict[str, int]:
         row = by_night.get(cur)
         out_of_credits = exhausted_from is not None and cur >= exhausted_from
         if row is None:
-            # No frames at all. If the camera produced frames on both sides it was
-            # almost certainly up and simply saw nothing — a real zero. Otherwise we
-            # genuinely do not know, and guessing is what caused the original bug.
-            # Not across a long silence, though (one frame from a reset camera clock
-            # would otherwise make years of "watched, saw nothing"), and never for a
-            # night that has not happened yet (a clock running ahead).
+            # No frames at all. A night or two without frames between nights with
+            # frames is a camera that was up and simply saw nothing — a real zero.
+            # Otherwise we genuinely do not know, and guessing is what caused the
+            # original bug: a flat battery for a fortnight, or one frame from a reset
+            # camera clock, would make weeks or years of "watched, saw nothing". Never
+            # for a night that is not over yet (a clock running ahead).
             at = bisect_left(observed, cur)
             before = observed[at - 1] if at > 0 else None
             after = observed[at] if at < len(observed) else None
             presumed = (
                 before is not None and after is not None
-                and (after - before).days <= MAX_PRESUMED_GAP_DAYS and cur < today
+                and (after - before).days - 1 <= MAX_PRESUMED_GAP_NIGHTS and cur < tonight
             )
             states[cur] = ("PRESUMED_UP" if presumed else "UNKNOWN", 0, 0)
         elif row.unprocessed:

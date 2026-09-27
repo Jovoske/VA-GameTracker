@@ -7,7 +7,7 @@ nights.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -15,7 +15,8 @@ from sqlalchemy import select
 from app.forecasting.exposure import recompute_camera_nights
 from app.forecasting.model import SITTABLE_HOURS, _best_window
 from app.forecasting.scoring import (
-    MIN_EVALUATED,
+    MIN_SCORED_NIGHTS,
+    MIN_SKILL_NIGHTS,
     calibration,
     evaluate_night,
     persist_tonight,
@@ -166,77 +167,177 @@ def test_evaluation_is_idempotent(db_session, cam):
 
 @requires_db
 def test_no_hit_rate_is_shown_on_thin_evidence(db_session, cam):
-    """A hit rate on a handful of nights is theatre, so it is withheld."""
+    """A track record on a handful of nights is theatre, so it is withheld."""
     persist_tonight(db_session, _forecast_payload(cam), target=NIGHT)
     _frame(db_session, cam, datetime(2025, 11, 1, 21, 0, tzinfo=timezone.utc), animal=True)
     db_session.commit()
     recompute_camera_nights(db_session)
     evaluate_night(db_session, night=NIGHT)
 
-    cal = calibration(db_session)
+    cal = calibration(db_session, days=3650)
     assert cal["available"] is False
-    assert cal["n_evaluated"] < MIN_EVALUATED
-    assert "at least" in cal["statement"]
+    assert cal["nights"] < MIN_SCORED_NIGHTS
+    assert cal["statement"] == (
+        f"1 night checked so far. How often it was right shows after {MIN_SCORED_NIGHTS}.")
+
+
+def _graded(db, cam, night, probability, occurred, verdict=None):
+    fc = Forecast(camera_id=cam.id, target_date=night, species_id="wild_boar",
+                  probability=probability,
+                  factors={"verdict": verdict} if verdict else None)
+    db.add(fc)
+    db.flush()
+    db.add(ForecastOutcome(forecast_id=fc.id, occurred=occurred,
+                           evaluated_at=datetime.now(UTC)))
 
 
 @requires_db
-def test_calibration_reports_skill_against_climatology(db_session, cam):
-    """With enough scored nights, the number that appears is a measured hit rate."""
-    # Keep the fixture inside calibration's rolling lookback as the calendar advances.
-    base = date.today() - timedelta(days=MIN_EVALUATED + 5)
-    for i in range(MIN_EVALUATED + 5):
-        night = base + timedelta(days=i)
-        # A well-calibrated-ish model: high probability on nights animals appear.
+def test_the_track_record_is_graded_per_verdict_and_against_each_cameras_rate(db_session, cam):
+    """What the hunter read is what is graded: "When it said Best odds, animals came
+    X of N nights", and behind that whether the odds beat each camera's usual rate."""
+    base = date.today() - timedelta(days=MIN_SKILL_NIGHTS + 5)
+    for i in range(MIN_SKILL_NIGHTS + 5):
         animal = i % 2 == 0
-        fc = Forecast(
-            camera_id=cam.id,
-            target_date=night,
-            species_id="wild_boar",
-            probability=0.8 if animal else 0.2,
-        )
-        db_session.add(fc)
-        db_session.flush()
-        db_session.add(
-            ForecastOutcome(
-                forecast_id=fc.id, occurred=animal, evaluated_at=datetime.now(timezone.utc)
-            )
-        )
+        _graded(db_session, cam, base + timedelta(days=i), 0.8 if animal else 0.2, animal)
     db_session.commit()
 
     cal = calibration(db_session, days=365)
     assert cal["available"] is True
-    assert cal["n_evaluated"] == MIN_EVALUATED + 5
-    assert cal["hit_rate"] == pytest.approx(1.0)
-    # It must beat "just assume this camera's usual rate".
+    assert cal["n_evaluated"] == MIN_SKILL_NIGHTS + 5
+    assert {v["verdict"]: (v["came"], v["nights"]) for v in cal["by_verdict"]} == {
+        "BEST_ODDS": (18, 18), "WORTH_A_LOOK": (0, 17), "QUIET": (0, 0)}
+    assert cal["lines"] == [
+        "When it said Best odds, animals came 18 of 18 nights.",
+        "When it said Worth a look, animals came 0 of 17 nights.",
+        "Its odds were closer to what happened than each camera's usual rate.",
+    ]
     assert cal["skill_vs_climatology"] > 0
     assert cal["beats_baseline"] is True
-    assert "scored camera-nights" in cal["statement"]
+    assert "%" not in cal["statement"]
 
 
 @requires_db
 def test_a_useless_model_does_not_claim_skill(db_session, cam):
     """A constant forecast must not report itself as beating the baseline."""
-    base = date.today() - timedelta(days=MIN_EVALUATED + 5)
-    for i in range(MIN_EVALUATED + 5):
-        fc = Forecast(
-            camera_id=cam.id,
-            target_date=base + timedelta(days=i),
-            species_id="wild_boar",
-            probability=0.5,          # says the same thing every night
-        )
-        db_session.add(fc)
-        db_session.flush()
-        db_session.add(
-            ForecastOutcome(
-                forecast_id=fc.id, occurred=(i % 2 == 0), evaluated_at=datetime.now(timezone.utc)
-            )
-        )
+    base = date.today() - timedelta(days=MIN_SKILL_NIGHTS + 5)
+    for i in range(MIN_SKILL_NIGHTS + 5):
+        _graded(db_session, cam, base + timedelta(days=i), 0.5, i % 2 == 0)
     db_session.commit()
 
     cal = calibration(db_session, days=365)
     assert cal["available"] is True
     assert cal["skill_vs_climatology"] <= 0
     assert cal["beats_baseline"] is False
+    assert "no closer to what happened" in cal["statement"]
+
+
+@requires_db
+def test_knowing_each_cameras_usual_rate_is_not_skill(db_session, cam):
+    """G-14: a model that says 0.8 at a camera busy 80% of nights and 0.1 at one busy
+    10% of nights has learnt nothing a hunter doesn't know. Against one pooled
+    estate rate it looked skilful; against each camera's own rate it is not."""
+    other = Camera(estate_id=cam.estate_id, name="Loma", active=True)
+    db_session.add(other)
+    db_session.flush()
+    base = date.today() - timedelta(days=45)
+    for i in range(40):
+        night = base + timedelta(days=i)
+        _graded(db_session, cam, night, 0.8, i % 5 != 0)      # came 32 of 40
+        _graded(db_session, other, night, 0.1, i % 10 == 0)   # came 4 of 40
+    db_session.commit()
+
+    cal = calibration(db_session, days=365)
+    assert cal["available"] is True
+    assert cal["beats_baseline"] is False
+    assert "no closer" in cal["statement"]
+
+
+@requires_db
+def test_worth_a_look_is_not_graded_as_a_prediction_of_no_animals(db_session, cam):
+    """K-10: 30 "Worth a look" nights on which boar came every time used to read
+    "Right on 0%". It said worth a look, and they came: that is the record."""
+    base = date.today() - timedelta(days=35)
+    for i in range(30):
+        _graded(db_session, cam, base + timedelta(days=i), 0.35, True, "WORTH_A_LOOK")
+    db_session.commit()
+
+    cal = calibration(db_session, days=365)
+    assert cal["lines"][0] == "When it said Worth a look, animals came 30 of 30 nights."
+    assert "Right on" not in cal["statement"] and "0%" not in cal["statement"]
+
+
+@requires_db
+def test_not_enough_to_say_is_not_graded(db_session, cam):
+    """A camera too new to judge made no claim about the ground: grading it would pad
+    the record with nights the app said nothing about."""
+    base = date.today() - timedelta(days=25)
+    for i in range(20):
+        _graded(db_session, cam, base + timedelta(days=i), 0.9, False, "NO_DATA")
+    db_session.commit()
+
+    cal = calibration(db_session, days=365)
+    assert cal["available"] is False
+    assert cal["n_evaluated"] == 0
+
+
+# ── the claim is about one camera and the night itself ─────────────────────
+
+
+@requires_db
+def test_claims_are_matched_to_cameras_by_id_not_name(db_session, cam):
+    """H-12: two cameras called Feeder each keep their own claim."""
+    twin = Camera(estate_id=cam.estate_id, name=cam.name, active=True)
+    db_session.add(twin)
+    db_session.flush()
+    payload = _forecast_payload(cam, prob=0.9)
+    payload["where"].append({**_forecast_payload(twin, prob=0.1)["where"][0]})
+    persist_tonight(db_session, payload, target=NIGHT)
+
+    claims = {fc.camera_id: fc.probability for fc in db_session.scalars(select(Forecast))}
+    assert claims == {cam.id: pytest.approx(0.9), twin.id: pytest.approx(0.1)}
+
+    # A retired camera makes no claims, whatever a stale plan still lists.
+    twin.retired_at = datetime.now(UTC)
+    db_session.commit()
+    run = persist_tonight(db_session, payload, target=NIGHT + timedelta(days=1))
+    assert run.metrics["forecasts_written"] == 1
+
+
+@requires_db
+def test_a_claim_is_graded_on_its_evening_not_on_the_morning_before_it(db_session, cam):
+    """G-13: a boar at 09:00 was already known to the plan written at 17:00. Only
+    18:00 to 06:00 counts, and a photo marked "nothing in it" never does."""
+    persist_tonight(db_session, _forecast_payload(cam), target=NIGHT)
+    _frame(db_session, cam, datetime(2025, 11, 1, 8, 0, tzinfo=UTC), animal=True)
+    _frame(db_session, cam, datetime(2025, 11, 1, 21, 0, tzinfo=UTC))
+    db_session.commit()
+    recompute_camera_nights(db_session)
+    evaluate_night(db_session, night=NIGHT)
+    assert db_session.scalar(select(ForecastOutcome)).occurred is False
+
+    bush = _frame(db_session, cam, datetime(2025, 11, 1, 22, 0, tzinfo=UTC), animal=True)
+    db_session.commit()
+    evaluate_night(db_session, night=NIGHT)
+    assert db_session.scalar(select(ForecastOutcome)).occurred is True
+    bush.is_empty_frame = True  # a hunter: "nothing in it"
+    db_session.commit()
+    evaluate_night(db_session, night=NIGHT)
+    assert db_session.scalar(select(ForecastOutcome)).occurred is False
+
+
+@requires_db
+def test_the_night_the_clocks_go_back_is_thirteen_hours(db_session):
+    from app.forecasting.scoring import night_window
+
+    def hours(night):
+        start, end = night_window(night)
+        return end.astimezone(UTC) - start.astimezone(UTC)
+
+    assert hours(date(2026, 10, 24)) == timedelta(hours=13)
+    assert hours(date(2026, 10, 20)) == timedelta(hours=12)
+    # A plan written after dusk takes no credit for the hour before it.
+    late = datetime(2026, 10, 20, 19, 30, tzinfo=UTC)
+    assert night_window(date(2026, 10, 20), late)[0] == late
 
 
 @requires_db
@@ -251,7 +352,7 @@ def test_a_double_run_is_recorded_twice_but_scored_once(db_session, cam):
     persist_tonight(db_session, _forecast_payload(cam, prob=0.2), target=NIGHT)
     assert db_session.query(Forecast).count() == 2, "history must stay append-only"
 
-    _frame(db_session, cam, datetime(2025, 11, 1, 21, 0, tzinfo=timezone.utc), animal=True)
+    _frame(db_session, cam, datetime(2025, 11, 1, 21, 0, tzinfo=UTC), animal=True)
     db_session.commit()
     recompute_camera_nights(db_session)
 

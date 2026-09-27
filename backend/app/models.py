@@ -139,6 +139,11 @@ class Camera(Base):
     # False once no login reaches the camera (its login was removed); a login that
     # lists it again switches it back on. Its photos stay either way.
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # When an admin retired it (taken down, in a drawer). A retired camera is left out
+    # of tonight's plan, the alerts, the Insights and the track record; its photos
+    # stay. Its own column, not `active`: a login that still lists a camera in a
+    # drawer would switch that straight back on.
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
     # pages back to it (less an overlap) rather than reading only the newest page.
     photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -471,7 +476,9 @@ class CameraNight(Base):
 
     exposure_state:
       CONFIRMED    — frames exist inside the night window and have been processed.
-      PRESUMED_UP  — no frames, but frames exist either side; admitted as a true zero.
+      PRESUMED_UP  — no frames, but frames on the nights either side of a gap of at
+                     most two nights; admitted as a true zero. A longer silence is
+                     UNKNOWN: a flat battery is not a run of empty nights.
       UNPROCESSED  — frames exist that the AI has not checked yet, or gave up on after
                      failing. NULL: counting these as zero animals is the backlog
                      artefact.

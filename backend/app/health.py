@@ -12,6 +12,9 @@ Three things that look like a dead camera are not one, and each gets its own wor
   to check at the camera, and it is left out of the ranking;
 - a Suntek camera sending by FTP or email has no check-in, only photos, so a quiet
   spell is normal and only a long one (quiet) is worth a look.
+
+A camera an admin retired (taken down, in a drawer) is none of these: it is expected
+to be silent, and it is left out of the plan and the numbers (retired).
 """
 from __future__ import annotations
 
@@ -53,7 +56,11 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
     login_down = login is not None and login.get("state") in ("failing", "stale")
     fetch_error = getattr(cam, "fetch_error", None)
 
-    if cam.active is False:
+    if getattr(cam, "retired_at", None) is not None:
+        # An admin took it down: its silence is expected, and nothing is to be checked.
+        status = "retired"
+        detail = f"Retired {_day(cam.retired_at)}. Left out of tonight's plan and the numbers"
+    elif cam.active is False:
         status = "disconnected"
         detail = "Not connected: no camera login here fetches it now"
     elif login_down:
@@ -88,7 +95,7 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
     # rather than a camera fault. Offline or out-of-credits cameras are NOT producing,
     # so the forecast must exclude them instead of scoring them as empty; nor is a
     # camera whose photos we cannot fetch, or a photo-only camera silent for a week.
-    if status in ("disconnected", "not_syncing", "quiet"):
+    if status in ("retired", "disconnected", "not_syncing", "quiet"):
         producing = False
     elif heartbeat:
         producing = not offline and not out_of_credits

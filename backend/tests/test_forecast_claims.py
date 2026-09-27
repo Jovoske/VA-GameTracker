@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from app.forecasting.exposure import recompute_camera_nights
 from app.forecasting.model import MIN_NIGHTS_TO_JUDGE, _verdict, forecast_tonight
 from app.models import Camera, Detection, Estate, Image, Species
 
@@ -97,16 +98,20 @@ def test_payload_no_longer_carries_a_fabricated_confidence(db_session, monkeypat
     db_session.add(cam)
     db_session.flush()
 
-    base = datetime(2025, 9, 1, 21, 0, tzinfo=timezone.utc)
+    base = datetime.now(timezone.utc).replace(hour=21, minute=0, second=0, microsecond=0)
+    base -= timedelta(days=20)
     for i in range(20):
-        img = Image(camera_id=cam.id, captured_at=base + timedelta(days=i), reviewed=False)
+        animal = i % 2 == 0
+        img = Image(camera_id=cam.id, captured_at=base + timedelta(days=i), reviewed=False,
+                    is_empty_frame=not animal, processed_at=base + timedelta(days=i))
         db_session.add(img)
         db_session.flush()
-        if i % 2 == 0:
+        if animal:
             db_session.add(
                 Detection(image_id=img.id, species_id="wild_boar", sex="unknown", age_class="unknown")
             )
     db_session.commit()
+    recompute_camera_nights(db_session)
 
     out = forecast_tonight(db_session)
     assert "confidence" not in out

@@ -7,19 +7,22 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Integer, cast, extract, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.enrichment.astro import moon_phase, solar
-from app.forecasting.model import _best_window, class_label
-from app.models import Camera, Detection, Image, Species
+from app.forecasting.exposure import current_night, local_hour, night_key_start
+from app.forecasting.model import _best_window, sentence_case
+from app.models import Camera
 
 _TZ = settings.estate_timezone
+# How far back Insights reads: the season, not every photo ever taken.
+HISTORY_NIGHTS = 365
 
 
-def _local_hour():
-    return cast(extract("hour", func.timezone(_TZ, Image.captured_at)), Integer).label("h")
+def _since():
+    return night_key_start(current_night() - timedelta(days=HISTORY_NIGHTS + 1))
 
 
 def _outlook(days: int = 7) -> list[dict]:
@@ -55,18 +58,26 @@ def _clock(hour: int) -> str:
     return "midnight" if hour == 0 else f"{hour:02d}:00"
 
 
-def _correlations(db: Session) -> list[dict]:
+def _summaries(rows: list[tuple]) -> list[dict]:
+    """The plain-sentence summaries, from visits per (camera, species id, species
+    name, local hour of arrival). Visits, not photos: one boar loitering for thirty
+    frames is one arrival, and a camera that fires often no longer counts for more."""
     out: list[dict] = []
-    total = db.scalar(select(func.count(Detection.id))) or 0
+    total = sum(n for *_, n in rows)
     if total < 20:
         return out
 
     # 1. Overall peak window
-    h = _local_hour()
-    hour_rows = db.execute(
-        select(h, func.count()).select_from(Detection).join(Image, Image.id == Detection.image_id).group_by(h)
-    ).all()
-    by_hour = {int(x): int(c) for x, c in hour_rows}
+    by_hour: dict[int, int] = {}
+    per_species: dict[str, dict] = {}
+    per_camera: dict[str, int] = {}
+    for camera, species_id, name, hour, n in rows:
+        by_hour[hour] = by_hour.get(hour, 0) + n
+        per_camera[camera] = per_camera.get(camera, 0) + n
+        if species_id:
+            sp = per_species.setdefault(species_id, {"name": name, "n": 0, "by_hour": {}})
+            sp["n"] += n
+            sp["by_hour"][hour] = sp["by_hour"].get(hour, 0) + n
     w = _best_window(by_hour, sittable_only=False)
     out.append({
         "kind": "time",
@@ -76,41 +87,29 @@ def _correlations(db: Session) -> list[dict]:
     })
 
     # 2. Top-2 species, their own peak windows
-    sp_rows = db.execute(
-        select(Detection.species_id, Species.common_name, func.count(Detection.id))
-        .join(Species, Species.id == Detection.species_id)
-        .where(Species.hidden.is_(False))
-        .group_by(Detection.species_id, Species.common_name)
-        .order_by(func.count(Detection.id).desc()).limit(2)
-    ).all()
-    for sid, name, cnt in sp_rows:
-        rows = db.execute(
-            select(h, func.count()).select_from(Detection).join(Image, Image.id == Detection.image_id)
-            .where(Detection.species_id == sid).group_by(h)
-        ).all()
-        sw = _best_window({int(x): int(c) for x, c in rows}, sittable_only=False)
+    top = sorted(per_species.values(), key=lambda sp: (-sp["n"], sp["name"]))[:2]
+    for sp in top:
+        sw = _best_window(sp["by_hour"], sittable_only=False)
         out.append({
             "kind": "time",
-            "statement": f"The cameras see {name.lower()} mostly between "
+            "statement": f"The cameras see {sp['name'].lower()} mostly between "
                          f"{_clock(sw['start_hour'])} and {_clock(sw['end_hour'])}.",
-            "strength": sw["share_pct"] / 100, "sample": int(cnt),
+            "strength": sw["share_pct"] / 100, "sample": sp["n"],
         })
 
     # 3. Camera concentration. Moon comparisons live in patterns.py, where the
-    # denominator also includes quiet recording days.
-    cam_rows = db.execute(
-        select(Camera.name, func.count(Detection.id))
-        .select_from(Detection).join(Image, Image.id == Detection.image_id)
-        .join(Camera, Camera.id == Image.camera_id)
-        .group_by(Camera.name).order_by(func.count(Detection.id).desc())
-    ).all()
-    if len(cam_rows) >= 2:
-        top2 = sum(int(c) for _, c in cam_rows[:2])
+    # denominator also includes quiet recording nights. "The other cameras see far
+    # less" only when there are others, and they do: with two cameras the top two
+    # always hold everything, and 30/25/25/20 is not "far less".
+    cams = sorted(per_camera.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(cams) >= 2:
+        top2 = cams[0][1] + cams[1][1]
         share = round(top2 / total * 100)
-        names = " and ".join(n for n, _ in cam_rows[:2])
+        names = f"{cams[0][0]} and {cams[1][0]}"
+        concentrated = len(cams) >= 3 and cams[2][1] < cams[1][1] / 2
         statement = (
             f"Most of the action is at {names}. The other cameras see far less."
-            if share >= 50 else f"{names} are your busiest cameras."
+            if concentrated else f"{names} are your busiest cameras."
         )
         out.append({
             "kind": "location",
@@ -120,33 +119,48 @@ def _correlations(db: Session) -> list[dict]:
     return out
 
 
-def _composition(db: Session) -> list[dict]:
-    """Herd makeup: stags vs hinds, sows-with-piglets vs sounders, and where each concentrates."""
+def _correlations(db: Session) -> list[dict]:
+    """Summaries of the season's visits at cameras nobody retired, in words.
+
+    Hidden species and photos marked "nothing in it" are not visits (visit_rows)."""
+    from app.forecasting.visits import visit_rows
+
+    v = visit_rows(start=_since())
+    hour = local_hour(v.c.first_at).label("h")
     rows = db.execute(
-        select(
-            Detection.species_id, Species.common_name, Detection.sex,
-            Detection.group_type, Camera.name, func.count(Detection.id),
-        )
-        .join(Image, Image.id == Detection.image_id)
-        .join(Species, Species.id == Detection.species_id)
-        .join(Camera, Camera.id == Image.camera_id)
-        .where(Species.hidden.is_(False))
-        .group_by(
-            Detection.species_id, Species.common_name, Detection.sex,
-            Detection.group_type, Camera.name,
-        )
+        select(Camera.name, v.c.species_id, v.c.common_name, hour, func.count())
+        .select_from(v)
+        .join(Camera, Camera.id == v.c.camera_id)
+        .where(Camera.retired_at.is_(None))
+        .group_by(Camera.name, v.c.species_id, v.c.common_name, hour)
     ).all()
-    totals: dict[str, int] = {}
-    where: dict[str, dict[str, int]] = {}
-    for sp, cn, sex, gt, cam, c in rows:
-        lbl = class_label(sp, cn, sex, gt)
-        totals[lbl] = totals.get(lbl, 0) + int(c)
-        where.setdefault(lbl, {})[cam] = where.setdefault(lbl, {}).get(cam, 0) + int(c)
+    return _summaries([
+        (cam, sid, sentence_case(name) if name else None, int(h), int(n))
+        for cam, sid, name, h, n in rows
+    ])
+
+
+def _composition(db: Session) -> list[dict]:
+    """Herd makeup: stags vs hinds, sows-with-piglets vs sounders, and where each
+    concentrates, in visits (photos alongside, for the numbers behind the fold)."""
+    from app.forecasting.visits import class_visits
+
+    names = dict(db.execute(select(Camera.id, Camera.name)).all())
+    totals: dict[str, dict] = {}
+    where: dict[str, dict] = {}
+    for r in class_visits(db, start=_since()):
+        lbl = r["label"]
+        t = totals.setdefault(lbl, {"visits": 0, "photos": 0})
+        t["visits"] += r["visits"]
+        t["photos"] += r["photos"]
+        cams = where.setdefault(lbl, {})
+        cams[r["camera_id"]] = cams.get(r["camera_id"], 0) + r["visits"]
     items = []
-    for lbl, cnt in sorted(totals.items(), key=lambda kv: -kv[1]):
+    for lbl, t in sorted(totals.items(), key=lambda kv: (-kv[1]["visits"], kv[0])):
         cams = where.get(lbl, {})
         top_cam = max(cams.items(), key=lambda kv: kv[1])[0] if cams else None
-        items.append({"label": lbl, "count": cnt, "top_camera": top_cam})
+        items.append({"label": lbl, "count": t["visits"], "visits": t["visits"],
+                      "photos": t["photos"], "top_camera": names.get(top_cam)})
     return items
 
 

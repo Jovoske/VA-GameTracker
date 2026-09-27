@@ -102,6 +102,7 @@ def list_cameras(
             "can_rename": user.role in {"admin", "member"},
             "battery_level": c.battery_level,
             "signal_pct": c.signal_pct, "model": c.model, "active": c.active,
+            "retired_at": c.retired_at,
             "last_sync_at": c.last_sync_at, "last_capture": last,
             "last_report_at": c.last_report_at,
             "photo_count": c.photo_count, "photo_limit": c.photo_limit,
@@ -148,7 +149,16 @@ def rename_camera(
     # Local imports have no vendor label, so retain their initial name as default.
     if not camera.provider_name:
         camera.provider_name = camera.name
-    camera.name = camera.provider_name if body.name is None else body.name
+    name = camera.provider_name if body.name is None else body.name
+    # Two cameras with one name merge into one row wherever sightings are counted by
+    # camera, and nobody can tell which "Feeder" a photo came from (audit I-26).
+    taken = db.scalar(select(Camera.id).where(
+        Camera.estate_id == user.estate_id, Camera.id != camera.id,
+        func.lower(Camera.name) == name.lower(),
+    ).limit(1))
+    if taken is not None and body.name is not None:
+        raise HTTPException(409, f"Another camera is already called {name}. Pick another name.")
+    camera.name = name
     camera.name_is_custom = body.name is not None
     db.commit()
     return {
@@ -156,6 +166,41 @@ def rename_camera(
         "provider_name": camera.provider_name,
         "name_is_custom": camera.name_is_custom, "can_rename": True,
     }
+
+
+class RetireBody(BaseModel):
+    retired: bool
+
+
+@router.patch("/{camera_id}/retired")
+def retire_camera(
+    camera_id: uuid.UUID,
+    body: RetireBody,
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Retire a camera that was taken down, or bring it back. Admins only.
+
+    Retired, it is left out of tonight's plan, the alerts, Insights and the track
+    record, instead of topping Tonight for weeks on what it saw before it went in a
+    drawer (audit K-01). Its photos stay in Photos, and its login keeps fetching.
+    """
+    camera = db.scalar(select(Camera).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ))
+    if camera is None:
+        raise HTTPException(404, "Camera not found.")
+    if body.retired and camera.retired_at is None:
+        camera.retired_at = datetime.now(UTC)
+    elif not body.retired and camera.retired_at is not None:
+        camera.retired_at = None
+        db.commit()
+        # Back in the plan: its nights are counted again from where they stood.
+        from app.forecasting.exposure import recompute_camera_nights
+
+        recompute_camera_nights(db, camera_id=camera.id)
+    db.commit()
+    return {"id": str(camera.id), "name": camera.name, "retired_at": camera.retired_at}
 
 
 @router.post("/{camera_id}/seen")

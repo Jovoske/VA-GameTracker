@@ -19,12 +19,17 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.forecasting.exposure import night_key_start, visits_by_night
+from app.forecasting.exposure import current_night, night_key_start, visits_by_night
 from app.models import Camera, CameraNight
 
 LOOKBACK_NIGHTS = 30
 QUIET_RUN = 4       # nights of silence before a return is notable
 SILENCE_RUN = 3     # nights of silence at a normally-active camera
+# A night's count differs from the usual by at least this many visits, and the usual
+# is at least one a night, before it is news. One boar more than a usual of half a
+# visit is not a change, and it used to be one every other night.
+SHIFT_MIN_VISITS = 2
+WATCHED = ("CONFIRMED", "PRESUMED_UP")
 
 
 def _median(values: list[float]) -> float:
@@ -35,9 +40,23 @@ def _median(values: list[float]) -> float:
     return float(s[mid]) if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
 
 
-def whats_changed(db: Session, *, today: date | None = None) -> dict:
-    """A single ranked statement. Always returns something."""
-    last_night = (today or date.today()) - timedelta(days=1)
+def _visits(n: int) -> str:
+    return f"{n} visit{'' if n == 1 else 's'}"
+
+
+def _usual(median: float) -> str:
+    """"about 3", or "about 1.5": a whole number only where rounding says little."""
+    return f"about {median:.0f}" if median >= 2 else f"about {median:.1f}".replace(".0", "")
+
+
+def whats_changed(db: Session, *, tonight: date | None = None) -> dict:
+    """A single ranked statement. Always returns something.
+
+    `tonight` is the night key now (exposure.current_night): "last night" is the
+    one before it, so between midnight and 06:00 it is never the night still under
+    way, whatever the server's clock is set to.
+    """
+    last_night = (tonight or current_night()) - timedelta(days=1)
     window_start = last_night - timedelta(days=LOOKBACK_NIGHTS)
 
     # Exposure per camera-night, so a silent night can be told apart from a blind one.
@@ -48,7 +67,9 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
         ).all()
     }
 
-    active = db.scalars(select(Camera).where(Camera.active.is_(True))).all()
+    active = db.scalars(
+        select(Camera).where(Camera.active.is_(True), Camera.retired_at.is_(None))
+    ).all()
     cameras = {c.id: c.name for c in active}
     if not cameras:
         return {"kind": "none", "camera": None, "text": "No cameras set up yet."}
@@ -56,7 +77,7 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
     # A camera that has gone off the air outranks everything else on this screen.
     for cam_id, name in cameras.items():
         state = exposure.get((cam_id, last_night))
-        if state in ("UNKNOWN", "UNPROCESSED") or state is None:
+        if state == "UNKNOWN" or state is None:
             if any(exposure.get((cam_id, last_night - timedelta(days=d))) == "CONFIRMED"
                    for d in range(1, 5)):
                 return {
@@ -68,36 +89,45 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
 
     # Only the nights compared, read from the start of the one before them: a visit
     # already under way at 06:00 on the first stays on its own night. Unbounded,
-    # this read every photo ever taken on every load of Tonight.
+    # this read every photo ever taken on every load of Tonight. Hidden species and
+    # photos marked "nothing in it" are not visits (visits.visit_rows).
     visits = visits_by_night(db, start=night_key_start(window_start))
     per_night: dict[tuple, int] = {}
-    species_seen: dict[tuple, set] = {}
-    for (night, cam_id, species_id), row in visits.items():
+    for (night, cam_id, _species_id), row in visits.items():
         if night <= window_start:
             continue
         per_night[(cam_id, night)] = per_night.get((cam_id, night), 0) + row["visits"]
-        species_seen.setdefault((cam_id, night), set()).add(species_id)
+
+    def watched(cam_id, night) -> bool:
+        return exposure.get((cam_id, night)) in WATCHED
 
     best: tuple[float, dict] | None = None
+    unchecked: list[str] = []
     for cam_id, name in cameras.items():
+        if exposure.get((cam_id, last_night)) == "UNPROCESSED":
+            # Photos arrived and the AI has not been through them yet: not "sent
+            # nothing", and not a quiet night either.
+            unchecked.append(name)
+            continue
         history = [
             per_night.get((cam_id, last_night - timedelta(days=d)), 0)
             for d in range(1, LOOKBACK_NIGHTS + 1)
-            if exposure.get((cam_id, last_night - timedelta(days=d)))
-            in ("CONFIRMED", "PRESUMED_UP")
+            if watched(cam_id, last_night - timedelta(days=d))
         ]
         if len(history) < 5:
             continue  # too little to call anything a change
-        if exposure.get((cam_id, last_night)) not in ("CONFIRMED", "PRESUMED_UP"):
+        if not watched(cam_id, last_night):
             continue
 
         tonight_count = per_night.get((cam_id, last_night), 0)
         median = _median(history)
 
+        # Watched nights with nothing, back to the last one with a visit. A night
+        # nobody could see neither lengthens the run nor ends it.
         quiet_run = 0
         for d in range(1, LOOKBACK_NIGHTS + 1):
             night = last_night - timedelta(days=d)
-            if exposure.get((cam_id, night)) not in ("CONFIRMED", "PRESUMED_UP"):
+            if not watched(cam_id, night):
                 continue
             if per_night.get((cam_id, night), 0) > 0:
                 break
@@ -111,27 +141,23 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
             }
             score = 100 + quiet_run
         elif tonight_count == 0 and median >= 1:
-            silent = 1
-            for d in range(1, SILENCE_RUN + 1):
-                night = last_night - timedelta(days=d)
-                if per_night.get((cam_id, night), 0) == 0:
-                    silent += 1
+            silent = quiet_run + 1  # last night too
             if silent < SILENCE_RUN:
                 continue
             cand = {
                 "kind": "gone_quiet",
                 "camera": name,
                 "text": f"{name} has been quiet for {silent} nights. It usually sees "
-                        f"{median:.0f} a night.",
+                        f"{_usual(median)} a night.",
             }
             score = 50 + silent
-        elif median > 0 and abs(tonight_count - median) / max(median, 1) >= 0.5:
+        elif median >= 1 and abs(tonight_count - median) >= SHIFT_MIN_VISITS:
             direction = "busier" if tonight_count > median else "quieter"
             cand = {
                 "kind": "shift",
                 "camera": name,
-                "text": f"{name} was {direction} than usual last night: {tonight_count} "
-                        f"visits against a usual {median:.0f}.",
+                "text": f"{name} was {direction} than usual last night: "
+                        f"{_visits(tonight_count)} against a usual {_usual(median)}.",
             }
             score = 10 + abs(tonight_count - median)
         else:
@@ -142,6 +168,13 @@ def whats_changed(db: Session, *, today: date | None = None) -> dict:
 
     if best:
         return best[1]
+    if unchecked:
+        names = " and ".join(unchecked) if len(unchecked) <= 2 else "some cameras"
+        return {
+            "kind": "checking",
+            "camera": unchecked[0] if len(unchecked) == 1 else None,
+            "text": f"Last night's photos from {names} are still being checked.",
+        }
     return {
         "kind": "none",
         "camera": None,

@@ -25,15 +25,15 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, or_, select, text
+from sqlalchemy import and_, case, func, literal, or_, select, text
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.forecasting.exposure import VISIT_GAP, night_expr
-from app.forecasting.model import class_label
-from app.models import Detection, Image, Species
+from app.forecasting.model import class_label, class_label_sql, sentence_case
+from app.models import Camera, Detection, Image, Species
 
 # A photo the detector has checked and kept, of something that is not a hidden species.
 CHECKED_ANIMAL = and_(Image.is_empty_frame.is_(False), VISIBLE_ANIMAL)
@@ -211,6 +211,74 @@ def list_visits(db: Session, *, start: datetime, end: datetime, camera_ids: list
             "frames": int(r.frames),
             "max_group": int(r.max_group),
             "image_id": r.image_id,
+        }
+        for r in rows
+    ]
+
+
+def class_visits(db: Session, *, start: datetime | None = None, end: datetime | None = None,
+                 camera_ids: list | None = None, species_ids: list | None = None) -> list[dict]:
+    """Visits per camera and class ("Stag", "Sow + piglets", "Roe deer"), photos alongside.
+
+    The same rule as visit_rows, split one step finer: frames of one class at one
+    camera, each within VISIT_GAP of the one before, are one visit of that class. So
+    "Sow + piglets: 12 visits" counts arrivals, not the forty frames of one family
+    loitering at the feeder. A visit with a stag and a hind in it is a visit of each.
+    Only named sightings of species that are not hidden, in photos the detector kept
+    and nobody marked "nothing in it", from cameras nobody retired.
+
+    Each is {camera_id, species_id, label, visits, photos}.
+    """
+    label = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type)
+    # CHECKED_ANIMAL for a named sighting: the photo holds this visible species, so
+    # only "checked and kept" is left to ask.
+    conditions = [Image.is_empty_frame.is_(False), Species.hidden.is_(False),
+                  Camera.retired_at.is_(None)]
+    if start is not None:
+        conditions.append(Image.captured_at >= start)
+    if end is not None:
+        conditions.append(Image.captured_at < end)
+    if camera_ids is not None:
+        conditions.append(Image.camera_id.in_(camera_ids))
+    if species_ids is not None:
+        conditions.append(Detection.species_id.in_(species_ids))
+    # One row per photo and class: two boxes of the same stag are one frame of it.
+    frames = (
+        select(
+            Image.id.label("image_id"), Image.camera_id, Image.captured_at,
+            Detection.species_id, Species.common_name,
+            func.coalesce(label, literal("")).label("cls"),
+        )
+        .select_from(Detection)
+        .join(Image, Image.id == Detection.image_id)
+        .join(Species, Species.id == Detection.species_id)
+        .join(Camera, Camera.id == Image.camera_id)
+        .where(*conditions)
+        .distinct()
+        .subquery()
+    )
+    by_class = (frames.c.camera_id, frames.c.species_id, frames.c.cls)
+    prev = func.lag(frames.c.captured_at).over(
+        partition_by=by_class, order_by=(frames.c.captured_at, frames.c.image_id)
+    )
+    lagged = select(frames, prev.label("prev_at")).subquery()
+    arrival = case(
+        (or_(lagged.c.prev_at.is_(None), lagged.c.captured_at - lagged.c.prev_at > VISIT_GAP), 1),
+        else_=0,
+    )
+    rows = db.execute(
+        select(
+            lagged.c.camera_id, lagged.c.species_id, lagged.c.common_name, lagged.c.cls,
+            func.sum(arrival).label("visits"), func.count().label("photos"),
+        ).group_by(lagged.c.camera_id, lagged.c.species_id, lagged.c.common_name, lagged.c.cls)
+    ).all()
+    return [
+        {
+            "camera_id": r.camera_id,
+            "species_id": r.species_id,
+            "label": r.cls or sentence_case(r.common_name or r.species_id or "Animal"),
+            "visits": int(r.visits),
+            "photos": int(r.photos),
         }
         for r in rows
     ]

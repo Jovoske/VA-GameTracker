@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.species import BIG_GAME
 from app.api.deps import get_current_admin, get_current_user
+from app.api.visibility import VISIBLE_SIGHTING
 from app.core.db import get_db
 from app.forecasting.model import class_label
 from app.models import Camera, Detection, Image, Species, User
@@ -59,7 +60,7 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
         )
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
-        .where(Image.original_path.isnot(None), Species.hidden.is_(False))
+        .where(Image.original_path.isnot(None), VISIBLE_SIGHTING)
         .group_by(Detection.species_id, Species.common_name, Detection.sex, Detection.group_type)
     ).all()
 
@@ -77,7 +78,8 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
         thumb = db.scalar(
             select(Image.id)
             .join(Detection, Detection.image_id == Image.id)
-            .where(Detection.species_id == sid, Image.original_path.isnot(None))
+            .where(Detection.species_id == sid, Image.original_path.isnot(None),
+                   Image.is_empty_frame.isnot(True))
             .order_by(Image.captured_at.desc())
             .limit(1)
         )
@@ -113,7 +115,8 @@ def species_images(
         .join(Image, Image.id == Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
         .join(Camera, Camera.id == Image.camera_id)
-        .where(Detection.species_id == species_id, Image.original_path.isnot(None))
+        .where(Detection.species_id == species_id, Image.original_path.isnot(None),
+               VISIBLE_SIGHTING)
         .order_by(Image.captured_at.desc())
     ).all()
     out = []

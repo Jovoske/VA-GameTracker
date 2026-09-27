@@ -24,9 +24,10 @@ from datetime import timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
 from app.forecasting.exposure import local_hour
-from app.models import Camera, Detection, Image, Stand
+from app.models import Camera, Detection, Image, Species, Stand
 
 # Two cameras seeing the same species within this gap is plausibly one animal
 # moving between them rather than two unrelated visits.
@@ -71,7 +72,8 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
     rows = db.execute(
         select(Image.camera_id, Detection.species_id, Image.captured_at)
         .join(Detection, Detection.image_id == Image.id)
-        .where(Detection.species_id.isnot(None))
+        .join(Species, Species.id == Detection.species_id)
+        .where(VISIBLE_SIGHTING)
         .order_by(Image.captured_at)
     ).all()
 
@@ -138,7 +140,8 @@ def dark_exit(db: Session, stand: Stand, *, after_hour: int = 23) -> dict:
         select(h, func.count(Detection.id))
         .select_from(Detection)
         .join(Image, Image.id == Detection.image_id)
-        .where(Image.camera_id == stand.camera_id)
+        .join(Species, Species.id == Detection.species_id)
+        .where(Image.camera_id == stand.camera_id, VISIBLE_SIGHTING)
         .group_by(h)
     ).all()
     if not rows:
