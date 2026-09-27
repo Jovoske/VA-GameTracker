@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.forecasting.model import forecast_tonight
+from app.i18n import t
 from app.models import Stand, User
 
 router = APIRouter(prefix="/forecast", tags=["forecast"])
@@ -51,7 +52,7 @@ def wind_week(
     from app.forecasting.model import _tonight_conditions
 
     if stand is not None and db.get(Stand, stand) is None:
-        raise HTTPException(404, "That stand isn't on the app.")
+        raise HTTPException(404, t("stands.gone"))
     now = datetime.now(UTC)
     week = week_mod.week(db, stand_id=stand, now=now)
     release(db)

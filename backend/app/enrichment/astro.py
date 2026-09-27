@@ -12,6 +12,15 @@ MOON_PHASES = [
     "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent",
 ]
 _REF_NEW_MOON = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+
+
+def phase_words(phase: str) -> str:
+    """A MOON_PHASES name ("Full Moon", kept as data) as the reader says it."""
+    from app.i18n import t
+
+    if phase not in MOON_PHASES:
+        return phase
+    return t(f"moon.{phase.lower().replace(' ', '_')}")
 _SYNODIC_SECONDS = 29.53058867 * 86400
 
 

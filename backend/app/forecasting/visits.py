@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.forecasting.exposure import VISIT_GAP, night_expr
-from app.forecasting.model import class_label, class_label_sql
+from app.forecasting.model import class_label, class_label_sql, say_class
 from app.models import Camera, Detection, Image, Species
 
 # A photo the detector has checked and kept, of something that is not a hidden species.
@@ -303,7 +303,7 @@ def class_visits(db: Session, *, start: datetime | None = None, end: datetime | 
         {
             "camera_id": r.camera_id,
             "species_id": r.species_id,
-            "label": r.cls or class_label(r.species_id, r.common_name, None, None),
+            "label": say_class(r.cls, r.species_id, r.common_name),
             "night": r.night,
             "visits": int(r.visits),
             "photos": int(r.photos),

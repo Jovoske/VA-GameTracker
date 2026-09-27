@@ -35,6 +35,7 @@ from app import geo, jobs, media
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
+from app.i18n import stored
 from app.ingestion.logins import (
     PRIMARY_LABEL,
     LoginProblem,
@@ -72,9 +73,7 @@ OVERLAP_PAGES = 3
 # A routine fetch reads at most this many pages (of 100) per camera.
 MAX_PAGES = 20
 
-DUPLICATE_OF_PRIMARY = (
-    "This is the estate's main SPYPOINT login, which is fetched already. Remove this copy."
-)
+DUPLICATE_OF_PRIMARY = stored("login.copy_of_primary")
 # upsert_camera's account_id when the camera stays with the login it has: another
 # login listed it first in this run.
 KEEP = object()
@@ -552,7 +551,8 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
                 summary["status"] = "error" if len(failures) == len(cameras) else "partial"
                 summary["error"] = (
                     failures[0] if summary["status"] == "error"
-                    else f"{len(failures)} of {len(cameras)} cameras failed. {failures[0]}"
+                    else stored("sync.some_failed", n=len(failures), total=len(cameras),
+                                error=failures[0])
                 )
             row = _account_row(db, acct)
             # Its history import has been tried: a camera whose listing failed has no

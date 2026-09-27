@@ -26,6 +26,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.crypto import encrypt
 from app.core.db import get_db
+from app.i18n import localize, t
 from app.ingestion import logins
 from app.ingestion.spypoint import SpypointAuthError, SpypointClient, SpypointError
 from app.ingestion.ubox import UboxClient, UboxError
@@ -69,7 +70,7 @@ def _last_ubox_import(db: Session, account_id: uuid.UUID) -> dict | None:
     return {
         "at": log.started_at,
         "status": account.get("status"),
-        "error": account.get("error"),
+        "error": localize(account.get("error")),
         **counters,
     }
 
@@ -80,8 +81,10 @@ def _status(entry: dict, failing: list[str] | None = None) -> dict:
     out = {key: entry[key] for key in ("state", "error", "last_ok_at", "last_attempt_at")}
     out["password_problem"] = entry["state"] == "failing" and logins.asks_for_password(
         entry["error"])
+    # Kept in English on the row; said in the reader's language.
+    out["error"] = localize(entry["error"])
     out["cameras_failing"] = len(failing or [])
-    out["camera_error"] = (failing or [None])[0]
+    out["camera_error"] = localize((failing or [None])[0])
     return out
 
 
@@ -105,7 +108,7 @@ def _primary_row(db: Session, user: User, now: datetime, failing: dict) -> dict 
         Camera.account_id.is_(None), Camera.active.is_(True),
     )) or 0
     return {
-        "id": "primary", "label": logins.PRIMARY_LABEL,
+        "id": "primary", "label": t("login.primary_label"),
         "username": settings.spypoint_username if user.role == "admin" else None,
         "provider": "spypoint", "owner": None, "added_by_removed": None, "active": True,
         "primary": True,
@@ -193,26 +196,26 @@ def add_account(
     db: Session = Depends(get_db),
 ) -> dict:
     if user.role == "viewer":
-        raise HTTPException(403, "Viewers can see the camera logins but can't add one.")
+        raise HTTPException(403, t("accounts.viewer"))
     username = body.username.strip()
     provider_label = "UBox Pro" if body.provider == "ubox" else "SPYPOINT"
     if not username or not body.password:
-        raise HTTPException(400, f"Enter your {provider_label} email and password")
+        raise HTTPException(400, t("accounts.enter_login", provider=provider_label))
     if user.estate_id is None:
-        raise HTTPException(400, "Join an estate before adding a camera login")
+        raise HTTPException(400, t("accounts.no_estate"))
     # One login is one login whatever the case of its email; a second copy would be
     # fetched twice every run and fight over which one its cameras belong to.
     if body.provider == "spypoint" and logins.primary_configured() and (
         username.lower() == settings.spypoint_username.strip().lower()
     ):
-        raise HTTPException(400, "This login is already connected as the estate's main account")
+        raise HTTPException(400, t("accounts.is_primary"))
     if db.scalar(
         select(CameraAccount).where(
             func.lower(CameraAccount.username) == username.lower(),
             CameraAccount.provider == body.provider,
         )
     ):
-        raise HTTPException(400, f"That {provider_label} login is already added")
+        raise HTTPException(400, t("accounts.already_added", provider=provider_label))
 
     # Verify before saving — a typo'd login should fail loudly now,
     # not silently every 15 minutes in the sync log.
@@ -236,8 +239,7 @@ def add_account(
         db.rollback()
         # Most likely the same login, added a moment ago from another phone.
         raise HTTPException(
-            409, f"That {provider_label} login is already added. Refresh to see it."
-        ) from e
+            409, t("accounts.already_added_refresh", provider=provider_label)) from e
     account_id = str(acct.id)
 
     # Pull this account's cameras + recent history right away, as a job of its own
@@ -256,14 +258,13 @@ def add_account(
         "ubox_min_interval_seconds": acct.ubox_min_interval_seconds,
         "ubox_max_images_per_day": acct.ubox_max_images_per_day,
         "import_started": started,
-        "note": f"Connected — {provider_label} reports {n_cams} camera(s). "
-        + ("Fetching photos now." if started else "Photos come in on the next fetch."),
+        "note": t("accounts.connected_now" if started else "accounts.connected_later",
+                  provider=provider_label, n=n_cams),
     }
 
 
 def _unreachable(name: str) -> HTTPException:
-    return HTTPException(
-        503, f"Couldn't reach {name} to check the password. Try again in a few minutes.")
+    return HTTPException(503, t("accounts.unreachable", provider=name))
 
 
 def _verify(provider: str, username: str, password: str) -> int:
@@ -277,7 +278,7 @@ def _verify(provider: str, username: str, password: str) -> int:
         except UboxError as e:
             if str(e).startswith("Unable to reach UBox"):
                 raise _unreachable("UBox") from e
-            raise HTTPException(400, f"Could not connect to UBox Pro: {e}") from e
+            raise HTTPException(400, t("accounts.ubox_failed", error=localize(str(e)))) from e
         except (httpx.HTTPError, OSError) as e:
             raise _unreachable("UBox") from e
     client = SpypointClient(username, password)
@@ -285,13 +286,11 @@ def _verify(provider: str, username: str, password: str) -> int:
         client.login()
         return len(client.list_cameras())
     except SpypointAuthError as e:
-        raise HTTPException(
-            400, "SPYPOINT refused that email and password. Check them in the SPYPOINT app."
-        ) from e
+        raise HTTPException(400, t("accounts.spypoint_refused")) from e
     except SpypointError as e:
         if e.status is not None and (e.status == 429 or e.status >= 500):
             raise _unreachable("SPYPOINT") from e
-        raise HTTPException(400, f"SPYPOINT did not accept that login: {e}") from e
+        raise HTTPException(400, t("accounts.spypoint_failed", error=str(e))) from e
     except (httpx.HTTPError, OSError) as e:
         raise _unreachable("SPYPOINT") from e
     finally:
@@ -317,13 +316,11 @@ def replace_password(
     """
     acct = db.get(CameraAccount, account_id)
     if acct is None or acct.estate_id != user.estate_id:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, t("accounts.not_found"))
     if user.role != "admin" and acct.owner_user_id != user.id:
-        raise HTTPException(
-            403, "Only whoever added this login, or an admin, can change its password"
-        )
+        raise HTTPException(403, t("accounts.password_forbidden"))
     if not body.password:
-        raise HTTPException(400, "Enter the password")
+        raise HTTPException(400, t("accounts.enter_password"))
     n_cams = _verify(acct.provider, acct.username, body.password)
     acct.password_enc = encrypt(body.password)
     logins.keep_session(db, acct, None)  # the next fetch signs in with the new one
@@ -331,7 +328,7 @@ def replace_password(
     db.commit()
     return {
         "id": str(acct.id), "cameras": n_cams,
-        "note": "Password saved. Photos come in on the next fetch, within 15 minutes.",
+        "note": t("accounts.password_saved"),
     }
 
 
@@ -344,13 +341,11 @@ def update_import_settings(
 ) -> dict:
     acct = db.get(CameraAccount, account_id)
     if acct is None or acct.estate_id != user.estate_id:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, t("accounts.not_found"))
     if user.role != "admin" and acct.owner_user_id != user.id:
-        raise HTTPException(
-            403, "Only whoever added this login, or an admin, can change its limits"
-        )
+        raise HTTPException(403, t("accounts.limits_forbidden"))
     if acct.provider != "ubox":
-        raise HTTPException(400, "Photo limits only apply to UBox Pro logins")
+        raise HTTPException(400, t("accounts.limits_ubox_only"))
     acct.ubox_min_interval_seconds = body.ubox_min_interval_seconds
     acct.ubox_max_images_per_day = body.ubox_max_images_per_day
     db.commit()
@@ -358,7 +353,7 @@ def update_import_settings(
         "id": str(acct.id),
         "ubox_min_interval_seconds": acct.ubox_min_interval_seconds,
         "ubox_max_images_per_day": acct.ubox_max_images_per_day,
-        "note": "Limits saved. They apply from the next fetch.",
+        "note": t("accounts.limits_saved"),
     }
 
 
@@ -368,9 +363,9 @@ def remove_account(
 ) -> dict:
     acct = db.get(CameraAccount, account_id)
     if acct is None or acct.estate_id != user.estate_id:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, t("accounts.not_found"))
     if user.role != "admin" and acct.owner_user_id != user.id:
-        raise HTTPException(403, "Only whoever added this login, or an admin, can remove it")
+        raise HTTPException(403, t("accounts.remove_forbidden"))
     # Keep the cameras and every photo already ingested — history belongs to the estate.
     # Its cameras show as not connected (not as flat batteries) until a login that is
     # still here lists them again.

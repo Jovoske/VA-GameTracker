@@ -20,6 +20,7 @@ from app.core.security import (
     verify_password,
 )
 from app.core.startup import PUBLISHED_PASSWORDS, development
+from app.i18n import LANGUAGES, set_current, t
 from app.models import User
 from app.schemas import LoginRequest, TokenResponse, UserOut
 
@@ -27,13 +28,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 DB = Annotated[Session, Depends(get_db)]
-
-BUSY = "The server is busy. Try again in a minute."
-PUBLISHED = (
-    "That is the password published with GameSense, so it can't sign in from the internet. "
-    "Sign in on the server's own network and change it in Settings, or on the server run: "
-    "python -m app.manage set-password {email}"
-)
 
 
 @lru_cache(maxsize=1)
@@ -46,7 +40,7 @@ def _no_such_hash() -> str:
 def check_password(password: str, hashed: str | None) -> bool:
     """Argon2, a few at a time (throttle.HASHING): each check takes 64 MB."""
     if not HASHING.acquire(timeout=HASH_WAIT_S):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, BUSY)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, t("auth.busy"))
     try:
         ok = verify_password(password, hashed or _no_such_hash())
     finally:
@@ -73,7 +67,7 @@ def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
         user = find_user(db, email)
         if not check_password(body.password, user.password_hash if user else None):
             attempt.failed()
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong email or password")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.wrong_password"))
         # An admin on the password published with this repository is the first thing
         # anyone would try on the public address: from the internet it doesn't sign
         # in; on the server's own network it does, so the owner can change it there
@@ -81,7 +75,7 @@ def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
         if (user.role == "admin" and body.password in PUBLISHED_PASSWORDS
                 and not development() and from_outside(request)):
             attempt.failed()
-            raise HTTPException(status.HTTP_403_FORBIDDEN, PUBLISHED.format(email=user.email))
+            raise HTTPException(status.HTTP_403_FORBIDDEN, t("auth.published", email=user.email))
         attempt.succeeded()
     return TokenResponse(access_token=session_token(user), image_token=image_token(user),
                          known_phone=phone_token(user))
@@ -89,6 +83,24 @@ def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
 
 @router.get("/me", response_model=UserOut)
 def me(user: CurrentUser) -> User:
+    return user
+
+
+class MeBody(BaseModel):
+    language: str | None = None
+
+
+@router.patch("/me", response_model=UserOut)
+def update_me(body: MeBody, user: CurrentUser, db: DB) -> User:
+    """A person's own settings: their language, which anyone signed in may change
+    (a viewer too: it writes nothing but their own row). The answer is in it."""
+    if body.language is not None:
+        lang = body.language.strip().lower()
+        if lang not in LANGUAGES:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, t("auth.language_unknown"))
+        user.language = lang
+        db.commit()
+        set_current(lang)
     return user
 
 
@@ -112,9 +124,9 @@ def change_password(
     photo passes were made under the old token version. This phone gets new ones in
     the answer, so it stays signed in (audit D-07)."""
     if not check_password(body.current_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That is not your current password")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, t("auth.not_current_password"))
     if len(body.new_password) < 8:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must be at least 8 characters")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, t("auth.new_password_short"))
     user.password_hash = hash_password(body.new_password)
     user.token_version = (user.token_version or 0) + 1
     db.commit()
@@ -122,5 +134,5 @@ def change_password(
     response.headers[IMAGE_TOKEN_HEADER] = fresh
     return {
         "status": "ok", "access_token": session_token(user), "image_token": fresh,
-        "note": "Password changed. Every other phone signed in as you has to sign in again.",
+        "note": t("auth.password_changed"),
     }

@@ -14,6 +14,7 @@ from app.api.routes_stands import tonight
 from app.core.db import get_db
 from app.core.logging import get_logger
 from app.core.security import hash_password
+from app.i18n import LANGUAGES, t
 from app.models import CameraAccount, Harvest, Sit, User, Zone
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -25,7 +26,7 @@ def list_users(admin: User = Depends(get_current_admin), db: Session = Depends(g
     rows = db.scalars(select(User).order_by(User.created_at)).all()
     return [
         {"id": str(u.id), "email": u.email, "role": u.role, "created_at": u.created_at,
-         "is_you": u.id == admin.id}
+         "language": u.language, "is_you": u.id == admin.id}
         for u in rows
     ]
 
@@ -34,6 +35,8 @@ class CreateUserBody(BaseModel):
     email: str
     password: str
     role: str = "member"
+    # The language the app and their alerts speak to them; they can change it.
+    language: str | None = None
 
 
 @router.post("")
@@ -42,17 +45,20 @@ def create_user(
 ) -> dict:
     email = body.email.strip().lower()
     if "@" not in email or len(email) < 5:
-        raise HTTPException(400, "Enter a valid email address")
+        raise HTTPException(400, t("users.email_invalid"))
     if len(body.password) < 8:
-        raise HTTPException(400, "Password must be at least 8 characters")
+        raise HTTPException(400, t("users.password_short"))
     if body.role not in ("member", "admin"):
-        raise HTTPException(400, "Pick Member or Admin")
-    taken = "Someone with that email already has a login"
+        raise HTTPException(400, t("users.pick_role"))
+    language = (body.language or "en").strip().lower()
+    if language not in LANGUAGES:
+        raise HTTPException(400, t("auth.language_unknown"))
+    taken = t("users.email_taken")
     if db.scalar(select(User.id).where(func.lower(User.email) == email).limit(1)):
         raise HTTPException(400, taken)
     u = User(
         estate_id=admin.estate_id, email=email,
-        password_hash=hash_password(body.password), role=body.role,
+        password_hash=hash_password(body.password), role=body.role, language=language,
     )
     db.add(u)
     try:
@@ -62,7 +68,7 @@ def create_user(
         # the same answer as the check's, not a server error.
         db.rollback()
         raise HTTPException(400, taken) from None
-    return {"id": str(u.id), "email": u.email, "role": u.role}
+    return {"id": str(u.id), "email": u.email, "role": u.role, "language": u.language}
 
 
 @router.delete("/{user_id}")
@@ -83,13 +89,13 @@ def delete_user(
     """
     u = db.get(User, user_id)
     if u is None:
-        raise HTTPException(404, "That person isn't on the app any more.")
+        raise HTTPException(404, t("users.gone"))
     if u.id == admin.id:
-        raise HTTPException(400, "You can't remove yourself")
+        raise HTTPException(400, t("users.not_yourself"))
     if u.role == "admin":
         admins = db.scalar(select(func.count(User.id)).where(User.role == "admin")) or 0
         if admins <= 1:
-            raise HTTPException(400, "Keep at least one admin")
+            raise HTTPException(400, t("users.keep_admin"))
     email = u.email
     now = datetime.now(UTC)
     logins = db.execute(
@@ -123,13 +129,9 @@ def delete_user(
     except IntegrityError as e:
         db.rollback()
         log.warning("user.remove_failed", user_id=str(user_id), error=str(e.orig))
-        raise HTTPException(
-            409, f"Couldn't remove {email}: something on the app still points at them. "
-            "Nothing was changed. Try again, or ask whoever runs the server.",
-        ) from None
+        raise HTTPException(409, t("users.remove_failed", email=email)) from None
     moved = len(logins)
-    note = f"{email} can't sign in any more. What they recorded stays."
+    note = t("users.removed", email=email)
     if moved:
-        note += (f" {moved} camera login{'s' if moved > 1 else ''} they added keep"
-                 f"{'' if moved > 1 else 's'} fetching photos, now under your name.")
+        note += " " + t("users.logins_moved", n=moved)
     return {"status": "deleted", "email": email, "camera_logins_moved": moved, "note": note}

@@ -33,8 +33,8 @@ from app.api.routes_stands import tonight
 from app.core.config import settings
 from app.core.db import get_db
 from app.forecasting.conditions import sunset_of
-from app.forecasting.model import sentence_case
 from app.forecasting.thermal import SETTLING
+from app.i18n import species_name, t
 from app.models import Harvest, Sit, Species, Stand, User
 from app.people import name_for
 
@@ -44,9 +44,9 @@ DB = Annotated[Session, Depends(get_db)]
 
 SEXES = ("male", "female", "unknown")
 AGES = ("juvenile", "young_adult", "mature_adult", "old", "unknown")
-SEX_WORDS = {"male": "Male", "female": "Female", "unknown": "Not sure"}
-AGE_WORDS = {"juvenile": "Young of the year", "young_adult": "Young adult",
-             "mature_adult": "Adult", "old": "Old", "unknown": "Not sure"}
+# The words for them (keys, said in the reader's language: the export's columns).
+SEX_WORDS = {s: f"harvest.sex.{s}" for s in SEXES}
+AGE_WORDS = {a: f"harvest.age.{a}" for a in AGES}
 
 # The morning card asks about a SHOT for this many nights, then lets it be.
 ASK_NIGHTS = 7
@@ -56,9 +56,9 @@ SEASON_START = (4, 1)
 CLOCK_SLACK = timedelta(minutes=10)
 EARLIEST = datetime(2000, 1, 1, tzinfo=UTC)
 
-VIEWERS_LOOK = "Viewers can’t log a harvest."
-NOT_YOURS = "That harvest is another hunter’s. An admin can change it."
-NOT_A_SHOT = "That sit isn’t reported as a shot. Say what happened first."
+VIEWERS_LOOK = "harvest.viewer"
+NOT_YOURS = "harvest.not_yours"
+NOT_A_SHOT = "harvest.not_a_shot"
 
 
 def _tz() -> ZoneInfo:
@@ -88,10 +88,10 @@ def _plain(value: str | None, limit: int, what: str, *, lines: bool = False) -> 
     if value is None:
         return None
     if any(unicodedata.category(ch) in {"Cc", "Cf", "Cs"} and ch not in "\n\t" for ch in value):
-        raise ValueError(f"The {what} has hidden characters in it. Retype it.")
+        raise ValueError(t("harvest.hidden_chars", what=t(what)))
     value = value.strip() if lines else " ".join(value.split())
     if len(value) > limit:
-        raise ValueError(f"The {what} is at most {limit} characters.")
+        raise ValueError(t("harvest.too_long", what=t(what), n=limit))
     return value or None
 
 
@@ -107,17 +107,17 @@ class _Words(BaseModel):
     @field_validator("seal")
     @classmethod
     def check_seal(cls, v: str | None) -> str | None:
-        return _plain(v, 40, "seal number")
+        return _plain(v, 40, "harvest.field.seal")
 
     @field_validator("notes")
     @classmethod
     def check_notes(cls, v: str | None) -> str | None:
-        return _plain(v, 500, "note", lines=True)
+        return _plain(v, 500, "harvest.field.note", lines=True)
 
     @field_validator("hunter")
     @classmethod
     def check_hunter(cls, v: str | None) -> str | None:
-        return _plain(v, 60, "name")
+        return _plain(v, 60, "harvest.field.name")
 
 
 class HarvestIn(_Words):
@@ -142,7 +142,7 @@ class HarvestPatch(_Words):
 
 def _can_write(user: User) -> None:
     if user.role not in ("admin", "member"):
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
 
 
 def _mine(h: Harvest, user: User) -> bool:
@@ -151,11 +151,11 @@ def _mine(h: Harvest, user: User) -> bool:
 
 def _check_kind(species_id: str | None, sex: str | None, age: str | None) -> None:
     if species_id is not None and species_id not in ESTATE_KEYS:
-        raise HTTPException(422, "Pick one of the animals on the list.")
+        raise HTTPException(422, t("harvest.bad_species"))
     if sex is not None and sex not in SEXES:
-        raise HTTPException(422, "Sex is male, female or not sure.")
+        raise HTTPException(422, t("harvest.bad_sex"))
     if age is not None and age not in AGES:
-        raise HTTPException(422, "Pick an age from the list.")
+        raise HTTPException(422, t("harvest.bad_age"))
 
 
 def _when(at: datetime | None, now: datetime) -> datetime | None:
@@ -164,9 +164,9 @@ def _when(at: datetime | None, now: datetime) -> datetime | None:
     if at.tzinfo is None:
         at = at.replace(tzinfo=_tz())
     if at > now + CLOCK_SLACK:
-        raise HTTPException(422, "That time is still to come. Check the date.")
+        raise HTTPException(422, t("harvest.future"))
     if at < EARLIEST:
-        raise HTTPException(422, "That date is too long ago. Check the year.")
+        raise HTTPException(422, t("harvest.too_old"))
     return at
 
 
@@ -198,7 +198,7 @@ def _stand(db: Session, stand_id: uuid.UUID | None) -> Stand | None:
         return None
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "That stand isn’t on the app.")
+        raise HTTPException(404, t("stands.gone"))
     return stand
 
 
@@ -218,7 +218,7 @@ def _out(db: Session, h: Harvest, user: User, names: dict | None = None,
         "hunter": h.hunter,
         "yours": h.user_id == user.id,
         "species_id": h.species_id,
-        "species": names.get(h.species_id) or default_name(h.species_id),
+        "species": species_name(h.species_id, names.get(h.species_id)),
         "sex": h.sex,
         "age_class": h.age_class,
         "seal": h.seal,
@@ -231,7 +231,8 @@ def _out(db: Session, h: Harvest, user: User, names: dict | None = None,
 
 
 def _species_names(db: Session) -> dict[str, str]:
-    return {k: sentence_case(n) for k, n in db.execute(select(Species.id, Species.common_name))}
+    """{species id: its stored name}; each is said with i18n.species_name."""
+    return {k: n for k, n in db.execute(select(Species.id, Species.common_name))}
 
 
 @router.get("/harvests")
@@ -245,7 +246,7 @@ def list_harvests(user: CurrentUser, db: DB, season: int | None = None) -> dict:
     current = season_of(now)
     season = current if season is None else season
     if not 2000 <= season <= current + 1:
-        raise HTTPException(422, "Pick a season from the list.")
+        raise HTTPException(422, t("harvest.bad_season"))
     start, end = season_bounds(season)
     q = select(Harvest).where(Harvest.taken_at >= start, Harvest.taken_at < end)
     seasons_q = select(func.min(Harvest.taken_at), func.max(Harvest.taken_at))
@@ -302,9 +303,9 @@ def harvest_asks(user: CurrentUser, db: DB) -> list[dict]:
 def _sit_for(db: Session, sit_id: uuid.UUID, user: User) -> Sit:
     sit = db.get(Sit, sit_id)
     if sit is None:
-        raise HTTPException(404, "That sit isn’t on the app.")
+        raise HTTPException(404, t("sits.gone"))
     if sit.user_id != user.id and user.role != "admin":
-        raise HTTPException(403, "That sit is another hunter’s.")
+        raise HTTPException(403, t("sits.not_yours"))
     return sit
 
 
@@ -325,7 +326,7 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
         same = db.get(Harvest, body.id)
         if same is not None:
             if not _mine(same, user):
-                raise HTTPException(409, "That harvest couldn’t be saved. Close it and try again.")
+                raise HTTPException(409, t("harvest.not_saved"))
             response.status_code = 200
             return _change(db, same, _as_change(body, user), user)
 
@@ -335,7 +336,7 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
     if body.sit_id is not None:
         sit = _sit_for(db, body.sit_id, user)
         if sit.outcome != "shot":
-            raise HTTPException(409, NOT_A_SHOT)
+            raise HTTPException(409, t(NOT_A_SHOT))
         stand = db.get(Stand, sit.stand_id)
         hunter_user = db.get(User, sit.user_id) if sit.user_id else None
         taken = taken or min(shot_time(sit), now)
@@ -356,7 +357,7 @@ def log_harvest(body: HarvestIn, user: CurrentUser, db: DB, response: Response) 
     db.commit()
     h = db.get(Harvest, harvest_id)
     if h is None or not _mine(h, user):
-        raise HTTPException(409, "That harvest couldn’t be saved. Close it and try again.")
+        raise HTTPException(409, t("harvest.not_saved"))
     if not fresh:
         # Saved alongside by another try of this one: this try's answers stand.
         response.status_code = 200
@@ -383,9 +384,9 @@ def _own_harvest(db: Session, harvest_id: uuid.UUID, user: User) -> Harvest:
     _can_write(user)
     h = db.get(Harvest, harvest_id)
     if h is None:
-        raise HTTPException(404, "That harvest isn’t in the book any more.")
+        raise HTTPException(404, t("harvest.gone"))
     if not _mine(h, user):
-        raise HTTPException(403, NOT_YOURS)
+        raise HTTPException(403, t(NOT_YOURS))
     return h
 
 
@@ -402,7 +403,7 @@ def _change(db: Session, h: Harvest, body: HarvestPatch, user: User) -> dict:
     _check_kind(body.species_id, body.sex, body.age_class)
     if "species_id" in sent:
         if body.species_id is None:
-            raise HTTPException(422, "Pick one of the animals on the list.")
+            raise HTTPException(422, t("harvest.bad_species"))
         _ensure_species(db, body.species_id, default_name(body.species_id))
         h.species_id = body.species_id
     for field in ("sex", "age_class"):
@@ -415,7 +416,7 @@ def _change(db: Session, h: Harvest, body: HarvestPatch, user: User) -> dict:
         h.taken_at = _when(body.taken_at, datetime.now(UTC))
     if "hunter" in sent and body.hunter:
         if user.role != "admin":
-            raise HTTPException(403, "Only an admin changes the name on a harvest.")
+            raise HTTPException(403, t("harvest.admin_names"))
         h.hunter = body.hunter
     if "stand_id" in sent and h.sit_id is None:
         stand = _stand(db, body.stand_id)
@@ -449,7 +450,7 @@ def nothing_to_log(sit_id: uuid.UUID, user: CurrentUser, db: DB,
     sit = _sit_for(db, sit_id, user)
     nothing = body.nothing if body is not None else True
     if nothing and sit.outcome != "shot":
-        raise HTTPException(409, NOT_A_SHOT)
+        raise HTTPException(409, t(NOT_A_SHOT))
     if nothing and sit.no_harvest_at is None:
         sit.no_harvest_at = datetime.now(UTC)
     elif not nothing:
@@ -460,8 +461,8 @@ def nothing_to_log(sit_id: uuid.UUID, user: CurrentUser, db: DB,
 
 # ── the season's export ─────────────────────────────────────────────────────
 
-COLUMNS = ["Date", "Time", "Species", "Sex", "Age", "Seal number", "Weight (kg)", "Hunter",
-           "Stand", "Notes"]
+# The export's column headings (keys, in the admin's language).
+COLUMNS = ["date", "time", "species", "sex", "age", "seal", "weight", "hunter", "stand", "notes"]
 
 
 def _cell(value) -> str:
@@ -486,7 +487,7 @@ def export_season(
     current = season_of(datetime.now(UTC))
     season = current if season is None else season
     if not 2000 <= season <= current + 1:
-        raise HTTPException(422, "Pick a season from the list.")
+        raise HTTPException(422, t("harvest.bad_season"))
     start, end = season_bounds(season)
     rows = db.scalars(
         select(Harvest).where(Harvest.taken_at >= start, Harvest.taken_at < end)
@@ -496,14 +497,15 @@ def export_season(
     stands = {s.id: s.name for s in db.scalars(select(Stand))}
     buf = io.StringIO()
     out = csv.writer(buf, delimiter=";")
-    out.writerow(COLUMNS)
+    out.writerow([t(f"harvest.col.{c}") for c in COLUMNS])
     for h in rows:
         local = h.taken_at.astimezone(_tz())
         weight = None if h.weight_kg is None else f"{h.weight_kg:g}".replace(".", ",")
         out.writerow([_cell(v) for v in (
             local.strftime("%Y-%m-%d"), local.strftime("%H:%M"),
-            names.get(h.species_id) or default_name(h.species_id),
-            SEX_WORDS.get(h.sex, h.sex), AGE_WORDS.get(h.age_class, h.age_class),
+            species_name(h.species_id, names.get(h.species_id)),
+            t(SEX_WORDS[h.sex]) if h.sex in SEX_WORDS else h.sex,
+            t(AGE_WORDS[h.age_class]) if h.age_class in AGE_WORDS else h.age_class,
             h.seal, weight, h.hunter, stands.get(h.stand_id), h.notes,
         )])
     name = f"harvest-{season}-{str(season + 1)[-2:]}.csv"

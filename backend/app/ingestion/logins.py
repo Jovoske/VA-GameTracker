@@ -25,19 +25,23 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.crypto import InvalidToken, decrypt, encrypt, is_current
 from app.core.logging import get_logger
+from app.i18n import stored, t
 from app.models import AppSetting, Camera, CameraAccount, Image
 
 log = get_logger(__name__)
 
 PRIMARY_KEY = "spypoint_primary_login"
+# Its name in a fetch's summary and log; on screen it is t("login.primary_label").
 PRIMARY_LABEL = "Main SPYPOINT login"
 # Fetches run every 15 minutes: two hours without a good one is a stoppage, not a blip.
 STALE_AFTER = timedelta(hours=2)
 
-UNREADABLE = "The saved password can't be read. Re-enter it."
-SPYPOINT_REFUSED = "SPYPOINT refused the password. Re-enter it."
-UBOX_REFUSED = "UBox refused the password. Re-enter it."
-UBOX_SIGNED_OUT = "UBox signed this login out. Re-enter the password."
+# Kept in English on the login's row, like every error here, and put in the reader's
+# language when read (app.i18n.localize).
+UNREADABLE = stored("login.unreadable")
+SPYPOINT_REFUSED = stored("login.spypoint_refused")
+UBOX_REFUSED = stored("login.ubox_refused")
+UBOX_SIGNED_OUT = stored("login.ubox_signed_out")
 # The problems a new password fixes; for the others (no answer, busy, a copy of
 # the main login) typing the password again would not help.
 PASSWORD_PROBLEMS = frozenset({UNREADABLE, SPYPOINT_REFUSED, UBOX_REFUSED, UBOX_SIGNED_OUT})
@@ -56,12 +60,13 @@ def _provider_name(provider: str) -> str:
 
 
 def login_error(exc: BaseException, provider: str) -> str:
-    """What went wrong with a login, in words that say what to do about it."""
+    """What went wrong with a login, in words that say what to do about it. In
+    English, as it is kept on the login's row (app.i18n.localize says it in the
+    reader's language)."""
     from app.ingestion.spypoint import SpypointAuthError, SpypointError
     from app.ingestion.ubox import UboxError
 
     name = _provider_name(provider)
-    later = "It tries again on the next fetch."
     if isinstance(exc, LoginProblem):
         return str(exc)
     if isinstance(exc, InvalidToken):
@@ -71,28 +76,29 @@ def login_error(exc: BaseException, provider: str) -> str:
     if isinstance(exc, SpypointError):
         status = exc.status or 0
         if status == 429:
-            return f"SPYPOINT is turning requests away for now. {later}"
+            return stored("login.spypoint_throttled")
         if status >= 500:
-            return f"SPYPOINT isn't answering properly right now. {later}"
+            return stored("login.spypoint_down")
         if status >= 400:
-            return f"SPYPOINT refused the request. {later}"
-        return f"SPYPOINT sent something the app can't read. {later}"
+            return stored("login.spypoint_refused_request")
+        return stored("login.spypoint_unreadable")
     if isinstance(exc, UboxError):
         text = str(exc)
         if "rejected the account or password" in text:
             return UBOX_REFUSED
         if "did not recognize this account" in text:
-            return "UBox doesn't know this login. Check the email used in the UBox Pro app."
+            return stored("login.ubox_unknown")
         if "reconnect the account" in text or "authentication failed" in text:
             return UBOX_SIGNED_OUT
         if text.startswith("Unable to reach UBox"):
-            return f"Couldn't reach UBox. {later}"
+            return stored("login.unreachable", provider="UBox")
         if "(HTTP " in text:
-            return f"UBox isn't answering properly right now. {later}"
-        return f"{text.rstrip('.')}. {later}"  # UboxError text is written to be shown
+            return stored("login.ubox_down")
+        # UboxError text is written to be shown.
+        return stored("login.other", text=text.rstrip("."))
     if isinstance(exc, httpx.HTTPError | OSError):
-        return f"Couldn't reach {name}. {later}"
-    return f"The fetch from {name} failed ({type(exc).__name__}). {later}"
+        return stored("login.unreachable", provider=name)
+    return stored("login.failed", provider=name, error=type(exc).__name__)
 
 
 def read_password(db: Session, account: CameraAccount) -> str:
@@ -278,8 +284,8 @@ def primary_entry(db: Session, now: datetime) -> dict | None:
     status = primary_status(db)
     if status is None:
         return None
-    return _entry(PRIMARY_LABEL, "spypoint", status["last_attempt_at"], status["last_ok_at"],
-                  status["last_error"], now)
+    return _entry(t("login.primary_label"), "spypoint", status["last_attempt_at"],
+                  status["last_ok_at"], status["last_error"], now)
 
 
 def camera_logins(db: Session, cameras, now: datetime | None = None) -> dict:

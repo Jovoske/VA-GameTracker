@@ -51,6 +51,7 @@ from app.ai import empty_filter, species
 from app.ai.detector import DETECT_CONF, detect, detect_animals, split
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.i18n import stored
 from app.models import Detection, Image
 
 log = get_logger(__name__)
@@ -104,12 +105,12 @@ def load_models() -> str | None:
     """Load both models once. None when they are ready, else why not, in words."""
     from app.ai import classifier, detector
 
-    for what, load in (("The animal detector", detector.load),
-                       ("The species model", classifier.load)):
+    for what, load in (("ai.detector_failed", detector.load),
+                       ("ai.classifier_failed", classifier.load)):
         try:
             load()
         except Exception as e:  # ImportError, a failed download, weights that won't load
-            return f"{what} could not start ({_short(e)})."
+            return stored(what, error=_short(e))
     return None
 
 
@@ -125,7 +126,7 @@ def models_work() -> str | None:
         species.classify_crop(path, None)
         return None
     except Exception as e:
-        return f"The models stopped working ({_short(e)})."
+        return stored("ai.models_broken", error=_short(e))
     finally:
         try:
             os.remove(path)
@@ -235,9 +236,10 @@ def _announce(db: Session) -> None:
         db.rollback()
 
 
-# What a photo the AI has not finished with is called where its species would be.
-NOT_CHECKED_YET = "Not checked yet"
-COULD_NOT_CHECK = "Couldn’t check"
+# What a photo the AI has not finished with is called where its species would be
+# (keys: said in the reader's language).
+NOT_CHECKED_YET = "photos.not_checked"
+COULD_NOT_CHECK = "photos.could_not_check"
 
 
 def photo_states(db: Session, image_ids: list) -> dict:
@@ -321,8 +323,7 @@ def check_photos(db: Session, *, limit: int | None = None, budget: timedelta | N
         if stop_if_models_broken:
             why = models_work()
             if why:
-                raise _Stop(f"{why} Checking stopped after {len(streak)} photos in a row "
-                            f"failed; they were not counted against the photos.")
+                raise _Stop(stored("ai.stopped_streak", why=why, n=len(streak)))
         result["failed"] += len(streak)
         result["given_up"] += _record_failures(db, streak, now)
         streak = []

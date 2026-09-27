@@ -11,7 +11,7 @@ from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.db import get_db
 from app.forecasting.insights import compute_insights
-from app.forecasting.model import class_label_sql, sentence_case_sql
+from app.forecasting.model import class_label_sql, labels_in_english, sentence_case_sql
 from app.forecasting.patterns import compute_patterns
 from app.models import Camera, Detection, Image, Species, User
 
@@ -29,15 +29,17 @@ def patterns(_: User = Depends(get_current_user), db: Session = Depends(get_db))
     return compute_patterns(db)
 
 
-def _in_class(label: str):
+def _in_class(labels: set[str]):
     """SQL on a Detection joined to its Species: it is of this class (Stag, Sow +
     piglets, Roe deer). The same split as model.class_label, so the photos are the
     ones labelled with the class the Insights makeup names (a visit it counted as
-    "Sow + piglets" may have plain "Wild boar" frames too; those list under that)."""
+    "Sow + piglets" may have plain "Wild boar" frames too; those list under that).
+    `labels`: the class as the database writes it (model.labels_in_english)."""
     split = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type,
                             Species.common_name)
-    return or_(split == label,
-               and_(split.is_(None), sentence_case_sql(Species.common_name) == label))
+    names = sorted(labels)
+    return or_(split.in_(names),
+               and_(split.is_(None), sentence_case_sql(Species.common_name).in_(names)))
 
 
 @router.get("/class")
@@ -58,16 +60,17 @@ def class_images(
     Only photos anybody can see: not a hidden species, not a photo marked "nothing
     in it", not a retired camera (which the makeup leaves out too).
     """
+    labels = labels_in_english(db, label)
     of_class = (
         select(Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
         .join(Image, Image.id == Detection.image_id)
-        .where(_in_class(label), VISIBLE_SIGHTING)
+        .where(_in_class(labels), VISIBLE_SIGHTING)
     )
     group = (
         select(func.max(Detection.group_size))
         .join(Species, Species.id == Detection.species_id)
-        .where(Detection.image_id == Image.id, _in_class(label))
+        .where(Detection.image_id == Image.id, _in_class(labels))
         .scalar_subquery()
     )
     q = (

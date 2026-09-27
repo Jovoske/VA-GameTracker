@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
-from app.models import PushSubscription
+from app.models import PushSubscription, User
 from app.notifications.vapid import get_vapid, subject
 
 log = get_logger(__name__)
@@ -40,6 +40,15 @@ def _expired(s: PushSubscription, now: datetime) -> bool:
         return False
     last = s.last_success_at or s.created_at
     return last is None or now - last > EXPIRE_AFTER
+
+
+def languages(db: Session, user_ids) -> dict:
+    """{user id: their language}: every push is written in its recipient's (app.i18n)."""
+    ids = list(user_ids)
+    if not ids:
+        return {}
+    rows = db.execute(select(User.id, User.language).where(User.id.in_(ids))).all()
+    return {user_id: language for user_id, language in rows}
 
 
 def apple(endpoint: str) -> bool:

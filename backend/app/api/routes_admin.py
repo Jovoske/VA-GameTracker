@@ -19,13 +19,14 @@ from sqlalchemy.orm import Session
 from app import jobs, ops
 from app.api.deps import get_current_admin
 from app.core.db import get_db
+from app.i18n import localize, t
 from app.models import Camera, Detection, Image, User
 from app.version import COMMIT, __version__
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 # A deploy holds every job's lock while it swaps the code (pipeline.py hold).
-DEPLOYING = "The server is installing an update. Try again in a few minutes."
+DEPLOYING = "admin.deploying"
 
 
 def _deploying(name: str) -> bool:
@@ -41,14 +42,14 @@ def sex_pass(_: Annotated[User, Depends(get_current_admin)]) -> dict:
     a second tap (or a tap while the hourly pass runs) never bills a photo twice.
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(400, "Add ANTHROPIC_API_KEY to .env first")
+        raise HTTPException(400, t("admin.no_api_key"))
     if _deploying("sexpass"):
-        return {"status": "busy", "note": DEPLOYING}
+        return {"status": "busy", "note": t(DEPLOYING)}
     if jobs.holder("sexpass") is not None:
-        return {"status": "busy", "note": "Already labelling. Labels appear over a few minutes."}
+        return {"status": "busy", "note": t("admin.labelling")}
     if not jobs.spawn("sex"):
-        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
-    return {"status": "started", "note": "Labels appear in Cameras over a few minutes."}
+        raise HTTPException(503, t("cameras.start_failed"))
+    return {"status": "started", "note": t("admin.labels_coming")}
 
 
 @router.post("/ai/retry")
@@ -59,8 +60,7 @@ def retry_failed_photos(
     from app.ai.checking import retry_failed
 
     n = retry_failed(db)
-    return {"photos": n, "note": f"{n} photo{'' if n == 1 else 's'} will be checked again "
-                                 "on the next fetch." if n else "Nothing to try again."}
+    return {"photos": n, "note": t("admin.retry", n=n) if n else t("admin.nothing_to_retry")}
 
 
 @router.get("/version")
@@ -74,7 +74,7 @@ def version(_: User = Depends(get_current_admin)) -> dict:
 def version_check(_: User = Depends(get_current_admin)) -> dict:
     """What an app copy from before the self-update status asks; it shows `error`."""
     return {"current": f"v{__version__}", "latest": None, "update_available": False,
-            "error": "Reload the app: updates now show under App version by themselves."}
+            "error": t("admin.reload")}
 
 
 def _suntek_spool() -> dict | None:
@@ -133,8 +133,9 @@ def _ai_status(db: Session) -> dict:
         "log_file": str(jobs.log_dir() / "pipeline.log"),
         "last_run_at": note.get("last_run_at"),
         "last_ok_at": note.get("last_ok_at"),
-        "stopped": note.get("stopped"),
-        "last_error": note.get("last_error"),
+        # Kept in English; said in the reader's language.
+        "stopped": localize(note.get("stopped")),
+        "last_error": localize(note.get("last_error")),
         "last_error_at": note.get("last_error_at"),
     }
 
@@ -149,7 +150,8 @@ def _sex_status(db: Session) -> dict:
         "waiting": waiting(db),
         "last_run_at": note.get("last_run_at"),
         "labelled": note.get("labelled"),
-        "stopped": note.get("stopped"),
-        "last_error": note.get("last_error"),
+        # Kept in English; said in the reader's language.
+        "stopped": localize(note.get("stopped")),
+        "last_error": localize(note.get("last_error")),
         "last_error_at": note.get("last_error_at"),
     }

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app import geo
 from app.core.config import settings
+from app.i18n import t
 from app.models import AppSetting, Camera, Stand, Zone
 
 BOX_KEY = "estate_offline_box"
@@ -165,17 +166,15 @@ def check_box(box: Box) -> Box:
     """A box an admin asked for, or ValueError saying what is wrong with it."""
     s, w, n, e = (box.get(k) for k in ("south", "west", "north", "east"))
     if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (s, w, n, e)):
-        raise ValueError("The box needs four numbers: south, west, north and east.")
+        raise ValueError(t("box.four_numbers"))
     if not (-90 <= s < n <= 90 and -180 <= w < e <= 180):
-        raise ValueError("That box is off the map.")
+        raise ValueError(t("box.off_map"))
     ew, ns = side_m({"south": s, "west": w, "north": n, "east": e})
     if max(ew, ns) > MAX_SIDE_M:
-        raise ValueError(
-            f"That is {max(ew, ns) / 1000:.0f} km across, more than a phone should keep. "
-            f"Zoom in so the estate is under {MAX_SIDE_M / 1000:.0f} km across."
-        )
+        raise ValueError(t("box.too_big", km=f"{max(ew, ns) / 1000:.0f}",
+                           limit=f"{MAX_SIDE_M / 1000:.0f}"))
     if min(ew, ns) < MIN_SIDE_M / 4:
-        raise ValueError("That is too small to be the estate. Zoom out a little.")
+        raise ValueError(t("box.too_small"))
     return {"south": s, "west": w, "north": n, "east": e}
 
 

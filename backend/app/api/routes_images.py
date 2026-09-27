@@ -27,6 +27,7 @@ from app.core.db import get_db
 from app.core.logging import get_logger
 from app.core.security import IMAGE_SCOPE
 from app.forecasting.model import class_label
+from app.i18n import t
 from app.models import Camera, Detection, Image, Species, User
 from app.thumbs import make_thumb, thumb_path
 
@@ -41,8 +42,8 @@ _optional_bearer = HTTPBearer(auto_error=False)
 # a night on a weak signal costs nothing the second time.
 PHOTO_CACHE = "private, max-age=31536000, immutable"
 
-VIEWERS_LOOK = "Viewers can look at the photos but can't change them."
-OLD_LINK = "This photo link has run out. Open the photo in the app again."
+VIEWERS_LOOK = "images.viewer"
+OLD_LINK = "images.old_link"
 
 
 def download_name(camera_name: str | None, captured_at) -> str:
@@ -76,11 +77,11 @@ def _require_user(
     if creds is not None:
         return user_from_token(creds.credentials, db)[0]
     if not token:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to view photos.")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("images.sign_in"))
     try:
         return user_from_token(token, db, scope=IMAGE_SCOPE)[0]
     except HTTPException:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, OLD_LINK) from None
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t(OLD_LINK)) from None
 
 
 def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
@@ -95,7 +96,7 @@ def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, 
         .where(Image.id == image_id, Camera.estate_id == user.estate_id)
     ).first()
     if row is None or hidden_from(user, row[0]):
-        raise HTTPException(404, "Photo not found.")
+        raise HTTPException(404, t("notes.photo_not_found"))
     return row[0], row[1]
 
 
@@ -110,7 +111,7 @@ def image_file(
     image, cam = _estate_image(db, image_id, _require_user(db, creds, token))
     source = media.resolve(image.original_path)
     if not source or not os.path.exists(source):
-        raise HTTPException(404, "Photo not found.")
+        raise HTTPException(404, t("notes.photo_not_found"))
     if download:
         # Content-Disposition: attachment, so the lightbox's Download button saves
         # a file instead of opening the photo in a tab the user then has to leave.
@@ -146,7 +147,7 @@ def image_thumb(
         )
     source = media.resolve(image.original_path)
     if not source or not os.path.exists(source):
-        raise HTTPException(404, "Photo not found.")
+        raise HTTPException(404, t("notes.photo_not_found"))
 
     dest = thumb_path(image.id)
     try:
@@ -176,7 +177,7 @@ def flag_image(
     """Manual override of the detector. Sticky — the auto-scan won't touch it again.
     Members and admins: it hides the photo (or brings it back) for everyone."""
     if user.role == "viewer":
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
     image, _ = _estate_image(db, image_id, user)
     if not body.is_empty and image.is_empty_frame is not False:
         # Kept by hand: it shows on the map from now, so it is new to whoever hasn't
@@ -271,13 +272,13 @@ def set_species(
     takes the fix back.
     """
     if user.role == "viewer":
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
     key = body.species_id.strip()
     if key not in ESTATE_KEYS:
-        raise HTTPException(422, "Pick one of the animals on the list.")
+        raise HTTPException(422, t("harvest.bad_species"))
     image, camera = _estate_image(db, image_id, user)
     if not image.original_path:
-        raise HTTPException(409, "This photo has no picture yet, so there's nothing to fix.")
+        raise HTTPException(409, t("images.no_picture"))
     visit = species_ai.set_by_hand(db, image, key, user.id)
     db.commit()
     fixed = _fixed(db, image, camera, visit)
@@ -295,7 +296,7 @@ def undo_species(
     """Take a hunter's fix back to what the AI had said (the viewer's Undo), the rest
     of its burst with it (`visit`)."""
     if user.role == "viewer":
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
     image, camera = _estate_image(db, image_id, user)
     visit = species_ai.undo_by_hand(db, image)
     db.commit()
@@ -327,7 +328,7 @@ def clear_people(
     if not body.cleared and not image.people_cleared:
         return _people_out(image)
     if body.cleared and not image.people_cleared and not is_people(image):
-        raise HTTPException(409, "The app doesn’t count anyone in this photo already.")
+        raise HTTPException(409, t("images.no_people"))
     image.people_cleared = body.cleared
     db.commit()
     recount_after_flag(db, image.camera_id, image.captured_at)

@@ -16,7 +16,8 @@ from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_photos import after_cursor, fixed_names, next_cursor
 from app.api.visibility import NO_PEOPLE, VISIBLE_ANIMAL, VISIBLE_SIGHTING
 from app.core.db import get_db
-from app.forecasting.model import class_label, sentence_case
+from app.forecasting.model import class_label
+from app.i18n import DEFAULT, LANGUAGES, current, renamed, species_name, t, tr, use
 from app.models import Camera, Detection, Image, Species, User
 from app.notes import note_counts
 
@@ -35,12 +36,15 @@ def list_species(_: User = Depends(get_current_user), db: Session = Depends(get_
     out = [
         {
             "id": s.id,
-            "common_name": s.common_name,
+            # What the app calls it, in the reader's language: the admin's own name
+            # for it when there is one (`custom`), in every language.
+            "common_name": species_name(s.id, s.common_name),
+            "custom": renamed(s.id, s.common_name),
             "huntable": s.huntable,
             "hidden": s.hidden,
             "is_priority": s.is_priority,
             # What the app calls it unless an admin names it otherwise (Settings).
-            "default_name": default_name(s.id),
+            "default_name": species_name(s.id, None),
             # The big game the advice is for (ai.species.BIG_GAME): Settings asks
             # once about any other animal still in the advice from before new ones
             # started off.
@@ -75,7 +79,8 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
 
     agg: dict[str, dict] = {}
     for sid, cn, sex, gt, cnt, last in rows:
-        s = agg.setdefault(sid, {"id": sid, "name": cn, "count": 0, "last_seen": None, "classes": {}})
+        s = agg.setdefault(sid, {"id": sid, "name": species_name(sid, cn), "count": 0,
+                                 "last_seen": None, "classes": {}})
         s["count"] += int(cnt)
         lbl = class_label(sid, cn, sex, gt)
         s["classes"][lbl] = s["classes"].get(lbl, 0) + int(cnt)
@@ -118,30 +123,36 @@ _CLASSES = {
 
 
 def class_filter(species_id: str, common_name: str | None, label: str | None):
-    """SQL on Detection for the photos class_label() calls `label` (all when None)."""
+    """SQL on Detection for the photos class_label() calls `label` (all when None),
+    in any of the app's languages: the app sends back the label it was shown."""
     if not label:
         return true()
+
+    def names(sex: str | None, gt: str | None) -> set[str]:
+        out = set()
+        for lang in LANGUAGES:
+            with use(lang):
+                out.add(class_label(species_id, common_name, sex, gt))
+        return out
+
     classes = _CLASSES.get(species_id)
     if classes is None:
-        return true() if label == class_label(species_id, common_name, None, None) else false()
+        return true() if label in names(None, None) else false()
     young_type, group_type = classes
-
-    def name(sex: str | None, gt: str | None) -> str:
-        return class_label(species_id, common_name, sex, gt)
 
     not_young = or_(Detection.group_type.is_(None), Detection.group_type != young_type)
     unsexed = Detection.sex.notin_(("male", "female"))
     # A list, not a dict: a boar renamed "Boar" is the unsexed ones and the males both.
-    hits = [where for lbl, where in (
-        (name(None, young_type), Detection.group_type == young_type),
-        (name("male", None), and_(not_young, Detection.sex == "male")),
-        (name("female", None), and_(not_young, Detection.sex == "female")),
-        (name(None, group_type), and_(unsexed, Detection.group_type == group_type)),
-        (name(None, None), and_(unsexed, or_(
+    hits = [where for lbls, where in (
+        (names(None, young_type), Detection.group_type == young_type),
+        (names("male", None), and_(not_young, Detection.sex == "male")),
+        (names("female", None), and_(not_young, Detection.sex == "female")),
+        (names(None, group_type), and_(unsexed, Detection.group_type == group_type)),
+        (names(None, None), and_(unsexed, or_(
             Detection.group_type.is_(None),
             Detection.group_type.notin_((young_type, group_type)),
         ))),
-    ) if lbl == label]
+    ) if label in lbls]
     return or_(*hits) if hits else false()
 
 
@@ -245,7 +256,7 @@ def choices(
     ).all())
     out = [{
         "id": key,
-        "name": sentence_case(rows[key].common_name) if key in rows else default_name(key),
+        "name": species_name(key, rows[key].common_name if key in rows else None),
         "hidden": bool(rows[key].hidden) if key in rows else False,
         "likely": key in BIG_GAME or seen.get(key, 0) > 0,
         "big_game": key in BIG_GAME,
@@ -267,10 +278,10 @@ class HuntableBody(BaseModel):
         if value is None:
             return None
         if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value):
-            raise ValueError("That name has hidden characters in it. Retype it.")
+            raise ValueError(t("species.name_hidden_chars"))
         value = " ".join(value.split())
         if not 1 <= len(value) <= 40:
-            raise ValueError("A name is 1 to 40 characters.")
+            raise ValueError(t("species.name_length"))
         # Kept as typed, bar a capital to start it: Settings then shows it as the
         # tiles write it (forecasting.model.sentence_case).
         return value[:1].upper() + value[1:]
@@ -294,9 +305,14 @@ def set_huntable(
     """
     sp = db.get(Species, species_id)
     if sp is None:
-        raise HTTPException(404, "Species not found.")
+        raise HTTPException(404, t("species.not_found"))
     if "common_name" in body.model_fields_set:
-        sp.common_name = body.common_name or default_name(sp.id)
+        # The app's own name for it, as this admin reads the app (or in English), is
+        # no name of theirs: a Finnish admin saving "Villisika" as it was shown keeps
+        # it "Wild boar" for the others. "Jabalí" typed by an English reader is theirs.
+        own = {tr(lang, f"species.{sp.id}").lower() for lang in {current(), DEFAULT}}
+        given = body.common_name
+        sp.common_name = default_name(sp.id) if not given or given.lower() in own else given
     if body.huntable is not None:
         sp.huntable = body.huntable
     if body.hidden is not None:
@@ -305,6 +321,8 @@ def set_huntable(
             sp.huntable = False
     db.commit()
     return {
-        "id": sp.id, "common_name": sp.common_name, "default_name": default_name(sp.id),
+        "id": sp.id, "common_name": species_name(sp.id, sp.common_name),
+        "custom": renamed(sp.id, sp.common_name),
+        "default_name": species_name(sp.id, None),
         "huntable": sp.huntable, "hidden": sp.hidden,
     }

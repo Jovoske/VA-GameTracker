@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.i18n import stored
 from app.models import SyncLog
 
 log = get_logger(__name__)
@@ -32,7 +33,9 @@ log = get_logger(__name__)
 PROVIDERS = {"spypoint": "SPYPOINT", "ubox": "UBox"}
 # Not a provider: the run stood down because the server's disk is nearly full.
 DISK = "disk"
-LABELS = {**PROVIDERS, DISK: "Server disk"}
+# Kept in English in the run's row, like its errors, and said in the reader's language
+# when read (app.i18n.localize).
+LABELS = {**PROVIDERS, DISK: stored("fetch.disk_label")}
 
 
 def summarize(results: dict) -> dict:
@@ -56,7 +59,7 @@ def summarize(results: dict) -> dict:
         if status == "error" and not any(a.get("error") for a in accounts):
             problems.append({"label": LABELS[provider],
                              "error": result.get("reason") or result.get("error")
-                             or "The fetch failed. It tries again on the next one."})
+                             or stored("fetch.failed")})
     if statuses and all(s == "skipped" for s in statuses):
         status = "skipped"
     elif all(s in ("ok", "skipped") for s in statuses):
@@ -80,8 +83,7 @@ def disk_full() -> dict | None:
     log.error("fetch.disk_full", free_gb=round(free / 1024**3, 1))
     return {
         "status": "error", "total": 0,
-        "reason": f"Nearly full ({free / 1024**3:.1f} GB free). The photos wait on the "
-                  "cameras and come in once there is room.",
+        "reason": stored("fetch.disk_full", gb=f"{free / 1024**3:.1f}"),
     }
 
 
@@ -120,8 +122,8 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
             log.error("fetch.provider_failed", provider=provider, error=str(exc))
             results[provider] = {
                 "status": "error", "total": 0,
-                "reason": f"The {PROVIDERS[provider]} fetch failed ({type(exc).__name__}). "
-                          "It tries again on the next one.",
+                "reason": stored("fetch.provider_failed", provider=PROVIDERS[provider],
+                                 error=type(exc).__name__),
             }
     return _summary(db, started, results), results
 
@@ -167,7 +169,7 @@ def check_and_recount(db: Session) -> tuple[dict, str | None]:
     except Exception as exc:
         db.rollback()
         log.error("fetch.ai_failed", error=str(exc))
-        error = f"Looking for animals failed ({type(exc).__name__})"
+        error = stored("fetch.ai_failed", error=type(exc).__name__)
     if jobs.lock_lost():
         return results, error  # the run that took the lock over recounts
     try:

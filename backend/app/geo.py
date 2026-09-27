@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+from app.i18n import t
+
 EARTH_R_M = 6_371_000.0
 
 
@@ -326,21 +328,21 @@ def clean_polygon(polygon: object) -> dict:
     part "outside" (audit B-10). Only the outer ring is kept.
     """
     if not isinstance(polygon, dict) or polygon.get("type") != "Polygon":
-        raise ShapeError("The outline must be a GeoJSON Polygon.")
+        raise ShapeError(t("shape.not_polygon"))
     rings = polygon.get("coordinates")
     if not isinstance(rings, list) or not rings or not isinstance(rings[0], list):
-        raise ShapeError("The outline has no corners.")
+        raise ShapeError(t("shape.no_corners"))
     if len(rings[0]) > MAX_CORNERS + 1:
-        raise ShapeError(f"That outline has {len(rings[0])} corners. Keep it under {MAX_CORNERS}.")
+        raise ShapeError(t("shape.too_many", n=len(rings[0]), limit=MAX_CORNERS))
     points: list[tuple[float, float]] = []
     for pt in rings[0]:
         if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
-            raise ShapeError("Each corner must be two numbers: longitude, then latitude.")
+            raise ShapeError(t("shape.two_numbers"))
         lon, lat = _number(pt[0]), _number(pt[1])
         if lon is None or lat is None:
-            raise ShapeError("Each corner must be two numbers: longitude, then latitude.")
+            raise ShapeError(t("shape.two_numbers"))
         if not (-180 <= lon <= 180 and -90 <= lat <= 90):
-            raise ShapeError("A corner is off the map. Corners go longitude first, then latitude.")
+            raise ShapeError(t("shape.off_map"))
         if points and distance_m(lat, lon, points[-1][1], points[-1][0]) < SAME_CORNER_M:
             continue
         points.append((lon, lat))
@@ -348,16 +350,14 @@ def clean_polygon(polygon: object) -> dict:
     if len(points) > 1 and distance_m(first[1], first[0], last[1], last[0]) < SAME_CORNER_M:
         points.pop()
     if len(points) < 3:
-        raise ShapeError("Tap at least three corners around the area.")
+        raise ShapeError(t("shape.three"))
     lats, lons = [p[1] for p in points], [p[0] for p in points]
     if distance_m(min(lats), min(lons), max(lats), max(lons)) > MAX_SPAN_M:
-        raise ShapeError(
-            "That outline is over 20 km across. Draw just the cover the animals lie up in."
-        )
+        raise ShapeError(t("shape.too_big"))
     xy = _flat(points)
     if _crosses_itself(xy):
-        raise ShapeError("The outline crosses itself. Put the corners in order around the edge.")
+        raise ShapeError(t("shape.crosses"))
     if _area_m2(xy) < MIN_AREA_M2:
-        raise ShapeError("That outline has almost no area. Spread the corners around the cover.")
+        raise ShapeError(t("shape.no_area"))
     closed = [[lon, lat] for lon, lat in points] + [[points[0][0], points[0][1]]]
     return {"type": "Polygon", "coordinates": [closed]}

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.db import get_db
-from app.forecasting.model import sentence_case
+from app.i18n import species_name, t
 from app.models import (
     Camera,
     Detection,
@@ -56,7 +56,7 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
     species = [
         {
             "id": s.id,
-            "common_name": sentence_case(s.common_name),  # "Roe deer", as the app writes it
+            "common_name": species_name(s.id, s.common_name),  # "Roe deer", as the app writes it
             "selected": s.id in chosen,
             "detections": int(counts.get(s.id, 0)),
         }
@@ -108,7 +108,7 @@ def _camera_ids(db: Session, user: User, ids: list[str]) -> list[str]:
         else:
             unknown.append(str(raw))
     if unknown:
-        raise HTTPException(400, f"Unknown camera: {', '.join(sorted(unknown))}")
+        raise HTTPException(400, t("alerts.unknown_camera", ids=", ".join(sorted(unknown))))
     return sorted(out)
 
 
@@ -133,14 +133,14 @@ def put_settings(
         known = set(db.scalars(select(Species.id)).all())
         unknown = sorted(set(body.species_ids) - known)
         if unknown:
-            raise HTTPException(400, f"Unknown species: {', '.join(unknown)}")
+            raise HTTPException(400, t("alerts.unknown_species", ids=", ".join(unknown)))
     muted = None
     if body.muted_camera_ids is not None:
         muted = _camera_ids(db, user, body.muted_camera_ids)
     if body.quiet and (body.quiet_start is None or body.quiet_end is None):
-        raise HTTPException(400, "Quiet hours need a start and an end.")
+        raise HTTPException(400, t("alerts.quiet_needs_both"))
     if body.quiet and body.quiet_start == body.quiet_end:
-        raise HTTPException(400, "Quiet hours can't start and end at the same time.")
+        raise HTTPException(400, t("alerts.quiet_same"))
     row = locked_prefs(db, user.id)
     if body.enabled is not None:
         row.enabled = body.enabled
@@ -190,7 +190,7 @@ def put_camera_alerts(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     row = locked_prefs(db, user.id)
     muted = set(row.muted_camera_ids or [])
     key = str(camera_id)
@@ -224,7 +224,7 @@ def subscribe(
 ) -> dict:
     """Register this browser's push endpoint. Re-posting the same endpoint updates it."""
     if not body.endpoint.startswith("https://"):
-        raise HTTPException(400, "Push endpoint must be an https URL")
+        raise HTTPException(400, t("alerts.endpoint_https"))
     sub = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint))
     if sub is None:
         sub = PushSubscription(endpoint=body.endpoint, user_id=user.id, p256dh="", auth="")
@@ -335,13 +335,11 @@ def mark_read(user: User = Depends(get_current_user), db: Session = Depends(get_
 def send_test(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """Push a test message to every device this user has subscribed."""
     if _subscription_count(db, user) == 0:
-        raise HTTPException(
-            400, "No phone is getting alerts yet. Turn alerts on from that phone first."
-        )
+        raise HTTPException(400, t("alerts.no_phone"))
     now = datetime.now(timezone.utc)
     n = Notification(
-        user_id=user.id, kind="test", title="Test alert",
-        body="Alerts are working on this phone.", url="/settings", created_at=now,
+        user_id=user.id, kind="test", title=t("alerts.test_title"),
+        body=t("alerts.test_body"), url="/settings", created_at=now,
     )
     db.add(n)
     db.flush()

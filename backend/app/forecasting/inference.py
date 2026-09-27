@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
+from app.i18n import t
 from app.models import Camera, Detection, Image, Species, Stand
 
 # Two cameras seeing the same species within this gap is plausibly one animal
@@ -54,11 +55,11 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
     advice costs more trust than an honest "yours to solve".
     """
     if stand.camera_id is None:
-        return {"suggestions": [], "reason": "This stand is not linked to a camera."}
+        return {"suggestions": [], "reason": t("arcs.no_camera")}
 
     target = db.get(Camera, stand.camera_id)
     if target is None or target.lat is None or target.lon is None:
-        return {"suggestions": [], "reason": "The linked camera has no position recorded."}
+        return {"suggestions": [], "reason": t("arcs.camera_unplaced")}
 
     others = [
         c
@@ -66,7 +67,7 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
         if c.lat is not None and c.lon is not None
     ]
     if not others:
-        return {"suggestions": [], "reason": "No other positioned cameras to infer movement from."}
+        return {"suggestions": [], "reason": t("arcs.no_others")}
 
     # Detections at the target camera, and at every other camera, by species/time.
     rows = db.execute(
@@ -106,10 +107,8 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
             "from_camera": name,
             "approach_deg": round(v["bearing"]),
             "sequences": v["count"],
-            "note": (
-                f"{v['count']} times, animals reached {target.name} within "
-                f"{int(MAX_TRAVEL_GAP.total_seconds() // 60)} min of passing {name}."
-            ),
+            "note": t("arcs.note", n=v["count"], camera=target.name, other=name,
+                      minutes=int(MAX_TRAVEL_GAP.total_seconds() // 60)),
         }
         for name, v in sorted(tally.items(), key=lambda kv: -kv[1]["count"])
         if v["count"] >= MIN_SEQUENCES
@@ -119,10 +118,7 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
         "suggestions": suggestions,
         "reason": None
         if suggestions
-        else (
-            "No repeated movement between cameras yet — not enough to propose an "
-            "approach line, so the app will keep saying this one is yours to solve."
-        ),
+        else t("arcs.none"),
     }
 
 
@@ -149,7 +145,7 @@ def dark_exit(db: Session, stand: Stand, *, after: timedelta = SIT_ENDS_AFTER_SU
     from app.forecasting.visits import visit_rows
 
     if stand.camera_id is None:
-        return {"hour": None, "reason": "This stand is not linked to a camera."}
+        return {"hour": None, "reason": t("arcs.no_camera")}
 
     tonight = current_night()
     v = visit_rows(start=night_key_start(tonight - timedelta(days=EXIT_HISTORY_NIGHTS)),
@@ -161,7 +157,7 @@ def dark_exit(db: Session, stand: Stand, *, after: timedelta = SIT_ENDS_AFTER_SU
             offsets.append((first_at - sunset).total_seconds() / 60)
     sunset = _sunset(tonight)
     if not offsets or sunset is None:
-        return {"hour": None, "reason": "No visits at this stand's camera yet."}
+        return {"hour": None, "reason": t("exit.no_visits")}
 
     total = len(offsets)
     start_min = after.total_seconds() / 60
@@ -188,18 +184,12 @@ def dark_exit(db: Session, stand: Stand, *, after: timedelta = SIT_ENDS_AFTER_SU
                 "hour": at.hour, "time": at.strftime("%H:%M"),
                 "share_pct": round(share(k) * 100, 1),
                 "reason": None,
-                "text": (
-                    f"Dark exit {at:%H:%M} — only {round(share(k) * 100)}% of this camera's "
-                    "visits fall in the hour after, so walking out then disturbs least."
-                ),
+                "text": t("exit.quiet", time=f"{at:%H:%M}", pct=round(share(k) * 100)),
             }
 
     quietest = on_clock(min(hours, key=share))
     return {
         "hour": quietest.hour, "time": quietest.strftime("%H:%M"),
-        "reason": "No genuinely quiet hour — this stand is busy all night.",
-        "text": (
-            f"No quiet hour after {on_clock(0):%H:%M} at this stand — it is busy all night. "
-            f"{quietest:%H:%M} is the least-bad exit."
-        ),
+        "reason": t("exit.busy_reason"),
+        "text": t("exit.busy", after=f"{on_clock(0):%H:%M}", time=f"{quietest:%H:%M}"),
     }

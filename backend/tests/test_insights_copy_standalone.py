@@ -27,7 +27,9 @@ def rows(camera, species_id, name, hours):
 
 class InsightsCopyTests(unittest.TestCase):
     def setUp(self):
-        self.namespace = {"SITTABLE_HOURS": tuple(range(16, 24)) + (0, 1)}
+        from app.i18n import t  # the words come from the catalogs, in English here
+
+        self.namespace = {"SITTABLE_HOURS": tuple(range(16, 24)) + (0, 1), "t": t}
         load_function("model.py", "_best_window", self.namespace)
         load_function("insights.py", "_clock", self.namespace)
         load_function("insights.py", "_summaries", self.namespace)

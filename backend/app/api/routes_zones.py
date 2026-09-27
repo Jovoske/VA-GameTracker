@@ -16,6 +16,7 @@ from app.api.deps import get_current_admin, get_current_user
 from app.core.db import get_db
 from app.core.logging import get_logger
 from app.forecasting import bedding
+from app.i18n import t
 from app.models import Estate, Stand, User, Zone
 from app.terrain import covers, get_grid, load_in_background, load_status, start_load
 
@@ -46,7 +47,7 @@ def _clean_name(value: object) -> object:
     if isinstance(value, str):
         value = value.strip()
         if not value:
-            raise ValueError("Give it a name the group will know.")
+            raise ValueError(t("zones.name_needed"))
     return value
 
 
@@ -72,8 +73,8 @@ class ZonePatch(BaseModel):
     @classmethod
     def _not_null(cls, value: object, info) -> object:
         if value is None:
-            raise ValueError(f"The {'name' if info.field_name == 'name' else 'outline'} "
-                             "can be changed, not left empty.")
+            raise ValueError(t("zones.name_not_empty" if info.field_name == "name"
+                               else "zones.outline_not_empty"))
         return value
 
 
@@ -95,11 +96,11 @@ def list_zones(_: User = Depends(get_current_user), db: Session = Depends(get_db
 def create_zone(body: ZoneIn, user: Admin, db: DB) -> dict:
     """Draw an area (admins, as on the map). Every wind call leans on the bedding."""
     if body.kind not in KINDS:
-        raise HTTPException(422, f"kind must be one of {', '.join(KINDS)}")
+        raise HTTPException(422, t("zones.bad_kind", kinds=", ".join(KINDS)))
     polygon = _validate_polygon(body.polygon)
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
-        raise HTTPException(400, "Set up the estate first.")
+        raise HTTPException(400, t("stands.no_estate"))
     z = Zone(
         estate_id=estate.id, kind=body.kind, name=body.name,
         polygon=polygon, notes=body.notes, created_by=user.id,
@@ -116,7 +117,7 @@ def update_zone(zone_id: uuid.UUID, body: ZonePatch, _: Admin, db: DB) -> dict:
     wind call rather than being removed and drawn again (audit B-22)."""
     z = db.get(Zone, zone_id)
     if z is None:
-        raise HTTPException(404, "That area isn't on the map.")
+        raise HTTPException(404, t("zones.gone"))
     data = body.model_dump(exclude_unset=True)
     if "polygon" in data:
         data["polygon"] = _validate_polygon(data["polygon"])
@@ -130,7 +131,7 @@ def update_zone(zone_id: uuid.UUID, body: ZonePatch, _: Admin, db: DB) -> dict:
 def delete_zone(zone_id: uuid.UUID, _: Admin, db: DB) -> None:
     z = db.get(Zone, zone_id)
     if z is None:
-        raise HTTPException(404, "That area isn't on the map.")
+        raise HTTPException(404, t("zones.gone"))
     db.delete(z)
     db.commit()
 

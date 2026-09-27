@@ -52,6 +52,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.forecasting.exposure import VISIT_GAP
 from app.forecasting.model import class_label
+from app.i18n import DEFAULT, t, use
 from app.models import (
     AppSetting,
     Camera,
@@ -166,13 +167,17 @@ def _set_cursor(db: Session, at: datetime) -> None:
 def group_by_species(rows) -> dict[str, SpeciesDigest]:
     """rows: (species_id, common_name, image_id, captured_at, camera_name).
 
-    Named as the app writes it ("Wild boar", "Roe deer"), not as it is stored.
+    Named as the app writes it ("Wild boar", "Roe deer"), not as it is stored, in
+    English: the name is kept in the alert's tally, and each push says it in its
+    recipient's language (words.name).
     """
     out: dict[str, SpeciesDigest] = {}
     for sid, name, image_id, captured_at, camera in rows:
         d = out.get(sid)
         if d is None:
-            d = out[sid] = SpeciesDigest(species_id=sid, name=class_label(sid, name, None, None))
+            with use(DEFAULT):
+                label = class_label(sid, name, None, None)
+            d = out[sid] = SpeciesDigest(species_id=sid, name=label)
         d.add(image_id, captured_at, camera)
     return out
 
@@ -187,36 +192,40 @@ def compose(d: SpeciesDigest, tz: ZoneInfo, now: datetime | None = None) -> tupl
     cams = [c for c, _ in d.cameras.most_common()]
     n = d.visits
     when = words.said_at(d.latest_at, tz, now)
-    title = words.where_title(d.name, d.cameras)
+    title = words.where_title(words.name(d.species_id, {"name": d.name}), d.cameras)
     if n == 1:
-        return title, f"1 visit at {when}."
+        return title, t("push.one_visit", when=when)
     if len(cams) == 1:
-        return title, f"{words.visits(n)}, last one {when}."
-    return title, f"{words.visits(n)} at {_join(cams)}, last one {when}."
+        return title, t("push.visits_last", visits=words.visits(n), when=when)
+    return title, t("push.visits_at_last", visits=words.visits(n), cameras=_join(cams),
+                    when=when)
 
 
-def compose_update(tally: dict, tz: ZoneInfo, now: datetime | None = None) -> tuple[str, str]:
+def compose_update(tally: dict, tz: ZoneInfo, now: datetime | None = None,
+                   species_id: str | None = None) -> tuple[str, str]:
     """(title, body) for a quiet update inside the cooldown: the running total since
     the alert that buzzed. "Wild boar at PL19" / "4 visits since 00:55, last one 02:40."
     """
     cams = Counter(tally.get("cameras") or {})
-    title = words.where_title(tally.get("name") or "Animal", cams)
+    title = words.where_title(words.name(species_id, tally), cams)
     since = words.said_at(words.first(tally), tz, now)
     last = words.said_at(words.latest(tally), tz, now)
-    where = "" if len(cams) <= 1 else f" at {_join([c for c, _ in cams.most_common()])}"
+    where = "" if len(cams) <= 1 else t(
+        "push.at_cameras", cameras=_join([c for c, _ in cams.most_common()]))
     n = words.visits(int(tally.get("visits") or 0))
-    return title, f"{n}{where} since {since}, last one {last}."
+    return title, t("push.update", visits=n, where=where, since=since, last=last)
 
 
 def compose_summary(digests: list[SpeciesDigest], tz: ZoneInfo,
                     now: datetime | None = None) -> tuple[str, str]:
     n = sum(d.visits for d in digests)
-    names = [d.name for d in sorted(digests, key=lambda d: -d.visits)]
+    names = [words.name(d.species_id, {"name": d.name})
+             for d in sorted(digests, key=lambda d: -d.visits)]
     latest = max((d.latest_at for d in digests if d.latest_at), default=None)
     when = words.said_at(latest, tz, now)
     return (
-        f"{n} new sightings, {len(digests)} animals",
-        f"{_join(names)}, last one {when}.",
+        t("push.summary_title", n=n, animals=len(digests)),
+        t("push.summary_body", names=_join(names), when=when),
     )
 
 
@@ -299,6 +308,8 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
             select(NotificationPref).where(NotificationPref.enabled.is_(True))
         ).all()
         on = hold.sitting(db, now, [p.user_id for p in prefs])
+        # Each push is in its recipient's language.
+        langs = push.languages(db, [p.user_id for p in prefs])
         news: dict = {}
         for pref in prefs:
             wanted_ids = set(pref.species_ids or [])
@@ -328,36 +339,38 @@ def dispatch_new_sightings(db: Session, now: datetime | None = None) -> dict:
 
             # (record, whether it buzzes)
             notes: list[tuple[Notification, bool]] = []
-            if len(wanted) > MAX_PER_USER:
-                title, body = compose_summary(wanted, tz, now)
-                running = _running(recent, None)
-                detail = {"species": {d.species_id: d.tally() for d in wanted}}
-                if running is not None:
-                    detail["update_of"] = str(running[0].id)
-                notes.append((Notification(
-                    user_id=pref.user_id, kind="sighting", title=title, body=body,
-                    url=summary_url([d.species_id for d in wanted]), created_at=now,
-                    detail=detail,
-                ), running is None))
-            else:
-                for d in wanted:
-                    title, body = compose(d, tz, now)
-                    detail = d.tally()
-                    running = _running(recent, d.species_id)
+            with use(langs.get(pref.user_id)):
+                if len(wanted) > MAX_PER_USER:
+                    title, body = compose_summary(wanted, tz, now)
+                    running = _running(recent, None)
+                    detail = {"species": {d.species_id: d.tally() for d in wanted}}
                     if running is not None:
-                        loud_row, tallies = running
-                        title, body = compose_update(words.merge([*tallies, detail]), tz, now)
-                        # Recent shows it as the alert it updates (routes_notifications),
-                        # when that alert is about this animal alone: not one that
-                        # named several, whose words it would take the place of.
-                        if loud_row.kind == "sighting" and loud_row.species_id == d.species_id:
-                            detail["update_of"] = str(loud_row.id)
+                        detail["update_of"] = str(running[0].id)
                     notes.append((Notification(
                         user_id=pref.user_id, kind="sighting", title=title, body=body,
-                        url=sighting_url(d.species_id, d.latest_image_id, d.latest_at),
-                        species_id=d.species_id, image_id=d.latest_image_id,
-                        created_at=now, detail=detail,
+                        url=summary_url([d.species_id for d in wanted]), created_at=now,
+                        detail=detail,
                     ), running is None))
+                else:
+                    for d in wanted:
+                        title, body = compose(d, tz, now)
+                        detail = d.tally()
+                        running = _running(recent, d.species_id)
+                        if running is not None:
+                            loud_row, tallies = running
+                            title, body = compose_update(words.merge([*tallies, detail]), tz, now,
+                                                     d.species_id)
+                            # Recent shows it as the alert it updates (routes_notifications),
+                            # when that alert is about this animal alone: not one that
+                            # named several, whose words it would take the place of.
+                            if loud_row.kind == "sighting" and loud_row.species_id == d.species_id:
+                                detail["update_of"] = str(loud_row.id)
+                        notes.append((Notification(
+                            user_id=pref.user_id, kind="sighting", title=title, body=body,
+                            url=sighting_url(d.species_id, d.latest_image_id, d.latest_at),
+                            species_id=d.species_id, image_id=d.latest_image_id,
+                            created_at=now, detail=detail,
+                        ), running is None))
             if why:
                 # In a stand, or quiet hours: kept, and sent as one message after.
                 for n, _ in notes:

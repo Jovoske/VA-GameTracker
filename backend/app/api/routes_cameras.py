@@ -18,6 +18,7 @@ from app.api.routes_photos import _items, after_cursor
 from app.api.visibility import SHOWN_EMPTY, VISIBLE_ANIMAL, team_sees
 from app.core.db import get_db
 from app.health import camera_health
+from app.i18n import localize, t
 from app.ingestion.logins import camera_logins
 from app.models import Camera, CameraView, Image, User
 
@@ -40,20 +41,25 @@ def _pipeline_busy() -> bool:
 
 # What a job that holds the photo fetch up is doing, in words, by its lock's owner.
 BUSY_WITH = {
-    "reid": "looking for repeat visitors",
-    "plan": "writing tonight’s plan",
-    "score": "checking last night’s plan against the cameras",
-    "scan": "checking photos for animals",
-    "deploy": "installing an update",
+    "reid": "busy.reid",
+    "plan": "busy.plan",
+    "score": "busy.score",
+    "scan": "busy.scan",
+    "deploy": "busy.deploy",
 }
+
+
+def busy_with(owner: str | None) -> str:
+    """"looking for repeat visitors": what the job holding the lock is doing."""
+    return t(BUSY_WITH.get(owner or "", "busy.other"))
 
 
 def _busy_words() -> str:
     """Why a one-off can't start now, in words: what holds the lock."""
     holder = jobs.holder("pipeline")
-    what = "fetching photos" if holder is None or holder.owner in jobs.FETCH_MODES else (
-        BUSY_WITH.get(holder.owner, "busy with another job"))
-    return f"The server is {what}. Try again in a few minutes."
+    what = t("busy.fetch") if holder is None or holder.owner in jobs.FETCH_MODES else (
+        busy_with(holder.owner))
+    return t("busy.try_later", what=what)
 
 
 def _lock_started() -> datetime | None:
@@ -64,7 +70,7 @@ def _lock_started() -> datetime | None:
 def _start(db: Session, mode: str, *args: str) -> None:
     """Start a pipeline job, or say in words that it could not be started."""
     if not jobs.spawn(mode, *args):
-        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
+        raise HTTPException(503, t("cameras.start_failed"))
 
 
 # How long a camera's photos take to reach the app: the middle one of its last
@@ -179,10 +185,10 @@ class CameraNameBody(BaseModel):
         if value is None:
             return None
         if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value):
-            raise ValueError("Camera name has hidden characters in it. Retype it.")
+            raise ValueError(t("cameras.name_hidden_chars"))
         value = value.strip()
         if not 1 <= len(value) <= 100:
-            raise ValueError("Camera name must be 1 to 100 characters.")
+            raise ValueError(t("cameras.name_length"))
         return value
 
 
@@ -194,12 +200,12 @@ def rename_camera(
     db: Session = Depends(get_db),
 ) -> dict:
     if user.role not in {"admin", "member"}:
-        raise HTTPException(403, "Only estate admins and members can rename cameras.")
+        raise HTTPException(403, t("cameras.rename_forbidden"))
     camera = db.scalar(select(Camera).where(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ).with_for_update().execution_options(populate_existing=True))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     # Local imports have no vendor label, so retain their initial name as default.
     if not camera.provider_name:
         camera.provider_name = camera.name
@@ -213,11 +219,8 @@ def rename_camera(
     if taken is not None:
         # Going back to the vendor's name too: two SPYPOINTs called "SPYPOINT" are the
         # same trap as two cameras a hunter called "Feeder".
-        raise HTTPException(409, (
-            f"Another camera is already called {name}. Pick another name."
-            if body.name is not None else
-            f"Another camera is already called {name}, so this one keeps its own name."
-        ))
+        raise HTTPException(409, t("cameras.name_taken" if body.name is not None
+                                   else "cameras.name_taken_reset", name=name))
     camera.name = name
     camera.name_is_custom = body.name is not None
     db.commit()
@@ -249,7 +252,7 @@ def retire_camera(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     if body.retired and camera.retired_at is None:
         camera.retired_at = datetime.now(UTC)
     elif not body.retired and camera.retired_at is not None:
@@ -281,7 +284,7 @@ def mark_seen(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     stmt = pg_insert(CameraView).values(
         user_id=user.id, camera_id=camera_id, seen_at=seen_mark(camera_id),
     )
@@ -303,17 +306,17 @@ def trigger_sync(
     to ask twice: the pipeline lock serves one fetch at a time, and one with nothing
     new is quick. Viewers wait for the fetch every 15 minutes."""
     if user.role not in {"admin", "member"}:
-        raise HTTPException(403, "New photos come in by themselves every 15 minutes.")
+        raise HTTPException(403, t("cameras.check_viewer"))
     # `since` is what the Check button waits for: a fetch summary started after it
     # is this check's result; an older one is somebody else's.
     holder = jobs.holder("pipeline")
     if holder is not None and holder.owner in jobs.FETCH_MODES:
         return {"status": "busy", "since": holder.started,
-                "note": "Already checking. New photos will show shortly."}
+                "note": t("cameras.check_running")}
     if jobs.holder("fetchqueue") is not None:
         asked = jobs.read_note(db, FETCH_REQUEST).get("at")
         return {"status": "queued", "since": asked,
-                "note": "Already asked. New photos come in as soon as the server is free."}
+                "note": t("cameras.check_asked")}
     since = datetime.now(UTC)
     if holder is None:
         _start(db, "sync")
@@ -324,9 +327,8 @@ def trigger_sync(
     # although no fetch had been asked for, and none came.
     _start(db, "sync", "queued")
     jobs.note(db, FETCH_REQUEST, at=since)
-    what = BUSY_WITH.get(holder.owner, "busy with another job")
     return {"status": "queued", "since": since,
-            "note": f"The server is {what}. New photos come in when it finishes."}
+            "note": t("cameras.check_queued", what=busy_with(holder.owner))}
 
 
 @router.post("/backfill")
@@ -379,18 +381,28 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
             return {
                 "status": "identifying", "result": row.status,
                 "images_downloaded": row.images_downloaded, "started_at": row.started_at,
-                "problems": details.get("problems", []),
+                "problems": _said(details.get("problems")),
             }
         return {"status": "running", "started_at": started}
     if row is None:
         return {"status": "never"}
-    details = row.details or {}
+    details = dict(row.details or {})
+    problems = _said(details.get("problems"))
+    if details.get("ai_error"):
+        details["ai_error"] = localize(details["ai_error"])
     return {
         "status": row.status, "images_downloaded": row.images_downloaded,
-        "started_at": row.started_at, "finished_at": row.finished_at, "error": row.error,
-        "problems": details.get("problems", []),
+        "started_at": row.started_at, "finished_at": row.finished_at,
+        "error": "; ".join(f"{p['label']}: {p['error']}" for p in problems) or row.error,
+        "problems": problems,
         "details": details,
     }
+
+
+def _said(problems: list | None) -> list[dict]:
+    """A run's problems ({"label", "error"}, kept in English) in the reader's language."""
+    return [{**p, "label": localize(p.get("label")), "error": localize(p.get("error"))}
+            for p in problems or []]
 
 
 class LocationBody(BaseModel):
@@ -413,7 +425,7 @@ def _camera_for_update(db: Session, user: User, camera_id: uuid.UUID) -> Camera:
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ).with_for_update().execution_options(populate_existing=True))
     if cam is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     return cam
 
 
@@ -428,7 +440,7 @@ def set_location(
     provider's GPS no longer moves it at the next sync (audit B-09, E-16), until
     someone asks for the camera's own position again (DELETE)."""
     if not geo.plausible_position(body.lat, body.lng):
-        raise HTTPException(422, "That spot is off the map. Move the map and try again.")
+        raise HTTPException(422, t("cameras.off_map"))
     cam = _camera_for_update(db, user, camera_id)
     cam.lat, cam.lon = body.lat, body.lng
     cam.location_is_custom = True
@@ -446,9 +458,7 @@ def use_provider_location(
     follow it from now on, as for a camera nobody placed."""
     cam = _camera_for_update(db, user, camera_id)
     if cam.provider_lat is None or cam.provider_lon is None:
-        raise HTTPException(
-            409, "This camera hasn’t reported a position of its own. Place it by hand."
-        )
+        raise HTTPException(409, t("cameras.no_own_position"))
     cam.lat, cam.lon = cam.provider_lat, cam.provider_lon
     cam.location_is_custom = False
     db.commit()

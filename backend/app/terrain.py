@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.estate_area import side_m, terrain_box
+from app.i18n import localize, stored
 from app.models import TerrainGrid
 
 log = get_logger(__name__)
@@ -142,9 +143,10 @@ def covers(grid: TerrainGrid, lat: float, lon: float) -> bool:
 STATUS_KEY = "terrain_status"
 # A download "loading" for longer than this died with its process: start another.
 LOADING_STALE_S = 10 * 60
+# Kept in English in the status, and said in the reader's language (load_status).
 FAILED_WORDS = {
-    "busy": "The elevation service is busy. Try again in a few minutes.",
-    "down": "The elevation service didn’t answer. Try again later.",
+    "busy": stored("terrain.busy"),
+    "down": stored("terrain.down"),
 }
 
 
@@ -160,7 +162,7 @@ def load_status(db: Session) -> dict:
     if value.get("state") not in ("loading", "failed"):
         value = {"state": "loaded" if grid is not None else "none",
                  "finished_at": value.get("finished_at")}
-    value.setdefault("error", None)
+    value["error"] = localize(value.get("error"))
     # A reload updates the grid's row in place, so its created_at is the first load.
     loaded = value.get("finished_at") if value["state"] == "loaded" else None
     value["loaded_at"] = loaded or (grid.created_at if grid is not None else None)

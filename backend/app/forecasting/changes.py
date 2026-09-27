@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.forecasting.exposure import current_night, night_key_start, visits_by_night
+from app.i18n import decimal, join, t
 from app.models import Camera, CameraNight
 
 LOOKBACK_NIGHTS = 30
@@ -41,12 +42,12 @@ def _median(values: list[float]) -> float:
 
 
 def _visits(n: int) -> str:
-    return f"{n} visit{'' if n == 1 else 's'}"
+    return t("count.visits", n=n)
 
 
 def usual(median: float) -> str:
     """"about 3", or "about 1.5": a whole number only where rounding says little."""
-    return f"about {median:.0f}" if median >= 2 else f"about {median:.1f}".replace(".0", "")
+    return t("changed.about", x=f"{median:.0f}" if median >= 2 else decimal(median, 1))
 
 
 class _Nights:
@@ -151,7 +152,7 @@ def whats_changed(db: Session, *, tonight: date | None = None) -> dict:
     last_night = (tonight or current_night()) - timedelta(days=1)
     cameras = _active(db)
     if not cameras:
-        return {"kind": "none", "camera": None, "text": "No cameras set up yet."}
+        return {"kind": "none", "camera": None, "text": t("changed.no_cameras")}
     n = _Nights(db, last_night)
 
     # A camera that has gone off the air outranks everything else on this screen.
@@ -163,8 +164,7 @@ def whats_changed(db: Session, *, tonight: date | None = None) -> dict:
                 return {
                     "kind": "camera_down",
                     "camera": name,
-                    "text": f"{name} sent nothing last night. Unknown whether anything "
-                            "came through.",
+                    "text": t("changed.camera_down", camera=name),
                 }
 
     best: tuple[float, dict] | None = None
@@ -189,7 +189,7 @@ def whats_changed(db: Session, *, tonight: date | None = None) -> dict:
             cand = {
                 "kind": "return",
                 "camera": name,
-                "text": f"Animals back at {name} after {quiet_run} quiet nights.",
+                "text": t("changed.return", camera=name, n=quiet_run),
             }
             score = 100 + quiet_run
         elif tonight_count == 0 and median >= 1:
@@ -199,17 +199,16 @@ def whats_changed(db: Session, *, tonight: date | None = None) -> dict:
             cand = {
                 "kind": "gone_quiet",
                 "camera": name,
-                "text": f"{name} has been quiet for {quiet['silent']} nights. It usually sees "
-                        f"{usual(median)} a night.",
+                "text": t("changed.gone_quiet", camera=name, n=quiet["silent"],
+                          usual=usual(median)),
             }
             score = 50 + quiet["silent"]
         elif median >= 1 and abs(tonight_count - median) >= SHIFT_MIN_VISITS:
-            direction = "busier" if tonight_count > median else "quieter"
             cand = {
                 "kind": "shift",
                 "camera": name,
-                "text": f"{name} was {direction} than usual last night: "
-                        f"{_visits(tonight_count)} against a usual {usual(median)}.",
+                "text": t("changed.busier" if tonight_count > median else "changed.quieter",
+                          camera=name, visits=_visits(tonight_count), usual=usual(median)),
             }
             score = 10 + abs(tonight_count - median)
         else:
@@ -221,14 +220,14 @@ def whats_changed(db: Session, *, tonight: date | None = None) -> dict:
     if best:
         return best[1]
     if unchecked:
-        names = " and ".join(unchecked) if len(unchecked) <= 2 else "some cameras"
+        names = join(unchecked) if len(unchecked) <= 2 else t("changed.some_cameras")
         return {
             "kind": "checking",
             "camera": unchecked[0] if len(unchecked) == 1 else None,
-            "text": f"Last night's photos from {names} are still being checked.",
+            "text": t("changed.checking", cameras=names),
         }
     return {
         "kind": "none",
         "camera": None,
-        "text": "Nothing changed. Much the same as the last few nights.",
+        "text": t("changed.none"),
     }

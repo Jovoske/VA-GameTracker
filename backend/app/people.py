@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import re
 
+from app.i18n import t
+
 _CHUNKS = re.compile(r"[._+\-0-9]+")
-FALLBACK = "Hunter"
+# "Hunter", in the language being written in.
+FALLBACK = "people.hunter"
 MAX_LEN = 24
 
 
@@ -21,4 +24,4 @@ def name_for(user) -> str:
     for chunk in _CHUNKS.split(local):
         if chunk:
             return chunk[:MAX_LEN].capitalize()
-    return FALLBACK
+    return t(FALLBACK)
