@@ -574,7 +574,7 @@ export default function PhotoLightbox({
         <>
           {peopleFrame && admin && !nobody && (
             <button className="ov-tool ov-tool--text" onClick={() => clearPeople(im.id, true)} disabled={peopleBusy}
-              aria-label="Nobody in it? Put it back with the animal photos" title="Nobody in it (a feeder or a rock read as a vehicle)? Put it back with the animal photos">
+              aria-label="Nobody in it? Make it an ordinary photo again" title="Nobody in it (a feeder or a rock read as a vehicle)? Make it an ordinary photo again">
               Nobody in it?
             </button>
           )}
@@ -634,7 +634,7 @@ export default function PhotoLightbox({
                   onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
                   <span>
                     {peopleErr || (shownPeople.cleared
-                      ? 'Marked: nobody in it. It goes back to the animal photos, for everyone.'
+                      ? 'Marked: nobody in it. It’s an ordinary photo again, for everyone.'
                       : 'Back with the people and vehicles.')}
                   </span>
                   {(shownPeople.cleared || peopleErr) && (
@@ -688,7 +688,9 @@ export default function PhotoLightbox({
               </div>
               {peopleFrame ? (
                 <p className="lb-people-note">
-                  Only admins see this photo. It never goes in the team’s photos, counts or alerts.
+                  {nobody
+                    ? 'Nobody in it: the team sees it like any other photo now.'
+                    : 'Only admins see this photo. It never goes in the team’s photos, counts or alerts.'}
                 </p>
               ) : <PhotoNotesPanel
                 key={im.id}
