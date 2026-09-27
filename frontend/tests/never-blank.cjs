@@ -126,7 +126,8 @@ const server=http.createServer((req,res)=>{
   set({mode:'drop'});
   const later=await open(ctx);await later.clock.install({time:new Date(Date.now()+14*3600e3)});
   await later.goto(base+'/');await later.locator('.tn-verdict').waitFor();
-  await waitFresh(later,/^No signal\. Plan from 14 h ago\./);await later.close();
+  // 14 h on from after 16:00 is past 06:00, when the plan is last night's and says so.
+  await waitFresh(later,/^No signal\. Plan from 14 h ago(\.|, made for last night\.)/);await later.close();
   // One bar: the page gives up on /stands first, so the worker never answers. With
   // nothing saved of its own, the page reads the worker's copy itself (J-06).
   set({});await page.goto(base+'/stands');await page.locator('#stand-s1').waitFor();
