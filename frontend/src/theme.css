@@ -534,3 +534,27 @@ main.page { padding: 16px; }
 /* The small binoculars on a tile the team has notes on. */
 .note-mark { position: absolute; top: 5px; right: 5px; z-index: 1; display: inline-flex; align-items: center; gap: 3px; padding: 3px 6px; border-radius: var(--r-pill); background: rgb(0 0 0 / 0.68); color: var(--v-look); font-size: 11px; line-height: 1; pointer-events: none; }
 .note-mark b { font-weight: 700; color: var(--text); }
+
+/* A page that broke (ErrorBoundary): the message and a way on, never a black screen. */
+.crashed { padding: 22px 18px; margin: 8px 0 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); }
+.crashed-title { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 8px; }
+.crashed-text { font-size: 14px; line-height: 1.6; color: var(--text-dim); margin: 0 0 16px; max-width: 60ch; }
+.crashed-reload { min-height: 56px; font-size: 16px; }
+.crashed-home { text-align: center; text-decoration: none; }
+/* "A new version is ready": one line and a Reload, above the page. */
+.update-ready { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; margin-bottom: 14px; background: var(--surface-2); border-radius: 10px; font-size: 14px; line-height: 1.4; }
+.update-ready span { flex: 1; min-width: 0; }
+.update-ready button { flex-shrink: 0; min-height: 44px; padding: 0 16px; background: transparent; color: var(--go); border: 1px solid var(--border); border-radius: var(--r-ctl); font: inherit; font-weight: 600; cursor: pointer; }
+/* Settings → Problems on phones (admins). */
+.phone-problem { padding: 10px 0; border-top: 1px solid var(--border); font-size: 13px; line-height: 1.5; }
+.phone-problem-head { display: flex; gap: 10px; font-weight: 600; font-size: 14px; }
+.phone-problem-head span:first-child { flex: 1; min-width: 0; }
+.phone-problem-when { font-weight: 400; color: var(--text-dim); white-space: nowrap; }
+.phone-problem-who { color: var(--text-dim); overflow-wrap: anywhere; }
+.phone-problem-msg { margin-top: 2px; overflow-wrap: anywhere; }
+.phone-problem-more summary { min-height: 44px; display: flex; align-items: center; color: var(--sand); cursor: pointer; }
+.phone-problem-more pre { margin: 4px 0 0; padding: 8px; max-height: 220px; overflow: auto; background: var(--surface-2); border-radius: var(--r-ctl); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* On the map the page runs edge to edge on a phone; these two keep the gutter. */
+@media (max-width: 640px) {
+  .layout--map > main.page > .crashed, .layout--map > main.page > .update-ready { margin: 12px 16px; }
+}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api } from '../api'
+import { api, getFresh } from '../api'
 
 /**
  * Sit Mode: the screen that works in a high seat at midnight.
@@ -96,8 +96,10 @@ export default function SitMode() {
   const holdFired = useRef(false)
 
   useEffect(() => {
-    api<Sit[]>('/sits')
-      .then((all) => setSit(all.find((s) => s.id === sitId) ?? null))
+    // The copy saved on the phone when there is no signal: the stand and the wind
+    // it was reserved on still show in the seat.
+    getFresh<Sit[]>('/sits', { save: true, timeoutMs: 20_000 })
+      .then((got) => setSit(got.data.find((s) => s.id === sitId) ?? null))
       .catch(() => setSit(null))
     const t = setInterval(() => setClock(new Date()), 1000)
 

@@ -16,3 +16,6 @@
 .stand-wind p { margin: 6px 0 10px; }
 .stand-wind-when { display: block; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
 .stand-wind a { color: var(--sand); font-size: 13px; }
+/* A saved copy on screen (no signal): how old, and what it can't know. */
+.stand-fresh { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 13px; line-height: 1.5; color: var(--v-look); margin: 0 0 14px; }
+.stand-fresh button { min-height: 44px; min-width: 44px; background: none; border: 0; text-decoration: underline; font: inherit; color: var(--sand); padding: 8px; cursor: pointer; }

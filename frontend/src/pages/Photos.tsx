@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, thumbUrl } from '../api'
+import { api, getFresh, peek, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { useRefetchOnReturn } from '../hooks'
@@ -68,6 +68,8 @@ export default function Photos() {
     if (sp || cam) return { species: sp ? sp.split(',') : [], cameras: cam ? cam.split(',') : [] }
     return readPick()
   })
+  // The newest page from earlier in this session paints at once, then the network
+  // replaces it: coming back to Photos from another tab is not "Loading…" again.
   const [photos, setPhotos] = useState<Photo[] | null>(null)
   const [nextBefore, setNextBefore] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -81,6 +83,15 @@ export default function Photos() {
   const wantImage = useRef<string | null>(params.get('image'))
   const request = useRef(0)
   const sentinel = useRef<HTMLDivElement>(null)
+  const photosRef = useRef(photos)
+  photosRef.current = photos
+  // What the page is still asking for; leaving the page drops it (audit K-08).
+  const ctl = useRef<AbortController | null>(null)
+  const signal = () => {
+    if (!ctl.current || ctl.current.signal.aborted) ctl.current = new AbortController()
+    return ctl.current.signal
+  }
+  useEffect(() => () => ctl.current?.abort(), [])
 
   const query = useCallback((before?: string | null) => {
     const q = new URLSearchParams()
@@ -94,23 +105,82 @@ export default function Photos() {
   const load = useCallback(() => {
     const id = ++request.current
     setErr('')
-    api<Page>(query())
-      .then((page) => {
+    const hit = peek<Page>(query())
+    if (hit) { setPhotos(hit.data.items); setNextBefore(hit.data.next_before) }
+    getFresh<Page>(query(), { signal: signal() })
+      .then(({ data: page }) => {
         if (id !== request.current) return
         setPhotos(page.items)
         setNextBefore(page.next_before)
       })
-      .catch((e) => { if (id === request.current) setErr(e.message) })
-    api<Filters>('/photos/filters').then(setFilters).catch(() => {})
+      .catch((e) => { if (id === request.current && (e as Error).name !== 'AbortError') setErr(e.message) })
   }, [query])
 
-  useEffect(load, [load])
+  // The chips, once they arrive, also clean the saved pick: an animal hidden or
+  // turned off since, or a camera taken down, filtered the feed invisibly with no
+  // chip lit (audit C-27, I-07). Only against a fresh list, never a saved one.
+  const loadFilters = useCallback(() => {
+    const hit = peek<Filters>('/photos/filters')
+    if (hit) setFilters(hit.data)
+    getFresh<Filters>('/photos/filters', { signal: signal() })
+      .then((got) => {
+        setFilters(got.data)
+        if (got.stale) return
+        const sp = new Set(got.data.species.map((x) => x.id))
+        const cams = new Set(got.data.cameras.map((x) => x.id))
+        setPick((p) => {
+          const next = { species: p.species.filter((x) => sp.has(x)), cameras: p.cameras.filter((x) => cams.has(x)) }
+          if (next.species.length === p.species.length && next.cameras.length === p.cameras.length) return p
+          try { localStorage.setItem(PICK_KEY, JSON.stringify(next)) } catch { /* private mode */ }
+          return next
+        })
+      })
+      .catch(() => {})
+  }, [])
+
   // Not with a photo open: the list would change under it (and under a note being
   // written, which is often when someone steps out to copy a message). The strip
   // above asks again by itself.
   const viewing = useRef(false)
   viewing.current = zoom != null || single != null
-  useRefetchOnReturn(() => { if (!viewing.current) load() }, 120_000)
+
+  /**
+   * Back in the app: put only the newer photos on top.
+   *
+   * This used to start the list over from the newest 60, which threw away every
+   * page scrolled through and, with a photo open, pulled the list out from under
+   * the viewer (a black screen, audit C-02 and I-01). Now the pages already loaded
+   * stay, and only when more than a page of new photos came in (the hunter was away
+   * a long time) does it start over from the newest.
+   */
+  const loadNewer = useCallback(() => {
+    const top = photosRef.current?.[0]
+    if (!top) { load(); return }
+    const id = request.current
+    loadFilters()
+    getFresh<Page>(query(), { signal: signal() })
+      .then(({ data: page, stale }) => {
+        if (id !== request.current || stale || viewing.current) return
+        const since = Date.parse(top.captured_at)
+        const oldest = page.items[page.items.length - 1]
+        if (page.items.length >= PAGE && oldest && Date.parse(oldest.captured_at) > since) {
+          setPhotos(page.items)
+          setNextBefore(page.next_before)
+          return
+        }
+        setPhotos((prev) => {
+          if (!prev) return page.items
+          const have = new Set(prev.map((p) => p.image_id))
+          const fresh = page.items.filter((p) => !have.has(p.image_id) && Date.parse(p.captured_at) >= since)
+          return fresh.length ? [...fresh, ...prev] : prev
+        })
+      })
+      .catch(() => {})
+  }, [load, loadFilters, query])
+
+  useEffect(load, [load])
+  useEffect(loadFilters, [loadFilters])
+  useRefetchOnReturn(() => { if (!viewing.current) loadNewer() }, 120_000)
 
   // Open the photo a notification pointed at: in the list when it is on the first
   // page, otherwise asked for by itself (a push tapped the next morning can be
@@ -138,7 +208,7 @@ export default function Photos() {
     if (!nextBefore || loadingMore) return
     const id = request.current
     setLoadingMore(true)
-    api<Page>(query(nextBefore))
+    api<Page>(query(nextBefore), { signal: signal(), timeoutMs: 20_000 })
       .then((page) => {
         if (id !== request.current) return
         setPhotos((prev) => [...(prev ?? []), ...page.items])

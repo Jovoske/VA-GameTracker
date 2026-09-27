@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, setToken } from '../api'
 import NotificationSettings from '../components/NotificationSettings'
+import PhoneProblems from '../components/PhoneProblems'
 import SettingsSection from '../components/SettingsSection'
 import Toggle from '../components/Toggle'
 
@@ -109,6 +110,7 @@ export default function Admin() {
   const [sexMsg, setSexMsg] = useState('')
   const [sexBusy, setSexBusy] = useState(false)
   const [species, setSpecies] = useState<Species[]>([])
+  const [speciesErr, setSpeciesErr] = useState('')
   const [savingId, setSavingId] = useState<string | null>(null)
   const [me, setMe] = useState<Me | null>(null)
   const [users, setUsers] = useState<UserRow[]>([])
@@ -140,11 +142,17 @@ export default function Admin() {
   useEffect(() => {
     api<{ version: string }>('/admin/version').then((r) => setVersion(r.version)).catch(() => {})
     api<Status>('/admin/status').then(setStatus).catch(() => {})
-    api<Species[]>('/species').then(setSpecies).catch(() => {})
+    loadSpecies()
     api<Me>('/auth/me').then(setMe).catch(() => {})
     api<UserRow[]>('/users').then(setUsers).catch(() => {})
     api<CamAccount[]>('/camera-accounts').then(setAccounts).catch(() => {})
   }, [])
+
+  // Its own failure, in words: a swallowed one left the list on "Loading…" for good (audit I-10).
+  function loadSpecies() {
+    setSpeciesErr('')
+    api<Species[]>('/species', { timeoutMs: 20_000 }).then(setSpecies).catch((e) => setSpeciesErr((e as Error).message))
+  }
 
   async function addUser() {
     setUserMsg('')
@@ -297,7 +305,14 @@ export default function Admin() {
         summary={species.length > 0 ? `${onCount} of ${shown.length} on` : undefined}>
         <p className="settings-hint">Turn off anything you don't hunt or that's out of season. Hide an animal to keep it out of photos, counts and alerts too.</p>
         {species.length === 0 ? (
-          <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
+          speciesErr ? (
+            <div role="alert" style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>
+              Couldn’t load the animals. {speciesErr}
+              <button className="text-action" onClick={loadSpecies}>Try again</button>
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
+          )
         ) : (
           shown.map((s) => (
             <div
@@ -573,6 +588,8 @@ export default function Admin() {
           </button>
         </div>
       </SettingsSection>
+
+      {me?.role === 'admin' && <PhoneProblems />}
 
       {status && (
         <SettingsSection id="system" title="System" style={{ marginBottom: 0 }}>

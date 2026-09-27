@@ -10,6 +10,8 @@ import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { setToken } from '../api'
 import { confirmLeave } from '../map/draftGuard'
+import { useNewerBuild } from '../serviceWorker'
+import { PageBoundary } from './ErrorBoundary'
 
 /**
  * Icons are drawn, from one family, at one weight.
@@ -72,6 +74,7 @@ export default function Layout() {
     nav('/login')
   }
   const onMap = loc.pathname === '/map'
+  const newerBuild = useNewerBuild()
 
   return (
     <div className={onMap ? 'layout layout--map' : 'layout'} style={{ maxWidth: onMap ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
@@ -112,7 +115,17 @@ export default function Layout() {
       {/* Padding lives in theme.css — an inline padding here overrides the
           media-query rule that clears the bottom tab bar, hiding content under it. */}
       <main className="page" id="main-content" tabIndex={-1}>
-        <Outlet />
+        {newerBuild && (
+          <div className="update-ready" role="status">
+            <span>A new version of GameSense is ready.</span>
+            <button type="button" onClick={() => location.reload()}>Reload</button>
+          </div>
+        )}
+        {/* A page that breaks is replaced by a message; the tab bar stays, and
+            moving to another tab clears it. */}
+        <PageBoundary resetKey={loc.pathname}>
+          <Outlet />
+        </PageBoundary>
       </main>
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
