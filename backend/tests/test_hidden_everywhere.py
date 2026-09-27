@@ -277,7 +277,7 @@ def test_marking_a_photo_grades_the_night_again(world, client, db_session):
     assert db_session.get(ForecastOutcome, fc.id).occurred is False
 
 
-# ── Push, bedding routes and the stand's hints ──────────────────────────────
+# ── Push, likely paths and the stand's hints ──────────────────────────────
 
 
 def _sighting(db, cam, species: str, when: datetime, *, marked=False, created=None) -> Image:
@@ -345,31 +345,33 @@ def test_hidden_and_marked_photos_send_no_push(db_session, estate_with_fox, monk
 
 
 @requires_db
-def test_hidden_and_marked_photos_make_no_bedding_route(db_session, estate_with_fox):
-    """A route from a bedding area to a camera needs five sightings there. Hidden foxes
-    and a marked bush made one out of four real boar."""
-    from app.forecasting.bedding import MIN_ROUTE_DETECTIONS, routes
-    from app.models import Zone
+def test_hidden_and_marked_photos_make_no_likely_path(db_session, estate_with_fox):
+    """The map's likely paths join visits of one species at two cameras within three
+    hours, on two nights or more. Hidden foxes walking Charca to Loma every night, and
+    a bush marked "nothing in it" at both, make no path; one real boar night isn't one."""
+    from app.forecasting.activity import usual_paths
 
-    cam = Camera(estate_id=estate_with_fox.id, name="Charca", lat=39.090, lon=-1.360)
-    db_session.add(cam)
-    db_session.add(Zone(estate_id=estate_with_fox.id, kind="bedding", name="Umbría",
-                        polygon={"type": "Polygon", "coordinates": [[
-                            [-1.364, 39.093], [-1.362, 39.093], [-1.362, 39.095],
-                            [-1.364, 39.095], [-1.364, 39.093]]]}))
+    charca = Camera(estate_id=estate_with_fox.id, name="Charca", lat=39.090, lon=-1.360)
+    loma = Camera(estate_id=estate_with_fox.id, name="Loma", lat=39.095, lon=-1.355)
+    db_session.add_all([charca, loma])
     db_session.flush()
-    for n in range(1, MIN_ROUTE_DETECTIONS):
-        _sighting(db_session, cam, "wild_boar", at(ago(n), 22))
     for n in range(1, 8):
-        _sighting(db_session, cam, "fox", at(ago(n), 23))
-        _sighting(db_session, cam, "wild_boar", at(ago(n), 21), marked=True)
+        _sighting(db_session, charca, "fox", at(ago(n), 21))
+        _sighting(db_session, loma, "fox", at(ago(n), 22))
+        _sighting(db_session, charca, "wild_boar", at(ago(n), 23), marked=True)
+        _sighting(db_session, loma, "wild_boar", at(ago(n), 23, 50), marked=True)
+    _sighting(db_session, charca, "wild_boar", at(ago(1), 19))
+    _sighting(db_session, loma, "wild_boar", at(ago(1), 20))
     db_session.commit()
-    assert routes(db_session) == []
+    paths = lambda: usual_paths(db_session, cameras=[charca, loma], last_night=ago(1))["paths"]  # noqa: E731
+    assert paths() == []
 
-    _sighting(db_session, cam, "wild_boar", at(ago(MIN_ROUTE_DETECTIONS), 22))
+    _sighting(db_session, charca, "wild_boar", at(ago(3), 19))
+    _sighting(db_session, loma, "wild_boar", at(ago(3), 20, 30))
     db_session.commit()
-    [route] = routes(db_session)
-    assert (route["camera"], route["detections"]) == ("Charca", MIN_ROUTE_DETECTIONS)
+    [path] = paths()
+    assert (path["cameras"], path["nights"]) == (["Charca", "Loma"], 2)
+    assert [(s["label"], s["nights"]) for s in path["species"]] == [("Wild boar", 2)]
 
 
 @requires_db

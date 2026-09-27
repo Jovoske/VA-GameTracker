@@ -12,6 +12,21 @@ import math
 EARTH_R_M = 6_371_000.0
 
 
+def plausible_position(lat: object, lon: object) -> bool:
+    """A real place: two finite numbers in range, and not (0, 0).
+
+    (0, 0) is what a camera with no GPS lock reports, and it is in the Gulf of
+    Guinea, not on anybody's estate.
+    """
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon)):
+        return False
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return False
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return False
+    return not (abs(lat) < 1e-6 and abs(lon) < 1e-6)
+
+
 def bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Initial great-circle bearing from point 1 to point 2, degrees from north."""
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -123,3 +138,121 @@ def angular_distance(a: float, b: float) -> float:
     """Smallest angle between two bearings, 0-180."""
     d = abs((a % 360.0) - (b % 360.0)) % 360.0
     return 360.0 - d if d > 180.0 else d
+
+
+# ── outlines drawn on the map ────────────────────────────────────────────────
+
+
+class ShapeError(ValueError):
+    """An outline that isn't a piece of ground, in words a hunter can act on."""
+
+
+# Closer than this to the corner before is the same corner tapped twice.
+SAME_CORNER_M = 0.5
+# Smaller than a 10 m square is a mis-tap, not cover animals lie up in.
+MIN_AREA_M2 = 100.0
+MAX_CORNERS = 500
+# Wider than this is not one piece of cover on an estate.
+MAX_SPAN_M = 20_000.0
+
+
+def _number(v: object) -> float | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) else None
+
+
+def _flat(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """(lon, lat) corners as metres on a flat sheet laid over the outline."""
+    lat0 = math.radians(sum(p[1] for p in points) / len(points))
+    k = math.pi / 180 * EARTH_R_M
+    return [(lon * k * math.cos(lat0), lat * k) for lon, lat in points]
+
+
+def _area_m2(xy: list[tuple[float, float]]) -> float:
+    twice = sum(xy[i][0] * xy[(i + 1) % len(xy)][1] - xy[(i + 1) % len(xy)][0] * xy[i][1]
+                for i in range(len(xy)))
+    return abs(twice) / 2
+
+
+def _crosses_itself(xy: list[tuple[float, float]]) -> bool:
+    """Whether two edges of the closed outline cross or touch, or one doubles back
+    along the one before it (a spike): a bow-tie or a needle, not an area."""
+    n = len(xy)
+
+    def side(a, b, c) -> float:
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def on(a, b, c) -> bool:  # c on segment ab, given the three are in a line
+        return (min(a[0], b[0]) <= c[0] <= max(a[0], b[0])
+                and min(a[1], b[1]) <= c[1] <= max(a[1], b[1]))
+
+    eps = 1e-6
+    for i in range(n):
+        a, b, c = xy[i - 1], xy[i], xy[(i + 1) % n]
+        # Straight back the way it came: the corner is the tip of a spike.
+        back = (a[0] - b[0]) * (c[0] - b[0]) + (a[1] - b[1]) * (c[1] - b[1]) > 0
+        if abs(side(a, b, c)) < eps and back:
+            return True
+    for i in range(n):
+        a, b = xy[i], xy[(i + 1) % n]
+        for j in range(i + 1, n):
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue  # edges that share a corner
+            c, d = xy[j], xy[(j + 1) % n]
+            s1, s2, s3, s4 = side(a, b, c), side(a, b, d), side(c, d, a), side(c, d, b)
+            if ((s1 > eps and s2 < -eps) or (s1 < -eps and s2 > eps)) and \
+                    ((s3 > eps and s4 < -eps) or (s3 < -eps and s4 > eps)):
+                return True
+            if (abs(s1) <= eps and on(a, b, c)) or (abs(s2) <= eps and on(a, b, d)) or \
+                    (abs(s3) <= eps and on(c, d, a)) or (abs(s4) <= eps and on(c, d, b)):
+                return True
+    return False
+
+
+def clean_polygon(polygon: object) -> dict:
+    """A drawn outline as a closed GeoJSON Polygon, or ShapeError saying what is wrong.
+
+    Corners are GeoJSON [longitude, latitude] pairs. A corner repeating the one before
+    (a double tap) is dropped, as is the closing corner, which is added back. What is
+    left must be at least three corners around some ground, not crossing itself: the
+    wind calls test whether a point is inside it, and a bow-tie leaves the crossed
+    part "outside" (audit B-10). Only the outer ring is kept.
+    """
+    if not isinstance(polygon, dict) or polygon.get("type") != "Polygon":
+        raise ShapeError("The outline must be a GeoJSON Polygon.")
+    rings = polygon.get("coordinates")
+    if not isinstance(rings, list) or not rings or not isinstance(rings[0], list):
+        raise ShapeError("The outline has no corners.")
+    if len(rings[0]) > MAX_CORNERS + 1:
+        raise ShapeError(f"That outline has {len(rings[0])} corners. Keep it under {MAX_CORNERS}.")
+    points: list[tuple[float, float]] = []
+    for pt in rings[0]:
+        if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
+            raise ShapeError("Each corner must be two numbers: longitude, then latitude.")
+        lon, lat = _number(pt[0]), _number(pt[1])
+        if lon is None or lat is None:
+            raise ShapeError("Each corner must be two numbers: longitude, then latitude.")
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+            raise ShapeError("A corner is off the map. Corners go longitude first, then latitude.")
+        if points and distance_m(lat, lon, points[-1][1], points[-1][0]) < SAME_CORNER_M:
+            continue
+        points.append((lon, lat))
+    first, last = points[0] if points else None, points[-1] if points else None
+    if len(points) > 1 and distance_m(first[1], first[0], last[1], last[0]) < SAME_CORNER_M:
+        points.pop()
+    if len(points) < 3:
+        raise ShapeError("Tap at least three corners around the area.")
+    lats, lons = [p[1] for p in points], [p[0] for p in points]
+    if distance_m(min(lats), min(lons), max(lats), max(lons)) > MAX_SPAN_M:
+        raise ShapeError(
+            "That outline is over 20 km across. Draw just the cover the animals lie up in."
+        )
+    xy = _flat(points)
+    if _crosses_itself(xy):
+        raise ShapeError("The outline crosses itself. Put the corners in order around the edge.")
+    if _area_m2(xy) < MIN_AREA_M2:
+        raise ShapeError("That outline has almost no area. Spread the corners around the cover.")
+    closed = [[lon, lat] for lon, lat in points] + [[points[0][0], points[0][1]]]
+    return {"type": "Polygon", "coordinates": [closed]}

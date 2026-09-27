@@ -6,12 +6,12 @@ from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import geo, jobs
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
 from app.api.routes_photos import _items, after_cursor
@@ -349,24 +349,65 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
 
 
 class LocationBody(BaseModel):
-    lat: float
-    lng: float
+    # Finite and on the planet: one camera at latitude 1000 took the map down for
+    # everyone (audit B-08).
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lng: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
+def _location_out(cam: Camera) -> dict:
+    return {
+        "id": str(cam.id), "lat": cam.lat, "lng": cam.lon,
+        "location_is_custom": cam.location_is_custom,
+        "provider_location": cam.provider_lat is not None and cam.provider_lon is not None,
+    }
+
+
+def _camera_for_update(db: Session, user: User, camera_id: uuid.UUID) -> Camera:
+    cam = db.scalar(select(Camera).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ).with_for_update().execution_options(populate_existing=True))
+    if cam is None:
+        raise HTTPException(404, "Camera not found.")
+    return cam
 
 
 @router.put("/{camera_id}/location")
 def set_location(
     camera_id: uuid.UUID,
     body: LocationBody,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    cam = db.get(Camera, camera_id)
-    if cam is None:
-        raise HTTPException(404, "Camera not found.")
-    cam.lat = body.lat
-    cam.lon = body.lng
+    """Place the camera by hand, admins only as on the map. It stays there: the
+    provider's GPS no longer moves it at the next sync (audit B-09, E-16), until
+    someone asks for the camera's own position again (DELETE)."""
+    if not geo.plausible_position(body.lat, body.lng):
+        raise HTTPException(422, "That spot is off the map. Move the map and try again.")
+    cam = _camera_for_update(db, user, camera_id)
+    cam.lat, cam.lon = body.lat, body.lng
+    cam.location_is_custom = True
     db.commit()
-    return {"id": str(cam.id), "lat": body.lat, "lng": body.lng}
+    return _location_out(cam)
+
+
+@router.delete("/{camera_id}/location")
+def use_provider_location(
+    camera_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Back to the position the camera itself last reported (SPYPOINT's GPS), and
+    follow it from now on, as for a camera nobody placed."""
+    cam = _camera_for_update(db, user, camera_id)
+    if cam.provider_lat is None or cam.provider_lon is None:
+        raise HTTPException(
+            409, "This camera hasn’t reported a position of its own. Place it by hand."
+        )
+    cam.lat, cam.lon = cam.provider_lat, cam.provider_lon
+    cam.location_is_custom = False
+    db.commit()
+    return _location_out(cam)
 
 
 @router.get("/{camera_id}/images")

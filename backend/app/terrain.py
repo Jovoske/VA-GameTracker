@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.estate_area import side_m, terrain_box
 from app.models import TerrainGrid
 
 log = get_logger(__name__)
@@ -32,6 +33,12 @@ MAX_POINTS_PER_CALL = 100  # Open-Meteo's documented limit
 # and drainage is a hillside-scale phenomenon rather than a per-boulder one.
 GRID_STEPS = 20
 BOX_KM = 5.0
+# The box grows to take in every stand, camera and bedding outline (plus a margin):
+# a stand 3 km out of a fixed 5 km box was told its ground was flat (audit B-20).
+# Posts stay about POST_M apart, up to MAX_STEPS a side (16 requests).
+MAX_BOX_KM = 12.0
+POST_M = 250.0
+MAX_STEPS = 40
 
 # Open-Meteo is free and unauthenticated, so it is rate limited and we should be
 # polite: pace the chunks and back off rather than hammering it.
@@ -63,28 +70,25 @@ def _get_elevations(lats: list[float], lons: list[float]) -> list[float]:
     return []
 
 
-def _deg_per_km(lat: float) -> tuple[float, float]:
-    return (1.0 / 111.32, 1.0 / (111.32 * max(0.1, math.cos(math.radians(lat)))))
-
-
-def fetch_grid(db: Session, centre_lat: float, centre_lon: float, *, force: bool = False) -> TerrainGrid:
-    """Download and store the elevation grid around the estate. Idempotent."""
+def fetch_grid(
+    db: Session, centre_lat: float, centre_lon: float, *, force: bool = False
+) -> TerrainGrid:
+    """Download and store the elevation grid over the estate: the square round its
+    centre, grown to take in every stand, camera and bedding outline. Idempotent."""
     existing = db.scalar(select(TerrainGrid).order_by(TerrainGrid.created_at.desc()))
     if existing is not None and not force:
         return existing
 
-    dlat, dlon = _deg_per_km(centre_lat)
-    half_lat = (BOX_KM / 2) * dlat
-    half_lon = (BOX_KM / 2) * dlon
-    min_lat, max_lat = centre_lat - half_lat, centre_lat + half_lat
-    min_lon, max_lon = centre_lon - half_lon, centre_lon + half_lon
+    box = terrain_box(db, centre_lat, centre_lon, BOX_KM * 1000, MAX_BOX_KM * 1000)
+    min_lat, max_lat, min_lon, max_lon = box["south"], box["north"], box["west"], box["east"]
+    steps = min(MAX_STEPS, max(GRID_STEPS, math.ceil(max(side_m(box)) / POST_M) + 1))
 
     lats: list[float] = []
     lons: list[float] = []
-    for i in range(GRID_STEPS):
-        for j in range(GRID_STEPS):
-            lats.append(min_lat + (max_lat - min_lat) * i / (GRID_STEPS - 1))
-            lons.append(min_lon + (max_lon - min_lon) * j / (GRID_STEPS - 1))
+    for i in range(steps):
+        for j in range(steps):
+            lats.append(min_lat + (max_lat - min_lat) * i / (steps - 1))
+            lons.append(min_lon + (max_lon - min_lon) * j / (steps - 1))
 
     elevations: list[float] = []
     for start in range(0, len(lats), MAX_POINTS_PER_CALL):
@@ -103,7 +107,7 @@ def fetch_grid(db: Session, centre_lat: float, centre_lon: float, *, force: bool
     if existing is not None:
         existing.min_lat, existing.min_lon = min_lat, min_lon
         existing.max_lat, existing.max_lon = max_lat, max_lon
-        existing.steps = GRID_STEPS
+        existing.steps = steps
         existing.elevations = elevations
         db.commit()
         log.info("terrain.refreshed", points=len(elevations))
@@ -111,7 +115,7 @@ def fetch_grid(db: Session, centre_lat: float, centre_lon: float, *, force: bool
 
     grid = TerrainGrid(
         min_lat=min_lat, min_lon=min_lon, max_lat=max_lat, max_lon=max_lon,
-        steps=GRID_STEPS, elevations=elevations,
+        steps=steps, elevations=elevations,
     )
     db.add(grid)
     db.commit()
@@ -122,6 +126,100 @@ def fetch_grid(db: Session, centre_lat: float, centre_lon: float, *, force: bool
 
 def get_grid(db: Session) -> TerrainGrid | None:
     return db.scalar(select(TerrainGrid).order_by(TerrainGrid.created_at.desc()))
+
+
+def covers(grid: TerrainGrid, lat: float, lon: float) -> bool:
+    """Whether the hill shape reaches this spot."""
+    return _indices(grid, lat, lon) is not None
+
+
+# ── loading it from the map ─────────────────────────────────────────────────
+# The download takes 5 to 30 s when the service is kind and minutes when it rate
+# limits us, so the map's button starts it and asks how it went (audit B-18) instead
+# of holding a request (and the hunter) for all of it. Where it is lives in
+# app_settings, so every worker process of the server reads the same answer.
+
+STATUS_KEY = "terrain_status"
+# A download "loading" for longer than this died with its process: start another.
+LOADING_STALE_S = 10 * 60
+FAILED_WORDS = {
+    "busy": "The elevation service is busy. Try again in a few minutes.",
+    "down": "The elevation service didn’t answer. Try again later.",
+}
+
+
+def load_status(db: Session) -> dict:
+    """{"state": "none" | "loading" | "loaded" | "failed", "error": words or None, ...}."""
+    from app.models import AppSetting
+
+    row = db.get(AppSetting, STATUS_KEY)
+    value = dict(row.value) if row else {}
+    grid = get_grid(db)
+    if value.get("state") == "loading" and _age_s(value.get("started_at")) > LOADING_STALE_S:
+        value = {**value, "state": "failed", "error": FAILED_WORDS["down"]}
+    if value.get("state") not in ("loading", "failed"):
+        value = {"state": "loaded" if grid is not None else "none",
+                 "finished_at": value.get("finished_at")}
+    value.setdefault("error", None)
+    # A reload updates the grid's row in place, so its created_at is the first load.
+    loaded = value.get("finished_at") if value["state"] == "loaded" else None
+    value["loaded_at"] = loaded or (grid.created_at if grid is not None else None)
+    return value
+
+
+def _age_s(iso: str | None) -> float:
+    from datetime import UTC, datetime
+
+    try:
+        return (datetime.now(UTC) - datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _set_status(db: Session, value: dict) -> None:
+    from app.models import AppSetting
+
+    row = db.get(AppSetting, STATUS_KEY, with_for_update=True)
+    if row is None:
+        db.add(AppSetting(key=STATUS_KEY, value=value))
+    else:
+        row.value = value
+    db.commit()
+
+
+def start_load(db: Session) -> tuple[dict, bool]:
+    """Mark a download as started, unless one already is. (status, started)."""
+    from datetime import UTC, datetime
+
+    from app.models import AppSetting
+
+    row = db.get(AppSetting, STATUS_KEY, with_for_update=True)
+    now = row.value if row else {}
+    if now.get("state") == "loading" and _age_s(now.get("started_at")) <= LOADING_STALE_S:
+        db.rollback()
+        return load_status(db), False
+    _set_status(db, {"state": "loading", "started_at": datetime.now(UTC).isoformat()})
+    return load_status(db), True
+
+
+def load_in_background(centre_lat: float, centre_lon: float) -> None:
+    """fetch_grid on its own session, after the button's answer has gone back. What
+    went wrong is logged in full; the map gets a short line it can show."""
+    from datetime import UTC, datetime
+
+    from app.core import db as core_db
+
+    with core_db.SessionLocal() as db:
+        try:
+            fetch_grid(db, centre_lat, centre_lon, force=True)
+            _set_status(db, {"state": "loaded", "finished_at": datetime.now(UTC).isoformat()})
+        except Exception as e:
+            db.rollback()
+            log.warning("terrain.load_failed", error=f"{type(e).__name__}: {e}"[:500])
+            busy = isinstance(e, RuntimeError) and "rate limit" in str(e).lower() or (
+                isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429)
+            _set_status(db, {"state": "failed", "finished_at": datetime.now(UTC).isoformat(),
+                             "error": FAILED_WORDS["busy" if busy else "down"]})
 
 
 def _at(grid: TerrainGrid, i: int, j: int) -> float:
@@ -172,9 +270,13 @@ def slope_at(grid: TerrainGrid, lat: float, lon: float) -> dict | None:
     cell_lat_m = (grid.max_lat - grid.min_lat) / (n - 1) * 111_320.0
     cell_lon_m = (grid.max_lon - grid.min_lon) / (n - 1) * 111_320.0 * math.cos(math.radians(lat))
 
-    # i increases north, j increases east.
-    dz_north = (_at(grid, i + 1, j) - _at(grid, i - 1, j)) / (2 * cell_lat_m)
-    dz_east = (_at(grid, i, j + 1) - _at(grid, i, j - 1)) / (2 * cell_lon_m)
+    # i increases north, j increases east. At the grid's edge there is no post beyond,
+    # so the difference is one-sided over one cell rather than a central one over two
+    # cells with one of them clamped, which halved the slope there (audit B-20).
+    i0, i1 = max(i - 1, 0), min(i + 1, n - 1)
+    j0, j1 = max(j - 1, 0), min(j + 1, n - 1)
+    dz_north = (_at(grid, i1, j) - _at(grid, i0, j)) / ((i1 - i0) * cell_lat_m)
+    dz_east = (_at(grid, i, j1) - _at(grid, i, j0)) / ((j1 - j0) * cell_lon_m)
 
     slope = math.hypot(dz_north, dz_east)
     if slope < 1e-6:

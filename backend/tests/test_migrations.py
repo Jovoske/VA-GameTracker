@@ -1050,3 +1050,59 @@ def test_species_fixes_upgrade_down_and_up_again(fresh_db):
             assert dict(c.execute(text("SELECT id, common_name FROM species")).all()) == names
     finally:
         eng.dispose()
+
+
+@requires_db
+def test_camera_location_custom_upgrade_down_and_up_again(fresh_db):
+    """0027 on a real 0025 database: a placed camera with no SPYPOINT id can only have
+    been placed by hand, so it is marked custom; a SPYPOINT camera keeps following
+    its own GPS, as it did; positions stay through down and up again."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0025_species_fixes")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0025 shape first.
+            for col in ("location_is_custom", "provider_lat", "provider_lon"):
+                c.execute(text(f"ALTER TABLE cameras DROP COLUMN {col}"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            for name, spy, lat, lon in (("UBox charca", None, 39.09, -1.36),
+                                        ("PL19", "sp-19", 39.1, -1.35),
+                                        ("FTP loma", None, None, None)):
+                c.execute(text(
+                    "INSERT INTO cameras (id,estate_id,name,spypoint_id,lat,lon,name_is_custom,"
+                    "active,import_failures) VALUES (gen_random_uuid(),:e,:n,:s,:lat,:lon,"
+                    "false,true,'{}')"), {"e": estate, "n": name, "s": spy, "lat": lat, "lon": lon})
+
+        command.upgrade(cfg, "0027_camera_location_custom")
+        with eng.connect() as c:
+            rows = c.execute(text("SELECT name, lat, lon, location_is_custom, provider_lat "
+                                  "FROM cameras ORDER BY name")).all()
+            assert [tuple(r) for r in rows] == [
+                ("FTP loma", None, None, False, None),
+                ("PL19", 39.1, -1.35, False, None),
+                ("UBox charca", 39.09, -1.36, True, None),
+            ]
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0025_species_fixes")
+        assert "location_is_custom" not in _columns(eng, "cameras")
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT lat FROM cameras WHERE name='UBox charca'")).scalar_one() == 39.09
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0025_species_fixes")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"location_is_custom", "provider_lat", "provider_lon"} <= set(
+            _columns(eng, "cameras"))
+    finally:
+        eng.dispose()

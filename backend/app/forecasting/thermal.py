@@ -86,7 +86,14 @@ def regime(
         }
 
     slope = slope_at(grid, lat, lon)
-    if slope is None or slope.get("downhill_deg") is None or slope["slope_pct"] < MIN_SLOPE_PCT:
+    if slope is None:
+        # Past the edge of the hill shape is not flat ground (audit B-20).
+        return {
+            "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
+            "text": ("This spot is outside the hill shape that was loaded, so the slope wind "
+                     "can’t be worked out. An admin can load the hill shape again to cover it."),
+        }
+    if slope.get("downhill_deg") is None or slope["slope_pct"] < MIN_SLOPE_PCT:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
             "text": "Ground is near flat here. No slope for cold air to run down.",
