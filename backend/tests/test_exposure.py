@@ -6,11 +6,12 @@ counting photographs as if they were animals.
 """
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 
 import pytest
 
 from app.forecasting.exposure import (
+    current_night,
     excluded_nights,
     observed_nights,
     recompute_camera_nights,
@@ -261,7 +262,9 @@ def test_a_clock_running_ahead_does_not_presume_nights_that_have_not_happened(
     db_session, estate_and_camera,
 ):
     _, cam = estate_and_camera
-    today = datetime.now(UTC).replace(hour=21, minute=0, second=0, microsecond=0)
+    # 21:00 UTC on tonight's night key: between midnight and 06:00 in Madrid the UTC
+    # date is already the next night's, which failed this test in the small hours.
+    today = datetime.combine(current_night(), time(21), tzinfo=UTC)
     _frame(db_session, cam, today - timedelta(days=2), empty=True)
     _frame(db_session, cam, today + timedelta(days=1), empty=True)
     recompute_camera_nights(db_session)
