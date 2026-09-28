@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ageLabel, api, changePassword, noAnswer, peekMe, plainWords, signOut, whoAmI } from '../api'
 import { confirmSignOut } from '../sits'
+import { useOnServerLanguage } from '../hooks'
 import LanguagePicker from '../components/LanguagePicker'
 import { type Key, LANGS, fmtDate, fmtList, lasted, t, tOr, tn, useLang } from '../i18n'
 import HarvestBook from '../components/HarvestBook'
@@ -386,6 +387,13 @@ export default function Admin() {
     loadStatus()
     api<UserRow[]>('/users').then(setUsers).catch(() => {})
   }, [admin])
+  // A language picked above reached the server: the animals' names, the logins'
+  // states and the AI's status come again in it.
+  useOnServerLanguage(() => {
+    loadSpecies()
+    api<CamAccount[]>('/camera-accounts').then(setAccounts).catch(() => {})
+    if (admin) loadStatus()
+  })
 
   // A login just added imports in the background: look again every few seconds, for
   // two minutes at most, so its cameras and "Working" show without a reload.

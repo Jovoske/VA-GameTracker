@@ -4,7 +4,7 @@ import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, thumbUr
 import PhotoLightbox, { type LightboxPhoto, morePhotosFailed } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import type { PhotoFix } from '../components/PhotoFix'
-import { useRefetchOnReturn } from '../hooks'
+import { useOnServerLanguage, useRefetchOnReturn } from '../hooks'
 import { fmtTime, t, useLang } from '../i18n'
 import { photoHeading } from '../night'
 import './photos.css'
@@ -246,6 +246,9 @@ export default function Photos() {
   useEffect(load, [load])
   useEffect(loadFilters, [loadFilters])
   useRefetchOnReturn(() => { if (!viewing.current) loadNewer() }, 120_000)
+  // Each photo's animal is named by the server in the person's language: a new one
+  // there names them all again, not only the ones that came in since.
+  useOnServerLanguage(() => { if (!viewing.current) load() })
 
   // Open the photo a notification pointed at: in the list when it is on the first
   // page; otherwise, by the time the alert carries, with the frames just before it

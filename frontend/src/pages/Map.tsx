@@ -10,7 +10,7 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from 're
 import { Link, useBlocker, useSearchParams } from 'react-router-dom'
 import { ageLabel, api, fromEarlierNight, getFresh, noAnswer, noAnswerWords, peek, peekMe, savedCopy, thumbUrl, whenLabel, whoAmI, type Got, type StaleWhy } from '../api'
 import { useRefetchOnReturn } from '../hooks'
-import { type Key, fmtTime, t } from '../i18n'
+import { type Key, fmtTime, t, useLang } from '../i18n'
 import { isView, type View } from '../map/activity'
 import { ActivityBar, ActivityCard } from '../map/ActivityPanel'
 import { BASE_SOURCES, CALLOUT_ZOOM, CATASTRO, baseLabel, baseSource, mapStyle, readPrefs, retryBase, showBase, showCatastro, writePrefs, type BaseId, type MapPrefs } from '../map/basemaps'
@@ -34,6 +34,15 @@ import { useMeasure } from '../map/useMeasure'
 import { useMyPosition } from '../map/useMyPosition'
 import { useReplay } from '../map/useReplay'
 import '../map/map.css'
+
+/** MapLibre's own words (what a screen reader calls the map, a mark on it, the
+ *  credits button), in the language on screen: its built-in ones are English. */
+const mapWords = (): Record<string, string> => ({
+  'Map.Title': t('nav.map'),
+  'Marker.Title': t('mapPage.marker'),
+  'AttributionControl.ToggleAttribution': t('mapPage.credits'),
+  'AttributionControl.MapFeedback': t('mapPage.feedback'),
+})
 
 type Selection = { kind: 'stand' | 'camera' | 'zone'; id: string }
 const SELECTION_KINDS = ['stand', 'camera', 'zone'] as const
@@ -235,7 +244,7 @@ export default function MapPage() {
     const start = data && roomy ? estateBounds(data, cameras) : null
     const opening = start ? { bounds: start, fitBoundsOptions: { padding: 72, maxZoom: 16 } } : { center: ESTATE_CENTER, zoom: 14 }
     try {
-      instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), ...opening, maxZoom: 20, maxPitch: 0, attributionControl: false })
+      instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), ...opening, maxZoom: 20, maxPitch: 0, attributionControl: false, locale: mapWords() })
     } catch { setFatal(t('mapPage.fatal')); return }
     map.current = instance
     // Browser checks read the live map in development builds only.
@@ -355,6 +364,22 @@ export default function MapPage() {
     // The map is built once; later preference changes flip layers on the live style.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // A language chosen with the map open: MapLibre keeps the words it was built with,
+  // so the ones already on the page are put right here, and the table it reads new
+  // marks' names from is swapped.
+  const language = useLang()
+  useEffect(() => {
+    const m = map.current
+    if (!m) return
+    const words = mapWords()
+    m._locale = { ...m._locale, ...words }
+    m.getCanvas().setAttribute('aria-label', words['Map.Title'])
+    m.getContainer().querySelectorAll('.maplibregl-ctrl-attrib-button').forEach((b) => {
+      b.setAttribute('title', words['AttributionControl.ToggleAttribution'])
+      b.setAttribute('aria-label', words['AttributionControl.ToggleAttribution'])
+    })
+  }, [language, mapObj])
 
   // Base picture and property lines follow the choice without rebuilding the style.
   useEffect(() => { setActiveBase(prefs.base); setFallbackFrom(null); setTileErr(false); tiles.current = freshTiles(); tried.current.clear() }, [prefs.base])

@@ -9,6 +9,9 @@ const sv: Dict = {
   'common.loading': 'Laddar…',
   'common.tryAgain': 'Försök igen',
   'common.reload': 'Ladda om',
+  'boot.slow': 'GameSense tar lång tid att öppna.',
+  'boot.why': 'Ingen täckning, eller så har appen just uppdaterats.',
+  'app.description': 'Gör dina viltkameror till en jaktprognos.',
 
   // ── time and server answers ──
   'common.andList': '{list} och {last}',
@@ -1411,6 +1414,9 @@ const sv: Dict = {
   'mapPage.theStands': 'passen och liggplatserna',
   'mapPage.theCameras': 'kamerorna',
   'mapPage.fatal': 'Kartan kunde inte starta i den här telefonen. Ladda om sidan, eller använd Pass och Kameror så länge.',
+  'mapPage.marker': 'Markering på kartan',
+  'mapPage.credits': 'Kartans källor',
+  'mapPage.feedback': 'Synpunkter på kartan',
   'mapPage.pathsNoSignal': 'Ingen täckning, så de troliga vägarna laddades inte.',
   'mapPage.pathsCouldnt': 'Kunde inte ladda de troliga vägarna. {why}',
   'mapPage.standPin': 'Pass: {name}',

@@ -62,7 +62,10 @@
 /* ── one camera ── */
 .cam-card { padding: 14px; }
 .cam-card-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
-.cam-health { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin-left: auto; white-space: nowrap; }
+/* Beside the name when it fits; on a line of its own, right-aligned, when it doesn't,
+   and wrapping there rather than widening the page ("Sin movimiento desde la noche
+   del miércoles" is wider than a 320 px card). */
+.cam-health { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin-left: auto; min-width: 0; max-width: 100%; text-align: right; overflow-wrap: break-word; }
 .cam-health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .cam-last-seen { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
 .cam-health-note { font-size: 13px; line-height: 1.45; color: var(--text-dim); margin: 6px 0 0; }

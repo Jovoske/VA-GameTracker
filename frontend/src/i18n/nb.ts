@@ -9,6 +9,9 @@ const nb: Dict = {
   'common.loading': 'Laster…',
   'common.tryAgain': 'Prøv igjen',
   'common.reload': 'Last inn på nytt',
+  'boot.slow': 'GameSense bruker lang tid på å åpne.',
+  'boot.why': 'Ingen dekning, eller appen ble nettopp oppdatert.',
+  'app.description': 'Gjør viltkameraene dine om til en jaktprognose.',
 
   // ── time and server answers ──
   'common.andList': '{list} og {last}',
@@ -1411,6 +1414,9 @@ const nb: Dict = {
   'mapPage.theStands': 'postene og liggeplassene',
   'mapPage.theCameras': 'kameraene',
   'mapPage.fatal': 'Kartet kunne ikke starte på denne telefonen. Last inn siden på nytt, eller bruk Poster og Kameraer så lenge.',
+  'mapPage.marker': 'Merke på kartet',
+  'mapPage.credits': 'Kartkilder',
+  'mapPage.feedback': 'Tilbakemelding om kartet',
   'mapPage.pathsNoSignal': 'Ingen dekning, så de trolige veiene lastet ikke.',
   'mapPage.pathsCouldnt': 'Kunne ikke laste de trolige veiene. {why}',
   'mapPage.standPin': 'Post: {name}',

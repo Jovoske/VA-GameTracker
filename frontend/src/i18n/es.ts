@@ -9,6 +9,9 @@ const es: Dict = {
   'common.loading': 'Cargando…',
   'common.tryAgain': 'Reintentar',
   'common.reload': 'Recargar',
+  'boot.slow': 'GameSense está tardando mucho en abrir.',
+  'boot.why': 'Sin cobertura, o la app se acaba de actualizar.',
+  'app.description': 'Convierte tus cámaras de fototrampeo en un pronóstico de caza.',
 
   // ── time and server answers ──
   'common.andList': '{list} y {last}',
@@ -1411,6 +1414,9 @@ const es: Dict = {
   'mapPage.theStands': 'los puestos y encames',
   'mapPage.theCameras': 'las cámaras',
   'mapPage.fatal': 'El mapa no pudo arrancar en este móvil. Recarga la página, o usa mientras tanto Puestos y Cámaras.',
+  'mapPage.marker': 'Marca en el mapa',
+  'mapPage.credits': 'Créditos del mapa',
+  'mapPage.feedback': 'Comentarios sobre el mapa',
   'mapPage.pathsNoSignal': 'Sin cobertura, así que los pasos probables no cargaron.',
   'mapPage.pathsCouldnt': 'No se pudieron cargar los pasos probables. {why}',
   'mapPage.standPin': 'Puesto: {name}',

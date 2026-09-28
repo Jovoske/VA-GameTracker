@@ -13,13 +13,15 @@ type Insights = {
   outlook: {
     date: string
     moon_phase: string
+    moon_phase_key?: string | null
     moon_illum: number
     darkness_minutes: number | null
     sunset: string | null
     civil_twilight_end: string | null
   }[]
   // count = visits; photos behind the fold.
-  composition: { label: string; count: number; visits?: number; photos?: number; top_camera: string | null }[]
+  /** `key`: the class the same in every language (a newer server sends it). */
+  composition: { label: string; key?: string; count: number; visits?: number; photos?: number; top_camera: string | null }[]
   correlations: { kind?: string; statement: string; strength: number; sample: number }[]
 }
 type ClassImg = { image_id: string; file_url: string; captured_at: string; camera: string; group_size: number | null }
@@ -29,7 +31,10 @@ const dayName = (iso: string) => fmtWeekday(iso + 'T12:00:00')
 const dayNum = (iso: string) => new Date(iso + 'T12:00:00').getDate()
 const clock = (iso: string | null) => (iso ? fmtTime(iso) : '–')
 /** "Full Moon" as the server names the phase, in the language on screen. */
-const moonWords = (phase: string) => tOr(`moon.${phase.toLowerCase().replace(/[\s_]+/g, '_')}`, phase.replace(/_/g, ' '))
+// By the phase's key where the server sends one (its words are the reader's; an older
+// server sent the English name only).
+const moonWords = (phase: string, key?: string | null) =>
+  tOr(`moon.${(key || phase).toLowerCase().replace(/[\s_]+/g, '_')}`, phase.replace(/_/g, ' '))
 
 // The numbers behind a finding, for the "Show the numbers" fold.
 function backing(c: Insights['correlations'][number]) {
@@ -50,6 +55,8 @@ export default function Insights() {
   const [classErr, setClassErr] = useState('')
   const classRequest = useRef(0)
   const [openClass, setOpenClass] = useState<string | null>(null)
+  // Its key, when the makeup gave one: asked for by that, not by a word in one language.
+  const openKey = useRef<string | null>(null)
   const [classImgs, setClassImgs] = useState<ClassImg[] | null>(null)
   // Where the next page of the open class starts; null when there is no more.
   const [classNext, setClassNext] = useState<{ before: string; id: string | null } | null>(null)
@@ -97,7 +104,7 @@ export default function Insights() {
   useRefetchOnReturn(load, 120_000)
 
   function classPath(label: string, from: { before: string; id: string | null } | null) {
-    const q = new URLSearchParams({ label })
+    const q = new URLSearchParams(openKey.current ? { key: openKey.current } : { label })
     if (from) {
       q.set('before', from.before)
       if (from.id) q.set('before_id', from.id)
@@ -109,9 +116,10 @@ export default function Insights() {
     if (Array.isArray(page) || !page.next_before) return null
     return { before: page.next_before, id: page.next_before_id }
   }
-  async function openClassImages(label: string) {
+  async function openClassImages(label: string, key?: string | null) {
     const request = ++classRequest.current
     setClassErr('')
+    openKey.current = key ?? null
     setOpenClass(label)
     setClassImgs(null)
     setClassNext(null)
@@ -185,7 +193,7 @@ export default function Insights() {
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
-                onClick={() => openClassImages(x.label)}
+                onClick={() => openClassImages(x.label, x.key)}
                 title={t('insights.seePhotos', { label: x.label })}
               >
                 <div className="insights-class-main">
@@ -229,7 +237,7 @@ export default function Insights() {
               <div className="moon-day-lit">
                 {t('insights.lit', { pct: Math.round(o.moon_illum) })}
               </div>
-              <div className="moon-day-phase">{moonWords(o.moon_phase)}</div>
+              <div className="moon-day-phase">{moonWords(o.moon_phase, o.moon_phase_key)}</div>
               <div className="moon-last-light">
                 <span>{t('insights.lastLight')}</span><strong>{clock(o.civil_twilight_end)}</strong>
               </div>
@@ -266,7 +274,7 @@ export default function Insights() {
               </button>
             </div>
             <div style={{ overflowY: 'auto', padding: 12 }}>
-              {classErr && <div className="status-panel" role="alert">{classErr}<button className="text-action" onClick={() => openClassImages(openClass)}>{t('common.retry')}</button></div>}
+              {classErr && <div className="status-panel" role="alert">{classErr}<button className="text-action" onClick={() => openClassImages(openClass, openKey.current)}>{t('common.retry')}</button></div>}
               {!classImgs && !classErr && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>{t('photos.loading')}</div>}
               {classImgs && classImgs.length === 0 && (
                 <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>{t('cameras.noPhotos')}</div>

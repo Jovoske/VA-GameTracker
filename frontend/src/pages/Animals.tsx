@@ -17,7 +17,9 @@ type SpeciesRow = {
   count: number
   last_seen: string | null
   thumb_image_id: string | null
-  classes: { label: string; count: number }[]
+  /** `key` asks for a class's photos the same in every language (a newer server sends
+   *  it); its label is a word in one. */
+  classes: { label: string; count: number; key?: string }[]
 }
 type SpImg = {
   image_id: string
@@ -96,7 +98,7 @@ export default function Animals() {
   const [spLoading, setSpLoading] = useState(true)
   const [galleryErr, setGalleryErr] = useState('')
   const galleryRequest = useRef(0)
-  const [gallery, setGallery] = useState<{ sp: SpeciesRow; label: string | null } | null>(null)
+  const [gallery, setGallery] = useState<{ sp: SpeciesRow; label: string | null; key?: string | null } | null>(null)
   const [galleryImgs, setGalleryImgs] = useState<SpImg[] | null>(null)
   // Where the next page of the gallery starts; null when it is all here.
   const [galleryNext, setGalleryNext] = useState<Cursor | null>(null)
@@ -147,9 +149,12 @@ export default function Animals() {
   }, [galleryImgs, setParams])
   useRefetchOnReturn(loadSpecies, 120_000)
 
-  const galleryPath = (sp: SpeciesRow, label: string | null, after: Cursor | null) => {
+  const galleryPath = (sp: SpeciesRow, label: string | null, key: string | null | undefined, after: Cursor | null) => {
     const q = new URLSearchParams({ limit: String(GALLERY_PAGE) })
-    if (label) q.set('label', label)
+    // By its key where there is one: the label is in the language the list came in,
+    // which may not be the one the server reads now.
+    if (key) q.set('key', key)
+    else if (label) q.set('label', label)
     if (after) {
       q.set('before', after.before)
       if (after.before_id) q.set('before_id', after.before_id)
@@ -158,17 +163,17 @@ export default function Animals() {
   }
   const cursorOf = (p: SpPage): Cursor | null => (p.next_before ? { before: p.next_before, before_id: p.next_before_id } : null)
 
-  async function openGallery(sp: SpeciesRow, label: string | null) {
+  async function openGallery(sp: SpeciesRow, label: string | null, key?: string | null) {
     const request = ++galleryRequest.current
     galleryInFlight.current = null
     setGalleryMore(false)
     setGalleryMoreErr('')
     setGalleryErr('')
-    setGallery({ sp, label })
+    setGallery({ sp, label, key })
     setGalleryImgs(null)
     setGalleryNext(null)
     try {
-      const page = await api<SpPage>(galleryPath(sp, label, null), { signal: signal(), timeoutMs: SLOW_MS })
+      const page = await api<SpPage>(galleryPath(sp, label, key, null), { signal: signal(), timeoutMs: SLOW_MS })
       if (request !== galleryRequest.current) return
       setGalleryImgs(page.items)
       setGalleryNext(cursorOf(page))
@@ -184,7 +189,7 @@ export default function Animals() {
     galleryInFlight.current = request
     setGalleryMore(true)
     setGalleryMoreErr('')
-    api<SpPage>(galleryPath(gallery.sp, gallery.label, galleryNext), { signal: signal(), timeoutMs: SLOW_MS })
+    api<SpPage>(galleryPath(gallery.sp, gallery.label, gallery.key, galleryNext), { signal: signal(), timeoutMs: SLOW_MS })
       .then((page) => {
         if (request !== galleryRequest.current) return
         setGalleryImgs((prev) => {
@@ -440,7 +445,7 @@ export default function Animals() {
                     <button
                       key={cl.label}
                       className="an-chip"
-                      onClick={() => openGallery(sp, cl.label)}
+                      onClick={() => openGallery(sp, cl.label, cl.key)}
                       title={t('insights.classPhotos', { label: cl.label })}
                     >
                       {cl.label} <span className="an-dim">{cl.count}</span>
@@ -615,7 +620,7 @@ export default function Animals() {
                   {gallery.sp.classes.map((cl) => (
                     <button
                       key={cl.label}
-                      onClick={() => openGallery(gallery.sp, cl.label)}
+                      onClick={() => openGallery(gallery.sp, cl.label, cl.key)}
                       className={`an-chip${gallery.label === cl.label ? ' an-chip--on' : ''}`}
                     >
                       {cl.label} {cl.count}
@@ -625,7 +630,7 @@ export default function Animals() {
               )}
             </div>
             <div className="an-gallery-body" ref={galleryBody}>
-              {galleryErr && <div className="status-panel" role="alert">{galleryErr}<button className="text-action" onClick={() => openGallery(gallery.sp, gallery.label)}>{t('common.tryAgain')}</button></div>}
+              {galleryErr && <div className="status-panel" role="alert">{galleryErr}<button className="text-action" onClick={() => openGallery(gallery.sp, gallery.label, gallery.key)}>{t('common.tryAgain')}</button></div>}
               {!galleryImgs && !galleryErr && <div role="status" className="an-dim an-gallery-status">{t('photos.loading')}</div>}
               {galleryImgs && galleryImgs.length === 0 && (
                 <div className="an-dim an-gallery-status">{t('animals.noPhotos')}</div>

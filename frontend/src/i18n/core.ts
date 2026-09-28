@@ -80,12 +80,43 @@ function store(code: Lang): void {
   }
 }
 
+/** How long a language's words may take to arrive before the choice is given up
+ *  on: a link that hangs would otherwise leave "Loading…" on its row for good. */
+export const LOAD_TIMEOUT_MS = 15_000
+
+/**
+ * Where a language's words failed to come from. The browser remembers a module that
+ * failed to load and fails every later import of it at once, so "try again when you
+ * have signal" never could: the next try asks for the same file at a fresh address.
+ * (Chrome and Firefox name the file in the error; elsewhere the plain import is tried.)
+ */
+const failedAt: Partial<Record<Lang, string>> = {}
+
+async function fetchWords(code: Exclude<Lang, 'en'>): Promise<{ default: Dict }> {
+  const again = failedAt[code]
+  try {
+    return again
+      ? await (import(/* @vite-ignore */ `${again}${again.includes('?') ? '&' : '?'}again=${Date.now()}`) as Promise<{ default: Dict }>)
+      : await loaders[code]()
+  } catch (e) {
+    const url = /https?:\/\/[^\s'"]+/.exec(String((e as Error)?.message ?? ''))?.[0]
+    // Only this app's own file, never an address from anywhere else.
+    if (url && typeof location !== 'undefined' && url.startsWith(location.origin + '/')) failedAt[code] = url.replace(/[?&]again=\d+/, '')
+    throw e
+  }
+}
+
 async function load(code: Lang): Promise<Dict> {
   const have = dicts[code]
   if (have) return have
-  const dict = (await loaders[code as Exclude<Lang, 'en'>]()).default
-  dicts[code] = dict
-  return dict
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    // Words that come after all are still kept, for the next time they are asked for.
+    const got = fetchWords(code as Exclude<Lang, 'en'>).then((m) => (dicts[code] = m.default))
+    return await Promise.race([got, new Promise<never>((_, no) => { timer = setTimeout(() => no(new Error('slow')), LOAD_TIMEOUT_MS) })])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function apply(code: Lang): void {
@@ -98,16 +129,25 @@ function apply(code: Lang): void {
 
 /**
  * Speak `code` from now on, and remember it on this phone. Resolves once its words
- * are here and on screen; until then the language before stays, so nothing flashes.
- * A language that won't load (no signal on a first visit) leaves the one before.
+ * are here and on screen (true), or false when a later choice, made while these
+ * loaded, won; until then the language before stays, so nothing flashes. A language
+ * that won't load (no signal on a first visit) rejects and leaves the one before, on
+ * screen and on the phone: nothing is kept that the hunter can't see.
  */
-export async function setLanguage(code: Lang): Promise<void> {
-  if (!isLang(code)) return
+export async function setLanguage(code: Lang): Promise<boolean> {
+  if (!isLang(code)) return false
   wanted = code
-  store(code)
-  await load(code)
+  try {
+    await load(code)
+  } catch (e) {
+    if (wanted === code) wanted = current
+    throw e
+  }
   // A later choice made while this one loaded wins.
-  if (wanted === code) apply(code)
+  if (wanted !== code) return false
+  store(code)
+  apply(code)
+  return true
 }
 
 /** The phone's saved language, loaded before the first paint (main.tsx), for at most
@@ -118,7 +158,7 @@ export function startLanguage(waitMs = 2500): Promise<void> {
     if (typeof document !== 'undefined') document.documentElement.lang = 'en'
     return Promise.resolve()
   }
-  const going = setLanguage(code).catch(() => {})
+  const going = setLanguage(code).then(() => {}, () => {})
   return Promise.race([going, new Promise<void>((r) => setTimeout(r, waitMs))])
 }
 

@@ -51,6 +51,26 @@ for (const lang of LANGS) {
 const ALLOWED = new Set(['GameSense', 'Game', 'Sense', 'GameSense v', 'km/h', 'SPYPOINT', 'UBox Pro'])
 const TEXT_ATTRS = new Set(['aria-label', 'title', 'placeholder', 'alt', 'label', 'backLabel', 'note', 'summary'])
 const words = (s) => { const w = s.replace(/&\w+;/g, ' ').trim(); return /[A-Za-zÀ-ÿ]{2,}/.test(w) && !ALLOWED.has(w) }
+// A message rather than a code: a state set to 'edit' or 'activity' is not a sentence,
+// 'Saving…' or 'Could not save the stand.' is.
+const sentence = (s) => words(s) && (/\s/.test(s.trim()) || /[.…!?:]$/.test(s.trim()))
+// The parts of an expression a hunter ends up reading: both answers of a ?:, each side
+// of || and ??, what && gives when it holds, both sides of a +, a template's own text.
+// Not what goes into a call: t('key'), fmtNumber(n), a helper that picks its own words.
+function shown(expr, out = []) {
+  if (!expr) return out
+  if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isNonNullExpression(expr)) return shown(expr.expression, out)
+  if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) out.push({ node: expr, text: expr.text })
+  else if (ts.isTemplateExpression(expr)) {
+    out.push({ node: expr, text: [expr.head.text, ...expr.templateSpans.map((sp) => sp.literal.text)].join(' ') })
+  } else if (ts.isConditionalExpression(expr)) { shown(expr.whenTrue, out); shown(expr.whenFalse, out) }
+  else if (ts.isBinaryExpression(expr)) {
+    const op = expr.operatorToken.kind
+    if (op === ts.SyntaxKind.BarBarToken || op === ts.SyntaxKind.QuestionQuestionToken || op === ts.SyntaxKind.PlusToken) { shown(expr.left, out); shown(expr.right, out) }
+    else if (op === ts.SyntaxKind.AmpersandAmpersandToken) shown(expr.right, out)
+  }
+  return out
+}
 const files = []
 const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).forEach((e) => {
   const p = path.join(dir, e.name)
@@ -67,15 +87,28 @@ for (const file of files) {
   const rel = path.relative(SRC, file)
   const src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
   const at = (node) => `${rel}:${src.getLineAndCharacterOfPosition(node.getStart()).line + 1}`
+  // "i18n-ok" on the line, or the one above, says why words there are never a hunter's
+  // to read (a crash report's placeholder).
+  const lines = text.split('\n')
+  const waived = (node) => { const n = src.getLineAndCharacterOfPosition(node.getStart()).line; return /i18n-ok/.test(lines[n] ?? '') || /i18n-ok/.test(lines[n - 1] ?? '') }
   const visit = (node) => {
     if (ts.isJsxText(node) && words(node.text)) problems.push(`${at(node)}: text in JSX: "${node.text.trim().slice(0, 60)}"`)
     if (ts.isJsxAttribute(node) && TEXT_ATTRS.has(node.name.getText()) && node.initializer) {
       const init = node.initializer
-      const lit = ts.isStringLiteral(init) ? init : ts.isJsxExpression(init) && init.expression && ts.isStringLiteral(init.expression) ? init.expression : null
-      if (lit && words(lit.text)) problems.push(`${at(node)}: ${node.name.getText()}="${lit.text.slice(0, 60)}"`)
+      const parts = ts.isStringLiteral(init) ? [{ node: init, text: init.text }] : ts.isJsxExpression(init) ? shown(init.expression) : []
+      for (const part of parts) if (words(part.text)) problems.push(`${at(part.node)}: ${node.name.getText()}="${part.text.slice(0, 60)}"`)
     }
-    if (ts.isJsxExpression(node) && node.expression && ts.isStringLiteral(node.expression) && ts.isJsxElement(node.parent) && words(node.expression.text)) {
-      problems.push(`${at(node)}: text in JSX: "${node.expression.text.slice(0, 60)}"`)
+    // {'Save'}, {busy ? 'Saving…' : 'Save'}, {err || 'Nothing here yet'}, {`${n} photos`}
+    if (ts.isJsxExpression(node) && node.expression && (ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))) {
+      for (const part of shown(node.expression)) if (words(part.text)) problems.push(`${at(part.node)}: text in JSX: "${part.text.slice(0, 60)}"`)
+    }
+    // A message set straight into a page's state, or thrown for a page to show:
+    // setErr('Could not save the stand.'), new Error('No signal').
+    const callee = ts.isCallExpression(node) ? node.expression : ts.isNewExpression(node) ? node.expression : null
+    const name = callee && (ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '')
+    // The build's own refusals (vite.config.ts) are for whoever runs it, not a hunter.
+    if (name && !rel.startsWith('..') && (/^set[A-Z]/.test(name) || (ts.isNewExpression(node) && name === 'Error'))) {
+      for (const arg of node.arguments ?? []) for (const part of shown(arg)) if (sentence(part.text) && !waived(part.node)) problems.push(`${at(part.node)}: ${name}("${part.text.slice(0, 60)}")`)
     }
     // Keys in use: t('a.b'), and the heads of keys made from data: t(`a.${x}`).
     if (ts.isStringLiteral(node) && node.text in en) used.add(node.text)

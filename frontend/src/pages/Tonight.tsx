@@ -15,7 +15,7 @@ import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import HarvestPrompt from '../components/Harvest'
 import SitPrompts from '../components/SitPrompts'
 import { WindWeekLine, WindWeekStrip, useWindWeek } from '../components/WindWeek'
-import { type Key, fmtTime, minutesSince, t } from '../i18n'
+import { type Key, fmtNumber, fmtTime, minutesSince, t } from '../i18n'
 import { compass, isCall } from '../map/geometry'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
@@ -471,7 +471,7 @@ export default function Tonight() {
             )}
 
             <div className="tn-cond">
-              {c.moon_illum != null && <span>{t('tonight.moon', { pct: c.moon_illum })}</span>}
+              {c.moon_illum != null && <span>{t('tonight.moon', { pct: fmtNumber(c.moon_illum, { maximumFractionDigits: 0 }) })}</span>}
               {c.darkness_minutes != null && <span>{t('tonight.dark', { h: Math.round(c.darkness_minutes / 60) })}</span>}
               {c.wind_dir_deg != null && (
                 <span>{t('tonight.windCond', { from: compass(c.wind_dir_deg), kmh: Math.round(c.wind_speed_kmh ?? 0) })}</span>

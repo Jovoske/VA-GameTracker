@@ -83,6 +83,9 @@ export function signOut(): void {
   setToken(null)
   meCache = null
   meKnown = null
+  // The phone keeps its language (gs_lang); a choice not yet sent was this person's.
+  markPending(null)
+  spoken = null
   for (const path of [...memory.keys()]) if (personal(path)) memory.delete(path)
   try {
     localStorage.removeItem(SIT_QUEUE_KEY)
@@ -272,6 +275,9 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
       if (img) setImagePass(img)
       const renewed = resp.headers.get('X-Session-Token')
       if (renewed && getToken() === token) renewToken(renewed)
+      // The server answers again: a language chosen with no signal can go now. Not
+      // a saved copy the service worker handed back, which is no answer at all.
+      if (path !== '/auth/me' && !resp.headers.get('X-GameSense-Stale')) retryLanguage()
     }
 
     // An expired or revoked session is not a data-loading failure — showing it as one
@@ -550,11 +556,13 @@ export function whoAmI(): Promise<Me> {
   const token = getToken()
   if (meCache && meCache.token === token && Date.now() - meCache.at < 3_600_000) return meCache.p
   const entry = { token, at: Date.now(), p: null as unknown as Promise<Me> }
+  const asked = choices
   entry.p = api<Me>('/auth/me', { timeoutMs: 20_000 }).then(
     (me) => {
       meKnown = { token, me }
       try { localStorage.setItem(ME_KEY, JSON.stringify({ token, me })) } catch { /* private mode */ }
-      followLanguage(me)
+      // A slow answer asked for before a language was chosen here says the old one.
+      if (asked === choices) followLanguage(me)
       return me
     },
     (e) => {
@@ -628,7 +636,19 @@ export async function login(email: string, password: string): Promise<void> {
     localStorage.setItem(LAST_EMAIL_KEY, email.trim())
     if (data.known_phone) localStorage.setItem(PHONE_KEY, data.known_phone)
   } catch { /* private mode */ }
+  // A language picked on the sign-in page is now this person's, and goes to the
+  // server before the first page asks for anything: it answers in the language the
+  // person saved, so the plan asked for first would otherwise come in the old one.
+  // A few seconds at most; a slower answer still lands and the pages ask again.
+  const mine = pendingLanguage()
+  if (mine) {
+    markPending(mine)
+    await Promise.race([sendLanguage(mine), new Promise((r) => window.setTimeout(r, SEND_ON_SIGN_IN_MS))])
+  }
 }
+
+/** How long signing in waits for a language picked on the sign-in page to reach the server. */
+const SEND_ON_SIGN_IN_MS = 4000
 
 /** A password change: this phone gets a new sign-in and pass in the answer; every
  *  other phone signed in as this person is signed out (backend routes_auth). */
@@ -646,54 +666,131 @@ export async function changePassword(current: string, next: string): Promise<str
  * The language, chosen in Settings or on the sign-in page: on screen at once, kept
  * on this phone, and saved to the person on the server so every phone they sign in
  * on speaks it (and the server's own words come in it). With no signal, or before
- * signing in, it waits on the phone and goes the next time the app hears who is
- * signed in. 'saved' when the server has it, 'phone' when only this phone does.
+ * signing in, it waits on the phone and goes as soon as the server answers again.
+ *
+ * The server writes its lines (the plan, reasons, animal names) in the language the
+ * signed-in person saved there (backend app/i18n), not the one a request asks for.
+ * So until a choice reaches it, what it sends is in the old language; once it does,
+ * the pages on screen ask again (onServerLanguage, hooks.ts), and signing in with a
+ * choice from the sign-in page sends it before the first page asks for anything.
  */
 const LANG_PENDING_KEY = 'gs_lang_pending'
 
-/** The language this phone chose and the server hasn't confirmed yet, if any. */
-function pendingLanguage(): Lang | null {
+/** A choice waiting to be sent, and whose: `uid` is who was signed in when it was
+ *  made (tokenSubject), null on the sign-in page, where it is for whoever signs in. */
+type PendingLang = { code: Lang; uid: string | null }
+
+function readPending(): PendingLang | null {
   try {
-    const code = localStorage.getItem(LANG_PENDING_KEY)
-    return isLang(code) ? code : null
+    const raw = localStorage.getItem(LANG_PENDING_KEY)
+    if (!raw) return null
+    // An earlier build kept the bare code.
+    if (isLang(raw)) return { code: raw, uid: null }
+    const v = JSON.parse(raw) as Partial<PendingLang> | null
+    return v && isLang(v.code) ? { code: v.code, uid: typeof v.uid === 'string' ? v.uid : null } : null
   } catch {
     return null
   }
 }
 
+/** The language this phone chose for whoever is signed in and the server hasn't
+ *  confirmed yet, if any. Another person's choice is never theirs to send: a phone
+ *  passed round the party would switch the next hunter's phones and pushes. */
+function pendingLanguage(): Lang | null {
+  const p = readPending()
+  if (!p) return null
+  if (p.uid == null || p.uid === tokenSubject()) return p.code
+  if (getToken()) markPending(null)
+  return null
+}
+
 function markPending(code: Lang | null): void {
   try {
-    if (code) localStorage.setItem(LANG_PENDING_KEY, code)
+    if (code) localStorage.setItem(LANG_PENDING_KEY, JSON.stringify({ code, uid: tokenSubject() }))
     else localStorage.removeItem(LANG_PENDING_KEY)
   } catch {
     /* private mode: the choice still shows, it just isn't retried */
   }
 }
 
+/** A choice on this phone still waiting for the server (Settings offers to send it again). */
+export function languageWaiting(): Lang | null {
+  return pendingLanguage()
+}
+
+/** Bumps with every choice made on this phone. An answer about the person that was
+ *  asked for before the latest choice says what the server had then, not now: it
+ *  must not switch the screen back (R8FE-4). */
+let choices = 0
+
+/** The language the server answers this person in, as far as this phone knows. */
+let spoken: string | null = null
+const serverListeners = new Set<() => void>()
+
+/** Run `f` whenever a choice reaches the server and it starts answering in another
+ *  language, so a page on screen asks again and its server lines follow. */
+export function onServerLanguage(f: () => void): () => void {
+  serverListeners.add(f)
+  return () => { serverListeners.delete(f) }
+}
+
 // One at a time, in the order they were chosen, so the server keeps the last one
 // even when an earlier answer is slow.
 let sending: Promise<unknown> = Promise.resolve()
+/** The code the queue will send last, while any is on its way. */
+let queued: Lang | null = null
+let lastTry = 0
 
 function sendLanguage(code: Lang): Promise<boolean> {
   if (!getToken()) return Promise.resolve(false)
+  queued = code
+  lastTry = Date.now()
   const run = sending.then(async () => {
     try {
       await api('/auth/me', { method: 'PATCH', body: JSON.stringify({ language: code }), timeoutMs: 15_000 })
     } catch {
       return false
+    } finally {
+      if (queued === code) queued = null
     }
     // Still the one wanted (a later choice waits its turn behind this one).
-    if (pendingLanguage() === code) markPending(null)
+    const later = pendingLanguage()
+    if (later === code) markPending(null)
     if (meKnown) meKnown = { ...meKnown, me: { ...meKnown.me, language: code } }
+    const before = spoken
+    spoken = code
+    // The pages ask again once, for the last choice, not for each one on the way.
+    if (before !== code && (!later || later === code)) serverListeners.forEach((f) => f())
     return true
   })
   sending = run.catch(() => false)
   return run
 }
 
-export async function chooseLanguage(code: Lang): Promise<'saved' | 'phone'> {
+/** A choice still waiting goes again once the server answers anything else: signal
+ *  came back, and nobody should wait for the next app open to see their language. */
+function retryLanguage(): void {
+  if (queued || Date.now() - lastTry < 30_000) return
+  const mine = pendingLanguage()
+  if (mine) void sendLanguage(mine)
+}
+
+/**
+ * A language chosen in Settings or on the sign-in page, put on screen: true once
+ * its words are there and it is kept on this phone, false when a later choice won
+ * while these loaded; throws when they won't load, and then nothing is kept (the
+ * phone stays as it was). saveLanguage() then sends it.
+ */
+export async function chooseLanguage(code: Lang): Promise<boolean> {
+  choices++
+  if (!(await setLanguage(code))) return false
   markPending(code)
-  await setLanguage(code)
+  return true
+}
+
+/** Send the chosen language to the person on the server: 'saved' when it has it,
+ *  'phone' when only this phone does for now (no signal, or not signed in yet). */
+export async function saveLanguage(code: Lang): Promise<'saved' | 'phone'> {
   return (await sendLanguage(code)) ? 'saved' : 'phone'
 }
 
@@ -703,8 +800,9 @@ function followLanguage(me: Me): void {
   const mine = pendingLanguage()
   if (mine) {
     if (me.language === mine) markPending(null)
-    else void sendLanguage(mine)
+    else if (queued !== mine) void sendLanguage(mine)
     return
   }
+  spoken = me.language ?? null
   if (isLang(me.language) && me.language !== lang()) void setLanguage(me.language).catch(() => {})
 }

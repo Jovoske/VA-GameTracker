@@ -10,6 +10,9 @@ const en = {
   'common.loading': 'Loading…',
   'common.tryAgain': 'Try again',
   'common.reload': 'Reload',
+  'boot.slow': 'GameSense is taking a long time to open.',
+  'boot.why': 'No signal, or the app was just updated.',
+  'app.description': 'Turn your trail cameras into a hunting forecast.',
 
   // ── time and server answers ──
   'common.andList': '{list} and {last}',
@@ -1414,6 +1417,9 @@ const en = {
   'mapPage.theStands': 'the stands and bedding',
   'mapPage.theCameras': 'the cameras',
   'mapPage.fatal': 'The map couldn’t start on this phone. Reload the page, or use Stands and Cameras meanwhile.',
+  'mapPage.marker': 'Mark on the map',
+  'mapPage.credits': 'Map credits',
+  'mapPage.feedback': 'Map feedback',
   'mapPage.pathsNoSignal': 'No signal, so the likely paths didn’t load.',
   'mapPage.pathsCouldnt': 'Couldn’t load the likely paths. {why}',
   'mapPage.standPin': 'Stand: {name}',

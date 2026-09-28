@@ -20,6 +20,7 @@ export class PageBoundary extends Component<{ resetKey: string; children: ReactN
   state = { error: null as unknown, why: null as Why }
 
   static getDerivedStateFromError(error: unknown) {
+    // i18n-ok: never on screen, only in the crash report.
     return { error: error ?? new Error('Unknown error'), why: isChunkError(error) ? 'checking' : null }
   }
 
