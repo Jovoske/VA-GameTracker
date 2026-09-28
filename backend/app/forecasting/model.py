@@ -10,9 +10,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from functools import lru_cache
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, and_, case, cast, func, literal, select
+from sqlalchemy import Integer, and_, case, cast, false, func, literal, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -29,7 +30,7 @@ from app.forecasting.conditions import (
 from app.forecasting.exposure import current_night, night_key_start
 from app.forecasting.scoring import calibration
 from app.i18n import species_name, t
-from app.models import Camera, CameraNight, Image, Species
+from app.models import Camera, CameraNight, Detection, Image, Species
 
 log = get_logger(__name__)
 
@@ -372,6 +373,43 @@ def sentence_case(name: str) -> str:
     return name[:1].upper() + name[1:]
 
 
+class _Split(NamedTuple):
+    """How class_label splits red deer or wild boar: by the young one's group type,
+    then the sex, then the group's; the species' own name for the rest."""
+
+    young_type: str  # Detection.group_type of a mother with her young
+    young: str
+    male: str
+    female: str
+    group_type: str  # Detection.group_type of a group of them
+    group: str
+
+    @property
+    def classes(self) -> tuple[str, str, str, str]:
+        return self.young, self.male, self.female, self.group
+
+
+_SPLIT = {
+    "red_deer": _Split("hind_with_calf", "hind_calf", "stag", "hind", "herd", "herd"),
+    "wild_boar": _Split("sow_with_piglets", "sow_piglets", "boar", "sow", "sounder", "sounder"),
+}
+
+
+def _class_of(species_id: str | None, sex: str | None, group_type: str | None) -> str | None:
+    """"stag", "sow_piglets", "herd"… for a red deer or wild boar class_label splits
+    off; None where the class is the species' own name."""
+    split = _SPLIT.get(species_id or "")
+    if split is None:
+        return None
+    if group_type == split.young_type:
+        return split.young
+    if sex == "male":
+        return split.male
+    if sex == "female":
+        return split.female
+    return split.group if group_type == split.group_type else None
+
+
 def class_label(species_id: str | None, common_name: str | None, sex: str | None, group_type: str | None) -> str:
     """Human class from species + sex + group composition (mirrors the gallery chip),
     in the language being written in (app.i18n).
@@ -381,28 +419,105 @@ def class_label(species_id: str | None, common_name: str | None, sex: str | None
     reaches those tiles too. Every other species is its name ("Roe deer", "Fallow
     deer"), so the Photos tiles, the map and the alerts all write it the same way.
     """
-    if species_id == "red_deer":
-        if group_type == "hind_with_calf":
-            return t("class.hind_calf")
-        if sex == "male":
-            return t("class.stag")
-        if sex == "female":
-            return t("class.hind")
-        name = species_name(species_id, common_name)
-        return t("class.herd", name=name) if group_type == "herd" else name
-    if species_id == "wild_boar":
-        if group_type == "sow_with_piglets":
-            return t("class.sow_piglets")
-        if sex == "male":
-            return t("class.boar")
-        if sex == "female":
-            return t("class.sow")
-        if group_type == "sounder":
-            return t("class.sounder")
-        return species_name(species_id, common_name)
+    cls = _class_of(species_id, sex, group_type)
+    if cls == "herd":
+        return t("class.herd", name=species_name(species_id, common_name))
+    if cls:
+        return t(f"class.{cls}")
     if common_name or species_id:
         return species_name(species_id, common_name)
     return t("class.animal")
+
+
+def class_key(species_id: str | None, sex: str | None, group_type: str | None) -> str | None:
+    """The class class_label names, as the app sends it back to ask for its photos:
+    the same in every language, where the label is not ("Hjort" is a stag in Swedish
+    and a red deer in Norwegian). "red_deer.stag", "wild_boar.sow_piglets", or the
+    species' id for its own name ("red_deer", "roe_deer"); None for an unnamed animal."""
+    if not species_id:
+        return None
+    cls = _class_of(species_id, sex, group_type)
+    return f"{species_id}.{cls}" if cls else species_id
+
+
+def join_class_keys(keys) -> str | None:
+    """One chip's key: class_keys comma-joined, as a label that is two classes in the
+    reader's language carries both (a boar an admin renamed "Boar" is the unsexed
+    ones and the males)."""
+    return ",".join(sorted({k for k in keys if k})) or None
+
+
+def parse_class_key(key: str | None) -> tuple[str, str | None] | None:
+    """(species id, class or None) of a class_key; None for one that is not."""
+    if not key:
+        return None
+    sid, _, cls = key.strip().partition(".")
+    if not sid:
+        return None
+    if not cls:
+        return sid, None
+    split = _SPLIT.get(sid)
+    if split is None or cls not in split.classes:
+        return None
+    return sid, cls
+
+
+def class_where(species_id: str, cls: str | None):
+    """SQL on Detection: a sighting of `species_id` that class_label puts in class
+    `cls` (None: the species' own name). Mirrors _class_of, so a class's photos are
+    the ones its tiles are labelled with."""
+    of_species = Detection.species_id == species_id
+    split = _SPLIT.get(species_id)
+    if split is None:
+        return of_species if cls is None else false()
+    not_young = or_(Detection.group_type.is_(None), Detection.group_type != split.young_type)
+    unsexed = or_(Detection.sex.is_(None), Detection.sex.notin_(("male", "female")))
+    where = {
+        split.young: Detection.group_type == split.young_type,
+        split.male: and_(not_young, Detection.sex == "male"),
+        split.female: and_(not_young, Detection.sex == "female"),
+        split.group: and_(unsexed, Detection.group_type == split.group_type),
+        None: and_(unsexed, or_(
+            Detection.group_type.is_(None),
+            Detection.group_type.notin_((split.young_type, split.group_type)),
+        )),
+    }.get(cls)
+    return false() if where is None else and_(of_species, where)
+
+
+def class_keys_where(keys: str, species_id: str | None = None):
+    """SQL on Detection for the classes a chip's key names (join_class_keys), of
+    `species_id` only when given; nothing for a key that names none."""
+    hits = []
+    for key in keys.split(","):
+        parsed = parse_class_key(key)
+        if parsed is not None and (species_id is None or parsed[0] == species_id):
+            hits.append(class_where(*parsed))
+    return or_(*hits) if hits else false()
+
+
+def class_label_filter(species_id: str, common_name: str | None, label: str):
+    """SQL on Detection, among `species_id`'s sightings, for the ones class_label
+    calls `label`, read in one language (i18n.reading_order): the reader's own first.
+    In one language a label can be two classes (a boar an admin renamed "Boar" is the
+    unsexed ones and the males both); two languages are never mixed."""
+    from app.i18n import reading_order, use
+
+    split = _SPLIT.get(species_id)
+    asked: dict[str | None, tuple[str | None, str | None]] = {None: (None, None)}
+    if split is not None:
+        asked |= {split.young: (None, split.young_type), split.male: ("male", None),
+                  split.female: ("female", None), split.group: (None, split.group_type)}
+    for lang in reading_order():
+        with use(lang):
+            hits = [cls for cls, (sex, gt) in asked.items()
+                    if class_label(species_id, common_name, sex, gt) == label]
+        if hits:
+            # Any other species is one class, its name: all of its sightings.
+            if split is None:
+                return true()
+            return or_(*(class_where(species_id, cls) for cls in hits))
+    return false()
 
 
 # class_label_sql's words for a class, and the key each is said with.
@@ -427,25 +542,41 @@ def say_class(cls: str | None, species_id: str | None, common_name: str | None) 
     return class_label(species_id, common_name, None, None)
 
 
+def sql_class_key(cls: str | None, species_id: str | None) -> str | None:
+    """class_key for a class as class_label_sql names it ("Sow + piglets", "Red deer
+    (herd)", or empty for the species' own name)."""
+    if not species_id:
+        return None
+    if cls in _CLASS_KEYS:
+        return f"{species_id}.{_CLASS_KEYS[cls].removeprefix('class.')}"
+    if cls and cls.endswith(_HERD):
+        return f"{species_id}.herd"
+    return species_id
+
+
 def labels_in_english(db: Session, label: str) -> set[str]:
     """What a class label the app sent back (a filter) may be, as class_label_sql
     and the English screens write it: the app shows labels in its person's language
-    ("Uros", "Villisika"), the database compares English ("Stag", "Wild boar")."""
-    from app.i18n import LANGUAGES, tr
+    ("Uros", "Villisika"), the database compares English ("Stag", "Wild boar").
 
-    out = {label}
-    for en, key in _CLASS_KEYS.items():
-        if any(label == tr(lang, key) for lang in LANGUAGES):
-            out.add(en)
-    for sid, stored in db.execute(select(Species.id, Species.common_name)).all():
-        english = sentence_case(stored) if stored else None
-        for lang in LANGUAGES:
+    Read in one language (i18n.reading_order), the reader's own first: "Hjort" from
+    a Swedish reader is a stag, from a Norwegian one a red deer, never both. A label
+    no language knows is compared as it came."""
+    from app.i18n import reading_order, tr
+
+    species = db.execute(select(Species.id, Species.common_name)).all()
+    for lang in reading_order():
+        out = {en for en, key in _CLASS_KEYS.items() if label == tr(lang, key)}
+        for sid, stored in species:
+            english = sentence_case(stored) if stored else None
             name = species_name(sid, stored, lang)
             if label == name and english:
                 out.add(english)
             if sid == "red_deer" and label == tr(lang, "class.herd", name=name):
                 out.add(f"{english or 'Red deer'}{_HERD}")
-    return out
+        if out:
+            return out
+    return {label}
 
 
 def sentence_case_sql(name):

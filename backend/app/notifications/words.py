@@ -35,6 +35,14 @@ def name(species_id: str | None, tally: dict) -> str:
         tally.get("name") or i18n.t("class.animal"))
 
 
+def names(tallies: list[tuple[str | None, dict]]) -> list[str]:
+    """Several tallies' names for one list, most first: the first as it starts the
+    sentence, the rest as words inside it (i18n.species_inside: "Villisika,
+    saksanhirvi ja 2 muuta")."""
+    return [i18n.species_inside(sid, tally.get("name")) if i and sid else name(sid, tally)
+            for i, (sid, tally) in enumerate(tallies)]
+
+
 def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> str:
     """"22:14", "23:50 last night" or "23:50 on Thu 24 Sep", on the estate's clock.
 

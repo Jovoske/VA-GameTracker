@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.api.refusal import Refusal
 from app.core.db import get_db
 from app.core.security import RENEW_AFTER, decode_token, image_token, session_token
 from app.i18n import set_current, t
@@ -35,6 +36,11 @@ IMAGE_TOKEN_HEADER = "X-Image-Token"
 SESSION_TOKEN_HEADER = "X-Session-Token"
 
 
+# The code on every refusal of a sign-in that no longer works (api.refusal): the app
+# sends its person to sign in again, whatever the words say in their language.
+SIGNED_OUT = "signed_out"
+
+
 def user_from_token(raw: str, db: Session, *, scope: str | None = None) -> tuple[User, dict]:
     """The person a token belongs to, and its claims; a 401 otherwise.
 
@@ -46,23 +52,23 @@ def user_from_token(raw: str, db: Session, *, scope: str | None = None) -> tuple
         payload = decode_token(raw)
         subject = payload.get("sub")
     except jwt.PyJWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.token_invalid"))
+        raise Refusal(status.HTTP_401_UNAUTHORIZED, SIGNED_OUT, t("auth.token_invalid"))
     if payload.get("scope") != scope:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.token_invalid"))
+        raise Refusal(status.HTTP_401_UNAUTHORIZED, SIGNED_OUT, t("auth.token_invalid"))
 
     # A token whose subject is not a UUID is a bad token, not a server fault:
     # uuid.UUID() raises ValueError, which surfaced as a 500 instead of a 401.
     try:
         user_id = uuid.UUID(subject) if subject else None
     except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.token_subject"))
+        raise Refusal(status.HTTP_401_UNAUTHORIZED, SIGNED_OUT, t("auth.token_subject"))
 
     user = db.get(User, user_id) if user_id else None
     if user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.user_not_found"))
+        raise Refusal(status.HTTP_401_UNAUTHORIZED, SIGNED_OUT, t("auth.user_not_found"))
     # A token from before the version existed carries none: that is version 0.
     if payload.get("tv", 0) != (user.token_version or 0):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.signed_out"))
+        raise Refusal(status.HTTP_401_UNAUTHORIZED, SIGNED_OUT, t("auth.signed_out"))
     return user, payload
 
 

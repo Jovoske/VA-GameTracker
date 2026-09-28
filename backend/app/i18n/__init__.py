@@ -277,6 +277,24 @@ def species_name(species_id: str | None, stored: str | None = None,
     return species_id or tr(lang, "class.animal")
 
 
+# Languages that write an animal's name in lower case inside a sentence
+# ("villisika", "jabalí"): all but English, which writes "Wild boar" as it always has.
+_LOWER_INSIDE = frozenset({"fi", "sv", "nb", "es"})
+
+
+def species_inside(species_id: str | None, stored: str | None = None,
+                   lang: str | None = None) -> str:
+    """species_name as a word inside a sentence, or after the first name of a list
+    ("Villisika, saksanhirvi ja 2 muuta"): lower case in a language that writes it
+    so. An admin's own name is written as they wrote it, in every language."""
+    lang = lang or current()
+    name = species_name(species_id, stored, lang)
+    if (lang in _LOWER_INSIDE and species_id and not renamed(species_id, stored)
+            and f"species.{species_id}" in _catalog(DEFAULT)):
+        return name[:1].lower() + name[1:]
+    return name
+
+
 def renamed(species_id: str, stored: str | None) -> bool:
     """Whether `stored` (species.common_name) is a name an admin gave it."""
     if not stored:
@@ -328,6 +346,10 @@ def _stored_patterns() -> list[tuple[re.Pattern, str, tuple[str, ...]]]:
     return [p[1:] for p in out]
 
 
+# Parameters of kept messages that are decimal numbers (fetch.disk_full's free GB).
+_DECIMAL_PARAMS = frozenset({"gb"})
+
+
 def localize(text: str | None, lang: str | None = None) -> str | None:
     """A message the server kept in English (en.STORED), said in the language.
 
@@ -347,6 +369,10 @@ def localize(text: str | None, lang: str | None = None) -> str | None:
             if "n" in params:
                 with contextlib.suppress(ValueError):
                     params["n"] = int(params["n"])
+            for k in _DECIMAL_PARAMS & params.keys():
+                # A number kept as English text ("12.3" GB free), in the language's mark.
+                if re.fullmatch(r"\d+\.\d+", params[k]):
+                    params[k] = params[k].replace(".", tr(lang, "num.decimal_mark"))
             return tr(lang, key, **params)
     return text
 
@@ -354,6 +380,6 @@ def localize(text: str | None, lang: str | None = None) -> str | None:
 __all__ = [
     "DEFAULT", "LANGUAGES", "NAMES", "LanguageMiddleware", "current", "day_month", "decimal",
     "fixed", "from_accept_language", "join", "join_all", "localize", "month", "normalize",
-    "plural", "reading_order", "renamed", "set_current", "species_name", "stored", "t", "tr",
-    "use", "weekday", "weekday_day_month",
+    "plural", "reading_order", "renamed", "set_current", "species_inside", "species_name",
+    "stored", "t", "tr", "use", "weekday", "weekday_day_month",
 ]

@@ -597,3 +597,256 @@ def test_a_team_note_reaches_each_teammate_in_their_language(client, db_session,
     bodies = {lang: p["body"] for lang, u in team.items() for p in rec.to(u)}
     assert bodies == {"en": "Pedro marked a photo", "fi": "Pedro merkitsi kuvan",
                       "es": "Pedro ha marcado una foto"}
+
+
+# ── a class the app sends back (R8BE-1) ──────────────────────────────────────
+
+
+@pytest.fixture
+def herd(db_session, estate):
+    """One photo each of a stag, a red deer nobody could sex, an otter and a coypu:
+    "Hjort" is the stag in Swedish and the red deer in Norwegian, "Nutria" the otter
+    in Spanish and the coypu in English."""
+    cam = Camera(estate_id=estate.id, name="PL19", active=True, lat=39.09, lon=-1.36,
+                 last_report_at=datetime.now(UTC))
+    db_session.add_all([cam, Species(id="red_deer", common_name="Red deer", is_priority=True),
+                        Species(id="otter", common_name="Otter"),
+                        Species(id="nutria", common_name="Nutria")])
+    db_session.commit()
+    at = datetime.now(UTC) - timedelta(days=1)
+    out = {}
+    for name, sid, sex in (("stag", "red_deer", "male"), ("deer", "red_deer", "unknown"),
+                           ("otter", "otter", "unknown"), ("coypu", "nutria", "unknown")):
+        img = Image(camera_id=cam.id, captured_at=at, original_path=f"{name}.jpg",
+                    processed_at=at, is_empty_frame=False, reviewed=True)
+        db_session.add(img)
+        db_session.flush()
+        db_session.add(Detection(image_id=img.id, species_id=sid, species_conf=0.9, sex=sex,
+                                 created_at=at))
+        out[name] = str(img.id)
+        at += timedelta(hours=2)  # a visit each
+    db_session.commit()
+    return out
+
+
+def _ids(r) -> list[str]:
+    assert r.status_code == 200, r.text
+    return sorted(i["image_id"] for i in r.json()["items"])
+
+
+@requires_db
+@pytest.mark.parametrize("lang, word, means", [
+    ("sv", "Hjort", "stag"),  # a stag
+    ("nb", "Hjort", "deer"),  # a red deer nobody could sex
+    ("en", "Stag", "stag"),
+    ("nb", "Stag", "stag"),   # an older link, in English
+    ("fi", "Saksanhirvi", "deer"),
+])
+def test_a_class_tapped_is_read_in_the_readers_own_language(
+    client, db_session, estate, herd, lang, word, means,
+):
+    u = _user(db_session, estate, "member", language=lang)
+    got = _ids(client.get("/api/species/red_deer/photos", params={"label": word},
+                          headers=_h(u)))
+    assert got == [herd[means]]
+    got = _ids(client.get("/api/insights/class", params={"label": word}, headers=_h(u)))
+    assert got == [herd[means]]
+
+
+@requires_db
+@pytest.mark.parametrize("lang, means", [("es", "otter"), ("en", "coypu"), ("fi", "coypu")])
+def test_nutria_is_the_otter_in_spanish_and_the_coypu_in_english(
+    client, db_session, estate, herd, lang, means,
+):
+    u = _user(db_session, estate, "member", language=lang)
+    got = _ids(client.get("/api/insights/class", params={"label": "Nutria"}, headers=_h(u)))
+    assert got == [herd[means]]
+
+
+@requires_db
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_every_class_comes_with_a_key_the_same_in_every_language(
+    client, db_session, estate, herd, lang,
+):
+    u = _user(db_session, estate, "member", language=lang)
+    h = _h(u)
+    deer = next(s for s in client.get("/api/species/spotted", headers=h).json()
+                if s["id"] == "red_deer")
+    keys = {c["label"]: c["key"] for c in deer["classes"]}
+    assert sorted(keys.values()) == ["red_deer", "red_deer.stag"]
+    assert keys[tr(lang, "class.stag")] == "red_deer.stag"
+    assert keys[tr(lang, "species.red_deer")] == "red_deer"
+    # The gallery and the Insights makeup are asked by key, in any language.
+    items = client.get("/api/species/red_deer/photos", params={"key": "red_deer.stag"},
+                       headers=h).json()["items"]
+    assert [(i["image_id"], i["class_key"], i["label"]) for i in items] == [
+        (herd["stag"], "red_deer.stag", tr(lang, "class.stag"))]
+    assert _ids(client.get("/api/species/red_deer/photos", params={"key": "red_deer"},
+                           headers=h)) == [herd["deer"]]
+    makeup = {x["key"]: x["label"]
+              for x in client.get("/api/insights", headers=h).json()["composition"]}
+    assert makeup == {"red_deer.stag": tr(lang, "class.stag"),
+                      "red_deer": tr(lang, "species.red_deer"),
+                      "otter": tr(lang, "species.otter"), "nutria": tr(lang, "species.nutria")}
+    for key, name in (("red_deer.stag", "stag"), ("red_deer", "deer"), ("otter", "otter"),
+                      ("nutria", "coypu")):
+        assert _ids(client.get("/api/insights/class", params={"key": key}, headers=h)) == [
+            herd[name]]
+    # A chip that is two classes carries both; a key for another animal is nothing.
+    assert _ids(client.get("/api/insights/class", params={"key": "red_deer,red_deer.stag"},
+                           headers=h)) == sorted([herd["stag"], herd["deer"]])
+    assert _ids(client.get("/api/species/red_deer/photos", params={"key": "otter"},
+                           headers=h)) == []
+    assert _ids(client.get("/api/insights/class", params={"key": "red_deer.piglet"},
+                           headers=h)) == []
+    r = client.get("/api/insights/class", headers=h)
+    assert (r.status_code, r.json()["detail"]) == (422, tr(lang, "insights.class_missing"))
+
+
+# ── refusals the app acts on (R8BE-2) ────────────────────────────────────────
+
+
+@requires_db
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_a_refusal_the_app_acts_on_has_a_code_beside_its_words(
+    client, db_session, estate, lang,
+):
+    """The words are in the reader's language, so the app knows a refusal by its
+    code: "Save again to keep it as an animal photo" on empty_frame, sign in again
+    on signed_out. `detail` stays the words, for an app that only shows them."""
+    cam = Camera(estate_id=estate.id, name="PL19")
+    db_session.add_all([cam, Species(id="lagomorph", common_name="Rabbit", hidden=True)])
+    db_session.flush()
+    at = datetime.now(UTC) - timedelta(hours=3)
+
+    def photo(species=(), **kw):
+        img = Image(camera_id=cam.id, captured_at=at, original_path=f"{uuid.uuid4()}.jpg",
+                    **{"processed_at": at, "is_empty_frame": False, **kw})
+        db_session.add(img)
+        db_session.flush()
+        for sid in species:
+            db_session.add(Detection(image_id=img.id, species_id=sid, species_conf=0.9))
+        return img
+
+    empty = photo(is_empty_frame=True)
+    rabbit = photo(species=("lagomorph",))
+    walker = photo(person_conf=0.9)
+    unseen = photo(processed_at=None, is_empty_frame=None, reviewed=False)
+    db_session.commit()
+    admin = _user(db_session, estate, "admin", language=lang)
+    member = _user(db_session, estate, "member", language=lang)
+
+    for who, img, code, key in (
+        (member, empty, "empty_frame", "notes.empty_frame"),
+        (member, rabbit, "hidden_only", "notes.hidden_only"),
+        (admin, walker, "people_only", "notes.people_only"),
+        (admin, unseen, "not_looked", "notes.not_looked"),
+    ):
+        r = client.post(f"/api/images/{img.id}/notes", headers=_h(who), json={"text": "boar"})
+        assert (r.status_code, r.json()) == (409, {"detail": tr(lang, key), "code": code})
+
+    # A sign-in that no longer works (a new password elsewhere, a removed person, an
+    # expired token): nobody is signed in, so the phone's language; the same code.
+    member.token_version = (member.token_version or 0) + 1
+    db_session.commit()
+    r = client.get("/api/auth/me", headers=_h(member, **{"Accept-Language": lang}))
+    assert (r.status_code, r.json()) == (401, {"detail": tr(lang, "auth.signed_out"),
+                                               "code": "signed_out"})
+    r = client.get("/api/auth/me", headers={"Authorization": "Bearer junk",
+                                            "Accept-Language": lang})
+    assert (r.status_code, r.json()) == (401, {"detail": tr(lang, "auth.token_invalid"),
+                                               "code": "signed_out"})
+    # Any other refusal is words alone, as before.
+    r = client.delete(f"/api/stands/{uuid.uuid4()}", headers=_h(admin))
+    assert r.json() == {"detail": tr(lang, "stands.gone")}
+
+
+# ── numbers in each language's decimal mark (R8BE-3) ─────────────────────────
+
+
+@requires_db
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_the_slope_winds_numbers_use_the_languages_decimal_mark(db_session, place, lang):
+    import re
+
+    from app.forecasting import bedding, conditions
+
+    from .test_weather_and_wind import _slope_north
+
+    _slope_north(db_session)
+    evening = conditions.sunset_of(date(2026, 9, 26)) + timedelta(minutes=45)
+    stand = place["stand"]
+    with use(lang):
+        report = bedding.stand_wind_report(
+            db_session, stand_name=stand.name, lat=stand.lat, lon=stand.lon,
+            wind_dir_deg=90.0, wind_speed_kmh=3.0, when=evening)
+    assert report["source"] == "katabatic"
+    speed = f"{report['speed_kmh']:.1f}"
+    pct = f"{report['slope']['slope_pct']:.1f}"
+    mark = tr(lang, "num.decimal_mark")
+    text = report["text"]
+    for number in (speed, pct):
+        assert number.replace(".", mark) in text, text
+    if lang == "en":  # word for word as before
+        assert f"~{speed} km/h ({pct}% fall)" in text
+    else:
+        assert not re.search(r"\d\.\d", text), text
+
+
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_a_number_kept_in_english_is_read_in_the_languages_mark(lang):
+    kept = stored("fetch.disk_full", gb="12.3")
+    mark = tr(lang, "num.decimal_mark")
+    assert localize(kept, lang) == tr(lang, "fetch.disk_full", gb=f"12{mark}3")
+
+
+# ── the moon (R8BE-4) ────────────────────────────────────────────────────────
+
+
+@requires_db
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_the_moon_is_said_in_the_readers_language_with_a_key_beside_it(
+    client, db_session, estate, lang,
+):
+    from app.enrichment.astro import MOON_PHASES
+
+    keys = {p.lower().replace(" ", "_") for p in MOON_PHASES}
+    u = _user(db_session, estate, "member", language=lang)
+    tonight = client.get("/api/analytics/overview", headers=_h(u)).json()["tonight"]
+    days = client.get("/api/insights", headers=_h(u)).json()["outlook"]
+    for said in (tonight, *days):
+        assert said["moon_phase_key"] in keys
+        assert said["moon_phase"] == tr(lang, f"moon.{said['moon_phase_key']}")
+
+
+# ── animals' names inside a push's list (R8BE-5) ─────────────────────────────
+
+
+@pytest.mark.parametrize("lang, body", [
+    ("en", "Wild boar, Red deer and Big tusker, last one 22:14."),
+    ("fi", "Villisika, saksanhirvi ja Big tusker, viimeisin klo 22:14."),
+    ("sv", "Vildsvin, kronhjort och Big tusker, senast {t}."),
+    ("nb", "Villsvin, hjort og Big tusker, sist {t}."),
+    ("es", "Jabalí, ciervo y Big tusker, el último {t}."),
+])
+def test_a_list_of_animals_starts_with_a_capital_and_goes_on_in_lower_case(lang, body):
+    """The first name starts the sentence; the others are words inside it, lower case
+    in the languages that write them so. An admin's own name stays as they wrote it."""
+    t0 = datetime(2026, 9, 20, 22, 14, tzinfo=MADRID)
+    ds = []
+    for i, (sid, name) in enumerate([("wild_boar", "Wild boar"), ("red_deer", "Red deer"),
+                                     ("roe_deer", "Big tusker")]):
+        d = dispatch.SpeciesDigest(sid, name)
+        for k in range(3 - i):
+            d.add(uuid.uuid4(), t0 - timedelta(hours=k), "PL19")
+        ds.append(d)
+    with use(lang):
+        _, said = dispatch.compose_summary(ds, MADRID)
+        when = tr(lang, "push.time", time="22:14")
+    assert said == body.replace("{t}", when)
+
+
+@pytest.mark.parametrize("lang, verdict", [("en", "Not enough to say"),
+                                           ("es", "Sin datos suficientes")])
+def test_the_no_data_verdict_reads_naturally(lang, verdict):
+    assert tr(lang, "verdict.no_data") == verdict

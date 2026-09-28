@@ -162,8 +162,9 @@ def compose_held(rows: list[Notification], why: str, now: datetime,
         parts.append(t("held.one", name=words.name(order[0], one),
                        visits=words.visits(one["visits"]), cameras=words.join(cams)))
     else:
-        parts += [t("held.each", name=words.name(s, tallies[s]),
-                    visits=words.visits(tallies[s]["visits"])) for s in order]
+        said = words.names([(s, tallies[s]) for s in order])
+        parts += [t("held.each", name=said[i], visits=words.visits(tallies[s]["visits"]))
+                  for i, s in enumerate(order)]
         parts += [r.title for r in bare]
         if notes:
             parts.append(t("held.worth_a_look", n=len(notes)))

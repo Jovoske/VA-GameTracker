@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app import geo
 from app.forecasting.wind import SCENT_CONE_DEG
-from app.i18n import t
+from app.i18n import fixed, t
 from app.models import Zone
 
 # How far a hunter's scent stays concentrated enough for a deer to act on it. A
@@ -186,11 +186,12 @@ def stand_wind_report(
     if source == "synoptic":
         lead = t("wind.reading", dir=compass(eff_dir), speed=round(eff_speed))
     elif source == "katabatic":
+        # In the language's decimal mark ("1,5 km/h"); English reads as it did.
         lead = t("bedding.lead.katabatic", dir=compass(scent_bearing),
-                 speed=round(eff_speed, 1),
-                 fall=t("bedding.fall", pct=slope_pct) if slope_pct else "")
+                 speed=fixed(eff_speed, 1),
+                 fall=t("bedding.fall", pct=fixed(slope_pct, 1)) if slope_pct else "")
     else:
-        lead = t("bedding.lead.anabatic", dir=compass(scent_bearing), speed=round(eff_speed, 1))
+        lead = t("bedding.lead.anabatic", dir=compass(scent_bearing), speed=fixed(eff_speed, 1))
 
     # A drainage call is only as good as the conditions holding; dusk is when it turns.
     caveat = ""

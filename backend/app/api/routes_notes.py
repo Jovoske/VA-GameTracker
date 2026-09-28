@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.checking import hunter_decided
 from app.api.deps import get_current_user
+from app.api.refusal import Refusal
 from app.api.routes_images import recount_after_flag
 from app.api.routes_map import latest_photos
 from app.api.visibility import ONLY_HIDDEN_SPECIES, hidden_from, is_people, not_looked_at
@@ -82,10 +83,18 @@ class NoteBody(BaseModel):
     keep: bool = False
 
 
-EMPTY_FRAME = "notes.empty_frame"
-HIDDEN_ONLY = "notes.hidden_only"
-PEOPLE_ONLY = "notes.people_only"
-NOT_LOOKED = "notes.not_looked"
+# Why a photo takes no note, as the app is told it: a code the same in every
+# language (api.refusal), and the words' catalog key. The app offers "Save again to
+# keep it as an animal photo" on empty_frame.
+EMPTY_FRAME = ("empty_frame", "notes.empty_frame")
+HIDDEN_ONLY = ("hidden_only", "notes.hidden_only")
+PEOPLE_ONLY = ("people_only", "notes.people_only")
+NOT_LOOKED = ("not_looked", "notes.not_looked")
+
+
+def _refuse(why: tuple[str, str]) -> Refusal:
+    code, key = why
+    return Refusal(409, code, t(key))
 
 
 def _markable(db: Session, image: Image, keep: bool) -> bool:
@@ -97,15 +106,15 @@ def _markable(db: Session, image: Image, keep: bool) -> bool:
     sees it), and not one marked "nothing in it" unless the hunter says to keep it.
     """
     if db.scalar(select(Image.id).where(Image.id == image.id, ONLY_HIDDEN_SPECIES)) is not None:
-        raise HTTPException(409, t(HIDDEN_ONLY))
+        raise _refuse(HIDDEN_ONLY)
     if is_people(image):
-        raise HTTPException(409, t(PEOPLE_ONLY))
+        raise _refuse(PEOPLE_ONLY)
     if not_looked_at(image):
-        raise HTTPException(409, t(NOT_LOOKED))
+        raise _refuse(NOT_LOOKED)
     if not image.is_empty_frame:
         return False
     if not keep:
-        raise HTTPException(409, t(EMPTY_FRAME))
+        raise _refuse(EMPTY_FRAME)
     image.is_empty_frame = False
     image.reviewed = True  # sticky, like the Keep button: the auto-scan leaves it be
     image.processed_at = datetime.now(UTC)  # on the map from now, so new (routes_map.shown_after)

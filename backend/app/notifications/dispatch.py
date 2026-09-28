@@ -219,8 +219,8 @@ def compose_update(tally: dict, tz: ZoneInfo, now: datetime | None = None,
 def compose_summary(digests: list[SpeciesDigest], tz: ZoneInfo,
                     now: datetime | None = None) -> tuple[str, str]:
     n = sum(d.visits for d in digests)
-    names = [words.name(d.species_id, {"name": d.name})
-             for d in sorted(digests, key=lambda d: -d.visits)]
+    names = words.names([(d.species_id, {"name": d.name})
+                         for d in sorted(digests, key=lambda d: -d.visits)])
     latest = max((d.latest_at for d in digests if d.latest_at), default=None)
     when = words.said_at(latest, tz, now)
     return (

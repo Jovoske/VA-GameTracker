@@ -794,6 +794,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Det mesta händer vid {cameras}. De andra kamerorna ser betydligt mindre."
     ),
     "insights.busiest_cameras": "{cameras} är dina livligaste kameror.",
+    "insights.class_missing": "Välj vilka djur som ska visas.",
 
     # ---- species in Settings -------------------------------------------------
     "species.name_hidden_chars": "Namnet innehåller dolda tecken. Skriv det igen.",

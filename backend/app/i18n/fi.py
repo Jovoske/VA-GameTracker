@@ -793,6 +793,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Suurin osa liikkeestä on kameroilla {cameras}. Muut kamerat näkevät paljon vähemmän."
     ),
     "insights.busiest_cameras": "{cameras} ovat vilkkaimmat kamerasi.",
+    "insights.class_missing": "Valitse, mitkä eläimet näytetään.",
 
     # ---- species in Settings -------------------------------------------------
     "species.name_hidden_chars": "Nimessä on piilomerkkejä. Kirjoita se uudelleen.",

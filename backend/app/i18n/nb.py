@@ -769,6 +769,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Mesteparten skjer ved {cameras}. De andre kameraene ser langt mindre."
     ),
     "insights.busiest_cameras": "{cameras} er de travleste kameraene dine.",
+    "insights.class_missing": "Velg hvilke dyr som skal vises.",
 
     # ---- species in Settings -------------------------------------------------
     "species.name_hidden_chars": "Navnet har skjulte tegn. Skriv det på nytt.",

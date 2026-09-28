@@ -579,7 +579,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     "verdict.best_odds": "Mejores opciones",
     "verdict.worth_a_look": "Merece la pena",
     "verdict.quiet": "Tranquilo",
-    "verdict.no_data": "Poco para decir",
+    "verdict.no_data": "Sin datos suficientes",
     "plan.wind.clean": "viento bueno",
     "plan.wind.wrong": "viento malo",
     "plan.wind.too_light": "viento demasiado flojo para juzgar",
@@ -824,6 +824,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Casi todo el movimiento está en {cameras}. Las demás cámaras ven mucho menos."
     ),
     "insights.busiest_cameras": "{cameras} son tus cámaras con más movimiento.",
+    "insights.class_missing": "Elige qué animales mostrar.",
 
     # ---- species in Settings -------------------------------------------------
     "species.name_hidden_chars": "Ese nombre tiene caracteres ocultos. Vuelve a escribirlo.",

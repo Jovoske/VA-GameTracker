@@ -9,7 +9,7 @@ from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_ANIMAL, VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.db import get_db
-from app.enrichment.astro import moon_phase, solar
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.forecasting.exposure import current_night, night_expr
 from app.models import Camera, Detection, Image, Species, User
 
@@ -107,7 +107,8 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
         "by_species": by_species,
         "best_window": _best_window(by_hour),
         "tonight": {
-            "moon_phase": phase,
+            "moon_phase": phase_words(phase),
+            "moon_phase_key": phase_key(phase),
             "moon_illum": illum,
             "sunset": s.get("sunset"),
             "darkness_minutes": s.get("darkness_minutes"),

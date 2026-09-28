@@ -53,11 +53,55 @@ Notifications already sent keep the language they were sent in.
 Each species has its name in every catalog (`species.wild_boar`: Wild boar,
 Villisika, Vildsvin, Villsvin, Jabalí). An admin's own name for one (Settings) is
 used in every language. Saving the name the app itself shows you (in your language
-or in English) is no rename: it stays each reader's own. Labels the app sends back
-as filters ("Purke + smågriser") are understood in any of the five languages.
+or in English) is no rename: it stays each reader's own. Inside a sentence, or after
+the first name of a list, Finnish, Swedish, Norwegian and Spanish write the app's
+names in lower case ("Villisika, saksanhirvi ja 2 muuta"; `species_inside`); an
+admin's own name is written as they wrote it.
+
+## Classes sent back as filters
+
+A class chip (Stag, Sow + piglets, Red deer) comes with a `key` the same in every
+language: `red_deer.stag`, `wild_boar.sow_piglets`, or the species' id for its own
+name (`red_deer`). `GET /api/species/spotted` gives each class its `key`, each photo
+in `GET /api/species/{id}/photos` its `class_key`, and each class of the Insights
+makeup (`GET /api/insights`, `composition`) its `key`; both galleries take it back
+as `?key=` (one chip that is two classes carries both, comma-joined). The app should
+ask by key: a label is a word in one language, and two languages share words for
+different things ("Hjort" is a stag in Swedish and a red deer in Norwegian; "Nutria"
+the otter in Spanish and the coypu in English).
+
+A `?label=` is still understood, read in one language at a time: the reader's own,
+then English (an older link), then the others; the first that knows the word says
+what it means, and two languages are never mixed.
+
+## Refusals the app acts on
+
+The words of a refusal are in the reader's language, so an app cannot tell one from
+another by them. A refusal the app branches on carries a `code` beside its words,
+the same in every language: `{"detail": "<words>", "code": "empty_frame"}`
+(`app/api/refusal.py`). `detail` stays the words, as for every other refusal.
+
+- A note on a photo (`POST /api/images/{id}/notes`, 409): `empty_frame` (marked
+  "nothing in it": save again with `keep` to keep it as an animal photo),
+  `hidden_only`, `people_only`, `not_looked`.
+- A sign-in that no longer works (401: a password changed elsewhere, the person was
+  removed, an expired or broken token): `signed_out`.
+
+The moon's phase is said in the reader's words (`moon_phase`) with a key beside it
+(`moon_phase_key`: `full_moon`, `waxing_crescent`, ...) on Tonight's conditions, the
+Insights outlook and `/api/analytics/overview`.
+
+## Numbers
+
+A decimal is written with the language's mark (`decimal`, `fixed`: "1,5 km/h" in
+Finnish, Swedish, Norwegian and Spanish; "1.5 km/h" in English): the slope-wind
+speeds and gradients, and the free space a kept "disk full" message names.
 
 ## Not translated
 
 Operator tools (`python -m app.manage`, the deploy and backup scripts, logs), the
-API's own validation errors for malformed requests (422), and the screens' own
-words, which the app translates itself.
+API's own validation errors for malformed requests (422: "Field required", and the
+"Value error, " before our own validators' words), and the screens' own words, which
+the app translates itself. Text written once for one reader stays in the language it
+was written in: a sit's wind line (`Sit.wind_text`, shown only to the sitter), pushes
+already sent, and the stand an admin's run names after its camera ("PL19 stand").

@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from app import geo
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.enrichment.astro import moon_phase, phase_words, solar
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.enrichment.weather import weather_at
 from app.forecasting.exposure import current_night
 from app.forecasting.thermal import SETTLING
@@ -126,7 +126,8 @@ def tonight_conditions(now: datetime | None = None, *, night: date | None = None
         log.warning("conditions.weather_failed", error=str(e))
     return {
         "night": night.isoformat(),
-        "moon_phase": phase_words(phase), "moon_illum": illum,
+        "moon_phase": phase_words(phase), "moon_phase_key": phase_key(phase),
+        "moon_illum": illum,
         "darkness_minutes": evening.get("darkness_minutes"),
         "sunset": sunset.isoformat() if sunset else None,
         "sunset_local": clock(sunset),

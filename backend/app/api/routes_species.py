@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
-from sqlalchemy import and_, false, func, or_, select, true
+from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
 
 from app.ai.classifier import ESTATE_KEYS, default_name
@@ -16,8 +16,14 @@ from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_photos import after_cursor, fixed_names, next_cursor
 from app.api.visibility import NO_PEOPLE, VISIBLE_ANIMAL, VISIBLE_SIGHTING
 from app.core.db import get_db
-from app.forecasting.model import class_label
-from app.i18n import DEFAULT, LANGUAGES, current, renamed, species_name, t, tr, use
+from app.forecasting.model import (
+    class_key,
+    class_keys_where,
+    class_label,
+    class_label_filter,
+    join_class_keys,
+)
+from app.i18n import DEFAULT, current, renamed, species_name, t, tr
 from app.models import Camera, Detection, Image, Species, User
 from app.notes import note_counts
 
@@ -82,8 +88,9 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
         s = agg.setdefault(sid, {"id": sid, "name": species_name(sid, cn), "count": 0,
                                  "last_seen": None, "classes": {}})
         s["count"] += int(cnt)
-        lbl = class_label(sid, cn, sex, gt)
-        s["classes"][lbl] = s["classes"].get(lbl, 0) + int(cnt)
+        c = s["classes"].setdefault(class_label(sid, cn, sex, gt), {"count": 0, "keys": set()})
+        c["count"] += int(cnt)
+        c["keys"].add(class_key(sid, sex, gt))
         if last is not None and (s["last_seen"] is None or last > s["last_seen"]):
             s["last_seen"] = last
 
@@ -103,61 +110,34 @@ def spotted(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
             "count": s["count"],
             "last_seen": s["last_seen"],
             "thumb_image_id": str(thumb) if thumb else None,
+            # `key` asks for a chip's photos the same in every language, where its
+            # label is a word in one (model.class_key).
             "classes": [
-                {"label": lbl, "count": c}
-                for lbl, c in sorted(s["classes"].items(), key=lambda kv: -kv[1])
+                {"label": lbl, "count": c["count"], "key": join_class_keys(c["keys"])}
+                for lbl, c in sorted(s["classes"].items(), key=lambda kv: -kv[1]["count"])
             ],
         })
     out.sort(key=lambda r: -r["count"])
     return out
 
 
-# Stag / Hind / Hind + calf / Red deer (herd) / Red deer and the boar classes, as SQL,
-# so a class gallery pages in the database (forecasting.model.class_label in reverse):
-# the young one's group type, then the group's. The labels come from class_label, so
-# a species renamed in Settings is found under its new name.
-_CLASSES = {
-    "red_deer": ("hind_with_calf", "herd"),
-    "wild_boar": ("sow_with_piglets", "sounder"),
-}
-
-
-def class_filter(species_id: str, common_name: str | None, label: str | None):
-    """SQL on Detection for the photos class_label() calls `label` (all when None),
-    in any of the app's languages: the app sends back the label it was shown."""
+def class_filter(species_id: str, common_name: str | None, label: str | None,
+                 key: str | None = None):
+    """SQL on Detection for one class of a species' photos (all when neither is
+    given), as the app asks for it: its class_key ("red_deer.stag", "wild_boar"),
+    the same in every language, or else the label it was shown ("Uros", "Hjort"),
+    read in the reader's own language first (model.class_label_filter). Paged in
+    the database like the rest of the gallery."""
+    if key:
+        return class_keys_where(key, species_id)
     if not label:
         return true()
-
-    def names(sex: str | None, gt: str | None) -> set[str]:
-        out = set()
-        for lang in LANGUAGES:
-            with use(lang):
-                out.add(class_label(species_id, common_name, sex, gt))
-        return out
-
-    classes = _CLASSES.get(species_id)
-    if classes is None:
-        return true() if label in names(None, None) else false()
-    young_type, group_type = classes
-
-    not_young = or_(Detection.group_type.is_(None), Detection.group_type != young_type)
-    unsexed = Detection.sex.notin_(("male", "female"))
-    # A list, not a dict: a boar renamed "Boar" is the unsexed ones and the males both.
-    hits = [where for lbls, where in (
-        (names(None, young_type), Detection.group_type == young_type),
-        (names("male", None), and_(not_young, Detection.sex == "male")),
-        (names("female", None), and_(not_young, Detection.sex == "female")),
-        (names(None, group_type), and_(unsexed, Detection.group_type == group_type)),
-        (names(None, None), and_(unsexed, or_(
-            Detection.group_type.is_(None),
-            Detection.group_type.notin_((young_type, group_type)),
-        ))),
-    ) if label in lbls]
-    return or_(*hits) if hits else false()
+    return class_label_filter(species_id, common_name, label)
 
 
 def _gallery(db: Session, species_id: str, label: str | None, before: datetime | None,
-             before_id: uuid.UUID | None, limit: int) -> tuple[list[dict], bool, list]:
+             before_id: uuid.UUID | None, limit: int,
+             key: str | None = None) -> tuple[list[dict], bool, list]:
     """One page of a species' photos, newest first, and whether there are more.
 
     One row per photo (a photo with two sightings of the species is one photo), only
@@ -175,7 +155,7 @@ def _gallery(db: Session, species_id: str, label: str | None, before: datetime |
         select(Detection.image_id, Detection.sex, Detection.group_type, Detection.group_size,
                Detection.corrected_at, Detection.corrected_by)
         .where(Detection.species_id == species_id,
-               class_filter(species_id, sp.common_name if sp else None, label))
+               class_filter(species_id, sp.common_name if sp else None, label, key))
         .distinct(Detection.image_id)
         .order_by(Detection.image_id, Detection.species_conf.desc().nullslast())
         .subquery()
@@ -200,6 +180,7 @@ def _gallery(db: Session, species_id: str, label: str | None, before: datetime |
         "captured_at": r.captured_at,
         "camera": r.name,
         "label": class_label(species_id, name, r.sex, r.group_type),
+        "class_key": class_key(species_id, r.sex, r.group_type),
         "species_id": species_id,
         "group_size": r.group_size,
         "notes_count": counts.get(r.id, 0),
@@ -214,13 +195,19 @@ def species_photos(
     _: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     label: Annotated[str | None, Query(description="Only one class (e.g. 'Stag')")] = None,
+    key: Annotated[str | None, Query(
+        description="Only one class, by its key (e.g. 'red_deer.stag'); over `label`")] = None,
     before: Annotated[datetime | None, Query(description="next_before, page before")] = None,
     before_id: Annotated[uuid.UUID | None, Query(description="next_before_id")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 60,
 ) -> dict:
     """A species' photos a page at a time, newest first, optionally one class (Stag,
-    Sow + piglets…). `next_before`/`next_before_id` page on, null on the last page."""
-    items, more, rows = _gallery(db, species_id, label, before, before_id, limit)
+    Sow + piglets…). `next_before`/`next_before_id` page on, null on the last page.
+
+    A class is best asked for by the `key` its chip came with (spotted's classes): a
+    label is a word in one language, and two languages can share one for different
+    classes."""
+    items, more, rows = _gallery(db, species_id, label, before, before_id, limit, key)
     return {"items": items, **next_cursor(rows, more)}
 
 

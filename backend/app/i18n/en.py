@@ -722,6 +722,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     "insights.species_mostly": "The cameras see {species} mostly between {start} and {end}.",
     "insights.concentrated": "Most of the action is at {cameras}. The other cameras see far less.",
     "insights.busiest_cameras": "{cameras} are your busiest cameras.",
+    "insights.class_missing": "Pick which animals to show.",
 
     # ---- species in Settings -------------------------------------------------
     "species.name_hidden_chars": "That name has hidden characters in it. Retype it.",

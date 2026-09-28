@@ -13,9 +13,9 @@ from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.enrichment.astro import moon_phase, phase_words, solar
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.forecasting.exposure import current_night, night_key_start
-from app.forecasting.model import SLOT_MIN, _best_window
+from app.forecasting.model import SLOT_MIN, _best_window, join_class_keys
 from app.i18n import species_name, t
 from app.models import Camera
 
@@ -48,6 +48,7 @@ def _outlook(days: int = 7) -> list[dict]:
         out.append({
             "date": night.date().isoformat(),
             "moon_phase": phase_words(phase),
+            "moon_phase_key": phase_key(phase),
             "moon_illum": illum,
             "darkness_minutes": s.get("darkness_minutes"),
             "sunset": s.get("sunset"),
@@ -199,16 +200,19 @@ def _composition(db: Session) -> list[dict]:
     where: dict[str, dict] = {}
     for r in class_visits(db, start=_since()):
         lbl = r["label"]
-        tot = totals.setdefault(lbl, {"visits": 0, "photos": 0})
+        tot = totals.setdefault(lbl, {"visits": 0, "photos": 0, "keys": set()})
         tot["visits"] += r["visits"]
         tot["photos"] += r["photos"]
+        tot["keys"].add(r["key"])
         cams = where.setdefault(lbl, {})
         cams[r["camera_id"]] = cams.get(r["camera_id"], 0) + r["visits"]
     items = []
     for lbl, tot in sorted(totals.items(), key=lambda kv: (-kv[1]["visits"], kv[0])):
         cams = where.get(lbl, {})
         top_cam = max(cams.items(), key=lambda kv: kv[1])[0] if cams else None
-        items.append({"label": lbl, "count": tot["visits"], "visits": tot["visits"],
+        # `key` asks /insights/class for the class the same in every language.
+        items.append({"label": lbl, "key": join_class_keys(tot["keys"]),
+                      "count": tot["visits"], "visits": tot["visits"],
                       "photos": tot["photos"], "top_camera": names.get(top_cam)})
     return items
 
