@@ -65,7 +65,7 @@ def from_accept_language(header: str | None) -> str:
     if not header:
         return DEFAULT
     best, best_q = None, -1.0
-    for i, part in enumerate(header.split(",")):
+    for part in header.split(","):
         tag, _, rest = part.strip().partition(";")
         q = 1.0
         m = re.search(r"q\s*=\s*([0-9.]+)", rest)
@@ -361,7 +361,7 @@ def localize(text: str | None, lang: str | None = None) -> str | None:
     lang = lang or current()
     if lang == DEFAULT:
         return text
-    for pattern, key, names in _stored_patterns():
+    for pattern, key, _names in _stored_patterns():
         m = pattern.match(text)
         if m:
             # A value can be a kept message itself ("Photos not coming in. {error}").
