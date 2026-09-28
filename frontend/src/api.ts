@@ -1,5 +1,5 @@
 import { type Lang, ago, fmtDate, fmtTime, fmtWeekday, isLang, lang, setLanguage, t } from './i18n'
-import { forgetThisDevice } from './push'
+import { currentSubscription, forgetThisDevice } from './push'
 
 const TOKEN_KEY = 'gs_token'
 const ME_KEY = 'gs_me'
@@ -80,13 +80,21 @@ export function signOut(): void {
   // Before the token goes: the server's copy of this phone's subscription is
   // removed in that person's name (push.ts).
   forgetThisDevice(getToken())
+  // What this person asked for and hasn't had yet never lands: a slow answer to an
+  // admin's request arriving after the next person signed in would put the admin's
+  // lists, and photo pass, back on the phone.
+  session.abort()
+  session = new AbortController()
   setToken(null)
   meCache = null
   meKnown = null
   // The phone keeps its language (gs_lang); a choice not yet sent was this person's.
   markPending(null)
   spoken = null
-  for (const path of [...memory.keys()]) if (personal(path)) memory.delete(path)
+  // This session's answers were this person's, whatever they were: an admin's
+  // People & vehicles list must not be the next person's copy with no signal.
+  memory.clear()
+  readOn.clear()
   try {
     localStorage.removeItem(SIT_QUEUE_KEY)
     for (const key of Object.keys(localStorage)) if (key.startsWith(SAVED) && personal(key.slice(SAVED.length))) localStorage.removeItem(key)
@@ -233,6 +241,9 @@ export type Failure = Error & { status?: number; offline?: boolean; timeout?: bo
  * the network carries `offline: true`, and one the server refused carries `status`.
  * An abort from the caller's own `signal` is passed through untouched.
  */
+/** The requests of whoever is signed in: signOut aborts them all and starts afresh. */
+let session = new AbortController()
+
 async function request<T>(path: string, options: Options = {}): Promise<{ data: T; headers: Headers }> {
   const { timeoutMs, ...init } = options
   const headers = new Headers(init.headers)
@@ -245,19 +256,26 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
   const outer = init.signal
-  const ctl = timeoutMs ? new AbortController() : null
+  const signedIn = session.signal
+  const ctl = new AbortController()
   let timedOut = false
   let timer = 0
-  if (ctl) {
-    if (outer?.aborted) ctl.abort(outer.reason)
-    else outer?.addEventListener('abort', () => ctl.abort(outer.reason), { once: true })
-    timer = window.setTimeout(() => { timedOut = true; ctl.abort() }, timeoutMs)
+  // Joined for this request only: the listeners come off again when it is done, or
+  // the session's signal would collect one per request all day.
+  const joined: [AbortSignal, () => void][] = []
+  for (const s of [outer, signedIn]) {
+    if (!s) continue
+    if (s.aborted) { ctl.abort(s.reason); continue }
+    const stop = () => ctl.abort(s.reason)
+    s.addEventListener('abort', stop, { once: true })
+    joined.push([s, stop])
   }
+  if (timeoutMs) timer = window.setTimeout(() => { timedOut = true; ctl.abort() }, timeoutMs)
   // The body is read inside the same guard: a connection can stall halfway through it.
   const guard = async <R,>(work: () => Promise<R>): Promise<R> => {
     try { return await work() } catch (e) {
       if (timedOut) throw Object.assign(new Error(noAnswerYet()), { timeout: true })
-      if ((e as Error).name === 'AbortError' || outer?.aborted) throw e
+      if ((e as Error).name === 'AbortError' || outer?.aborted || signedIn.aborted) throw e
       // fetch reports a dropped connection as a bare TypeError; anything else is real.
       if (e instanceof TypeError) throw Object.assign(new Error(noSignal()), { offline: true })
       // A 200 that isn't JSON is a page from something in the way (a hotspot's
@@ -268,13 +286,14 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
   }
 
   try {
-    const resp = await guard(() => fetch(`/api${path}`, { ...init, headers, signal: ctl?.signal ?? outer }))
-    // The photo pass and a renewed sign-in ride on every answer (backend deps.py).
-    if (token && resp.ok) {
+    const resp = await guard(() => fetch(`/api${path}`, { ...init, headers, signal: ctl.signal }))
+    // The photo pass and a renewed sign-in ride on every answer (backend deps.py),
+    // taken only while the one who asked is still the one signed in.
+    if (token && resp.ok && getToken() === token) {
       const img = resp.headers.get('X-Image-Token')
       if (img) setImagePass(img)
       const renewed = resp.headers.get('X-Session-Token')
-      if (renewed && getToken() === token) renewToken(renewed)
+      if (renewed) renewToken(renewed)
       // The server answers again: a language chosen with no signal can go now. Not
       // a saved copy the service worker handed back, which is no answer at all.
       if (path !== '/auth/me' && !resp.headers.get('X-GameSense-Stale')) retryLanguage()
@@ -285,6 +304,8 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
     // and send them to sign in. Only when we actually sent a token: a 401 without one is
     // a failed login attempt, which the login form reports itself.
     if (resp.status === 401 && token) {
+      // A late refusal of someone who already signed out is no news for whoever is in now.
+      if (getToken() !== token) throw Object.assign(new Error(t('api.signedOut')), { signedOut: true })
       setToken(null)
       if (!window.location.pathname.startsWith('/login')) {
         // Back to this page after signing in again: the photo an alert opened, not Tonight (D-10).
@@ -306,6 +327,7 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
     return { data: await guard(() => resp.json() as Promise<T>), headers: resp.headers }
   } finally {
     window.clearTimeout(timer)
+    joined.forEach(([s, stop]) => s.removeEventListener('abort', stop))
   }
 }
 
@@ -653,9 +675,12 @@ const SEND_ON_SIGN_IN_MS = 4000
 /** A password change: this phone gets a new sign-in and pass in the answer; every
  *  other phone signed in as this person is signed out (backend routes_auth). */
 export async function changePassword(current: string, next: string): Promise<string> {
+  // This phone's alerts stay on; the server drops every other phone's, so a lost
+  // phone stops showing sightings and team notes on its lock screen.
+  const sub = await currentSubscription()
   const r = await api<{ access_token: string; image_token: string; note: string }>('/auth/change-password', {
     method: 'POST',
-    body: JSON.stringify({ current_password: current, new_password: next }),
+    body: JSON.stringify({ current_password: current, new_password: next, keep_endpoint: sub?.endpoint ?? null }),
   })
   renewToken(r.access_token)
   setImagePass(r.image_token)

@@ -18,6 +18,8 @@ from app.models import Camera, CameraAccount, Estate, Image, SyncLog, User
 from .conftest import requires_db
 
 NOW = datetime(2026, 9, 16, 12, tzinfo=UTC)
+# What the sync module reads as now (the setup fixture's clock): a test moves it on.
+CLOCK = [NOW + timedelta(hours=1)]
 
 
 def test_interval_handles_unordered_and_late_arrivals():
@@ -149,10 +151,12 @@ def setup(db_session, monkeypatch, tmp_path):
     monkeypatch.setattr(sync.settings, "media_root", str(tmp_path / "media"))
     monkeypatch.setattr(sync, "enrich_image", lambda *args: None)
 
+    CLOCK[0] = NOW + timedelta(hours=1)
+
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return (NOW + timedelta(hours=1)).astimezone(tz or UTC)
+            return CLOCK[0].astimezone(tz or UTC)
 
     monkeypatch.setattr(sync, "datetime", Clock)
     estate = Estate(name="UBox test estate", timezone="Europe/Madrid")
@@ -440,7 +444,9 @@ def test_catch_up_stops_at_what_ubox_still_lists(db_session, setup):
 
 @requires_db
 def test_a_dead_snapshot_is_tried_three_times_then_let_go(db_session, setup):
-    """E-08: it holds the camera's place while it may still come, then stops doing so."""
+    """E-08: it holds the camera's place while it may still come, then stops doing so.
+    The tries that count are an hour apart (E-01): fetches every 15 minutes gave up on
+    a photo after half an hour of UBox trouble."""
     FakeClient.events = [event("1", 60), event("bad")]
     FakeClient.payloads = {"https://example.com/bad": UboxError("expired")}
     for attempt in (1, 2, 3):
@@ -452,11 +458,36 @@ def test_a_dead_snapshot_is_tried_three_times_then_let_go(db_session, setup):
         assert result["accounts"][0]["error"] == (
             "1 photo wouldn't download. It is tried again on the next fetch." if attempt < 3
             else "1 photo wouldn't download. It was tried 3 times, so it is left out.")
-    assert camera.last_sync_at == NOW + timedelta(hours=1)  # no longer held back
+        if attempt < 3:
+            # A fetch a quarter of an hour later tries again, and doesn't count it.
+            CLOCK[0] += timedelta(minutes=15)
+            again = sync.sync_ubox_all(db_session)
+            assert again["failed"] == 1 and again["accounts"][0]["error"] == (
+                "1 photo wouldn't download. It is tried again on the next fetch.")
+            assert db_session.scalar(select(Camera)).import_failures["cam-1:bad"][0] == attempt
+            CLOCK[0] += timedelta(minutes=45)
+    assert camera.last_sync_at == CLOCK[0]  # no longer held back
+    # Let go: a fetch that still lists it doesn't try it again.
+    camera.last_sync_at = NOW
+    db_session.commit()
     fourth = sync.sync_ubox_all(db_session)
     assert fourth["failed"] == 0 and fourth["given_up"] == 1 and fourth["status"] == "ok"
-    assert FakeClient.downloads.count("https://example.com/bad") == 3
+    assert FakeClient.downloads.count("https://example.com/bad") == 5
     assert setup.last_error is None
+
+
+@requires_db
+def test_a_snapshot_that_comes_back_after_hours_of_trouble_is_kept(db_session, setup):
+    """Two hours of a dead link, fetched every 15 minutes, then it downloads."""
+    FakeClient.events = [event("1", 60), event("late")]
+    FakeClient.payloads = {"https://example.com/late": UboxError("expired")}
+    for _ in range(8):
+        assert sync.sync_ubox_all(db_session)["failed"] == 1
+        CLOCK[0] += timedelta(minutes=15)
+    FakeClient.payloads = {"https://example.com/late": jpeg("blue")}
+    result = sync.sync_ubox_all(db_session)
+    assert result["failed"] == 0 and result["downloaded"] == 1
+    assert db_session.scalar(select(func.count(Image.id))) == 2
 
 
 @requires_db

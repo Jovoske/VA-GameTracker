@@ -13,9 +13,11 @@ Create Date: 2026-09-27
   lock taken when a stand is reserved; the lock is what also keeps crossing fire
   lanes apart, which no index can express.
 - Before the index can exist, two live reservations of one stand on one night
-  (possible before the lock) become one. The sit kept is the one somebody used: a
-  report first, then a started sit, then the first reservation. The others are
-  cancelled, and what they said is kept in their notes, so nothing is lost.
+  (possible before the lock) become one. The sit kept is the one somebody used: the
+  highest report first (shot > shootable no shot > seen > nothing, the order a
+  report never goes down in, so a shot is never the one cancelled), then a started
+  sit, then the first reservation. The others are cancelled, and what they said is
+  kept in their notes, so nothing is lost.
 
 A no-op on fresh installs, where 0001's create_all() builds both from the models.
 """
@@ -33,8 +35,9 @@ def upgrade() -> None:
         WITH ranked AS (
             SELECT id, first_value(id) OVER (
                 PARTITION BY stand_id, night
-                ORDER BY (outcome <> 'unreported') DESC, (started_at IS NOT NULL) DESC,
-                         claimed_at, id
+                ORDER BY CASE outcome WHEN 'shot' THEN 4 WHEN 'shootable_no_shot' THEN 3
+                                      WHEN 'seen' THEN 2 WHEN 'nothing' THEN 1 ELSE 0 END DESC,
+                         (started_at IS NOT NULL) DESC, claimed_at, id
             ) AS keeper
             FROM sits WHERE outcome <> 'cancelled'
         )

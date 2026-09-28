@@ -356,6 +356,41 @@ why nothing came in. A deploy notes a warning under 10 GB free and doesn't start
 - The deploy scripts are for Windows PowerShell 5.1 (no `??`, `?.`, `&&`). CI parses
   them with PowerShell 7 (`backend/tests/test_safe_deploys.py`); a harness that runs
   `update.ps1` end to end against a fake server lives outside the repo.
+- **The Cloudflare tunnel must reach the API at `http://localhost:8090`**, not
+  `http://db01:8090` or the machine's LAN address. The sign-in limits believe the
+  visitor's address (`CF-Connecting-IP`) only from a peer named in `TRUSTED_PROXIES`
+  (`127.0.0.1` and `::1` by default). Reached by the LAN address, every visitor counts
+  as that one address, so 20 wrong passwords from anyone hold everyone, the owner too,
+  for 15 minutes. The API says so once in `api.log` (`throttle.untrusted_tunnel`,
+  with the address). Either point the tunnel's service at `http://localhost:8090` in
+  the Cloudflare dashboard (Zero Trust → Networks → Tunnels → the tunnel → Public
+  hostname), or add that address to `TRUSTED_PROXIES` in `backend\.env`
+  (`TRUSTED_PROXIES=["127.0.0.1","::1","192.168.1.10"]`) and restart `GameSenseAPI`.
+  Whatever the peer, a request carrying Cloudflare's headers counts as from the
+  internet, so the published admin password never signs in through the tunnel.
+- **The database connection runs with `jit=off`** (`app/core/db.py`). Nothing to set:
+  the visit queries behind Tonight and Insights are short, and with JIT on Postgres
+  spent most of each call compiling code it ran once.
+
+## What the September 2026 plan asks of Db01
+
+Nothing by hand beyond what the deploy does. For the record:
+
+- **Migrations 0026 to 0034** run on the first deploy of this branch (a dump is taken
+  first, step 8). 0034 only renames one foreign key so the server's schema names it
+  as a fresh install does.
+- **No new scheduled task and no new environment variable.** The plan push (feature
+  19) and the other jobs are the ones `deploy/register-tasks.ps1` already registers;
+  run it again once after this deploy so every task has its current arguments and
+  its own error file.
+- **Check the tunnel's address** (Gotchas above): `http://localhost:8090`.
+- **After a password change**, the lost phone stops getting alerts too (its push
+  subscription is dropped); the owner's own phones pick theirs up again when they
+  sign in. `python -m app.manage set-password EMAIL` does the same.
+- **The CI workflow** (`.github/workflows/ci.yml`) is what lets only tested commits
+  through: it moves the `deploy` branch, and the server deploys that. Until it has run
+  green once on `main`, the server deploys `main` as before (see "The loop"). If
+  `main`'s branch protection refuses the Actions bot, allow it to push `deploy`.
 
 ## Manual control
 

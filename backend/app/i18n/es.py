@@ -331,9 +331,9 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         ". Su reloj va {h} h adelantado (¿no se cambió la hora?): las horas de las fotos se "
         "corrigen, pero ajusta el reloj de la cámara"
     ),
-    "health.no_checkin_for": "Sin conectar desde hace {h} h",
+    "health.no_checkin_for": "Sin conectar desde el {day}",
     "health.no_checkin": "Aún sin conectar",
-    "health.photo_limit": "Límite de fotos alcanzado ({count}/{limit})",
+    "health.photo_limit": "Sin créditos de fotos ({count}/{limit})",
     "health.battery_low": "Batería baja ({pct} %)",
     "health.ok": "Funciona con normalidad",
 
@@ -561,6 +561,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- alerts on the phone -------------------------------------------------
     "push.just_now": "ahora mismo",
     "push.time": "a las {time}",
+    "push.since_time": "las {time}",
     "push.last_night": "anoche a las {time}",
     "push.yesterday": "ayer a las {time}",
     "push.on_day": "el {day} a las {time}",

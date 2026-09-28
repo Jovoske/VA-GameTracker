@@ -41,7 +41,10 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException, Request
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.i18n import t
+
+log = get_logger(__name__)
 
 IP_WINDOW_S = 15 * 60
 IP_LIMIT = 20
@@ -69,15 +72,25 @@ def client_ip(request: Request) -> str:
         forwarded = _forwarded(request)
         if forwarded:
             return forwarded
+    elif _from_cloudflare(request):
+        _untrusted_tunnel(peer)
     return peer or "unknown"
 
 
 def from_outside(request: Request) -> bool:
     """Whether a request came from the internet: through the tunnel (or another
     trusted proxy), or straight from a public address. The server's own network,
-    the LAN or the machine itself, is not."""
+    the LAN or the machine itself, is not.
+
+    Cloudflare's own headers (CF-Connecting-IP, CF-Ray) mean the internet, whoever
+    the peer is: a tunnel that reaches the API by the machine's LAN address would
+    otherwise make every visitor look local and let the published admin password in.
+    Somebody on the LAN who writes them only locks themselves out of that."""
     peer = request.client.host if request.client else ""
     if peer in settings.trusted_proxies and _forwarded(request):
+        return True
+    if _from_cloudflare(request):
+        _untrusted_tunnel(peer)
         return True
     try:
         addr = ipaddress.ip_address(peer)
@@ -86,6 +99,26 @@ def from_outside(request: Request) -> bool:
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
     return addr.is_global
+
+
+def _from_cloudflare(request: Request) -> bool:
+    return bool(request.headers.get("cf-connecting-ip") or request.headers.get("cf-ray"))
+
+
+_warned: set[str] = set()
+
+
+def _untrusted_tunnel(peer: str) -> None:
+    """Say once per peer that Cloudflare's requests come from one TRUSTED_PROXIES
+    doesn't name: every visitor then counts as that one address in the sign-in
+    limits, so 20 wrong passwords from anyone hold everyone for 15 minutes."""
+    if peer in _warned or len(_warned) > 100:
+        return
+    _warned.add(peer)
+    log.warning("throttle.untrusted_tunnel", peer=peer,
+                trusted_proxies=list(settings.trusted_proxies),
+                fix="point the tunnel at http://localhost:8090, or add this address "
+                    "to TRUSTED_PROXIES in backend/.env")
 
 
 def _forwarded(request: Request) -> str:

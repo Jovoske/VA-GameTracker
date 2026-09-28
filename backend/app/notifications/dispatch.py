@@ -208,11 +208,18 @@ def compose_update(tally: dict, tz: ZoneInfo, now: datetime | None = None,
     """
     cams = Counter(tally.get("cameras") or {})
     title = words.where_title(words.name(species_id, tally), cams)
-    since = words.said_at(words.first(tally), tz, now)
+    since = words.said_at(words.first(tally), tz, now, since=True)
     last = words.said_at(words.latest(tally), tz, now)
+    n = words.visits(int(tally.get("visits") or 0))
+    if since == words.said_at(words.latest(tally), tz, now, since=True):
+        # The same minute on the clock: the hour the clocks go back comes twice, and
+        # "2 visits since 02:30, last one 02:30" reads as one moment (E2E-4).
+        if len(cams) <= 1:
+            return title, t("push.visits_last", visits=n, when=last)
+        return title, t("push.visits_at_last", visits=n,
+                        cameras=_join([c for c, _ in cams.most_common()]), when=last)
     where = "" if len(cams) <= 1 else t(
         "push.at_cameras", cameras=_join([c for c, _ in cams.most_common()]))
-    n = words.visits(int(tally.get("visits") or 0))
     return title, t("push.update", visits=n, where=where, since=since, last=last)
 
 

@@ -40,7 +40,7 @@ from app.forecasting.visits import (
     map_night_window,
     part_hours,
 )
-from app.i18n import join_all, t
+from app.i18n import clock, join_all, t
 from app.models import Camera, CameraNight, Image
 
 WATCHED = ("CONFIRMED", "PRESUMED_UP")
@@ -187,7 +187,7 @@ def activity_read(*, who: str | None, visits: int, watched: int, nights: int,
     if 0 < len(times) <= LIST_TIMES:
         # In the order of the night: 23:10 comes before 02:15.
         local = sorted((_local(x) for x in times), key=lambda x: (x.hour < 12, x.time()))
-        tail = t("activity.tail.times", times=join_all([f"{x:%H:%M}" for x in local]))
+        tail = t("activity.tail.times", times=join_all([clock(x) for x in local]))
     elif peak:
         tail = t("activity.tail.mostly" if share > MOSTLY_SHARE else "activity.tail.busiest",
                  peak=peak)

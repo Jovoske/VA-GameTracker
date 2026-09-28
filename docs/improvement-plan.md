@@ -22,6 +22,8 @@ Sizes: **S** ≈ half a day, **M** ≈ 1 day, **L** ≈ 2–3 days.
 ## Part A: fixes (things that are broken or feel broken)
 
 ### 1. The app never goes blank (M)
+**Status:** Done. Error boundary with one automatic reload on a stale chunk, Photos keeps its place, a service worker that never answers a script with the page and treats 5xx/52x as no signal, and crash reports in Settings.
+
 **Problem:** four confirmed ways to get a completely blank screen:
 - coming back to the app with a photo open deep in the feed;
 - tapping Map after any deploy;
@@ -43,6 +45,8 @@ Nobody is told when it happens.
 **Covers:** B-02, C-02, D-01, D-18, D-20, H-06, I-01, I-06, K-02, K-03, K-14
 
 ### 2. Sit reports are never lost or overwritten (L)
+**Status:** Done. Reports only go up (a correction from Stands can lower one on purpose), every write carries its tap time, one queued entry per sit, a real End sit, the next-morning question, a per-night reservation lock with a unique index. Final review: the upgrade that merged double reservations now keeps the highest report (a shot is never the one cancelled).
+
 **Problem:** the most important data the app collects is the easiest to lose.
 - A later tap or a replayed no-signal tap turns **SHOT** into "Saw animals". The whole screen is the
   SAW ANIMALS button, so a glove brush is enough.
@@ -66,6 +70,8 @@ Nobody is told when it happens.
 **Covers:** A-01, A-02, A-06, A-07, A-17, A-20, A-23, A-25, I-02, I-03, I-09, I-23, J-02, J-03, J-11, J-15, J-22
 
 ### 3. Safe deploys and a test gate (M)
+**Status:** Done with notes. CI (backend tests on PostGIS, ruff ratchet, build, every UI script) moves a `deploy` branch that the server deploys; `update.ps1` swaps the screens after the migration, retries pip and vite, rolls everything back when `/api/health` doesn't answer from the new commit, and backs up before a migration. Owner decision: deploys keep their 10-minute timing at any hour, with **no evening pause**.
+
 **Problem:** every push to `main` goes live on Db01 within 10 minutes, at any hour, with no tests run. A
 dusk deploy is what triggers the blank-screen and error-page cases in item 1. The deploy also has these problems:
 - it swaps the frontend before the backup and migration;
@@ -90,6 +96,8 @@ The health checks report "ok" with the database down.
 **Covers:** B-25, D-22, H-04, H-05, H-07, H-08, H-09, H-10, H-15, H-18, H-21, I-29, K-09
 
 ### 4. No gaps in photo ingestion; broken camera logins are visible (L)
+**Status:** Done. Downloads retried while SPYPOINT lists the photo (final review: an outage of any length loses nothing while it is listed, and UBox tries are counted an hour apart), a repair pass, paging back to what is stored, a longer UBox catch-up, per-login status in Settings, cards that say the login needs attention, and a truthful Check result. A photo whose file never came leaves its night not watched rather than empty, and Admin counts them.
+
 **Problem:** photos can go missing for good, and the app then counts those nights as "no animals".
 - A SPYPOINT photo whose download fails once is never retried.
 - A routine sync reads only the newest 100 photos per camera, so any outage leaves a permanent hole.
@@ -112,6 +120,8 @@ The health checks report "ok" with the database down.
 **Covers:** C-07, C-08, E-01–E-08, E-10, E-13, E-15, E-17–E-23, H-20, H-22, I-30
 
 ### 5. Background jobs and the AI pass run reliably (L)
+**Status:** Done. Atomic job lock with owner, heartbeat and PID; plan and score wait, score catches up 14 days; AI failures retried then marked failed, never empty nights; the stag/hind pass stops on auth or credit errors; manual checks run in the worker; Admin shows the backlog and the last error.
+
 **Problem:** the pipeline lock is a file checked by age.
 - A crash blocks syncing for 3 h. A run longer than 3 h lets a second run in, which duplicates detections.
 - The 17:00 plan job and the 11:00 score job silently skip whenever a sync holds the lock, and a missed night
@@ -133,6 +143,8 @@ The health checks report "ok" with the database down.
 H-03, H-11, H-19, J-01
 
 ### 6. Tonight is fast and honest on weak signal (M)
+**Status:** Done. Saved plan first, true age from the service worker, 06:00 cutover, timeouts and abort-on-leave, an in-memory cache (cleared at sign-out since the final review), Stands offline, species fallback.
+
 **Problem:**
 - With no signal, the installed app shows a days-old plan as "Plan from just now".
 - Tonight never paints the saved plan first. It waits on the network with no timeout, so the spinner can run
@@ -153,6 +165,8 @@ H-03, H-11, H-19, J-01
 **Covers:** A-04, A-05, A-15, A-16, A-18, C-27, D-02, D-03, D-09, G-19, I-05, I-07, I-10, I-24, J-05, J-06, K-08
 
 ### 7. Weather and wind: fresh, and one answer everywhere (L)
+**Status:** Done. A 30-60 min forecast cache with a stale fallback fetched outside the database session, one wind verdict (bedding and thermals) everywhere, judged at sit time and labelled, timezone-correct sun, the scent cone against the bedding outline, "no wind forecast" instead of "calm".
+
 **Problem:**
 - Tonight's wind is fetched once a day and never refreshed, so dusk shows the morning's forecast.
 - Tonight, Stands, Sit mode and Map use **different wind models**, and can tell the same hunter opposite
@@ -175,6 +189,8 @@ H-03, H-11, H-19, J-01
 J-04, J-07, K-04
 
 ### 8. Best hours follow sunset; sunset and last legal light on screen (L) — before 25 Oct
+**Status:** Done with notes. Best hours are binned by minutes after each night's sunset (recent weeks weigh more) and put back on tonight's clock, so they survive the clock change; sunset is on Tonight and in Sit mode; Suntek clocks are checked across the change; moon names fixed. Owner decision: **no legal-light feature** (no per-species legal hours, no last legal light, no clipping).
+
 **Problem:**
 - "Best hours" come from a season-long histogram of clock hours. Sunset moves about 3 h between early August
   and late October (counting the clock change), so after 25 Oct the window will start after the animals arrive.
@@ -193,6 +209,8 @@ J-04, J-07, K-04
 **Covers:** A-08, A-27, E-14, F-21, F-22, G-05, H-17, J-08, J-18
 
 ### 9. The forecast counts nights and ranks cameras correctly (M)
+**Status:** Done. One statistics night, 18:00 to 06:00 keyed by its evening, for Tonight, the Changed line, Insights, the patterns and the track record (final review: the day and the dawn after 06:00 no longer count); the map's Activity and Replay keep their 18:00-08:00 night. Judgeable cameras first, silent ones dropped and a Retire switch, unprocessed nights left out, visits with photos behind the fold, per-verdict grading, claims by id, alerts without the whole forecast.
+
 **Problem:**
 - Nights are counted by calendar date, so the app says "Wild boar seen 8 of the last 7 nights". One visit
   either side of midnight counts twice, which pushes a Worth a look spot up to Best odds.
@@ -217,6 +235,8 @@ J-04, J-07, K-04
 I-26, J-10, J-12, J-24, K-01, K-10
 
 ### 10. Hidden animals and hidden photos stay hidden everywhere (S)
+**Status:** Done. One visible filter everywhere, the camera's nights recomputed after a hide, a test per screen; final review: a named animal's own page leaves out hidden species and photos marked "nothing in it".
+
 **Problem:** hiding a species (e.g. fox, rabbit) still leaves it in alerts, Insights, the Changed line and the
 weather patterns. Hiding a false-alarm photo removes it from Photos, but Tonight still counts it as a sighting.
 
@@ -228,6 +248,8 @@ weather patterns. Hiding a false-alarm photo removes it from Photos, but Tonight
 **Covers:** C-05, C-23, G-06, I-25, K-05
 
 ### 11. Insights stops presenting chance as findings (S)
+**Status:** Done. The headline sentences are gone; findings come only from watched nights and only when they beat a shuffle test, with the numbers behind the fold.
+
 **Problem:** the "More sightings when…" weather and moon lines appear from pure noise in 86–99% of simulated
 runs. They also count nights when the cameras were down as quiet nights.
 
@@ -239,6 +261,8 @@ runs. They also count nights when the cameras were down as quiet nights.
 **Covers:** A-19, G-04, G-20, J-09
 
 ### 12. Access and security (M)
+**Status:** Done with notes. Removing a person just works and keeps their history; per-user token versions (a password change signs other phones out and, since the final review, stops their alerts); Cloudflare-aware sign-in throttling (the current-password check too); short-lived photo passes; role checks; docs off in production. Owner decision: camera logins a removed person added **keep syncing**, owned by the admin, marked "Added by <removed person>" in Settings with the normal remove option.
+
 **Problem:**
 - Removing a guest who ever reserved a stand, drew a zone or added a camera login fails with a 500, so their
   access can't be revoked.
@@ -260,6 +284,8 @@ runs. They also count nights when the cameras were down as quiet nights.
 **Covers:** B-08, C-09, C-19, C-28, D-05–D-08, D-11, D-12, D-23, E-09, H-01, H-13, H-14, H-23, I-12, I-13, I-15, K-12
 
 ### 13. Photos and Animals fixes (L)
+**Status:** Done. 320 px WebP thumbnails and long-lived caching, (time, id) paging, a viewer that loads more as you swipe, names that survive re-ID and merges, plain-word errors, the Animals gallery past 300, Photos by night.
+
 **Problem:**
 - Grids download full-size originals.
 - Paging skips photos that share a timestamp.
@@ -282,6 +308,8 @@ runs. They also count nights when the cameras were down as quiet nights.
 **Covers:** C-01, C-03, C-04, C-10–C-18, C-20, C-25, C-29, E-24, F-11, I-18, I-19, I-27, I-28, J-13, J-14
 
 ### 14. Map fixes (M)
+**Status:** Done. Retry reloads only the tiles, hand-placed cameras stay, save errors next to the control, readable shape errors, phone drawing layout, See photos opens that camera, bedding-only drawing, a north reset, the satellite zoom limit, and the **+ / − zoom buttons are back** (owner request). Final review: Fit the estate keeps every camera clear of the button column.
+
 **Problem:**
 - "Try again" on a satellite error wipes the bedding and wind layers, and leaves "Loading map…" on screen.
 - A camera placed by hand snaps back to SPYPOINT's position at the next sync.
@@ -302,6 +330,8 @@ runs. They also count nights when the cameras were down as quiet nights.
 **Covers:** B-01, B-09–B-13, B-17, B-18, B-21–B-24, E-16, G-25, I-11
 
 ### 15. Notifications that respect the hunter (M)
+**Status:** Done. A per-species two-hour cooldown with quiet updates, quiet hours, re-subscribe on open, confirmed saves, unsubscribe on sign-out, the photo time in the link, holds while sitting with one summary after.
+
 **Problem:**
 - One sounder at a feeder buzzes the phone every 15 minutes all night.
 - Alerts silently stop after a network blip while Settings still says "This phone gets alerts".
@@ -320,6 +350,8 @@ runs. They also count nights when the cameras were down as quiet nights.
 **Covers:** D-04, D-14, D-17, D-19, D-21, G-23, I-14, I-21, J-21, K-06, K-07
 
 ### 16. Glove-sized and small-screen UI polish (M)
+**Status:** Done. 44-56 px targets (the main actions 56 px since the final review), a More tab under 380 px, no jumps, back to the intended page after sign-in, a sliding session (not for sign-ins from before token versions), landscape in the viewer, double-submit guards.
+
 **Problem:**
 - Chips, switches, map zoom and the hide button are 25–34 px.
 - On 320 px screens the Settings tab sits off-screen.
@@ -338,6 +370,8 @@ runs. They also count nights when the cameras were down as quiet nights.
 **Covers:** A-21, B-16, C-24, C-26, D-10, D-13, D-15, D-16, D-24, G-21, I-08, I-16, I-22, K-11, K-13
 
 ### 17. AI accuracy (M)
+**Status:** Done. The detector's threshold passed through, a confidence floor and the estate's species list, nested boxes removed, a vote per visit, a season-aware stag/hind prompt, one detection per frame, a hunter's flag never overwritten.
+
 **Problem:**
 - MegaDetector runs at its default 0.25 cut-off, so the 0.10 "keep faint animals" setting never applies.
 - The classifier keeps its top guess with no confidence floor and no Iberian species list.
@@ -360,6 +394,15 @@ runs. They also count nights when the cameras were down as quiet nights.
 ---
 
 ## Part B: new features
+
+**Status (28 Sep 2026):** 19, 20, 22, 23, 24 and 25 are **done**; 18 and 21 are
+**parked** (the owner: hunt planning, collaboration and safety come later). Done: the
+plan push about two hours before sunset (19), fixing a species or a false alarm from
+the viewer with readable names (20), the hour-by-hour wind for each stand and the
+right evenings this week (22), the harvest book with its season CSV (23), the map
+with no signal (24), people and vehicles on camera, admin-only (25). On top of the
+plan, the app and the server speak five languages (English, Suomi, Svenska, Norsk,
+Español; see [translations](translations.md)).
 
 These are ranked by value for this estate. Each one respects the product's rules: one estate, a few hunters,
 one tap per sit, plain words.
@@ -386,8 +429,12 @@ one tap per sit, plain words.
 Each item ships as its own PR with tests. The DB-backed suite runs with `GAMESENSE_REQUIRE_DB=1`, the UI
 scripts are repaired, and changed flows get a Playwright check.
 
-## Decisions needed from the owner
-- **Legal hours per species** (item 8): the proposed default is last legal light = sunset + 60 min for all
-  species, with boar allowed at night (aguardo). Confirm against the estate's permits.
-- **Removing a guest** (item 12): the proposed default switches off the camera logins they added (history kept).
-- **Deploy freeze** (item 3): whether to skip auto-deploys from 1 h before sunset to 01:00. Proposed: yes.
+## Decisions the owner made (final)
+- **Legal hours** (item 8): **no legal-light feature**. No per-species legal hours, no "last legal light",
+  no clipping of the best window. Best hours still follow sunset, and sunset is shown.
+- **Removing a person** (item 12): it simply works and keeps their history. Camera logins they added
+  **keep syncing**; ownership moves to the admin, and Settings marks them "Added by <removed person>"
+  with the normal remove option.
+- **Deploys** (item 3): the current timing stays (every 10 minutes, any hour, **no evening pause**). They
+  gained only safety: only tested commits go live, and a deploy that doesn't come back healthy rolls back.
+- **Parked:** features 18 (Tonight names a stand) and 21 (shooting arcs, crossing fire lanes).

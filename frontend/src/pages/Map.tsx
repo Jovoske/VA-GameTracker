@@ -120,7 +120,9 @@ export default function MapPage() {
   const [estateBox, setEstateBox] = useState<Box | null>(null)
   // Who you are, as the phone knows it, then the shared /auth/me answer (it has a
   // time limit and a saved copy; its own call here had neither).
-  const [admin, setAdmin] = useState(() => peekMe()?.role === 'admin')
+  const [who, setWho] = useState(() => peekMe())
+  const admin = who?.role === 'admin'
+  // Never "Reserve" before the phone knows who you are: a viewer can't.
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const [notice, setNotice] = useState('')
@@ -216,7 +218,7 @@ export default function MapPage() {
   }, [])
   useEffect(() => {
     alive.current = true
-    load(); whoAmI().then(u => setAdmin(u.role === 'admin')).catch(() => {})
+    load(); whoAmI().then(setWho).catch(() => {})
     return () => { alive.current = false }
   }, [load])
   // What is saved on the phone, read again whenever a download writes its note or ends.
@@ -406,7 +408,7 @@ export default function MapPage() {
     const layers = view === 'cameras' ? prefs.layers : { ...prefs.layers, wind: false, exposure: false, routes: false }
     renderLayers(instance, data, layers, selected?.kind === 'stand' ? selected.id : undefined)
     if (!fitted.current) {
-      fitEstate(instance, data, cameras)
+      fitEstate(instance, data, cameras, 0, fitPadding())
       fitted.current = true
       const focus = selected?.kind === 'stand' ? data.stands.find(s => s.id === selected.id) : selected?.kind === 'camera' ? cameras.find(c => c.id === selected.id) : null
       if (focus && validLngLat(focus.lon, focus.lat)) reveal(focus.lon as number, focus.lat as number, true)
@@ -463,12 +465,26 @@ export default function MapPage() {
   /** Room around the estate for Fit: clear of an open sheet, below it on a phone, beside it on a wider screen. */
   function fitPadding(): number | maplibregl.PaddingOptions {
     const edge = 72
-    const wrap = mapEl.current?.getBoundingClientRect(), sheet = mapEl.current?.parentElement?.querySelector('.bsheet')?.getBoundingClientRect()
-    if (!wrap || !sheet?.height) return edge
+    const stage = mapEl.current?.parentElement
+    const wrap = mapEl.current?.getBoundingClientRect(), sheet = stage?.querySelector('.bsheet')?.getBoundingClientRect()
+    if (!wrap) return edge
+    // A camera's photo callout stands above its pin and reaches half its width either
+    // side, its "N new" badge further: the camera nearest an edge must not end up
+    // under the buttons there (Zoom in, Point north), which hid the one count that
+    // says new photos came.
+    const callout = 80 * (parseFloat(getComputedStyle(mapEl.current!).getPropertyValue('--pin-scale')) || 1)
+    const fabs = stage?.querySelector('.map-fabs--right')?.getBoundingClientRect()
+    const column = fabs && fabs.height > fabs.width
+    const right = fabs?.width && column ? Math.max(edge, Math.round(wrap.right - fabs.left) + 42) : edge
+    const top = Math.max(edge, Math.round(callout) + 8, fabs?.height && !column ? Math.round(fabs.bottom - wrap.top) + Math.round(callout) : 0)
+    // The left needs only half a callout: what the right gives up to the buttons comes
+    // off here, so the estate is drawn no smaller than it was.
+    const left = right > edge ? Math.max(40, edge - (right - edge)) : edge
+    if (!sheet?.height) return { top, right, bottom: edge, left }
     const room = (px: number, span: number) => Math.max(edge, Math.min(Math.round(px) + 24, span - edge - 80))
     return sheet.width < wrap.width - 2
-      ? { top: edge, right: edge, bottom: edge, left: room(sheet.right - wrap.left, wrap.width) }
-      : { top: edge, right: edge, left: edge, bottom: room(wrap.bottom - sheet.top, wrap.height) }
+      ? { top, right, bottom: edge, left: room(sheet.right - wrap.left, wrap.width) }
+      : { top, right, left, bottom: room(wrap.bottom - sheet.top, wrap.height) }
   }
 
   const choose = useCallback((next: Selection | null, sheetSnap: Snap = 'half') => {
@@ -934,6 +950,7 @@ export default function MapPage() {
             offline={{ cameras, viewBox, onBox: setEstateBox }} />}
           {sheet === 'pick' && <PickBody pins={pick!} onPick={select} />}
           {stand && <StandBody stand={stand} scentRange={data!.scent_range_m} admin={admin}
+            viewer={!who || who.role === 'viewer'} me={who?.id ?? null}
             onMove={() => startEdit({ kind: 'stand', id: stand.id, name: stand.name, at: [stand.lon, stand.lat] })}
             onRemove={() => remove('stand', stand.id)} onRename={name => rename(stand.id, name)} />}
           {camera && <CameraBody camera={camera} admin={admin} onRename={name => renameCamera(camera.id, name)} onUseOwnGps={() => useOwnGps(camera.id)}

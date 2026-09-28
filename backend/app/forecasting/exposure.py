@@ -26,7 +26,7 @@ from bisect import bisect_left
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, cast, func, select, text
+from sqlalchemy import Integer, cast, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -37,10 +37,15 @@ log = get_logger(__name__)
 
 _TZ = settings.estate_timezone
 
-# A "night" is keyed by its EVENING date: 18:00 D through 06:00 D+1. Shifting the
-# local timestamp back 6h before taking the date puts post-midnight activity on the
-# night it belongs to — the same key the overnight weather aggregation uses.
+# A "night" is keyed by its EVENING date. Shifting the local timestamp back 6h before
+# taking the date puts post-midnight activity on the night it belongs to — the same
+# key the overnight weather aggregation uses. The key itself runs 06:00 D to 06:00
+# D+1, so it files the day under the evening after it; what a hunter reads as the
+# night is 18:00 D through 06:00 D+1 (in_night), and every statistic reads only
+# frames inside it: the Changed line, Tonight, Insights and the track record count
+# the same visits on the same night.
 NIGHT_SHIFT = text("interval '6 hours'")
+NIGHT_START_HOUR, NIGHT_END_HOUR = 18, 6
 
 # Gap after which the same species at the same camera counts as a new arrival.
 # 30 minutes is the common camera-trap convention for independence; it is a
@@ -62,6 +67,15 @@ MAX_PRESUMED_GAP_NIGHTS = 2
 def night_expr(col=Image.captured_at):
     """SQL expression for the night an image belongs to."""
     return func.date(func.timezone(_TZ, col) - NIGHT_SHIFT)
+
+
+def in_night(col=Image.captured_at):
+    """SQL: whether a moment is inside a night (18:00-06:00 local), the stretch the
+    statistics count. A morning roe deer at 07:30 or a fox at noon is a real photo,
+    but it is not a night's visit: night_expr would file it under the evening after
+    it, and the track record (scoring.night_window) never grades it."""
+    hour = func.extract("hour", func.timezone(_TZ, col))
+    return or_(hour >= NIGHT_START_HOUR, hour < NIGHT_END_HOUR)
 
 
 def current_night(now: datetime | None = None) -> date:
@@ -241,17 +255,17 @@ def visits_by_night(db: Session, *, camera_id=None, species_id=None,
     first frame. `animals` uses group_size, which the pipeline already computes per
     frame and which nothing has ever used.
 
-    Only frames in [start, end) are read. Without them this is every photo ever
-    taken, which grows with the archive: a caller that wants a month should start
-    a whole night before the first night it keeps (night_key_start of that night
-    before), so a visit already under way is counted on its own night, not cut
-    in two at `start`.
+    Only frames inside the nights (in_night, 18:00-06:00) count, and only those in
+    [start, end). Without a range this is every photo ever taken, which grows with
+    the archive: a caller that wants a month should start a whole night before the
+    first night it keeps (night_key_start of that night before), so a visit already
+    under way is counted on its own night, not cut in two at `start`.
     """
     # Imported here: visits reads VISIT_GAP and night_expr from this module.
     from app.forecasting.visits import visit_rows
 
     v = visit_rows(start=start, end=end, camera_ids=[camera_id] if camera_id else None,
-                   species_id=species_id)
+                   species_id=species_id, nights=True)
     rows = db.execute(
         select(
             v.c.night, v.c.camera_id, v.c.species_id,

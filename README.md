@@ -39,15 +39,35 @@ Edit `.env` (created from `.env.example` on first run) to set your SPYPOINT cred
 
 ---
 
-## What works today (Milestone 0)
+## What works (September 2026)
 
-A runnable foundation:
+The whole [improvement plan](docs/improvement-plan.md) is in, apart from two features the owner
+parked for later (18, Tonight names a stand; 21, shooting arcs and safety). In short:
 
-- One-command Docker startup; six services wired together with health checks.
-- PostgreSQL + PostGIS + pgvector schema (full model) via Alembic migrations.
-- FastAPI backend with secure login (Argon2 + JWT), health/readiness probes, structured logging.
-- Celery worker + beat scheduler (SPYPOINT sync is a heartbeat until M1).
-- React + TypeScript frontend shell: login + an honest "still learning" Tonight placeholder.
+- **Photos in, none lost.** SPYPOINT, UBox and Suntek (FTP or email) photos come in on a schedule; a
+  download that fails is tried again while the camera still lists it, an outage is caught up, and a
+  login that stops is said on Settings, the camera card and Tonight. A photo whose file never came
+  leaves its night "not watched", never "no animals".
+- **The AI reads the estate right.** MegaDetector and DeepFaune with the estate's species list, a
+  confidence floor, one vote per visit, people and vehicles kept to the admin; a hunter's fix from the
+  photo viewer (**Wrong?**) is never overwritten.
+- **Tonight** ranks the cameras that can be judged, in visits over watched nights (18:00 to 06:00, the
+  same night the Changed line, Insights and the track record count), with best hours that follow
+  sunset, one wind verdict for the sit time, the hour-by-hour wind for the week, and the plan on the
+  phone about two hours before sunset. It shows the saved plan at once with no signal, and says how old.
+- **Sits** are never lost or overwritten: a report only goes up, a tap with no signal is queued and
+  sent later, a stand can't be reserved twice, and the morning after asks about an unreported sit and
+  a shot (the harvest book, with its season CSV).
+- **The map** (WeHunt-style): cameras as their latest photo, Activity and Replay, stands and bedding,
+  + / − zoom buttons, and the whole estate downloadable for no signal (details below).
+- **Alerts that respect the hunter:** one buzz per animal per two hours, quiet hours, nothing while
+  sitting.
+- **Safe to run:** sign-in limits that understand the Cloudflare tunnel, sessions a password change
+  ends (and its alerts), short-lived photo passes, role checks; only tested commits deploy, and a
+  deploy that doesn't come back healthy rolls back ([deployment](docs/09-deployment.md)).
+- **Five languages:** English, Suomi, Svenska, Norsk, Español, for the screens, the server's sentences
+  and the pushes ([translations](docs/translations.md); the four non-English ones were machine-written
+  and want one read-through by a native-speaking hunter).
 
 ### The cameras on the map (September 2026)
 

@@ -41,6 +41,7 @@ from app.models import (
     Estate,
     Image,
     PhotoNote,
+    PushSubscription,
     Sit,
     Stand,
     User,
@@ -256,6 +257,86 @@ def test_a_password_change_signs_every_other_phone_out(client, db_session, estat
     assert login.status_code == 200
 
 
+def _subscribe(db, user, endpoint):
+    db.add(PushSubscription(user_id=user.id, endpoint=endpoint, p256dh="k", auth="a"))
+    db.commit()
+
+
+def _endpoints(db, user) -> set[str]:
+    db.expire_all()
+    return set(db.scalars(select(PushSubscription.endpoint)
+                          .where(PushSubscription.user_id == user.id)).all())
+
+
+@requires_db
+def test_a_password_change_stops_the_lost_phones_alerts_and_keeps_this_ones(
+    client, db_session, estate,
+):
+    """The lost phone was signed out, and still got every sighting, team note and
+    the plan on its lock screen, with no end (final review SEC-1)."""
+    user, headers = _user(db_session, estate, "member")
+    other, _ = _user(db_session, estate, "member")
+    lost, here = "https://fcm.googleapis.com/fcm/send/lost", "https://web.push.apple.com/here"
+    _subscribe(db_session, user, lost)
+    _subscribe(db_session, user, here)
+    _subscribe(db_session, other, "https://fcm.googleapis.com/fcm/send/pedro")
+    r = client.post("/api/auth/change-password", headers=headers, json={
+        "current_password": PASSWORD, "new_password": "another-one-9", "keep_endpoint": here})
+    assert r.status_code == 200
+    assert _endpoints(db_session, user) == {here}
+    assert _endpoints(db_session, other) == {"https://fcm.googleapis.com/fcm/send/pedro"}
+    # A phone with no alerts of its own keeps none of the others'.
+    r = client.post("/api/auth/change-password", headers=_auth(r.json()["access_token"]),
+                    json={"current_password": "another-one-9", "new_password": "a-third-one-9"})
+    assert r.status_code == 200 and _endpoints(db_session, user) == set()
+
+
+@requires_db
+def test_guessing_the_current_password_is_held_like_a_sign_in(
+    client, db_session, estate, monkeypatch,
+):
+    """Whoever picks up an unlocked phone could guess the current password without
+    end, then change it and lock the owner out (final review SEC-4)."""
+    now = [1000.0]
+    monkeypatch.setattr(throttle_mod.throttle, "clock", lambda: now[0])
+    user, headers = _user(db_session, estate, "viewer")
+
+    def change(current):
+        return client.post("/api/auth/change-password", headers=headers,
+                           json={"current_password": current, "new_password": "another-one-9"})
+
+    for _ in range(throttle_mod.FREE_TRIES):
+        assert change("guess").status_code == 400
+    held = change(PASSWORD)
+    assert held.status_code == 429 and held.headers["Retry-After"] == "2"
+    now[0] += 2
+    assert change(PASSWORD).status_code == 200
+
+
+def test_one_person_checks_one_current_password_at_a_time():
+    """A viewer sending thirty at once held every hashing slot sign-in shares; now
+    the second waits its turn without touching them."""
+    first = throttle_mod.throttle.attempt("203.0.113.9", "viewer@estate.local", known=True)
+    with pytest.raises(HTTPException) as held:
+        throttle_mod.throttle.attempt("203.0.113.9", "viewer@estate.local", known=True)
+    assert held.value.status_code == 429
+    first.failed()
+
+
+@requires_db
+def test_a_sign_in_from_before_token_versions_works_until_its_end_but_is_never_renewed(
+    client, db_session, estate,
+):
+    """Those sat in photo addresses, logs and copied links: renewed, a leaked one
+    would never end (final review SEC-3)."""
+    user, _ = _user(db_session, estate, "member")
+    then = datetime.now(UTC) - timedelta(days=20)
+    legacy = jwt.encode({"sub": str(user.id), "iat": then, "exp": then + timedelta(days=30),
+                         "role": "member"}, settings.jwt_secret, algorithm="HS256")
+    r = client.get("/api/auth/me", headers=_auth(legacy))
+    assert r.status_code == 200 and SESSION_TOKEN_HEADER not in r.headers
+
+
 @requires_db
 def test_sign_ins_from_before_the_token_version_still_work(client, db_session, estate):
     """Tokens made before this change carry no version: they read as 0, so nobody is
@@ -425,8 +506,12 @@ def test_the_visitors_address_is_believed_only_from_the_tunnel(monkeypatch):
     assert throttle_mod.from_outside(req("8.8.8.8"))
     assert throttle_mod.from_outside(req("::ffff:8.8.8.8"))
     assert not throttle_mod.from_outside(req("127.0.0.1"))
-    assert not throttle_mod.from_outside(req("192.168.1.50", cf_connecting_ip="203.0.113.9"))
+    assert not throttle_mod.from_outside(req("192.168.1.50"))
     assert not throttle_mod.from_outside(req("testclient"))
+    # Cloudflare's headers mean the internet whoever the peer is: a tunnel pointed at
+    # the LAN address must not let the published admin password in (SEC-5).
+    assert throttle_mod.from_outside(req("192.168.1.50", cf_connecting_ip="203.0.113.9"))
+    assert throttle_mod.from_outside(req("192.168.1.50", cf_ray="8c1f-MAD"))
 
 
 def test_the_tunnel_is_seen_as_the_tunnel_through_uvicorn_as_serve_py_runs_it(monkeypatch):
@@ -450,7 +535,8 @@ def test_the_tunnel_is_seen_as_the_tunnel_through_uvicorn_as_serve_py_runs_it(mo
 
     def who(request):
         return JSONResponse({"ip": throttle_mod.client_ip(request),
-                             "outside": throttle_mod.from_outside(request)})
+                             "outside": throttle_mod.from_outside(request),
+                             "tunnel": request.client.host in settings.trusted_proxies})
 
     probe = Starlette(routes=[Route("/who", who)])
 
@@ -467,13 +553,16 @@ def test_the_tunnel_is_seen_as_the_tunnel_through_uvicorn_as_serve_py_runs_it(mo
 
     tunnel = {"CF-Connecting-IP": "198.51.100.7", "X-Forwarded-For": "198.51.100.7"}
     assert ask(serve.uvicorn_options(), "127.0.0.1", tunnel) == {
-        "ip": "198.51.100.7", "outside": True}
-    assert ask(serve.uvicorn_options(), "127.0.0.1", {}) == {"ip": "127.0.0.1", "outside": False}
+        "ip": "198.51.100.7", "outside": True, "tunnel": True}
+    assert ask(serve.uvicorn_options(), "127.0.0.1", {}) == {
+        "ip": "127.0.0.1", "outside": False, "tunnel": True}
+    # Cloudflare's headers from an untrusted peer: its address is not believed, but
+    # the request is from the internet all the same (SEC-5).
     assert ask(serve.uvicorn_options(), "192.168.1.20", tunnel) == {
-        "ip": "192.168.1.20", "outside": False}
+        "ip": "192.168.1.20", "outside": True, "tunnel": False}
     # What uvicorn's default did: the tunnel's own address is gone before the app
     # looks, so it can't tell the request came through the tunnel at all.
-    assert ask({"proxy_headers": True}, "127.0.0.1", tunnel)["outside"] is False
+    assert ask({"proxy_headers": True}, "127.0.0.1", tunnel)["tunnel"] is False
     assert serve.uvicorn_options()["proxy_headers"] is False
 
 
@@ -1046,8 +1135,10 @@ def test_set_password_signs_the_person_in_with_it_and_out_everywhere_else(
         manage.set_password("admin@gamesense.local", "changeme")
     with pytest.raises(SystemExit):
         manage.set_password("nobody@x.es", "a-fine-password")
+    _subscribe(db_session, user, "https://fcm.googleapis.com/fcm/send/lost")
     assert "Admin@GameSense.local" in manage.set_password("admin@gamesense.local",
                                                           "a-fine-password")
+    assert _endpoints(db_session, user) == set()  # the lost phone's alerts stop too
     db_session.expire_all()
     assert client.get("/api/auth/me", headers=old_h).status_code == 401
     assert client.post("/api/auth/login", json={
@@ -1066,3 +1157,23 @@ def test_the_access_log_never_keeps_a_token():
     line = record.getMessage()
     assert "eyJ" not in line and "token=…&download=1" in line
     assert any(isinstance(f, RedactTokens) for f in logging.getLogger("uvicorn.access").filters)
+
+
+@requires_db
+def test_a_tunnel_on_the_lan_address_is_warned_about_and_never_lets_the_published_password_in(
+    client, db_session, estate, monkeypatch, capsys,
+):
+    """cloudflared pointed at http://db01:8090 reaches the API from the LAN: every
+    visitor looked local, and the published admin password signed in from anywhere
+    (final review SEC-5). Now it is refused and the log says what to change."""
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "trusted_proxies", ["127.0.0.1"])
+    monkeypatch.setattr(throttle_mod, "_warned", set())
+    _user(db_session, estate, "admin", email="admin@gamesense.local", password="changeme")
+    lan = SimpleNamespace(host="192.168.1.10", port=50000)
+    monkeypatch.setattr("starlette.requests.Request.client", property(lambda self: lan))
+    r = client.post("/api/auth/login", headers={"CF-Connecting-IP": "203.0.113.9"},
+                    json={"email": "admin@gamesense.local", "password": "changeme"})
+    assert r.status_code == 403
+    said = capsys.readouterr().out
+    assert "throttle.untrusted_tunnel" in said and "TRUSTED_PROXIES" in said

@@ -119,9 +119,14 @@ const pad = (n: number) => String(n).padStart(2, '0')
 /** 24-hour clock, as the rest of the map ("mostly 21–23 h"). */
 export const clock = (ms: number) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
 export function nightLabel(night: string, first: boolean, soFar = false): string {
-  const d = new Date(`${night}T12:00:00`)
-  const day = fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' })
-  return first ? `${soFar ? t('replay.lastNightSoFar') : t('night.lastNight')} · ${day}` : day
+  const { prefix, day } = nightParts(night, first, soFar)
+  return prefix ? `${prefix} · ${day}` : day
+}
+/** nightLabel in its two parts, for a picker that lets "Last night" go first on a
+ *  narrow phone rather than the date it is there to show. */
+export function nightParts(night: string, first: boolean, soFar = false): { prefix: string | null; day: string } {
+  const day = fmtDate(new Date(`${night}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })
+  return { prefix: first ? (soFar ? t('replay.lastNightSoFar') : t('night.lastNight')) : null, day }
 }
 /**
  * The hours under the timeline: every third hour on the clock (18, 21, 00, 03, 06)

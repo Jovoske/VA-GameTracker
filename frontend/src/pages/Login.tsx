@@ -90,7 +90,7 @@ export default function Login() {
 
         {error && <div role="alert" style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
-        <button className="btn" disabled={busy}>
+        <button className="btn btn--main" disabled={busy}>
           {busy ? t('login.signingIn') : t('nav.signIn')}
         </button>
       </form>

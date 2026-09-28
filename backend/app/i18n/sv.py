@@ -333,9 +333,9 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         ". Klockan går {h} h före (missat tidsomställningen?): bildtiderna rättas, men ställ "
         "kamerans klocka"
     ),
-    "health.no_checkin_for": "Ingen kontakt på {h} h",
+    "health.no_checkin_for": "Ingen kontakt sedan {day}",
     "health.no_checkin": "Ingen kontakt än",
-    "health.photo_limit": "Bildgränsen nådd ({count}/{limit})",
+    "health.photo_limit": "Slut på bildkrediter ({count}/{limit})",
     "health.battery_low": "Lågt batteri ({pct} %)",
     "health.ok": "Rapporterar som vanligt",
 
@@ -540,6 +540,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- alerts on the phone -------------------------------------------------
     "push.just_now": "nyss",
     "push.time": "kl. {time}",
+    "push.since_time": "kl. {time}",
     "push.last_night": "i natt kl. {time}",
     "push.yesterday": "i går kl. {time}",
     "push.on_day": "{day} kl. {time}",

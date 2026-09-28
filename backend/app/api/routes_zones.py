@@ -17,7 +17,7 @@ from app.core.db import get_db
 from app.core.logging import get_logger
 from app.forecasting import bedding
 from app.i18n import t
-from app.models import Estate, Stand, User, Zone
+from app.models import Estate, Sit, Stand, User, Zone
 from app.terrain import covers, get_grid, load_in_background, load_status, start_load
 
 router = APIRouter(tags=["zones"])
@@ -168,13 +168,22 @@ def map_tonight(_: User = Depends(get_current_user), db: Session = Depends(get_d
 
     zones = [_zone_out(z) for z in db.scalars(select(Zone).order_by(Zone.name)).all()]
 
+    # Tonight's reservations, as Stands has them: the sheet offers Reserve only on a
+    # stand somebody can still reserve.
+    from app.api.routes_stands import tonight
+
+    claims = {c.stand_id: c for c in db.scalars(
+        select(Sit).where(Sit.night == tonight(), Sit.outcome != "cancelled"))}
     stands = []
     for s in db.scalars(select(Stand).order_by(Stand.name)).all():
+        claim = claims.get(s.id)
         stands.append({
             "id": str(s.id),
             "name": s.name,
             "lat": s.lat,
             "lon": s.lon,
+            "claimed_tonight": claim is not None,
+            "claimed_by": str(claim.user_id) if claim and claim.user_id else None,
             # The same verdict Tonight, a reservation and Sit mode give this stand.
             "wind": wind_verdict(db, s, cond, now=now),
             # Derived from the drawn bedding, so it is available even when nobody

@@ -59,7 +59,10 @@ from app.models import Camera, CameraAccount, Estate, Image, SyncLog
 
 log = get_logger(__name__)
 
-# A photo whose file would not download is tried again on this many fetches.
+# A photo whose file would not download is tried again on this many fetches from
+# the link saved with it (repair_missing). While SPYPOINT still lists it, with a
+# fresh link each time, it is tried on every fetch whatever the count: a CDN outage
+# or a full disk longer than an hour used to lose the photo for good (E-01).
 MAX_DOWNLOAD_ATTEMPTS = 5
 # Photos with no file that a fetch retries per camera, beyond those it lists anyway.
 REPAIR_PER_CAMERA = 20
@@ -229,14 +232,17 @@ def _ingest_photo(
     """Download + store + enrich one photo. True if its file is newly on disk.
 
     A photo already stored without its file (the download failed last time) is tried
-    again with the link this listing gave, so a CDN hiccup no longer loses it.
+    again with the link this listing gave, on every fetch that lists it: the link is
+    fresh, so an outage of any length loses nothing while SPYPOINT still lists it.
     """
     if not photo.spypoint_id:
         return False
     existing = db.scalar(select(Image).where(Image.spypoint_photo_id == photo.spypoint_id))
     if existing is not None:
-        if existing.original_path or existing.download_attempts >= MAX_DOWNLOAD_ATTEMPTS:
-            return False  # dedupe — already have it, or have given up on its file
+        if existing.original_path:
+            return False  # dedupe — already have it
+        if not photo.url and existing.download_attempts >= MAX_DOWNLOAD_ATTEMPTS:
+            return False  # no new link, and the old one has been tried enough
         if photo.url:
             existing.cdn_url = photo.url  # the freshest link
         if tried is not None:

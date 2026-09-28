@@ -260,10 +260,10 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "other": "{camera} has been quiet for {n} nights. It usually sees {usual} a night.",
     },
     "changed.busier": (
-        "{camera} was busier than usual last night: {visits} against a usual {usual}."
+        "{camera} was busier than usual last night: {visits}, when it usually sees {usual}."
     ),
     "changed.quieter": (
-        "{camera} was quieter than usual last night: {visits} against a usual {usual}."
+        "{camera} was quieter than usual last night: {visits}, when it usually sees {usual}."
     ),
     "changed.some_cameras": "some cameras",
     "changed.checking": "Last night's photos from {cameras} are still being checked.",
@@ -282,9 +282,9 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         ". Its clock is {h} h fast (missed the clock change?): photo times are put right, but "
         "set the camera's clock"
     ),
-    "health.no_checkin_for": "No check-in for {h}h",
+    "health.no_checkin_for": "No check-in since {day}",
     "health.no_checkin": "No check-in yet",
-    "health.photo_limit": "Photo limit reached ({count}/{limit})",
+    "health.photo_limit": "Out of photo credits ({count}/{limit})",
     "health.battery_low": "Battery low ({pct}%)",
     "health.ok": "Reporting normally",
 
@@ -477,6 +477,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     "push.just_now": "just now",
     # A time of day in an alert: "22:14" ("klo 22:14", "a las 22:14").
     "push.time": "{time}",
+    "push.since_time": "{time}",
     "push.last_night": "{time} last night",
     "push.yesterday": "{time} yesterday",
     "push.on_day": "{time} on {day}",

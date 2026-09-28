@@ -11,6 +11,9 @@
 .stand-wind-wait { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
 /* The time the wind line is judged for. */
 .stand-wind-for { display: block; font-size: 12px; font-weight: 400; color: var(--text-dim); }
+/* A stand's main action (Reserve, Start sit, Back to sit) is a glove's: 56px, the
+   size Tonight's own Back to sit is. */
+.stand-entry .map-button--primary { min-height: 56px; font-size: 16px; }
 .stand-entry > .map-button--primary { width: 100%; }
 .stand-reserve-later { width: 100%; margin-top: 10px; }
 .stand-entry .map-actions { margin-top: 0; }

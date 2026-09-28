@@ -169,11 +169,18 @@ function form(entry: Forms, count: number): string {
 }
 
 /** `{name}` in `text`, from `params`. A missing one stays visible, so it gets noticed. */
+/** Languages that write the clock with a dot, as Intl's fi-FI does ("21.40"). */
+const CLOCK_DOT: ReadonlySet<Lang> = new Set<Lang>(['fi'])
+const HHMM = /^\d{1,2}:\d{2}$/
+
 export function fill(text: string, params?: Params): string {
   if (!params) return text
   return text.replace(/\{(\w+)\}/g, (m, name: string) => {
     const v = params[name]
-    return v == null ? m : String(v)
+    if (v == null) return m
+    // A time the server sends ready-made ("20:30", the best hours, sunset) reads as
+    // the app's own times do in the language: one clock style on a screen.
+    return typeof v === 'string' && CLOCK_DOT.has(current) && HHMM.test(v) ? v.replace(':', '.') : String(v)
   })
 }
 

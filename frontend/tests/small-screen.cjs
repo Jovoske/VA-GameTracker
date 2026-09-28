@@ -139,6 +139,8 @@ const assert=require('node:assert/strict');
  await page.locator('#stand-s2 .ww-line').waitFor({timeout:10000});
  const after=(await reserve.boundingBox()).y;
  assert.equal(after,before,`Reserve moved from ${before} to ${after}`);
+ // A stand's main action is a glove's 56 px, as Tonight's Back to sit is (FUX-6).
+ assert.ok((await reserve.boundingBox()).height>=56,`Reserve is ${(await reserve.boundingBox()).height}px`);
  delete delays['/api/forecast/wind-week'];
  // Tonight: the stand's week under the wind line, the hours behind a fold.
  await page.goto(base+'/');
@@ -260,6 +262,7 @@ const assert=require('node:assert/strict');
  await page.waitForURL(/\/login\?next=/);
  assert.equal(new URL(page.url()).searchParams.get('next'),'/photos?species=wild_boar&image=p1');
  await page.getByLabel('Email').fill('admin@x.es');await page.getByLabel('Password').fill('changeme-please');
+ assert.ok((await page.getByRole('button',{name:'Sign in'}).boundingBox()).height>=56,'Sign in is a glove’s 56 px');
  await page.getByRole('button',{name:'Sign in'}).click();
  await page.waitForURL(u=>u.pathname==='/photos'&&u.search==='?species=wild_boar&image=p1');
  assert.deepEqual(loginAuth,[null],'signing in never carries an old sign-in');

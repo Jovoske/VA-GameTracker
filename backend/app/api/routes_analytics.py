@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.forecasting.exposure import current_night, night_expr
+from app.i18n import species_name
 from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -80,16 +81,18 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
 
     # A photo marked "nothing in it" keeps its sighting row (so keeping it again
     # brings it back); it is not counted while it is marked.
+    # By species id, named in the reader's language as every other list names it.
     sp_rows = db.execute(
-        select(Species.common_name, func.count(Detection.id))
+        select(Species.id, Species.common_name, func.count(Detection.id))
         .join(Detection, Detection.species_id == Species.id)
         .join(Image, Image.id == Detection.image_id)
         .join(Camera, Camera.id == Image.camera_id)
         .where(VISIBLE_SIGHTING, kept)
-        .group_by(Species.common_name)
-        .order_by(func.count(Detection.id).desc())
+        .group_by(Species.id, Species.common_name)
+        .order_by(func.count(Detection.id).desc(), Species.id)
     ).all()
-    by_species = [{"species": n, "count": int(c)} for n, c in sp_rows]
+    by_species = [{"species": species_name(sid, n), "species_id": sid, "count": int(c)}
+                  for sid, n, c in sp_rows]
 
     now = datetime.now(timezone.utc)
     phase, illum = moon_phase(now)

@@ -3,7 +3,7 @@ import { PlayIcon } from '@phosphor-icons/react/dist/csr/Play'
 import { createPortal } from 'react-dom'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import { t as tr } from '../i18n'
-import { SPEEDS, clock, hourMarks, minutesInto, nightLabel } from './activity'
+import { SPEEDS, clock, hourMarks, minutesInto, nightLabel, nightParts } from './activity'
 import type { Camera } from './geometry'
 import type { useReplay } from './useReplay'
 
@@ -38,7 +38,7 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
     : empty ? tr('replay.noVisits') : tr('replay.soFar', { n: r.soFar, count: r.visits.length })
   const marks = r.data ? hourMarks(r.data.start, r.data.end) : []
   const at = r.nights?.findIndex(n => n.night === r.night) ?? -1
-  const shown = r.nights && at >= 0 ? { date: nightLabel(r.nights[at].night, at === 0, r.nights[at].so_far), count: nightCount(r.nights[at].visits) } : null
+  const shown = r.nights && at >= 0 ? { ...nightParts(r.nights[at].night, at === 0, r.nights[at].so_far), count: nightCount(r.nights[at].visits) } : null
   return <section className="mode-bar mode-bar--replay" aria-label={tr('replay.label')}>
     <div className="mode-bar-row">
       <label className="replay-night">
@@ -46,7 +46,8 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
         {/* What the closed picker shows, drawn over it so a narrow phone cuts the date
             short and never the count. The real select is on top, and takes the tap. */}
         <span className="replay-night-shown" aria-hidden="true">
-          <span className="replay-night-date">{shown ? shown.date : r.nightsErr ? tr('replay.nightsFailed') : tr('replay.loadingNights')}</span>
+          {shown?.prefix && <span className="replay-night-prefix">{shown.prefix}&nbsp;·&nbsp;</span>}
+          <span className="replay-night-date">{shown ? shown.day : r.nightsErr ? tr('replay.nightsFailed') : tr('replay.loadingNights')}</span>
           {shown && <span className="replay-night-count">&nbsp;· {shown.count}</span>}
         </span>
         <select value={r.night ?? ''} disabled={!r.nights?.length} onChange={e => r.setNight(e.target.value)}>

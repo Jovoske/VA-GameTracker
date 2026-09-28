@@ -196,10 +196,11 @@ def test_tonight_gives_no_hours_for_animals_only_seen_at_dawn(db_session, offlin
     db_session.add(cam)
     db_session.flush()
     tonight = current_night()
+    # At first light, still inside the night (to 06:00) but after any sit could start.
     for n in range(1, 21):
         day = tonight - timedelta(days=n)
         img = Image(camera_id=cam.id,
-                    captured_at=datetime.combine(day, time(7, 5), tzinfo=MADRID),
+                    captured_at=datetime.combine(day, time(5, 50), tzinfo=MADRID),
                     is_empty_frame=False, processed_at=datetime.now(UTC), reviewed=False)
         db_session.add(img)
         db_session.flush()

@@ -60,10 +60,23 @@ def upgrade() -> None:
     op.execute(
         "ALTER TABLE detections ADD COLUMN IF NOT EXISTS corrected_at TIMESTAMP WITH TIME ZONE"
     )
-    op.execute(
-        "ALTER TABLE detections ADD COLUMN IF NOT EXISTS corrected_by UUID "
-        "REFERENCES users(id) ON DELETE SET NULL"
-    )
+    op.execute("ALTER TABLE detections ADD COLUMN IF NOT EXISTS corrected_by UUID")
+    # Named as the models name it (a bare REFERENCES got Postgres' own name,
+    # detections_corrected_by_fkey, so an upgraded server and a fresh install differed;
+    # 0034 renames one made that way). Added only when the column has no key yet.
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint c
+                JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+                WHERE c.contype = 'f' AND c.conrelid = 'detections'::regclass
+                  AND a.attname = 'corrected_by'
+            ) THEN
+                ALTER TABLE detections ADD CONSTRAINT fk_detections_corrected_by_users
+                    FOREIGN KEY (corrected_by) REFERENCES users (id) ON DELETE SET NULL;
+            END IF;
+        END $$
+    """)
     rename = text("UPDATE species SET common_name = :new WHERE id = :key AND common_name = :old")
     for key, old, new in _renames():
         op.get_bind().execute(rename, {"key": key, "old": old, "new": new})

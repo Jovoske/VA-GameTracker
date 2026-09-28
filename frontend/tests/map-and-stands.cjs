@@ -175,8 +175,9 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  assert.equal(await night('Last night: Wild boar · 2 visits, Red deer · 1 visit\nSome photos from last night couldn’t be checked, so this may not be everything.'),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nSome photos from last night couldn’t be checked, so this may not be everything.');
  cameras[1].last_night_status='blind';cameras[1].health={...ok,status:'offline',producing:false};cameras[1].last_report_at=new Date(Date.now()-3*86400e3).toISOString();
  await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
- await page.getByText('Not checking in. Last heard 3 d ago.').waitFor({timeout:10000});
- assert.equal(await page.locator('.cam-sheet-status--warn').first().innerText(),'Not checking in. Last heard 3 d ago.');
+ // The Cameras card's words and Tonight's: the day it last checked in, never hours.
+ await page.getByText(/^No check-in since /).waitFor({timeout:10000});
+ assert.match(await page.locator('.cam-sheet-status--warn').first().innerText(),/^No check-in since (Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)( night)?\.$/);
  assert.match(await page.locator('.cam-sheet-night').innerText(),/^No photos from last night\. The camera may not have been working/);
 
  await page.goto(base+'/stands');

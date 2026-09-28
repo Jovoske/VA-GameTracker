@@ -24,6 +24,8 @@ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42
 const clock=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 const nightOf=t=>{const p=Object.fromEntries(clock.formatToParts(new Date(t)).map(x=>[x.type,x.value]));return new Date(Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute)-6*3600e3).toISOString().slice(0,10)};
 const ago=m=>new Date(Date.now()-m*60e3).toISOString();
+// Madrid's offset from UTC now, in ms (the wall clock minus the instant).
+const madridOffset=()=>{const p=Object.fromEntries(clock.formatToParts(new Date()).map(x=>[x.type,x.value]));return Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute)-Math.floor(Date.now()/60e3)*60e3};
 
 // ── fixtures ──
 const species=[['wild_boar','Wild Boar'],['red_deer','Red Deer'],['fox','Fox']].map(([id,common_name])=>({id,common_name,huntable:true,hidden:false,is_priority:false,detections:40}));
@@ -212,12 +214,16 @@ const server=http.createServer((req,res)=>{
   const ctx=await context(),page=await open(ctx);const asked=[];
   page.on('request',r=>{if(r.url().includes('/api/'))asked.push(new URL(r.url()).pathname+new URL(r.url()).search)});
   await page.goto(base+'/');await waitFresh(page,/^Plan from just now\./);
-  await page.evaluate(()=>{const k='gs_cache:/forecast/tonight',v=JSON.parse(localStorage.getItem(k));v.at=new Date(Date.now()-40*60e3).toISOString();localStorage.setItem(k,JSON.stringify(v))});
+  // 40 minutes old, unless that is before this morning's 06:00 (a plan from before it is
+  // last night's, and says so): then as old as it can be and still be tonight's.
+  const sinceCutover=Math.floor((Date.now()-Date.parse(`${nightOf(Date.now())}T06:00:00Z`)+madridOffset())/60e3);
+  const age=sinceCutover>41?40:Math.max(2,sinceCutover-1);
+  await page.evaluate(age=>{const k='gs_cache:/forecast/tonight',v=JSON.parse(localStorage.getItem(k));v.at=new Date(Date.now()-age*60e3).toISOString();localStorage.setItem(k,JSON.stringify(v))},age);
   set({mode:'hang',only:/^\/api\/forecast\/tonight$/});
   const t0=Date.now();await page.reload();await page.locator('.tn-verdict').waitFor({timeout:5000});
   assert.ok(Date.now()-t0<3000,'the saved plan is painted first on a link that never answers');
-  assert.match(await fresh(page),/^Plan from 40 min ago\. Checking for a newer one…/);
-  await waitFresh(page,/^No answer from the server\. Plan from 40 min ago\./);
+  assert.match(await fresh(page),new RegExp(`^Plan from ${age} min ago\\. Checking for a newer one…`));
+  await waitFresh(page,new RegExp(`^No answer from the server\\. Plan from ${age} min ago\\.`));
   set({});await page.reload();await waitFresh(page,/^Plan from just now\./);
   set({mode:'drop',only:/^\/api\/forecast\/tonight$/});
   await page.locator('.tn-chip',{hasText:'Red Deer'}).click();

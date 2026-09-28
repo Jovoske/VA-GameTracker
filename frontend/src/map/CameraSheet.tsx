@@ -7,6 +7,7 @@ import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import { cap, t, tn } from '../i18n'
 import { validLngLat, type Camera } from './geometry'
+import { whenSeen } from '../night'
 import { stripPath } from './offline'
 import { OwnGpsControl, RenameControl } from './PlaceSheet'
 
@@ -80,7 +81,8 @@ function trouble(c: Camera): ReactNode | null {
   if (h.status === 'retired') return t('camSheet.retired')
   if (h.status === 'disconnected') return t('camSheet.disconnected')
   if (h.status === 'quiet') return t('camSheet.quiet', { detail: h.detail })
-  if (h.status === 'offline') return c.last_report_at ? t('camSheet.offline', { ago: ageLabel(c.last_report_at) }) : t('camSheet.never')
+  // The Cameras card's words, and Tonight's: the day it last checked in.
+  if (h.status === 'offline') return c.last_report_at ? t('camSheet.offline', { when: whenSeen(c.last_report_at) }) : t('camSheet.never')
   if (h.status === 'out_of_credits') return t('camSheet.credits')
   return null
 }

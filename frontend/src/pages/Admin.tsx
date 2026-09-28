@@ -34,6 +34,8 @@ type Status = {
 type AiStatus = {
   waiting: number
   failed: number
+  // Photos of the last month whose file never downloaded (older servers leave it out).
+  lost?: number
   running_since: string | null
   last_run_at: string | null
   last_ok_at: string | null
@@ -933,6 +935,11 @@ export default function Admin() {
               </div>
             )}
             {retryMsg && <div role="status" style={{ marginTop: 8, fontSize: 13, color: 'var(--text-dim)' }}>{retryMsg}</div>}
+            {(ai.lost ?? 0) > 0 && (
+              <div data-ai="lost" style={{ marginTop: 10, fontSize: 13, lineHeight: 1.5 }}>
+                {t('admin.ai.lost', { count: ai.lost ?? 0 })}
+              </div>
+            )}
             {(ai.stopped || ai.last_error) && (
               <details style={{ marginTop: 10, fontSize: 12, color: 'var(--text-dim)' }}>
                 <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center' }}>

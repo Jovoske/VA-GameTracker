@@ -318,9 +318,9 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         ". Klokka går {h} t for fort (glemt omstillingen?): bildetidene rettes, men still klokka på"
         " kameraet"
     ),
-    "health.no_checkin_for": "Ingen kontakt på {h} t",
+    "health.no_checkin_for": "Ingen kontakt siden {day}",
     "health.no_checkin": "Ingen kontakt ennå",
-    "health.photo_limit": "Bildegrensen er nådd ({count}/{limit})",
+    "health.photo_limit": "Tom for bildekreditter ({count}/{limit})",
     "health.battery_low": "Lavt batteri ({pct} %)",
     "health.ok": "Rapporterer som normalt",
 
@@ -515,6 +515,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- alerts on the phone -------------------------------------------------
     "push.just_now": "akkurat nå",
     "push.time": "kl. {time}",
+    "push.since_time": "kl. {time}",
     "push.last_night": "i natt kl. {time}",
     "push.yesterday": "i går kl. {time}",
     "push.on_day": "{day} kl. {time}",

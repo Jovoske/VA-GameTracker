@@ -419,6 +419,9 @@
 .replay-night-shown { display: flex; align-items: center; min-height: 48px; padding: 0 30px 0 12px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--bg); color: var(--text); font-size: 15px; white-space: nowrap; }
 .replay-night-shown::after { content: '▾'; position: absolute; right: 12px; font-size: 12px; color: var(--text-dim); }
 .replay-night-date { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.replay-night-prefix { flex-shrink: 1; min-width: 0; overflow: hidden; }
+/* A narrow phone keeps the date, what the picker is there to show: "Last night" goes. */
+@media (max-width: 380px) { .replay-night-prefix { display: none; } }
 .replay-night-count { flex-shrink: 0; }
 .replay-night:has(select:disabled) .replay-night-shown { color: var(--text-dim); }
 .replay-night:has(select:focus-visible) .replay-night-shown { outline: 2px solid var(--go); outline-offset: 2px; }

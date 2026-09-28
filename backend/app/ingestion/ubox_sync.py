@@ -7,9 +7,11 @@ No cloud files or previously imported images are deleted.
 Catching up: a routine fetch reads back to where the last complete one stopped (less
 two hours), however long ago that was, up to the week UBox keeps listing. A snapshot
 that will not download is a warning, not a failed login: it is tried again on the
-next MAX_SNAPSHOT_ATTEMPTS fetches (Camera.import_failures) and then given up on, so
-one dead link can neither hold the camera's catch-up back for good nor turn every
-fetch red. What each login did is recorded for Settings (app.ingestion.logins).
+next fetches (Camera.import_failures) and given up on after MAX_SNAPSHOT_ATTEMPTS
+tries at least RETRY_SPACING apart, so one dead link can neither hold the camera's
+catch-up back for good nor turn every fetch red, and an outage of a few hours
+(UBox's side, or a full disk here) loses nothing. What each login did is recorded
+for Settings (app.ingestion.logins).
 """
 from __future__ import annotations
 
@@ -51,8 +53,11 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 40_000_000
 # How far back a fetch reaches after an outage: about what UBox keeps listing.
 CATCH_UP = timedelta(days=7)
-# A snapshot that will not download is tried on this many fetches, then given up on.
+# A snapshot that will not download is tried again on every fetch; this many of those
+# tries, counted at most one per RETRY_SPACING, and it is given up on. Counted per
+# fetch, three fetches 15 minutes apart gave up on a photo after half an hour (E-01).
 MAX_SNAPSHOT_ATTEMPTS = 3
+RETRY_SPACING = timedelta(hours=1)
 COUNTERS = ("seen", "downloaded", "duplicate", "interval_skipped", "daily_limit_skipped",
             "no_image", "failed", "given_up")
 
@@ -281,7 +286,8 @@ def _sync_camera(
         account.ubox_max_images_per_day, estate.timezone,
     )
     known = {r.ubox_event_id for r in existing if r.ubox_event_id}
-    # Snapshots that would not download before: {event_id: [attempts, captured_at]}.
+    # Snapshots that would not download before:
+    # {event_id: [attempts, captured_at, last counted try]}.
     failures = {
         event_id: entry for event_id, entry in (camera.import_failures or {}).items()
         if datetime.fromisoformat(entry[1]) >= until - CATCH_UP - timedelta(days=1)
@@ -338,12 +344,17 @@ def _sync_camera(
             except Exception as exc:
                 result["failed"] += 1
                 window_failures += 1
-                failures[event.event_id] = [attempts + 1, event.captured_at.isoformat()]
-                if attempts + 1 < MAX_SNAPSHOT_ATTEMPTS:
+                entry = failures.get(event.event_id)
+                last = datetime.fromisoformat(entry[2]) if entry and len(entry) > 2 else None
+                if last is None or until - last >= RETRY_SPACING:
+                    attempts, last = attempts + 1, until
+                failures[event.event_id] = [attempts, event.captured_at.isoformat(),
+                                            last.isoformat()]
+                if attempts < MAX_SNAPSHOT_ATTEMPTS:
                     result["retried"] += 1
                     hold = min(hold or event.captured_at, event.captured_at)
                 log.warning("ubox.snapshot_failed", camera=str(camera.id),
-                            attempt=attempts + 1, error=type(exc).__name__)
+                            attempt=attempts, error=type(exc).__name__)
                 if window_failures >= 5:
                     # Stale links/outages must not cause thousands of GETs; what is
                     # left of this window is read again next time.

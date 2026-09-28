@@ -23,7 +23,7 @@ import re
 import string
 from collections.abc import Iterator
 from contextvars import ContextVar
-from datetime import date, datetime
+from datetime import date, datetime, time
 from functools import lru_cache
 
 LANGUAGES = ("en", "fi", "sv", "nb", "es")
@@ -243,6 +243,25 @@ def month(d: date | datetime | int, lang: str | None = None, *, short: bool = Tr
     return tr(lang or current(), f"cal.{'mon' if short else 'monl'}.{m}")
 
 
+# Languages that write the clock with a dot ("21.40"), as Intl's fi-FI does in the app.
+_CLOCK_DOT = frozenset({"fi"})
+
+
+def clock(at: datetime | time | int | str, lang: str | None = None) -> str:
+    """"21:40" as the language writes a time of day ("21.40" in Finnish), so a time
+    the server puts in a sentence reads as the app's own times do. An int is the
+    hour (21 is "21:00"), a string one already written "HH:MM". A datetime is read
+    on its own clock: give it the estate's."""
+    lang = lang or current()
+    if isinstance(at, int):
+        text = f"{at:02d}:00"
+    elif isinstance(at, str):
+        text = at
+    else:
+        text = at.strftime("%H:%M")
+    return text.replace(":", ".") if lang in _CLOCK_DOT else text
+
+
 def day_month(d: date | datetime, lang: str | None = None) -> str:
     """"24 Sep", "24.9.", "24 sep." as a hunter writes a date in that language."""
     lang = lang or current()
@@ -361,25 +380,43 @@ def localize(text: str | None, lang: str | None = None) -> str | None:
     lang = lang or current()
     if lang == DEFAULT:
         return text
+    return _localize(text, lang)[0]
+
+
+def _localize(text: str, lang: str) -> tuple[str, int]:
+    """(text in the language, how much of it is left as it came).
+
+    A kept message can hold another ("1 of 2 cameras failed. {error}", the error a
+    message of its own), and then more than one template fits the whole: "{text}. It
+    tries again on the next fetch." takes the outer one's tail too. Each is tried, and
+    the reading that leaves the least text untranslated wins, so a partial fetch is
+    never half English (final review E2E-2)."""
+    best: tuple[str, int] | None = None
     for pattern, key, _names in _stored_patterns():
         m = pattern.match(text)
-        if m:
-            # A value can be a kept message itself ("Photos not coming in. {error}").
-            params = {k: localize(v, lang) for k, v in m.groupdict().items()}
-            if "n" in params:
-                with contextlib.suppress(ValueError):
-                    params["n"] = int(params["n"])
-            for k in _DECIMAL_PARAMS & params.keys():
-                # A number kept as English text ("12.3" GB free), in the language's mark.
-                if re.fullmatch(r"\d+\.\d+", params[k]):
-                    params[k] = params[k].replace(".", tr(lang, "num.decimal_mark"))
-            return tr(lang, key, **params)
-    return text
+        if not m:
+            continue
+        # A value can be a kept message itself ("Photos not coming in. {error}").
+        said = {k: _localize(v, lang) for k, v in m.groupdict().items()}
+        params = {k: v[0] for k, v in said.items()}
+        left = sum(v[1] for v in said.values())
+        if "n" in params:
+            with contextlib.suppress(ValueError):
+                params["n"] = int(params["n"])
+        for k in _DECIMAL_PARAMS & params.keys():
+            # A number kept as English text ("12.3" GB free), in the language's mark.
+            if re.fullmatch(r"\d+\.\d+", params[k]):
+                params[k] = params[k].replace(".", tr(lang, "num.decimal_mark"))
+        if best is None or left < best[1]:
+            best = (tr(lang, key, **params), left)
+            if left == 0:
+                break
+    return best or (text, len(text))
 
 
 __all__ = [
-    "DEFAULT", "LANGUAGES", "NAMES", "LanguageMiddleware", "current", "day_month", "decimal",
-    "fixed", "from_accept_language", "join", "join_all", "localize", "month", "normalize",
-    "plural", "reading_order", "renamed", "set_current", "species_inside", "species_name",
-    "stored", "t", "tr", "use", "weekday", "weekday_day_month",
+    "DEFAULT", "LANGUAGES", "NAMES", "LanguageMiddleware", "clock", "current", "day_month",
+    "decimal", "fixed", "from_accept_language", "join", "join_all", "localize", "month",
+    "normalize", "plural", "reading_order", "renamed", "set_current", "species_inside",
+    "species_name", "stored", "t", "tr", "use", "weekday", "weekday_day_month",
 ]

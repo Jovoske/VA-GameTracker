@@ -867,10 +867,11 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
                 "INSERT INTO users (id,estate_id,email,password_hash,role) "
                 "VALUES (gen_random_uuid(),:e,:m,'h','member') RETURNING id"
             ), {"e": estate_id, "m": m}).scalar_one() for m in ("alice@x.local", "bob@x.local"))
-            ridge, oak, pine = (c.execute(text(
+            ridge, oak, pine, bridge = (c.execute(text(
                 "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,:n) "
                 "RETURNING id"
-            ), {"e": estate_id, "n": n}).scalar_one() for n in ("Ridge", "Oak", "Pine"))
+            ), {"e": estate_id, "n": n}).scalar_one()
+                for n in ("Ridge", "Oak", "Pine", "Bridge"))
 
             def sit(stand, user, night, outcome="unreported", started=False, mins=0, notes=None):
                 return c.execute(text(
@@ -889,12 +890,19 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
             idle = sit(oak, alice, "2026-09-21", mins=30, notes="Bring the chair")
             sat = sit(oak, bob, "2026-09-21", started=True, mins=5)
             alone = sit(pine, alice, "2026-09-20")
+            # Bridge: Alice reported a shot without starting; Bob started and saw. The
+            # shot is the higher report and a report never goes down: it is kept.
+            shot = sit(bridge, alice, "2026-09-22", outcome="shot", mins=60, notes="second")
+            seen = sit(bridge, bob, "2026-09-22", outcome="seen", started=True, mins=5)
 
         command.upgrade(cfg, "head")
         with eng.begin() as c:
             rows = {r[0]: r[1:] for r in c.execute(text(
                 "SELECT id, outcome, notes, reported_at FROM sits")).all()}
-            assert len(rows) == 6
+            assert len(rows) == 8
+            assert rows[shot][:2] == ("shot", "second")
+            assert rows[seen][0] == "cancelled"
+            assert rows[seen][1].endswith("Reported: seen.")
             assert rows[used][:2] == ("seen", None)
             assert rows[sat][:2] == ("unreported", None)
             assert rows[alone][:2] == ("unreported", None)
@@ -927,7 +935,7 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
         assert "reported_at" not in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live") is None
         with eng.connect() as c:
-            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 7
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 9
             assert c.execute(text("SELECT outcome FROM sits WHERE id=:s"),
                              {"s": first}).scalar_one() == "cancelled"
 
@@ -1514,6 +1522,56 @@ def test_user_language_upgrade_down_and_up_again(fresh_db):
         assert "language" in _columns(eng, "users")
         with pytest.raises(IntegrityError), eng.begin() as c:
             c.execute(text("UPDATE users SET language = 'de'"))
+    finally:
+        eng.dispose()
+
+
+def _foreign_keys(engine) -> set[tuple[str, str]]:
+    """{(table, key name)} of every foreign key in the database."""
+    with engine.connect() as c:
+        return {tuple(r) for r in c.execute(text(
+            "SELECT conrelid::regclass::text, conname FROM pg_constraint "
+            "WHERE contype = 'f' AND connamespace = 'public'::regnamespace")).all()}
+
+
+@requires_db
+def test_an_upgraded_server_names_its_keys_as_a_fresh_install_does(fresh_db):
+    """0025 named detections.corrected_by's key Postgres' way on a server that upgraded
+    through it (detections_corrected_by_fkey), where a fresh install has the models'
+    name, so a later migration dropping it by name would miss it there. Now 0025 names
+    it as the models do, and 0034 renames one an earlier 0025 made."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "head")
+    eng = create_engine(fresh_db)
+    try:
+        fresh = _foreign_keys(eng)
+        assert ("detections", "fk_detections_corrected_by_users") in fresh
+
+        # A real 0024 database upgraded through today's 0025.
+        command.downgrade(cfg, "0024_camera_retired")
+        assert "corrected_by" not in _columns(eng, "detections")
+        command.upgrade(cfg, "head")
+        assert _foreign_keys(eng) == fresh
+
+        # A server that ran the old 0025: Postgres' name, put right by 0034.
+        command.downgrade(cfg, "0033_user_language")
+        with eng.begin() as c:
+            c.execute(text("ALTER TABLE detections DROP CONSTRAINT "
+                           "fk_detections_corrected_by_users"))
+            c.execute(text("ALTER TABLE detections ADD FOREIGN KEY (corrected_by) "
+                           "REFERENCES users(id) ON DELETE SET NULL"))
+        assert ("detections", "detections_corrected_by_fkey") in _foreign_keys(eng)
+        command.upgrade(cfg, "head")
+        assert _foreign_keys(eng) == fresh
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT confdeltype FROM pg_constraint "
+                "WHERE conname = 'fk_detections_corrected_by_users'")).scalar_one() == "n"
+
+        command.downgrade(cfg, "0033_user_language")  # nothing to put back
+        command.stamp(cfg, "0033_user_language")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert _foreign_keys(eng) == fresh
     finally:
         eng.dispose()
 

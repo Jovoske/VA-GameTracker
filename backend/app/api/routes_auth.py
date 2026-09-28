@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import IMAGE_TOKEN_HEADER, get_current_user
@@ -21,7 +21,7 @@ from app.core.security import (
 )
 from app.core.startup import PUBLISHED_PASSWORDS, development
 from app.i18n import LANGUAGES, set_current, t
-from app.models import User
+from app.models import PushSubscription, User
 from app.schemas import LoginRequest, TokenResponse, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -114,21 +114,44 @@ def get_image_token(user: CurrentUser) -> dict:
 class ChangePasswordBody(BaseModel):
     current_password: str
     new_password: str
+    # This phone's push endpoint, if it gets alerts: the one subscription kept.
+    keep_endpoint: str | None = None
+
+
+def forget_other_phones(db: Session, user: User, keep_endpoint: str | None = None) -> None:
+    """Drop every push subscription of this person but `keep_endpoint`'s.
+
+    A password change signs the lost phone out, but the push service keeps
+    delivering to it: sightings, team notes and the plan on its lock screen, with no
+    end. Their own phones put theirs back when they sign in again (the app checks
+    its subscription as it opens), so nothing a hunter wants is lost."""
+    q = delete(PushSubscription).where(PushSubscription.user_id == user.id)
+    if keep_endpoint:
+        q = q.where(PushSubscription.endpoint != keep_endpoint)
+    db.execute(q)
 
 
 @router.post("/change-password")
 def change_password(
-    body: ChangePasswordBody, response: Response, user: CurrentUser, db: DB,
+    body: ChangePasswordBody, request: Request, response: Response, user: CurrentUser, db: DB,
 ) -> dict:
     """A new password signs out every other phone and browser: their sign-ins and
-    photo passes were made under the old token version. This phone gets new ones in
-    the answer, so it stays signed in (audit D-07)."""
-    if not check_password(body.current_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, t("auth.not_current_password"))
+    photo passes were made under the old token version, and their alerts stop. This
+    phone gets new ones in the answer, so it stays signed in (audit D-07).
+
+    The current password is checked as a sign-in is (throttle): whoever holds an
+    unlocked phone can't guess it without end, and one check at a time per person
+    and place, so a flood of these can't hold the hashing every sign-in shares."""
+    with throttle.attempt(client_ip(request), user.email.strip().lower(), known=True) as attempt:
+        if not check_password(body.current_password, user.password_hash):
+            attempt.failed()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, t("auth.not_current_password"))
+        attempt.succeeded()
     if len(body.new_password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, t("auth.new_password_short"))
     user.password_hash = hash_password(body.new_password)
     user.token_version = (user.token_version or 0) + 1
+    forget_other_phones(db, user, body.keep_endpoint)
     db.commit()
     fresh = image_token(user)
     response.headers[IMAGE_TOKEN_HEADER] = fresh

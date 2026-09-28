@@ -207,7 +207,8 @@ def test_a_marked_photo_leaves_the_animals_page_and_the_chips(world, client, db_
     chips = client.get("/api/photos/filters", headers=world.headers()).json()["species"]
     assert chips == [{"id": "wild_boar", "common_name": "Wild boar", "count": 5}]
     overview = client.get("/api/analytics/overview", headers=world.headers()).json()
-    assert overview["by_species"] == [{"species": "Wild Boar", "count": 5}]
+    assert overview["by_species"] == [{"species": "Wild boar", "species_id": "wild_boar",
+                                       "count": 5}]
 
 
 @requires_db
@@ -224,6 +225,35 @@ def test_a_hidden_species_has_no_named_animals(world, client, db_session):
     db_session.commit()
     named = client.get("/api/animals", headers=world.headers()).json()
     assert [a["species_id"] for a in named] == ["wild_boar"]
+    # Nor by its address: the hidden fox's page is not there.
+    fox = db_session.query(Individual).filter_by(species_id="fox").one()
+    assert client.get(f"/api/animals/{fox.id}", headers=world.headers()).status_code == 404
+
+
+@requires_db
+def test_a_marked_photo_leaves_a_named_animals_page(world, client, db_session):
+    """The list counted 3 sightings and the animal's own page listed 4, the photo
+    marked "nothing in it" among them, and could show it as the animal's picture."""
+    boar = Individual(estate_id=world.estate.id, label="Wild boar #1", species_id="wild_boar")
+    db_session.add(boar)
+    db_session.flush()
+    # Its clearest frame is the bush.
+    for img in world.bush[:4]:
+        det = db_session.query(Detection).filter_by(image_id=img.id).one()
+        det.species_conf = 0.99 if img is world.bush[0] else 0.5
+        db_session.add(DetectionIndividual(detection_id=det.id, individual_id=boar.id,
+                                           match_conf=0.9))
+    db_session.commit()
+    got = client.post(f"/api/images/{world.bush[0].id}/flag", json={"is_empty": True},
+                      headers=world.headers())
+    assert got.status_code == 200
+
+    listed = client.get("/api/animals", headers=world.headers()).json()
+    assert [(a["label"], a["sightings"]) for a in listed] == [("Wild boar #1", 3)]
+    assert listed[0]["thumb_image_id"] != str(world.bush[0].id)
+    page = client.get(f"/api/animals/{boar.id}", headers=world.headers()).json()
+    assert len(page["sightings"]) == 3
+    assert str(world.bush[0].id) not in {s["image_id"] for s in page["sightings"]}
 
 
 # ── The track record ────────────────────────────────────────────────────────

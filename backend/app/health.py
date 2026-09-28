@@ -18,9 +18,9 @@ to be silent, and it is left out of the plan and the numbers (retired).
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from app.i18n import day_month, localize, t
+from app.i18n import day_month, localize, t, weekday
 from app.models import Camera
 
 OFFLINE_HOURS = 36  # SPYPOINT and UBox cameras check in at least daily
@@ -36,6 +36,18 @@ LOW_BATTERY_PCT = 20
 
 def _day(when: datetime) -> str:
     return day_month(when)
+
+
+def _since(when: datetime, now: datetime) -> str:
+    """The day a camera last checked in, as the Cameras card and the map sheet say
+    it: its weekday within the week ("Thursday"), else its date. Hours past a day
+    ("No check-in for 240h") are not how a hunter counts."""
+    from zoneinfo import ZoneInfo
+
+    from app.core.config import settings
+
+    local = when.astimezone(ZoneInfo(settings.estate_timezone))
+    return weekday(local, short=False) if now - when < timedelta(days=6) else day_month(local)
 
 
 def camera_health(cam: Camera, now: datetime | None = None, login: dict | None = None) -> dict:
@@ -87,7 +99,7 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
             detail += t("health.clock_fast", h=hours)
     elif offline:
         status = "offline"
-        detail = (t("health.no_checkin_for", h=round(hours)) if hours is not None
+        detail = (t("health.no_checkin_for", day=_since(last, now)) if last is not None
                   else t("health.no_checkin"))
     elif out_of_credits:
         status = "out_of_credits"

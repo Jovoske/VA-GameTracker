@@ -168,7 +168,13 @@ export default function Overlay({
       style={{ background: backdrop, zIndex, ...style }}
     >
       <div className="ov-toolbar" onClick={(e) => e.stopPropagation()}>
-        <button className="ov-back" onClick={close}>← {backLabel}</button>
+        {/* The full words where they fit; "← Back", then the arrow alone, where they
+            don't: never a cut-off word on the way out. Its name is always the full one. */}
+        <button className="ov-back" onClick={close} aria-label={`← ${backLabel}`}>
+          <span className="ov-back-long" aria-hidden="true">← {backLabel}</span>
+          <span className="ov-back-short" aria-hidden="true">← {t('common.back')}</span>
+          <span className="ov-back-arrow" aria-hidden="true">←</span>
+        </button>
         <span>{label}</span>
         {tools && <div className="ov-tools">{tools}</div>}
       </div>

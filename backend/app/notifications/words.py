@@ -43,8 +43,12 @@ def names(tallies: list[tuple[str | None, dict]]) -> list[str]:
             for i, (sid, tally) in enumerate(tallies)]
 
 
-def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> str:
+def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None, *,
+            since: bool = False) -> str:
     """"22:14", "23:50 last night" or "23:50 on Thu 24 Sep", on the estate's clock.
+
+    `since`: the time after "since" (push.update), which some languages write
+    differently from the time alone ("desde las 02:04", not "desde a las 02:04").
 
     An alert about last night read the next morning used to say only "23:50", which
     reads as tonight (audit D-21). The day goes by the night, as every screen counts
@@ -58,12 +62,13 @@ def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> s
     if at is None:
         return i18n.t("push.just_now")
     local = at.astimezone(tz)
-    hhmm = local.strftime("%H:%M")
+    hhmm = i18n.clock(local)
+    bare = "push.since_time" if since else "push.time"
     if now is None:
-        return i18n.t("push.time", time=hhmm)
+        return i18n.t(bare, time=hhmm)
     seen, tonight = current_night(at), current_night(now)
     if seen >= tonight:
-        return i18n.t("push.time", time=hhmm)
+        return i18n.t(bare, time=hhmm)
     if seen == tonight - timedelta(days=1):
         dark = local.hour >= 18 or local.hour < 6
         return i18n.t("push.last_night" if dark else "push.yesterday", time=hhmm)

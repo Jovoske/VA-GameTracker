@@ -38,6 +38,7 @@ from app.forecasting.conditions import clock, sunset_of
 from app.forecasting.exposure import current_night
 from app.forecasting.model import sentence_case
 from app.i18n import DEFAULT, species_name, t, use
+from app.i18n import clock as say_clock
 from app.models import Camera, Forecast, ModelRun, Notification, NotificationPref, Species
 from app.notifications import hold, push
 
@@ -170,7 +171,7 @@ def compose_plan(plan: dict, sunset: datetime | None) -> tuple[str, str]:
     if camera and wind:
         bits.append(t(wind))
     if sunset is not None:
-        bits.append(t("plan.sunset", time=clock(sunset)))
+        bits.append(t("plan.sunset", time=say_clock(clock(sunset))))
     title = " · ".join(bits)
 
     if not camera:
@@ -179,8 +180,8 @@ def compose_plan(plan: dict, sunset: datetime | None) -> tuple[str, str]:
     if plan.get("species"):
         species = species_name(plan.get("species_id"), plan["species"])
         if plan.get("start") and plan.get("end"):
-            body += " " + t("plan.species_hours", species=species, start=plan["start"],
-                            end=plan["end"])
+            body += " " + t("plan.species_hours", species=species,
+                            start=say_clock(plan["start"]), end=say_clock(plan["end"]))
         else:
             body += f" {species}."
     return title, body

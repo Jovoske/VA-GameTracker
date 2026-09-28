@@ -7,7 +7,15 @@ import { DropIcon } from '@phosphor-icons/react/dist/csr/Drop'
 import { ThermometerIcon } from '@phosphor-icons/react/dist/csr/Thermometer'
 import { SunHorizonIcon } from '@phosphor-icons/react/dist/csr/SunHorizon'
 import type { Icon } from '@phosphor-icons/react'
-import { type Key, fmtNumber, t } from '../i18n'
+import { type Key, fmtDate, fmtNumber, t } from '../i18n'
+
+/** A night's date ("2026-08-14") as the language writes one: "14 Aug", with the
+ *  year only when it isn't this year's. */
+const dayOf = (iso: string): string => {
+  const at = `${iso}T12:00:00`
+  const thisYear = iso.slice(0, 4) === String(new Date().getFullYear())
+  return fmtDate(at, thisYear ? { day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short', year: 'numeric' })
+}
 
 type Bucket = { label: string; rate: number; days?: number; min?: number; max?: number }
 export type Driver = {
@@ -214,7 +222,7 @@ export default function WeatherPatterns({ patterns, scope, onScope, error, loadi
         <p className="weather-reading-guide">{t('weather.guide', { tested: patterns.tested ? t('weather.guideTested') : t('weather.guideUntested') })}</p>
         <div className="weather-grid">{FACTORS.map(factor => <FactorCard key={factor.key} factor={factor} driver={driverFor(factor)} status={selected.status?.[factor.key]} />)}</div>
         <p className="weather-bar-caption">{patterns.range
-          ? t('weather.totalsRange', { label: selected.label, visits: fmtNumber(selected.sightings), count: selected.total_nights, from: patterns.range[0], to: patterns.range[1] })
+          ? t('weather.totalsRange', { label: selected.label, visits: fmtNumber(selected.sightings), count: selected.total_nights, from: dayOf(patterns.range[0]), to: dayOf(patterns.range[1]) })
           : t('weather.totals', { label: selected.label, visits: fmtNumber(selected.sightings), count: selected.total_nights })}</p>
       </details>}
     </>}

@@ -51,8 +51,10 @@ def _thumb_map(db: Session, ids: list[uuid.UUID]) -> dict:
         )
         .join(Detection, DetectionIndividual.detection_id == Detection.id)
         .join(Image, Detection.image_id == Image.id)
-        # A frame with a person or a vehicle in it is an admin's (visibility.PEOPLE).
-        .where(DetectionIndividual.individual_id.in_(ids), NO_PEOPLE)
+        # A frame with a person or a vehicle in it is an admin's (visibility.PEOPLE),
+        # and one marked "nothing in it" is nobody's picture of the animal.
+        .where(DetectionIndividual.individual_id.in_(ids), NO_PEOPLE,
+               Image.is_empty_frame.isnot(True))
         .subquery()
     )
     rows = db.execute(select(ranked.c.ind, ranked.c.image_id).where(ranked.c.rn == 1)).all()
@@ -114,8 +116,12 @@ def get_animal(
     db: Session = Depends(get_db),
 ) -> dict:
     ind = db.get(Individual, individual_id)
-    if ind is None:
+    sp = db.get(Species, ind.species_id) if ind is not None and ind.species_id else None
+    # An animal of a hidden species is out of the app, as it is out of the list.
+    if ind is None or (sp is not None and sp.hidden):
         raise HTTPException(404, t("animals.not_found"))
+    # The sightings the list counts: not a photo marked "nothing in it", nor one of a
+    # hidden species (re-ID can put a mislabelled frame with the animal).
     sightings = db.execute(
         select(
             Image.id,
@@ -128,10 +134,12 @@ def get_animal(
         .join(Detection, DetectionIndividual.detection_id == Detection.id)
         .join(Image, Detection.image_id == Image.id)
         .join(Camera, Image.camera_id == Camera.id)
-        .where(DetectionIndividual.individual_id == individual_id, NO_PEOPLE)
+        .outerjoin(Species, Species.id == Detection.species_id)
+        .where(DetectionIndividual.individual_id == individual_id, NO_PEOPLE,
+               Image.is_empty_frame.isnot(True),
+               or_(Detection.species_id.is_(None), Species.hidden.is_(False)))
         .order_by(Image.captured_at.desc())
     ).all()
-    sp = db.get(Species, ind.species_id) if ind.species_id else None
     return {
         "id": str(ind.id),
         "label": said_label(ind.label, ind.species_id),

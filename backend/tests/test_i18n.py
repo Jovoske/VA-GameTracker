@@ -9,6 +9,7 @@ reader's language.
 """
 from __future__ import annotations
 
+import re
 import string
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
@@ -166,6 +167,29 @@ def test_what_is_kept_in_english_is_read_in_each_language(lang):
     # Words that are no message of ours (a provider's own) stay as they are.
     assert localize("HTTP 502 from api.example", lang) == "HTTP 502 from api.example"
     assert localize(None, lang) is None
+
+
+@pytest.mark.parametrize("lang", [x for x in LANGUAGES if x != "en"])
+def test_every_kept_message_inside_another_is_read_whole_in_each_language(lang):
+    """A partial fetch said "1 of 2 cameras failed. SPYPOINT isn't answering properly
+    right now." in English inside a Spanish sentence: "{text}. It tries again on the
+    next fetch." took the outer message's tail (final review E2E-2)."""
+    holders = [k for k in en_catalog.STORED if {"error", "text"} & _sample(k).keys()]
+    words = {"SPYPOINT", "UBox", "«provider-7»"}  # a name stays a name
+    for inner_key in en_catalog.STORED:
+        inner = stored(inner_key, **_sample(inner_key))
+        for outer_key in holders:
+            slot = "error" if "error" in _sample(outer_key) else "text"
+            params = {**_sample(outer_key), slot: inner}
+            got = localize(stored(outer_key, **params), lang)
+            if outer_key == "sync.some_failed":  # what a partial fetch keeps
+                assert got == tr(lang, outer_key, **{**params, slot: localize(inner, lang)}), (
+                    outer_key, inner_key)
+            english = tr("en", inner_key, **_sample(inner_key))
+            # Never a sentence of the inner one left in English.
+            for sentence in re.split(r"(?<=[.!?]) ", english):
+                if sentence not in words and len(sentence) > 12 and "«" not in sentence:
+                    assert sentence not in got, (outer_key, inner_key, sentence)
 
 
 # ── against the server ────────────────────────────────────────────────────────
@@ -371,6 +395,29 @@ def test_the_app_reads_in_each_language(client, db_session, estate, place, lang)
 
 
 @requires_db
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_photos_by_animal_on_tonights_fold_are_named_in_the_language(
+    client, db_session, estate, place, lang,
+):
+    """Tonight's "Photos by animal" said "Wild Boar" in every language: the one list
+    still printing the stored name."""
+    db_session.get(Species, "wild_boar").common_name = "Wild Boar"  # an older build's
+    now = datetime.now(UTC)
+    for n in range(3):
+        img = Image(camera_id=place["camera"].id, captured_at=now - timedelta(hours=n + 1),
+                    processed_at=now, is_empty_frame=False, reviewed=False,
+                    original_path=f"/nonexistent/{n}.jpg", person_conf=0.0, vehicle_conf=0.0)
+        db_session.add(img)
+        db_session.flush()
+        db_session.add(Detection(image_id=img.id, species_id="wild_boar", group_size=1))
+    db_session.commit()
+    user = _user(db_session, estate, "viewer", language=lang)
+    got = client.get("/api/analytics/overview", headers=_h(user)).json()
+    assert got["by_species"] == [
+        {"species": EXPECTED[lang]["boar"], "species_id": "wild_boar", "count": 3}]
+
+
+@requires_db
 def test_the_admins_own_name_for_an_animal_is_used_in_every_language(
     client, db_session, estate, place,
 ):
@@ -482,7 +529,7 @@ def test_a_sighting_is_told_to_each_person_in_their_language(db_session, estate,
     said = {lang: (p["title"], p["body"]) for lang, u in team.items() for p in rec.to(u)}
     assert said == {
         "en": ("Wild boar at PL19", f"1 visit at {clock}."),
-        "fi": ("Villisika, kamera PL19", f"1 käynti klo {clock}."),
+        "fi": ("Villisika, kamera PL19", f"1 käynti klo {clock.replace(':', '.')}."),
         "sv": ("Vildsvin vid PL19", f"1 besök kl. {clock}."),
         "nb": ("Villsvin ved PL19", f"1 besøk kl. {clock}."),
         "es": ("Jabalí en PL19", f"1 visita a las {clock}."),
@@ -528,7 +575,8 @@ def test_tonights_plan_is_sent_in_each_persons_language(db_session, estate, rec,
     assert said["sv"][1].startswith("Bäst chans. Vildsvin, bäst 20:40–22:10")
     assert said["es"][0] == f"▲ Charca · viento bueno · puesta de sol {local}"
     assert "Jabalí, mejor de 20:40 a 22:10." in said["es"][1]
-    assert said["fi"][0] == f"▲ Charca · tuuli sopiva · auringonlasku {local}"
+    # Finnish writes the clock with a dot, as the app's own times do there.
+    assert said["fi"][0] == f"▲ Charca · tuuli sopiva · auringonlasku {local.replace(':', '.')}"
     assert "Villisika" in said["fi"][1] and "Villsvin" in said["nb"][1]
 
 
@@ -613,7 +661,11 @@ def herd(db_session, estate):
                         Species(id="otter", common_name="Otter"),
                         Species(id="nutria", common_name="Nutria")])
     db_session.commit()
-    at = datetime.now(UTC) - timedelta(days=1)
+    # Last night from 21:00, an hour apart: the Insights count nights (18:00-06:00).
+    from app.forecasting.exposure import current_night
+
+    at = datetime.combine(current_night() - timedelta(days=1), time(21),
+                          tzinfo=ZoneInfo("Europe/Madrid"))
     out = {}
     for name, sid, sex in (("stag", "red_deer", "male"), ("deer", "red_deer", "unknown"),
                            ("otter", "otter", "unknown"), ("coypu", "nutria", "unknown")):
@@ -624,7 +676,7 @@ def herd(db_session, estate):
         db_session.add(Detection(image_id=img.id, species_id=sid, species_conf=0.9, sex=sex,
                                  created_at=at))
         out[name] = str(img.id)
-        at += timedelta(hours=2)  # a visit each
+        at += timedelta(hours=1)  # a visit each
     db_session.commit()
     return out
 
@@ -824,7 +876,7 @@ def test_the_moon_is_said_in_the_readers_language_with_a_key_beside_it(
 
 @pytest.mark.parametrize("lang, body", [
     ("en", "Wild boar, Red deer and Big tusker, last one 22:14."),
-    ("fi", "Villisika, saksanhirvi ja Big tusker, viimeisin klo 22:14."),
+    ("fi", "Villisika, saksanhirvi ja Big tusker, viimeisin klo 22.14."),
     ("sv", "Vildsvin, kronhjort och Big tusker, senast {t}."),
     ("nb", "Villsvin, hjort og Big tusker, sist {t}."),
     ("es", "Jabalí, ciervo y Big tusker, el último {t}."),
@@ -850,3 +902,39 @@ def test_a_list_of_animals_starts_with_a_capital_and_goes_on_in_lower_case(lang,
                                            ("es", "Sin datos suficientes")])
 def test_the_no_data_verdict_reads_naturally(lang, verdict):
     assert tr(lang, "verdict.no_data") == verdict
+
+
+@pytest.mark.parametrize(("lang", "want"), [
+    ("en", "21:40"), ("fi", "21.40"), ("sv", "21:40"), ("nb", "21:40"), ("es", "21:40")])
+def test_a_time_the_server_writes_follows_the_languages_clock(lang, want):
+    """Finnish showed "05.18" (the app's own times) beside "Auringonnousu 07:58" (the
+    server's): one clock style per language (final review FUX-2)."""
+    from app.i18n import clock
+
+    assert clock(time(21, 40), lang) == want
+    assert clock(datetime(2026, 9, 27, 21, 40), lang) == want
+    assert clock("21:40", lang) == want
+    assert clock(21, lang) == want.replace("40", "00")
+
+
+def test_a_camera_quiet_for_days_says_the_day_not_hours():
+    """"No check-in for 80h" on Tonight, "Quiet since Thursday night" on Cameras: one
+    phrase, the day it last checked in (final review FUX-9)."""
+    from types import SimpleNamespace
+
+    from app.health import camera_health
+
+    now = datetime(2026, 9, 28, 9, 0, tzinfo=UTC)  # a Monday
+    cam = SimpleNamespace(
+        last_report_at=now - timedelta(hours=80), spypoint_id="sp", ubox_uid=None,
+        photo_limit=None, photo_count=None, battery_pct=80, fetch_error=None,
+        retired_at=None, active=True)
+    with use("en"):
+        got = camera_health(cam, now)
+    assert got["status"] == "offline" and got["detail"] == "No check-in since Friday"
+    cam.last_report_at = now - timedelta(days=12)
+    with use("es"):
+        assert camera_health(cam, now)["detail"] == "Sin conectar desde el 16 sept"
+    cam.last_report_at, cam.photo_count, cam.photo_limit = now, 1000, 1000
+    with use("en"):
+        assert camera_health(cam, now)["detail"] == "Out of photo credits (1000/1000)"

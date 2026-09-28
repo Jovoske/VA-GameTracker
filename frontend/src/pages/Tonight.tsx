@@ -355,7 +355,7 @@ export default function Tonight() {
             {s.common_name}
           </button>
         ))}
-        <Link to="/settings" className="tn-chip-edit">{t('tonight.editList')}</Link>
+        <Link to="/settings#advice" className="tn-chip-edit">{t('tonight.editList')}</Link>
       </div>
     </div>
   )

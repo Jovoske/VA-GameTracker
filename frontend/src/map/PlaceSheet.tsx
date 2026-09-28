@@ -76,10 +76,14 @@ export function RenameControl({ name, onRename, maxLength = 80 }: { name: string
   </form>
 }
 
-export function StandBody({ stand, scentRange, admin, onMove, onRemove, onRename }: {
+export function StandBody({ stand, scentRange, admin, viewer = false, me = null, onMove, onRemove, onRename }: {
   stand: MapStand
   scentRange: number
   admin: boolean
+  /** A viewer can't reserve: no button that promises it. */
+  viewer?: boolean
+  /** Who is signed in (their id), to tell their own reservation from another's. */
+  me?: string | null
   onMove: () => void
   onRemove: () => Promise<void>
   onRename: (name: string) => Promise<void>
@@ -92,7 +96,13 @@ export function StandBody({ stand, scentRange, admin, onMove, onRemove, onRename
     {placed && stand.wind.source && stand.wind.source !== 'synoptic' && stand.wind.source !== 'unknown' && <p className="map-detail-copy">{t('place.slopeAir')}</p>}
     {drawn && <p className="map-caveat">{t('place.cone')}</p>}
     {!placed && !admin && <p className="map-detail-copy">{t('place.adminCan')}</p>}
-    <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>{t('place.reserve')}</Link>
+    {/* Reserve only where it can happen: never for a viewer, and never on a stand
+        somebody holds tonight. Your own goes to Stands, where Start sit is. */}
+    {!viewer && (stand.claimed_tonight && stand.claimed_by && stand.claimed_by === me
+      ? <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>{t('stands.yours')} · {t('stands.startSit')}</Link>
+      : stand.claimed_tonight
+        ? <p className="map-detail-copy">{stand.claimed_by && me == null ? t('stands.reserved') : t('stands.taken')}</p>
+        : <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>{t('place.reserve')}</Link>)}
     {admin && <div className="map-actions map-actions--admin">
       <button type="button" className="map-button" onClick={onMove}>{placed ? t('place.move') : t('place.placeIt')}</button>
       <RenameControl name={stand.name} onRename={onRename} />

@@ -118,7 +118,7 @@ def status(_: User = Depends(get_current_admin), db: Session = Depends(get_db)) 
 def _ai_status(db: Session) -> dict:
     """The AI pass as the owner needs it: how many photos are waiting, how many it gave
     up on, whether it is running, and the last thing that went wrong."""
-    from app.ai.checking import STATUS, failed_count, waiting_count
+    from app.ai.checking import STATUS, failed_count, lost_count, waiting_count
 
     note = jobs.read_note(db, STATUS)
     holder = jobs.holder("pipeline")
@@ -128,6 +128,8 @@ def _ai_status(db: Session) -> dict:
     return {
         "waiting": waiting_count(db),
         "failed": failed_count(db),
+        # Photos of the last month whose file never downloaded (the fetch gave up).
+        "lost": lost_count(db),
         "running_since": holder.started if checking else None,
         # Where the whole story is when checking stops: the owner runs the server.
         "log_file": str(jobs.log_dir() / "pipeline.log"),

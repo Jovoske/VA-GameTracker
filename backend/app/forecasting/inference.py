@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
-from app.i18n import t
+from app.i18n import clock, t
 from app.models import Camera, Detection, Image, Species, Stand
 
 # Two cameras seeing the same species within this gap is plausibly one animal
@@ -149,7 +149,7 @@ def dark_exit(db: Session, stand: Stand, *, after: timedelta = SIT_ENDS_AFTER_SU
 
     tonight = current_night()
     v = visit_rows(start=night_key_start(tonight - timedelta(days=EXIT_HISTORY_NIGHTS)),
-                   end=night_key_start(tonight), camera_ids=[stand.camera_id])
+                   end=night_key_start(tonight), camera_ids=[stand.camera_id], nights=True)
     offsets = []
     for night, first_at in db.execute(select(v.c.night, v.c.first_at)).all():
         sunset = _sunset(night)
@@ -184,12 +184,12 @@ def dark_exit(db: Session, stand: Stand, *, after: timedelta = SIT_ENDS_AFTER_SU
                 "hour": at.hour, "time": at.strftime("%H:%M"),
                 "share_pct": round(share(k) * 100, 1),
                 "reason": None,
-                "text": t("exit.quiet", time=f"{at:%H:%M}", pct=round(share(k) * 100)),
+                "text": t("exit.quiet", time=clock(at), pct=round(share(k) * 100)),
             }
 
     quietest = on_clock(min(hours, key=share))
     return {
         "hour": quietest.hour, "time": quietest.strftime("%H:%M"),
         "reason": t("exit.busy_reason"),
-        "text": t("exit.busy", after=f"{on_clock(0):%H:%M}", time=f"{quietest:%H:%M}"),
+        "text": t("exit.busy", after=clock(on_clock(0)), time=clock(quietest)),
     }

@@ -135,10 +135,15 @@ def set_password(email: str, password: str) -> str:
         if user is None:
             raise SystemExit(f"No one signs in as {email}.")
         user.password_hash = hash_password(password)
-        # Signs out every phone that had the old one, as a change in Settings does.
+        # Signs out every phone that had the old one, as a change in Settings does,
+        # and stops their alerts: a lost phone would keep showing them.
         user.token_version = (user.token_version or 0) + 1
+        from app.api.routes_auth import forget_other_phones
+
+        forget_other_phones(db, user)
         db.commit()
-        return f"Password set for {user.email}. They sign in with it from now on."
+        return (f"Password set for {user.email}. They sign in with it from now on; "
+                "their alerts come back on each phone when they sign in there again.")
 
 
 def main(argv: list[str]) -> int:

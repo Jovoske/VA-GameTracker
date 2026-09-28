@@ -117,9 +117,10 @@ def no_file_given_up():
 
     A photo whose file never downloaded is retried by the fetch for a while
     (ingestion.sync). Once the fetch has given up on it (or has no link to try), or
-    past a day, it is let through as "no file", so one lost frame stops holding its
-    whole night as "not checked yet"; if the file does come in later, the fetch sends
-    the photo back to be checked.
+    past a day, the AI pass stops waiting for it and lets it through as "no file".
+    Its night still counts as not watched (checking.NOT_CHECKED): nobody knows what
+    triggered it, so it is never a night with nothing in it. If the file does come in
+    later, the fetch sends the photo back to be checked.
     """
     from app.ingestion.sync import MAX_DOWNLOAD_ATTEMPTS
 

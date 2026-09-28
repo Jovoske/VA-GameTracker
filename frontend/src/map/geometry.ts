@@ -39,7 +39,9 @@ export const isCall = (status: string | null | undefined) => !!status && CALLED_
 /** When a stand's wind line is for: "for 20:39" or "now"; '' for a line that isn't a call. */
 export const windFor = (w: WindReport, status = w.status) =>
   !isCall(status) ? '' : w.now ? t('wind.now') : w.at_local ? t('wind.forTime', { time: w.at_local }) : ''
-export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[] }
+// `claimed_tonight`/`claimed_by`: tonight's reservation, as Stands has it (an older
+// server leaves them out, and the sheet then offers Reserve as it always did).
+export type MapStand = { id: string; name: string; lat: number | null; lon: number | null; wind: WindReport; approaches: { zone: string; approach_deg: number; distance_m: number }[]; claimed_tonight?: boolean; claimed_by?: string | null }
 export type MapData = {
   conditions: {
     wind_dir_deg: number | null; wind_speed_kmh: number | null

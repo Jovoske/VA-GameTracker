@@ -16,7 +16,7 @@ from app.core.config import settings
 from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.forecasting.exposure import current_night, night_key_start
 from app.forecasting.model import SLOT_MIN, _best_window, join_class_keys
-from app.i18n import species_name, t
+from app.i18n import clock, species_name, t
 from app.models import Camera
 
 _TZ = settings.estate_timezone
@@ -87,7 +87,7 @@ def _on_tonight(night: date, slot: int, tonight: date) -> int:
 
 def _clock(hour: int) -> str:
     """Plain clock time for a sentence: 0 reads as midnight, 21 as 21:00."""
-    return t("insights.midnight") if hour == 0 else f"{hour:02d}:00"
+    return t("insights.midnight") if hour == 0 else clock(hour)
 
 
 def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
@@ -161,10 +161,11 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
 def _correlations(db: Session) -> list[dict]:
     """Summaries of the season's visits at cameras nobody retired, in words.
 
-    Hidden species and photos marked "nothing in it" are not visits (visit_rows)."""
+    Hidden species and photos marked "nothing in it" are not visits (visit_rows), and
+    only the nights (18:00-06:00) count, as on Tonight and in the track record."""
     from app.forecasting.visits import visit_rows
 
-    v = visit_rows(start=_since())
+    v = visit_rows(start=_since(), nights=True)
     local = func.timezone(_TZ, v.c.first_at)
     slot = cast(
         func.floor((func.extract("hour", local) * 60 + func.extract("minute", local)) / SLOT_MIN),

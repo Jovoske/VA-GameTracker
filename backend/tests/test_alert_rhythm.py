@@ -751,3 +751,38 @@ def test_a_future_photo_time_never_reads_minus_minutes():
 def test_where_title_names_one_camera_or_counts_them():
     assert words.where_title("Fox", Counter({"PL19": 2})) == "Fox at PL19"
     assert words.where_title("Fox", Counter({"PL19": 2, "Charca": 1})) == "Fox on 2 cameras"
+
+
+@pytest.mark.parametrize(("lang", "body"), [
+    ("en", "2 visits at Cam C1 and Cam G1 since 02:04, last one 03:08."),
+    ("es", "2 visitas en Cam C1 y Cam G1 desde las 02:04, la última a las 03:08."),
+    ("fi", "2 käyntiä (kamerat Cam C1 ja Cam G1) alkaen klo 02.04, viimeisin klo 03.08."),
+    ("sv", "2 besök vid Cam C1 och Cam G1 sedan kl. 02:04, senast kl. 03:08."),
+    ("nb", "2 besøk ved Cam C1 og Cam G1 siden kl. 02:04, sist kl. 03:08."),
+])
+def test_a_quiet_update_reads_right_in_each_language(lang, body):
+    """Spanish said "desde a las 02:04" on every quiet update (final review E2E-3)."""
+    from app import i18n
+
+    tally = {"name": "Wild boar", "visits": 2, "cameras": {"Cam C1": 1, "Cam G1": 1},
+             "first_at": datetime(2026, 9, 27, 0, 4, tzinfo=UTC).isoformat(),
+             "latest_at": datetime(2026, 9, 27, 1, 8, tzinfo=UTC).isoformat()}
+    now = datetime(2026, 9, 27, 1, 13, tzinfo=UTC)
+    with i18n.use(lang):
+        _, got = dispatch.compose_update(tally, MADRID, now, species_id="wild_boar")
+    assert got == body
+
+
+def test_two_visits_in_the_hour_the_clocks_go_back_are_not_one_moment():
+    """02:30 summer time and 02:30 winter time, an hour apart: "2 visits since 02:30,
+    last one 02:30" read as one moment (final review E2E-4)."""
+    first = datetime(2026, 10, 25, 2, 30, tzinfo=MADRID)  # CEST, fold 0
+    second = datetime(2026, 10, 25, 2, 30, fold=1, tzinfo=MADRID)  # CET
+    assert second - first == timedelta(0) and second.astimezone(UTC) - first.astimezone(
+        UTC) == timedelta(hours=1)
+    tally = {"name": "Wild boar", "visits": 2, "cameras": {"Puente": 2},
+             "first_at": first.astimezone(UTC).isoformat(),
+             "latest_at": second.astimezone(UTC).isoformat()}
+    now = second.astimezone(UTC) + timedelta(minutes=5)
+    _, body = dispatch.compose_update(tally, MADRID, now, species_id="wild_boar")
+    assert body == "2 visits, last one 02:30."

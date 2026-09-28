@@ -600,7 +600,7 @@ def test_a_real_shift_reads_in_plain_words(db_session, estate):
     db_session.commit()
     recompute_camera_nights(db_session)
     assert whats_changed(db_session)["text"] == (
-        "Puente was busier than usual last night: 5 visits against a usual about 1.5.")
+        "Puente was busier than usual last night: 5 visits, when it usually sees about 1.5.")
 
 
 @requires_db

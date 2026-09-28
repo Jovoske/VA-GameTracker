@@ -245,7 +245,7 @@ def _evidence(
         wanted = wanted.where(Species.id.in_(species_ids))
     v = visit_rows(start=night_key_start(first - timedelta(days=1)),
                    end=night_key_start(tonight), camera_ids=cam_ids,
-                   species_ids=list(db.scalars(wanted).all()))
+                   species_ids=list(db.scalars(wanted).all()), nights=True)
     # The quarter hour of the estate's clock each visit arrived in: best hours are
     # worked out from its minutes after that night's sunset (_sunset_window).
     local = func.timezone(_TZ, v.c.first_at)

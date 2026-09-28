@@ -330,9 +330,9 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         ". Sen kello on {h} t edellä (kellojen siirto unohtui?): kuvien ajat korjataan, mutta aseta"
         " kameran kello"
     ),
-    "health.no_checkin_for": "Ei yhteydenottoa {h} tuntiin",
+    "health.no_checkin_for": "Ei yhteydenottoa, viimeksi {day}",
     "health.no_checkin": "Ei vielä yhteydenottoa",
-    "health.photo_limit": "Kuvaraja täynnä ({count}/{limit})",
+    "health.photo_limit": "Kuvakrediitit loppu ({count}/{limit})",
     "health.battery_low": "Akku vähissä ({pct} %)",
     "health.ok": "Toimii normaalisti",
 
@@ -532,6 +532,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- alerts on the phone -------------------------------------------------
     "push.just_now": "juuri nyt",
     "push.time": "klo {time}",
+    "push.since_time": "klo {time}",
     "push.last_night": "viime yönä klo {time}",
     "push.yesterday": "eilen klo {time}",
     "push.on_day": "{day} klo {time}",

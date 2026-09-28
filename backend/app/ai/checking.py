@@ -90,9 +90,16 @@ WAITING = or_(AWAITING_DETECTOR, AWAITING_SPECIES)
 # Judged empty at the detector's old 0.25 cut-off (empty_filter.old_rule_empty).
 OLD_RULE_EMPTY = and_(Image.is_empty_frame.is_(True), Image.reviewed.is_(False),
                       Image.detector_conf.is_(None))
+LOST_FILE = and_(Image.original_path.is_(None), Image.spypoint_photo_id.isnot(None),
+                 Image.reviewed.is_(False))
 NOT_CHECKED = or_(
     Image.processed_at.is_(None), Image.ai_failed_at.isnot(None),
     and_(Image.is_empty_frame.is_(False), Image.original_path.isnot(None), ~_HAS_DETECTION),
+    # A SPYPOINT photo whose file never came (a download given up on, or still being
+    # tried): nobody knows what triggered it, so its night is not one watched with
+    # nothing in it (E-01). UBox keeps no row for a snapshot it couldn't fetch, and
+    # an FTP or email photo always arrives with its file.
+    LOST_FILE,
 )
 
 
@@ -264,6 +271,18 @@ def waiting_count(db: Session) -> int:
 
 def failed_count(db: Session) -> int:
     return db.scalar(select(func.count(Image.id)).where(Image.ai_failed_at.isnot(None))) or 0
+
+
+# How far back Admin counts photos whose file never came.
+LOST_DAYS = 30
+
+
+def lost_count(db: Session) -> int:
+    """Photos of the last LOST_DAYS whose file the fetch gave up on: their nights
+    count as not watched rather than as nights with nothing in them."""
+    since = datetime.now(UTC) - timedelta(days=LOST_DAYS)
+    return db.scalar(select(func.count(Image.id)).where(
+        empty_filter.no_file_given_up(), LOST_FILE, Image.captured_at >= since)) or 0
 
 
 def _rescan_ids(db: Session, now: datetime, room: int) -> list:

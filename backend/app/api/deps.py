@@ -81,10 +81,13 @@ def get_current_user(
     # From here on the answer is in this person's language (app.i18n).
     set_current(user.language)
     # Every answer carries the photo pass (the same text all window, so photo
-    # addresses stay put), and a fresh sign-in once this one is a week old.
+    # addresses stay put), and a fresh sign-in once this one is a week old. Not for
+    # a sign-in from before token versions (no `tv`): those sat in photo addresses,
+    # in logs and copied links, and renewed they would never end. It works until its
+    # own end, so nobody is signed out by the upgrade.
     response.headers[IMAGE_TOKEN_HEADER] = image_token(user)
     issued = payload.get("iat")
-    if isinstance(issued, int | float) and (
+    if "tv" in payload and isinstance(issued, int | float) and (
         datetime.now(UTC) - datetime.fromtimestamp(issued, UTC) > RENEW_AFTER
     ):
         response.headers[SESSION_TOKEN_HEADER] = session_token(user)
