@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { PIN_ICONS, type PinRef } from './pins'
 
 /**
@@ -7,8 +8,8 @@ import { PIN_ICONS, type PinRef } from './pins'
  */
 export function PickHeader({ count }: { count: number }) {
   return <>
-    <span className="map-eyebrow">{count} here</span>
-    <h2 className="bsheet-name">Which one?</h2>
+    <span className="map-eyebrow">{t('map.pickHere', { n: count })}</span>
+    <h2 className="bsheet-name">{t('map.whichOne')}</h2>
   </>
 }
 
@@ -16,7 +17,7 @@ export function PickBody({ pins, onPick }: { pins: PinRef[]; onPick: (pin: PinRe
   return <div className="map-pick">
     {pins.map(p => <button key={`${p.kind}-${p.id}`} type="button" className="msheet-row map-pick-row" onClick={() => onPick(p)}>
       <span className={`map-pick-icon map-pin--${p.kind}`} aria-hidden="true"><span className="map-pin-icon" dangerouslySetInnerHTML={{ __html: PIN_ICONS[p.kind] }} /></span>
-      <span className="msheet-text"><span>{p.name}</span><small>{p.kind === 'camera' ? 'Camera' : 'Stand'}</small></span>
+      <span className="msheet-text"><span>{p.name}</span><small>{p.kind === 'camera' ? t('map.camera') : t('map.stand')}</small></span>
       <span className="msheet-chevron" aria-hidden="true">›</span>
     </button>)}
   </div>

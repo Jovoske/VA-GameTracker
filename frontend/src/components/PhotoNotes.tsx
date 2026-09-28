@@ -3,17 +3,22 @@ import { XIcon } from '@phosphor-icons/react/dist/csr/X'
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { api, whoAmI } from '../api'
 import { NOTE_MAX, newNoteId, noteLine, type NoteSaved, type PhotoNote, type PhotoNotes } from '../notes'
+import { t } from '../i18n'
 import SwitchRow from './SwitchRow'
 
-type Failure = Error & { offline?: boolean; timeout?: boolean; status?: number }
+type Failure = Error & { offline?: boolean; timeout?: boolean; status?: number; code?: string }
 const TIMEOUT_MS = 20_000
 
 function failed(e: unknown, what: string): string {
   const x = e as Failure
-  if (x.offline) return `No signal, so ${what}.`
-  if (x.timeout) return `No answer from the server, so ${what}.`
+  if (x.offline) return t('notes.failNoSignal', { what })
+  if (x.timeout) return t('notes.failTimeout', { what })
   return `${x.message}`
 }
+
+/** The server's "this photo is marked nothing in it": by its code, or its English words
+ *  from a server that sends no code. */
+const emptyFrame = (x: Failure) => x.status === 409 && (x.code === 'empty_frame' || /nothing in it/.test(x.message))
 
 /**
  * The notes under a photo in the viewer, and the "Worth a look" button.
@@ -66,7 +71,7 @@ export default function PhotoNotesPanel({ imageId, label, camera, count, empty, 
     setErr('')
     api<PhotoNotes>(`/images/${imageId}/notes`, { timeoutMs: TIMEOUT_MS })
       .then((r) => { if (id === request.current) setData(r) })
-      .catch((e) => { if (id === request.current) setErr(failed(e, 'the notes didn’t load')) })
+      .catch((e) => { if (id === request.current) setErr(failed(e, t('notes.what.didntLoad'))) })
   }
   useEffect(() => {
     if (count !== 0) load()
@@ -107,55 +112,55 @@ export default function PhotoNotesPanel({ imageId, label, camera, count, empty, 
       const r = await api<PhotoNotes>(`/photo-notes/${n.id}`, { method: 'DELETE', timeoutMs: TIMEOUT_MS })
       setData(r)
       onCount(imageId, r.notes.length)
-      setSaid({ err: false, text: 'Note removed.' })
+      setSaid({ err: false, text: t('notes.removed') })
       setConfirm(null)
     } catch (e) {
       const x = e as Failure
-      if (x.status === 404) { load(); setConfirm(null); setSaid({ err: false, text: 'That note was already gone.' }); return }
-      setSaid({ err: true, text: failed(e, 'the note is still there') })
+      if (x.status === 404) { load(); setConfirm(null); setSaid({ err: false, text: t('notes.alreadyGone') }); return }
+      setSaid({ err: true, text: failed(e, t('notes.what.stillThere')) })
     } finally {
       setRemoving(false)
     }
   }
 
   const notes = data?.notes ?? []
-  const quiet = !writer ? 'No notes on this photo.'
-    : empty ? 'Marked “nothing in it”. Seen an animal? Mark it and it’s kept for the team.'
-      : 'No notes yet. Seen something? Mark it for the team.'
+  const quiet = !writer ? t('notes.none')
+    : empty ? t('notes.noneEmpty')
+      : t('notes.noneYet')
   return (
     <div className="lb-notes" onClick={(e) => e.stopPropagation()}>
-      <div className="lb-notes-list" aria-label="Notes on this photo">
-        {!data && !err && <p className="lb-notes-quiet" role="status">Loading notes…</p>}
-        {err && !data && <p className="lb-notes-quiet" role="alert">{err} <button type="button" className="lb-notes-link" onClick={load}>Try again</button></p>}
+      <div className="lb-notes-list" aria-label={t('notes.listLabel')}>
+        {!data && !err && <p className="lb-notes-quiet" role="status">{t('notes.loading')}</p>}
+        {err && !data && <p className="lb-notes-quiet" role="alert">{err} <button type="button" className="lb-notes-link" onClick={load}>{t('common.tryAgain')}</button></p>}
         {data && notes.length === 0 && <p className="lb-notes-quiet">{quiet}</p>}
         {notes.map((n) => confirm === n.id ? (
-          <div key={n.id} className="lb-note lb-note--confirm" role="group" aria-label="Remove this note?">
-            <span className="lb-note-text">{n.mine ? 'Remove your note?' : `Remove ${n.name}’s note?`}</span>
-            <button type="button" className="lb-note-btn lb-note-btn--danger" disabled={removing} onClick={() => remove(n)}>{removing ? 'Removing…' : 'Remove'}</button>
-            <button type="button" className="lb-note-btn" disabled={removing} onClick={() => setConfirm(null)}>Keep</button>
+          <div key={n.id} className="lb-note lb-note--confirm" role="group" aria-label={t('notes.removeThis')}>
+            <span className="lb-note-text">{n.mine ? t('notes.removeYours') : t('notes.removeTheirs', { name: n.name })}</span>
+            <button type="button" className="lb-note-btn lb-note-btn--danger" disabled={removing} onClick={() => remove(n)}>{removing ? t('common.removing') : t('common.remove')}</button>
+            <button type="button" className="lb-note-btn" disabled={removing} onClick={() => setConfirm(null)}>{t('common.keep')}</button>
           </div>
         ) : (
           <div key={n.id} className="lb-note">
             <span className="lb-note-text">{noteLine(n)}</span>
-            {n.can_remove && <button type="button" className="lb-note-x" aria-label={n.mine ? 'Remove your note' : `Remove ${n.name}’s note`} onClick={() => { setSaid(null); setConfirm(n.id) }}><XIcon size={16} /></button>}
+            {n.can_remove && <button type="button" className="lb-note-x" aria-label={n.mine ? t('notes.removeYoursLabel') : t('notes.removeTheirsLabel', { name: n.name })} onClick={() => { setSaid(null); setConfirm(n.id) }}><XIcon size={16} /></button>}
           </div>
         ))}
       </div>
       {said && <p className={`lb-notes-said${said.err ? ' lb-notes-said--err' : ''}`} role={said.err ? 'alert' : 'status'}>{said.text}</p>}
       {writer && (
         <button ref={worth} type="button" className="lb-worth" onClick={() => { setSaid(null); openSheet(true) }}>
-          <BinocularsIcon size={22} aria-hidden="true" /> Worth a look
+          <BinocularsIcon size={22} aria-hidden="true" /> {t('notes.worthALook')}
         </button>
       )}
       {sheet && (
         <NoteSheet imageId={imageId} label={label} camera={camera} empty={!!empty} onClose={() => openSheet(false)}
           onSaved={(r, tell, kept) => {
             if (kept) onKept?.(imageId)
-            saved(r, `${kept ? 'Kept as an animal photo and marked' : 'Marked'} worth a look.${tell ? ` ${toldWords(r.told, r.muted ?? 0, camera)}` : ''}`)
+            saved(r, `${kept ? t('notes.keptMarked') : t('notes.marked')}${tell ? ` ${toldWords(r.told, r.muted ?? 0, camera)}` : ''}`)
           }}
           onFound={(r, tell, kept) => {
             if (kept) onKept?.(imageId)
-            saved(r, `The answer was slow, but it saved: marked worth a look.${tell ? ' Everyone with alerts on for this camera was told.' : ''}`)
+            saved(r, `${t('notes.slowSaved')}${tell ? ` ${t('notes.everyoneTold')}` : ''}`)
           }} />
       )}
     </div>
@@ -165,9 +170,9 @@ export default function PhotoNotesPanel({ imageId, label, camera, count, empty, 
 /** Who "Tell the team" reached, and when nobody, why: nobody else has alerts on, or
  * everyone who has muted this camera. */
 function toldWords(told: number, muted: number, camera: string): string {
-  if (told) return `Told ${told === 1 ? '1 person' : `${told} people`}.${muted ? ` ${muted === 1 ? '1 person has' : `${muted} have`} muted ${camera}.` : ''}`
-  if (muted) return `No one was told: everyone else with alerts on has muted ${camera}.`
-  return 'Nobody else has alerts on, so no one was told.'
+  if (told) return `${t('notes.told', { count: told })}${muted ? ` ${t('notes.muted', { count: muted, camera })}` : ''}`
+  if (muted) return t('notes.allMuted', { camera })
+  return t('notes.nobody')
 }
 
 /** How far the on-screen keyboard covers the bottom of the screen, and how much is left
@@ -316,21 +321,21 @@ function NoteSheet({ imageId, label, camera, empty, onClose, onSaved, onFound }:
       if (x.timeout || x.offline) {
         // The note may be on the server with only its answer lost: look before saying.
         setBusy('checking')
-        setErr(`${x.timeout ? 'No answer from the server' : 'The signal dropped'}, so it may not have saved. Checking…`)
+        setErr(x.timeout ? t('notes.maybeTimeout') : t('notes.maybeDropped'))
         try {
           const now = await api<PhotoNotes>(`/images/${imageId}/notes`, { timeoutMs: TIMEOUT_MS })
           if (!live.current) return
           if (now.notes.some((n) => n.id === noteId.current)) { finish(() => onFound(now, tell, kept)); return }
-          setErr('It didn’t save. Your note is still here; try again.')
+          setErr(t('notes.didntSave'))
         } catch {
           if (!live.current) return
-          setErr(`${x.timeout ? 'Still no answer' : 'Still no signal'}, so it may not have saved. Your note is still here. Try again: it won’t be saved twice.`)
+          setErr(x.timeout ? t('notes.stillNoAnswer') : t('notes.stillNoSignal'))
         }
-      } else if (x.status === 409 && /nothing in it/.test(x.message) && !kept) {
+      } else if (emptyFrame(x) && !kept) {
         setKeep(true)
-        setErr('The detector marked this photo “nothing in it”. Save again to keep it as an animal photo, so the team can see it.')
+        setErr(t('notes.detectorEmpty'))
       } else {
-        setErr(`${x.message} Your note is still here.`)
+        setErr(t('notes.stillHere', { why: x.message }))
       }
       setBusy(null)
     }
@@ -346,34 +351,34 @@ function NoteSheet({ imageId, label, camera, empty, onClose, onSaved, onFound }:
   return (
     <>
       <div className="lb-scrim" aria-hidden="true" onClick={(e) => { e.stopPropagation(); leave() }} onPointerDown={(e) => e.stopPropagation()} />
-      <div ref={root} className="lb-sheet" role="dialog" aria-modal="true" aria-label="Worth a look" tabIndex={-1}
+      <div ref={root} className="lb-sheet" role="dialog" aria-modal="true" aria-label={t('notes.worthALook')} tabIndex={-1}
         style={{ bottom: lift, maxHeight: room ? room - 8 : undefined }}
         onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
         <div className="lb-sheet-head">
           <div className="lb-sheet-title">
-            <h2>Worth a look</h2>
+            <h2>{t('notes.worthALook')}</h2>
             <p>{label} · {camera}</p>
           </div>
-          <button type="button" className="lb-sheet-x" aria-label="Cancel" onClick={leave} disabled={!!busy}><XIcon size={20} /></button>
+          <button type="button" className="lb-sheet-x" aria-label={t('common.cancel')} onClick={leave} disabled={!!busy}><XIcon size={20} /></button>
         </div>
-        {keep && <p className="lb-sheet-keep">The detector said there’s nothing in this photo. Saving keeps it as an animal photo, so the team can see it.</p>}
-        <label className="lb-sheet-label" htmlFor={`note-${imageId}`}>Note for the team <span>(optional)</span></label>
+        {keep && <p className="lb-sheet-keep">{t('notes.keepHint')}</p>}
+        <label className="lb-sheet-label" htmlFor={`note-${imageId}`}>{t('notes.noteForTeam')} <span>{t('notes.optional')}</span></label>
         <textarea ref={area} id={`note-${imageId}`} className="input lb-sheet-text" rows={2} maxLength={NOTE_MAX} value={text}
-          placeholder="Big boar, third night running" onChange={(e) => { setText(e.target.value); setAsking(false) }}
+          placeholder={t('notes.placeholder')} onChange={(e) => { setText(e.target.value); setAsking(false) }}
           // The keyboard coming up can hide it inside a short sheet (a phone on its side).
           onFocus={(e) => { const el = e.currentTarget; window.setTimeout(() => el.scrollIntoView({ block: 'nearest' }), 300) }} />
         <p className={`lb-sheet-count${left <= 10 ? ' lb-sheet-count--low' : ''}`} aria-live="polite">{text.length} / {NOTE_MAX}</p>
-        <SwitchRow label="Tell the team" note="One alert to everyone who has alerts on for this camera" on={tell} onChange={setTell} disabled={!!busy} />
+        <SwitchRow label={t('notes.tellTeam')} note={t('notes.tellTeamNote')} on={tell} onChange={setTell} disabled={!!busy} />
         {err && <p className="lb-sheet-err" role="alert">{err}</p>}
         {asking ? (
-          <div className="lb-sheet-ask" role="group" aria-label="Throw away this note?">
-            <p>Throw away this note?</p>
-            <button type="button" className="lb-note-btn" autoFocus onClick={() => { setAsking(false); area.current?.focus() }}>Keep writing</button>
-            <button type="button" className="lb-note-btn lb-note-btn--danger" onClick={() => finish(onClose)}>Throw away</button>
+          <div className="lb-sheet-ask" role="group" aria-label={t('notes.throwAway')}>
+            <p>{t('notes.throwAway')}</p>
+            <button type="button" className="lb-note-btn" autoFocus onClick={() => { setAsking(false); area.current?.focus() }}>{t('notes.keepWriting')}</button>
+            <button type="button" className="lb-note-btn lb-note-btn--danger" onClick={() => finish(onClose)}>{t('notes.throwAwayBtn')}</button>
           </div>
         ) : (
           <button type="button" className="btn lb-sheet-save" onClick={save} disabled={!!busy}>
-            {busy === 'checking' ? 'Checking…' : busy ? 'Saving…' : keep ? 'Keep it and save' : 'Save'}
+            {busy === 'checking' ? t('common.checking') : busy ? t('common.saving') : keep ? t('notes.keepAndSave') : t('common.save')}
             {busy && <span className="btn-progress" aria-hidden="true" />}
           </button>
         )}

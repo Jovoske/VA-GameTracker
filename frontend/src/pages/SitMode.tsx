@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { type Got, ageLabel, fromEarlierNight, getFresh, nightOf, peek } from '../api'
 import type { WindWeek } from '../components/WindWeek'
+import { fmtTime, t, tOr } from '../i18n'
 import { isCall, type MapData } from '../map/geometry'
 import { flushSits, onSitSync, pendingFor, rank, saveSit } from '../sits'
 
@@ -43,22 +44,13 @@ type StandWind = {
 }
 
 // Short wind headline. The sentence goes underneath.
-const WIND_HEAD: Record<string, string> = {
-  clean: 'Wind is right',
-  scent_carries: 'Wind is wrong',
-  too_light: 'Wind too light to call',
-  no_wind_data: 'No wind forecast',
-  no_geometry: 'Wind not set up for this stand',
-  no_bedding: 'No bedding drawn',
-  no_position: 'Stand not on the map',
-}
+const windHeadOf = (status: string) => tOr(`sitWind.${status}`, '') || null
 
 // Wind is asked for again this often while the seat is open.
 const WIND_EVERY_MS = 15 * 60_000
 
 // The estate's clock, whatever the phone's is set to: Tonight's hours are Spain time.
-const estateClock = (d: Date | string) =>
-  new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
+const estateClock = (d: Date | string) => fmtTime(d, { timeZone: 'Europe/Madrid' })
 // The estate's calendar day, "2026-09-28", to tell a sit's evening from the morning after.
 const estateDay = (d: Date) => {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
@@ -68,12 +60,7 @@ const estateDay = (d: Date) => {
 }
 
 // What the flash says is still on record when a lower tap changes nothing.
-const KEPT: Record<string, string> = {
-  nothing: 'nothing so far',
-  seen: 'saw animals',
-  shootable_no_shot: 'had a chance, no shot',
-  shot: 'shot',
-}
+const kept = (outcome: string) => tOr(outcome === 'nothing' ? 'sit.nothingSoFar' : `outcome.said.${outcome}`, outcome)
 
 // END SIT waits this long for the server, then goes anyway. The end is on the
 // phone and goes out with the next signal; nobody should stand in the dark
@@ -248,7 +235,7 @@ export default function SitMode() {
     if (!sitId) return
     const off = onSitSync((r) => {
       const left = pendingFor(sitId)
-      if (pendingRef.current && !left && r.sent > 0) say(r.reports > 0 ? 'Signal’s back. Report sent.' : 'Signal’s back.', 3500)
+      if (pendingRef.current && !left && r.sent > 0) say(r.reports > 0 ? t('sit.backSent') : t('sit.back'), 3500)
       setPending(!!left?.waiting)
     })
     void flushSits()
@@ -260,15 +247,15 @@ export default function SitMode() {
     if (navigator.vibrate) navigator.vibrate(20)
     // A lower tap changes nothing. Say what's still on record rather than
     // "Saved: saw animals" over a shot.
-    const kept = best.current
-    if (kept && rank(outcome) < rank(kept)) say(`Still saved: ${KEPT[kept] ?? kept}`)
+    const had = best.current
+    if (had && rank(outcome) < rank(had)) say(t('sit.stillSaved', { what: kept(had) }))
     else {
       best.current = outcome
       say(message)
     }
     saveSit(sitId, { outcome })
       .then((r) => setPending(r === 'queued'))
-      .catch((e: Error) => say(`Not saved. ${e.message}`, 5000))
+      .catch((e: Error) => say(t('sit.notSaved', { why: e.message }), 5000))
   }
 
   async function endSit() {
@@ -290,7 +277,7 @@ export default function SitMode() {
       setHolding(false)
       // Two pulses, because at this point you are not looking at the screen.
       if (navigator.vibrate) navigator.vibrate([25, 60, 25])
-      record('nothing', 'Saved: nothing so far')
+      record('nothing', t('sit.saved', { what: t('sit.nothingSoFar') }))
     }, HOLD_MS)
   }
   function cancelHold() {
@@ -304,27 +291,27 @@ export default function SitMode() {
       holdFired.current = false
       return
     }
-    record('seen', 'Saved: saw animals')
+    record('seen', t('sit.saved', { what: t('outcome.said.seen') }))
   }
 
   // The live verdict when the phone has one from tonight; else the one saved when the
   // stand was reserved, said as such.
   const wind = live?.data ?? null
-  const windHead = wind ? WIND_HEAD[wind.status] : sit?.wind_status ? WIND_HEAD[sit.wind_status] : null
+  const windHead = wind ? windHeadOf(wind.status) : sit?.wind_status ? windHeadOf(sit.wind_status) : null
   const windText = wind ? wind.text : sit?.wind_text
   // Only a call has a time: "Not on the map yet" is not a verdict for 20:39.
   const windWhen = wind
-    ? [isCall(wind.status) && (wind.now ? 'now' : wind.at_local && `for ${wind.at_local}`),
-      live?.stale && `checked ${ageLabel(live.at)}`].filter(Boolean).join(', ') || null
+    ? [isCall(wind.status) && (wind.now ? t('wind.now') : wind.at_local && t('wind.forTime', { time: wind.at_local })),
+      live?.stale && t('sit.checked', { ago: ageLabel(live.at) })].filter(Boolean).join(', ') || null
     : sit?.wind_text
-      ? `when you reserved${sit.claimed_at ? ` at ${estateClock(sit.claimed_at)}` : ''}${sit.wind_at && isCall(sit.wind_status) ? `, for ${estateClock(sit.wind_at)}` : ''}`
+      ? `${sit.claimed_at ? t('sit.whenReservedAt', { time: estateClock(sit.claimed_at) }) : t('sit.whenReserved')}${sit.wind_at && isCall(sit.wind_status) ? `, ${t('wind.forTime', { time: estateClock(sit.wind_at) })}` : ''}`
       : null
   // Sunset from the live answer, or the sit's own when there is none; once the sit's
   // night is past midnight, the sunrise that ends it.
   const sunset = wind?.sunset_local ?? sit?.sunset_local
   const sunrise = wind?.sunrise_local ?? sit?.sunrise_local
   const pastMidnight = sit?.night ? estateDay(clock) > sit.night : Number(estateClock(clock).slice(0, 2)) < 12
-  const sun = pastMidnight && sunrise ? `Sunrise ${sunrise}` : sunset ? `Sunset ${sunset}` : null
+  const sun = pastMidnight && sunrise ? t('sit.sunrise', { time: sunrise }) : sunset ? t('tonight.sunset', { time: sunset }) : null
 
   return (
     <div
@@ -342,7 +329,7 @@ export default function SitMode() {
     >
       <div style={{ padding: '16px 18px', borderBottom: `1px solid ${AMBER}33` }}>
         <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>
-          {sit?.stand ?? 'Your sit'}
+          {sit?.stand ?? t('sit.yourSit')}
         </div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
           <span style={{ fontSize: 34, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
@@ -383,7 +370,7 @@ export default function SitMode() {
           </span>
           <span style={{ marginLeft: 'auto', fontSize: 12, opacity: pending ? 0.85 : 0 }}>
             {/* Held space, not held text: an invisible line would still be read out. */}
-            {pending ? 'Saved on phone, no signal' : ''}
+            {pending ? t('sit.pending') : ''}
           </span>
         </div>
       </div>
@@ -396,7 +383,7 @@ export default function SitMode() {
         onPointerUp={cancelHold}
         onPointerLeave={cancelHold}
         onPointerCancel={cancelHold}
-        aria-label="Saw animals. Hold to save: saw nothing"
+        aria-label={t('sit.bigLabel')}
         style={{
           flex: 1,
           position: 'relative',
@@ -428,22 +415,22 @@ export default function SitMode() {
           }}
         />
         <span style={{ position: 'relative' }}>
-          SAW ANIMALS
+          <span className="sit-big">{t('sit.sawAnimals')}</span>
           <span style={{ display: 'block', fontSize: 15, fontWeight: 400, marginTop: 14, opacity: 0.8, letterSpacing: 0 }}>
-            Tap. Or hold for “saw nothing”.
+            {t('sit.tapOrHold')}
           </span>
         </span>
       </button>
 
       <div style={{ display: 'flex', borderTop: `1px solid ${AMBER}33` }}>
         <button
-          onClick={() => record('shot', 'Saved: shot')}
+          onClick={() => record('shot', t('sit.saved', { what: t('outcome.said.shot') }))}
           style={{ ...footButton, borderRight: `1px solid ${AMBER}33` }}
         >
-          SHOT
+          {t('sit.shot')}
         </button>
         <button onClick={endSit} disabled={ending} aria-busy={ending} style={footButton}>
-          {ending ? 'ENDING…' : 'END SIT'}
+          {ending ? t('sit.ending') : t('sit.end')}
         </button>
       </div>
     </div>

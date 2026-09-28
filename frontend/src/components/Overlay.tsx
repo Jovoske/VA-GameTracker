@@ -1,4 +1,5 @@
 import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react'
+import { t } from '../i18n'
 
 /**
  * Every full-screen panel in the app: the photo lightbox, the herd-makeup
@@ -54,8 +55,8 @@ export default function Overlay({
   backdrop = 'rgba(0, 0, 0, 0.8)',
   zIndex = 50,
   style,
-  label = 'Photo gallery',
-  backLabel = 'Back',
+  label = t('overlay.gallery'),
+  backLabel = t('common.back'),
   tools,
   children,
 }: {

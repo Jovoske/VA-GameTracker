@@ -11,6 +11,7 @@ import {
   subscribeThisDevice,
   unsubscribeThisDevice,
 } from '../push'
+import { type Key, t } from '../i18n'
 import CameraAlertRow from './CameraAlerts'
 import SettingsSection from './SettingsSection'
 import SwitchRow from './SwitchRow'
@@ -76,37 +77,35 @@ const SAVE_AFTER_MS = 500
 const QUIET_DEFAULT = { start: '23:00', end: '07:00' }
 
 /** What happened to an alert, in the Recent list. Nothing for one that got through. */
-const DELIVERY: Record<string, { text: string; warn?: boolean; why: string }> = {
-  updated: { text: 'quiet update', why: 'Updated the alert already on your phone without buzzing again.' },
-  held: { text: 'waiting', why: 'Held while you sit or during your quiet hours. It comes in one message after.' },
-  in_summary: { text: 'in one message', why: 'Sent in the one message after your sit or quiet hours.' },
-  skipped: { text: 'not sent', why: 'Not sent: you were sitting, in your quiet hours, or alerts were off.' },
-  withdrawn: { text: 'not sent', why: 'Not sent: by the time it could go, the photo was marked “nothing in it”, or the animal hidden or switched off.' },
-  no_subscription: { text: 'no device', warn: true, why: 'No phone was set up to get alerts.' },
-  failed: { text: 'not delivered', warn: true, why: 'The phone didn’t take it.' },
+const DELIVERY: Record<string, { text: Key; warn?: boolean; why: Key }> = {
+  updated: { text: 'alertsSet.d.updated', why: 'alertsSet.d.updatedWhy' },
+  held: { text: 'alertsSet.d.held', why: 'alertsSet.d.heldWhy' },
+  in_summary: { text: 'alertsSet.d.inSummary', why: 'alertsSet.d.inSummaryWhy' },
+  skipped: { text: 'alertsSet.d.notSent', why: 'alertsSet.d.skippedWhy' },
+  withdrawn: { text: 'alertsSet.d.notSent', why: 'alertsSet.d.withdrawnWhy' },
+  no_subscription: { text: 'alertsSet.d.noDevice', warn: true, why: 'alertsSet.d.noDeviceWhy' },
+  failed: { text: 'alertsSet.d.failed', warn: true, why: 'alertsSet.d.failedWhy' },
 }
 
 /** The line over the camera switches, true to them: how many are on, and what muting does. */
 function camerasHint(cameras: { alerts: boolean }[]): string {
   const on = cameras.filter((c) => c.alerts).length
-  if (on === cameras.length) return 'Every camera is on. Mute a busy one, like a feeder, and you hear nothing from it. Only for you.'
-  if (on === 0) return 'Every camera is muted, so you hear nothing from any of them. Only for you: the team still hears.'
-  return `${on} of ${cameras.length} cameras on. A muted one sends you nothing; the team still hears from it. Only for you.`
+  if (on === cameras.length) return t('alertsSet.allOn')
+  if (on === 0) return t('alertsSet.allMuted')
+  return t('alertsSet.someOn', { on, count: cameras.length })
 }
 
 /** Where the count goes while an animal stays: an iPhone buzzes for every push, so it
  *  only gets the buzz (the server leaves it out of the quiet updates). */
 function rhythmHint(): string {
-  return applePush()
-    ? 'A message when a camera catches an animal you picked. One buzz per animal every two hours. On an iPhone, the count while it stays goes on in Recent below.'
-    : 'A message when a camera catches an animal you picked. One buzz per animal every two hours: if it stays, the same alert updates quietly.'
+  return applePush() ? t('alertsSet.rhythmIphone') : t('alertsSet.rhythm')
 }
 
 function failWords(e: unknown): string {
   const x = e as Failure
-  if (x.offline) return 'No signal, so that didn’t save.'
-  if (x.timeout) return 'No answer from the server, so that didn’t save.'
-  return `That didn’t save. ${x.message}`
+  if (x.offline) return t('common.noSignalNotSaved')
+  if (x.timeout) return t('common.noAnswerNotSaved')
+  return t('common.notSaved', { why: x.message })
 }
 
 /**
@@ -141,7 +140,7 @@ export default function NotificationSettings() {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [feed, setFeed] = useState<Feed | null>(null)
-  const [said, setSaid] = useState<{ part: Part; text: string; err: boolean } | null>(null)
+  const [said, setSaid] = useState<{ part: Part; text: string; err: boolean; done?: boolean } | null>(null)
   const support = pushSupport()
 
   // The save in the making: what changed since the last one went, whether one is on
@@ -226,7 +225,7 @@ export default function NotificationSettings() {
 
   // "Saved" is news for a few seconds; a failure stays until the next change.
   useEffect(() => {
-    if (!said || said.err || said.text !== 'Saved.') return
+    if (!said || said.err || !said.done) return
     const t = window.setTimeout(() => setSaid(null), 6000)
     return () => window.clearTimeout(t)
   }, [said])
@@ -236,7 +235,7 @@ export default function NotificationSettings() {
   function save(part: Part, changes: Changes) {
     Object.assign(want.current, changes)
     wantPart.current = part
-    setSaid({ part, text: 'Saving…', err: false })
+    setSaid({ part, text: t('common.saving'), err: false })
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => void send(), SAVE_AFTER_MS)
   }
@@ -268,7 +267,7 @@ export default function NotificationSettings() {
         species: cur.species.map((x) => ({ ...x, selected: saved.species_ids.includes(x.id) })),
         quiet_start: saved.quiet_start, quiet_end: saved.quiet_end, plan_push: saved.plan_push,
       })
-      setSaid({ part, err: false, text: 'Saved.' })
+      setSaid({ part, err: false, text: t('common.saved'), done: true })
     } catch (e) {
       sending.current = false
       // What the server has wins over any tap still waiting: the screen shows it.
@@ -278,7 +277,7 @@ export default function NotificationSettings() {
       if (!alive.current) return
       setSaid({
         part, err: true,
-        text: `${failWords(e)} ${asked ? 'The switches show what is saved.' : 'The switches show what was saved last.'}`,
+        text: `${failWords(e)} ${asked ? t('alertsSet.showSaved') : t('alertsSet.showSavedLast')}`,
       })
     }
   }
@@ -293,7 +292,7 @@ export default function NotificationSettings() {
     setBusy(true)
     setMsg('')
     setS({ ...s, enabled: next, plan_push: withPlan || s.plan_push })
-    if (withPlan) setSaid({ part: 'plan', text: 'Saving…', err: false })
+    if (withPlan) setSaid({ part: 'plan', text: t('common.saving'), err: false })
     let saved = false
     try {
       const changes = withPlan ? { enabled: next, plan_push: true } : { enabled: next }
@@ -302,14 +301,14 @@ export default function NotificationSettings() {
       if (withPlan) {
         setSaid({
           part: 'plan', err: false,
-          text: 'Saved. Alerts are on too: the plan comes with them. Switch off any animal below you don’t want to hear about.',
+          text: t('alertsSet.planOn'),
         })
       }
       if (next) {
         if (support.ok) {
           await subscribeThisDevice(s.public_key, asked)
           setDevice('subscribed')
-          setMsg('On. This phone will get alerts.')
+          setMsg(t('alertsSet.onHere'))
         }
       } else {
         await unsubscribeThisDevice()
@@ -333,7 +332,7 @@ export default function NotificationSettings() {
     try {
       await subscribeThisDevice(s.public_key, asked)
       setDevice('subscribed')
-      setMsg('This phone will get alerts.')
+      setMsg(t('alertsSet.willGet'))
     } catch (e) {
       setMsg((e as Error).message)
     }
@@ -354,7 +353,7 @@ export default function NotificationSettings() {
     if (!cur) return
     setS({ ...cur, quiet_start: start, quiet_end: end })
     if (start && end && start === end) {
-      setSaid({ part: 'quiet', err: true, text: 'Quiet hours have to end at a different time from when they start.' })
+      setSaid({ part: 'quiet', err: true, text: t('alertsSet.quietSame') })
       return
     }
     save('quiet', start && end ? { quiet: true, quiet_start: start, quiet_end: end } : { quiet: false })
@@ -377,11 +376,7 @@ export default function NotificationSettings() {
         '/notifications/test',
         { method: 'POST' },
       )
-      setMsg(
-        r.sent
-          ? `Sent to ${r.sent} device${r.sent === 1 ? '' : 's'}. Give it a few seconds.`
-          : `Didn't get through to ${r.subscriptions} device${r.subscriptions === 1 ? '' : 's'}.`,
-      )
+      setMsg(r.sent ? t('alertsSet.testSent', { count: r.sent }) : t('alertsSet.testFailed', { count: r.subscriptions }))
       refreshFeed()
     } catch (e) {
       setMsg((e as Error).message)
@@ -395,69 +390,63 @@ export default function NotificationSettings() {
 
   let deviceLine: string
   if (!support.ok) deviceLine = support.reason
-  else if (perm === 'denied')
-    deviceLine = 'Blocked in this browser. Allow notifications for GameSense in your phone settings.'
-  else if (s && !s.enabled) deviceLine = 'Off. Nothing is sent to any of your phones.'
-  else if (device === 'checking') deviceLine = 'Checking this phone…'
+  else if (perm === 'denied') deviceLine = t('alertsSet.blocked')
+  else if (s && !s.enabled) deviceLine = t('alertsSet.off')
+  else if (device === 'checking') deviceLine = t('alertsSet.checking')
   else if (device === 'subscribed')
-    deviceLine = s && s.subscriptions > 1
-      ? `This phone gets alerts (${s.subscriptions} devices in total).`
-      : 'This phone gets alerts.'
-  else if (device === 'unconfirmed')
-    deviceLine = 'Set up on this phone, but the server couldn’t be reached to check it.'
-  else deviceLine = 'This phone is not getting alerts yet.'
+    deviceLine = s && s.subscriptions > 1 ? t('alertsSet.getsTotal', { count: s.subscriptions }) : t('alertsSet.gets')
+  else if (device === 'unconfirmed') deviceLine = t('alertsSet.unconfirmed')
+  else deviceLine = t('alertsSet.notYet')
 
   const saidUnder = (part: Part) => said?.part === part && (
     <p className={`switch-said${said.err ? ' switch-said--err' : ''}`} role={said.err ? 'alert' : 'status'}>{said.text}</p>
   )
 
   return (
-    <SettingsSection id="notifications" title="Alerts on my phone"
-      summary={s && s.species.length > 0 ? `${selected} of ${s.species.length} animals` : undefined}>
+    <SettingsSection id="notifications" title={t('alertsSet.title')}
+      summary={s && s.species.length > 0 ? t('alertsSet.summary', { n: selected, count: s.species.length }) : undefined}>
       <p className="settings-hint">{rhythmHint()}</p>
 
       {loadErr && !s ? (
         <div role="alert" style={{ fontSize: 13, color: 'var(--skip)', padding: '8px 0' }}>
-          Couldn't load alert settings: {loadErr}
+          {t('alertsSet.couldnt', { why: loadErr })}
         </div>
       ) : !s ? (
-        <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>Loading…</div>
+        <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>{t('common.loading')}</div>
       ) : (
         <>
           {/* The same whole-row switch as the cameras below and the map's sheets. */}
-          <SwitchRow label="Alerts" note={deviceLine} on={s.enabled} disabled={busy} onChange={() => setEnabled(!s.enabled)} />
+          <SwitchRow label={t('alertsSet.alerts')} note={deviceLine} on={s.enabled} disabled={busy} onChange={() => setEnabled(!s.enabled)} />
 
           {s.enabled && support.ok && perm !== 'denied' && (device === 'not_subscribed' || device === 'unconfirmed') && (
             <div style={{ padding: '4px 0 8px' }}>
               {device === 'not_subscribed' ? (
                 <button onClick={subscribeHere} disabled={busy} style={smallBtn}>
-                  Get alerts on this phone
+                  {t('alertsSet.getHere')}
                 </button>
               ) : (
                 <button onClick={() => void checkDevice()} disabled={busy} style={smallBtn}>
-                  Check again
+                  {t('alertsSet.checkAgain')}
                 </button>
               )}
             </div>
           )}
 
-          <SwitchRow label="Tonight's plan before sunset" on={s.enabled && s.plan_push} onChange={setPlan} disabled={busy}
-            note={s.enabled
-              ? 'One message a day, about 2 hours before sunset: where, the wind and sunset. Quiet nights too.'
-              : 'One message a day, about 2 hours before sunset. Turning it on turns Alerts on too.'} />
+          <SwitchRow label={t('alertsSet.plan')} on={s.enabled && s.plan_push} onChange={setPlan} disabled={busy}
+            note={s.enabled ? t('alertsSet.planNote') : t('alertsSet.planNoteOff')} />
           {saidUnder('plan')}
 
           <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
-            Which animals
+            {t('alertsSet.whichAnimals')}
           </div>
           {s.species.length === 0 ? (
             <div style={{ fontSize: 13, color: 'var(--text-dim)', padding: '8px 0' }}>
-              No animals yet. They show up here as the cameras see them.
+              {t('alertsSet.noAnimals')}
             </div>
           ) : (
             s.species.map((sp) => (
               <SwitchRow key={sp.id} label={sp.common_name} on={sp.selected}
-                note={`${sp.detections} sighting${sp.detections === 1 ? '' : 's'}`} onChange={() => toggleSpecies(sp)} />
+                note={t('alertsSet.sightings', { count: sp.detections })} onChange={() => toggleSpecies(sp)} />
             ))
           )}
           {saidUnder('species')}
@@ -465,7 +454,7 @@ export default function NotificationSettings() {
           {s.cameras.length > 0 && (
             <>
               <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
-                Cameras
+                {t('nav.cameras')}
               </div>
               <p className="settings-hint">{camerasHint(s.cameras)}</p>
               {s.cameras.map((c) => (
@@ -487,23 +476,21 @@ export default function NotificationSettings() {
           )}
 
           <div className="sect" style={{ marginTop: 14, marginBottom: 4 }}>
-            When
+            {t('alertsSet.when')}
           </div>
-          <p className="settings-hint">Nothing buzzes while you sit (from Start sit to End sit). What came in arrives as one message when you end the sit.</p>
-          <SwitchRow label="Quiet hours" on={quietOn}
+          <p className="settings-hint">{t('alertsSet.whileSitting')}</p>
+          <SwitchRow label={t('alertsSet.quiet')} on={quietOn}
             onChange={(on) => (on ? setQuiet(QUIET_DEFAULT.start, QUIET_DEFAULT.end) : setQuiet(null, null))}
-            note={quietOn
-              ? `Nothing buzzes from ${s.quiet_start} to ${s.quiet_end}. What comes in then arrives as one message after.`
-              : 'Off. Alerts come at any hour.'} />
+            note={quietOn ? t('alertsSet.quietOn', { from: s.quiet_start, to: s.quiet_end }) : t('alertsSet.quietOff')} />
           {quietOn && (
             <div className="quiet-hours">
               <label>
-                <span>From</span>
+                <span>{t('alertsSet.from')}</span>
                 <input className="input" type="time" required value={s.quiet_start ?? ''}
                   onChange={(e) => e.target.value && setQuiet(e.target.value, s.quiet_end)} />
               </label>
               <label>
-                <span>To</span>
+                <span>{t('alertsSet.to')}</span>
                 <input className="input" type="time" required value={s.quiet_end ?? ''}
                   onChange={(e) => e.target.value && setQuiet(s.quiet_start, e.target.value)} />
               </label>
@@ -516,9 +503,9 @@ export default function NotificationSettings() {
               onClick={sendTest}
               disabled={busy || device !== 'subscribed'}
               style={{ ...smallBtn, opacity: device !== 'subscribed' ? 0.6 : 1 }}
-              title={device === 'subscribed' ? 'Send a test alert to your devices' : 'Turn on alerts on a phone first'}
+              title={device === 'subscribed' ? t('alertsSet.testTitle') : t('alertsSet.testFirst')}
             >
-              Send a test
+              {t('alertsSet.test')}
             </button>
             {msg && <div role="status" style={{ fontSize: 13, color: 'var(--text-dim)', flex: 1, minWidth: 0 }}>{msg}</div>}
           </div>
@@ -526,16 +513,18 @@ export default function NotificationSettings() {
           {feed && feed.items.length > 0 && (
             <>
               <div className="sect" style={{ marginTop: 16, marginBottom: 4 }}>
-                Recent
+                {t('alertsSet.recent')}
               </div>
               {feed.items.map((n) => {
                 const how = n.updates
                   ? {
-                      text: `${n.updates} quiet update${n.updates === 1 ? '' : 's'}`,
-                      why: 'The count while it stayed, without buzzing again. Not sent to an iPhone, which would buzz.',
+                      text: t('alertsSet.quietUpdates', { count: n.updates }),
+                      why: t('alertsSet.quietUpdatesWhy'),
                       warn: false,
                     }
-                  : n.push_status ? DELIVERY[n.push_status] : undefined
+                  : n.push_status && DELIVERY[n.push_status]
+                    ? { ...DELIVERY[n.push_status], text: t(DELIVERY[n.push_status].text), why: t(DELIVERY[n.push_status].why) }
+                    : undefined
                 return (
                   <div key={n.id} style={{ ...row, alignItems: 'flex-start' }}>
                     <div style={{ minWidth: 0, flex: 1 }}>

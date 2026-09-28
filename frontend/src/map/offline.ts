@@ -1,3 +1,4 @@
+import { fmtNumber, t } from '../i18n'
 import { useSyncExternalStore } from 'react'
 import { ESTATE_CACHE, getFresh, getToken } from '../api'
 import { MAX_ZOOM, TILES, type BaseId } from './basemaps'
@@ -159,8 +160,8 @@ export function coverage(s: Saved, view: Box, zoom: number): 'outside' | 'close'
 
 /** "38 MB", "900 KB". */
 export function sizeLabel(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
-  return `${Math.round(bytes / (1024 * 1024))} MB`
+  if (bytes < 1024 * 1024) return `${fmtNumber(Math.max(1, Math.round(bytes / 1024)))} KB`
+  return `${fmtNumber(Math.round(bytes / (1024 * 1024)))} MB`
 }
 
 /** Whether two boxes are the same ground, to a few metres. */
@@ -172,7 +173,7 @@ export const sameBox = (a: Box, b: Box) =>
 const stamp = () => new Date().toISOString()
 // A note of how far a download has got is written every this many map squares.
 const NOTE_EVERY = 64
-export const NO_ROOM = 'The phone ran out of room part way. What came through is kept: free some space on the phone and download again to finish it.'
+const noRoomWords = () => t('offline.noRoom')
 const noRoom = (e: unknown) => (e as DOMException)?.name === 'QuotaExceededError'
 // Keys as the store gives them back: whole addresses.
 const href = (url: string) => new URL(url, location.origin).href
@@ -184,7 +185,7 @@ async function roomFor(bytes: number): Promise<string | null> {
     const est = await navigator.storage?.estimate?.()
     if (!est?.quota) return null
     const free = est.quota - (est.usage ?? 0)
-    return free < bytes * 1.2 ? `Not enough room on this phone: about ${sizeLabel(bytes)} is needed and ${sizeLabel(Math.max(0, free))} is free.` : null
+    return free < bytes * 1.2 ? t('offline.notEnough', { need: sizeLabel(bytes), free: sizeLabel(Math.max(0, free)) }) : null
   } catch {
     return null
   }
@@ -254,8 +255,8 @@ export const marksPath = (cameraId: string) => `/photos/highlights?${new URLSear
 export async function download({ base, box, cameras, signal, onProgress }: {
   base: BaseId; box: Box; cameras: Camera[]; signal: AbortSignal; onProgress: (p: Progress) => void
 }): Promise<Saved> {
-  if (!hasStore()) throw new Error('This browser can’t save the map on this phone.')
-  if (!SAVABLE.includes(base)) throw new Error('That map type can’t be saved on a phone.')
+  if (!hasStore()) throw new Error(t('offline.noStore'))
+  if (!SAVABLE.includes(base)) throw new Error(t('offline.cantSaveType'))
   const p = plan(box, base)
   const short = await roomFor(p.bytes)
   if (short) throw new Error(short)
@@ -303,12 +304,12 @@ export async function download({ base, box, cameras, signal, onProgress }: {
       }
     }
     await Promise.all(Array.from({ length: PARALLEL }, worker))
-    if (missing === urls.length) throw new Error('No map pictures came through. Check the signal and try again.')
+    if (missing === urls.length) throw new Error(t('offline.noPictures'))
 
     // Tonight's map, the cameras and each camera's sheet.
     onProgress({ done: 0, total: cameras.length + 2, bytes, stage: 'sheets' })
     await Promise.all([getFresh('/map/tonight', { save: true, timeoutMs: 30_000 }), getFresh('/map/cameras', { save: true, timeoutMs: 30_000 })])
-      .catch(() => { throw new Error('The stands and cameras didn’t load. Check the signal and try again.') })
+      .catch(() => { throw new Error(t('offline.noData')) })
     const keep = async (path: string) => {
       wanted.add(href(`/api${path}`))
       const answer = await keepJson(cache, path, signal)
@@ -344,7 +345,7 @@ export async function download({ base, box, cameras, signal, onProgress }: {
     return saved
   } catch (e) {
     await notePart()
-    if (noRoom(e)) throw new Error(NO_ROOM)
+    if (noRoom(e)) throw new Error(noRoomWords())
     throw e
   }
 }
@@ -383,9 +384,9 @@ export function startDownload(args: { base: BaseId; box: Box; cameras: Camera[] 
   jobCtl = ctl
   setJob({ progress: { done: 0, total: plan(args.box, args.base).tiles, bytes: 0, stage: 'map' }, base: args.base, outcome: null })
   download({ ...args, signal: ctl.signal, onProgress: progress => { if (jobCtl === ctl) setJob({ progress }) } })
-    .then(s => setJob({ outcome: { ok: true, text: s.missing ? 'Saved, with gaps. Download again with better signal to fill them.' : 'Saved. The map works here with no signal.' } }))
+    .then(s => setJob({ outcome: { ok: true, text: s.missing ? t('offline.savedGaps') : t('offline.saved') } }))
     .catch((e: Error) => setJob({ outcome: e.name === 'AbortError'
-      ? { ok: true, text: 'Stopped. What came through is kept.' }
+      ? { ok: true, text: t('offline.stopped') }
       : { ok: false, text: e.message } }))
     .finally(() => { if (jobCtl === ctl) jobCtl = null; setJob({ progress: null }) })
 }

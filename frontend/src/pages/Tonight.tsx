@@ -15,7 +15,8 @@ import PhotoFreshness, { type Freshness } from '../components/PhotoFreshness'
 import HarvestPrompt from '../components/Harvest'
 import SitPrompts from '../components/SitPrompts'
 import { WindWeekLine, WindWeekStrip, useWindWeek } from '../components/WindWeek'
-import { isCall } from '../map/geometry'
+import { type Key, fmtNumber, fmtTime, minutesSince, t } from '../i18n'
+import { compass, isCall } from '../map/geometry'
 import { useRefetchOnReturn, useReveal } from '../hooks'
 import './tonight.css'
 
@@ -104,24 +105,22 @@ type Alert = { type: string; severity: string; title: string; text: string; came
 type SpeciesOpt = { id: string; common_name: string; huntable: boolean; detections: number }
 
 const hh = (n: number) => String(n).padStart(2, '0') + ':00'
-const hours = (w: Window) => w ? `${w.start ?? hh(w.start_hour)} to ${w.end ?? hh(w.end_hour)}` : 'Not seen when you can sit'
+const hours = (w: Window) => w ? t('tonight.fromTo', { from: w.start ?? hh(w.start_hour), to: w.end ?? hh(w.end_hour) }) : t('tonight.notSeenSit')
 /** Which stand and when the wind line is for: "Puente, for 20:41" or "Puente, now".
  *  Only a call has a time: "isn't on the map yet" is not a verdict for 20:41. */
-const windFor = (w: Wind) => [w.stand, isCall(w.status) && (w.now ? 'now' : w.at_local && `for ${w.at_local}`)].filter(Boolean).join(', ')
-const estateTime = (iso: string) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' })
+const windFor = (w: Wind) => [w.stand, isCall(w.status) && (w.now ? t('wind.now') : w.at_local && t('wind.forTime', { time: w.at_local }))].filter(Boolean).join(', ')
+const estateTime = (iso: string) => fmtTime(iso, { timeZone: 'Europe/Madrid' })
 const visitsOf = (cl: ClassCount) => cl.visits ?? cl.count ?? 0
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 // Verdict states are carried by word and shape; colour is a third channel.
-const VERDICTS: Record<Verdict, { label: string; glyph: string; color: string }> = {
-  BEST_ODDS: { label: 'Best odds', glyph: '▲', color: 'var(--v-best)' },
-  WORTH_A_LOOK: { label: 'Worth a look', glyph: '◐', color: 'var(--v-look)' },
-  QUIET: { label: 'Quiet', glyph: '○', color: 'var(--v-quiet)' },
-  NO_DATA: { label: 'Not enough to say', glyph: '▨', color: 'var(--v-quiet)' },
+const VERDICTS: Record<Verdict, { label: Key; glyph: string; color: string }> = {
+  BEST_ODDS: { label: 'verdict.best', glyph: '▲', color: 'var(--v-best)' },
+  WORTH_A_LOOK: { label: 'verdict.look', glyph: '◐', color: 'var(--v-look)' },
+  QUIET: { label: 'verdict.quiet', glyph: '○', color: 'var(--v-quiet)' },
+  NO_DATA: { label: 'verdict.noData', glyph: '▨', color: 'var(--v-quiet)' },
 }
 const verdictOf = (v: string) => VERDICTS[v as Verdict] ?? VERDICTS.NO_DATA
 const verdictColor = (v: string) => verdictOf(v).color
-const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8]
 const impactColor = (impact: string) =>
   impact.startsWith('+') ? 'var(--go)' : impact === '•' ? 'var(--text-dim)' : 'var(--marginal)'
 
@@ -165,14 +164,14 @@ function TonightWeek({ standId }: { standId: string }) {
   const row = wk.week?.stands.find((x) => x.stand_id === standId)
   return (
     <div className="tn-line tn-week">
-      <span className="tn-line-k">This week</span>
+      <span className="tn-line-k">{t('tonight.thisWeek')}</span>
       <span className="tn-line-v">
         {row ? <WindWeekLine stand={row} className="tn-week-line" /> : <span className="tn-week-wait" role="status">{wk.wait}</span>}
         {/* A copy kept with no signal says how old it is, as the plan above does; its
             line only offers tonight's hours not yet over (WindWeekLine). */}
-        {row && wk.got?.stale && <span className="tn-line-when tn-week-age">{noAnswerWords(wk.got.why)} Checked {ageLabel(wk.got.at)}.</span>}
+        {row && wk.got?.stale && <span className="tn-line-when tn-week-age">{noAnswerWords(wk.got.why)} {t('tonight.checkedAgo', { ago: ageLabel(wk.got.at) })}</span>}
         <details className="tn-week-hours">
-          <summary>Hour by hour</summary>
+          <summary>{t('tonight.hourByHour')}</summary>
           {row && wk.week ? <WindWeekStrip week={wk.week} stand={row} /> : <p className="ww-note">{wk.wait}</p>}
         </details>
       </span>
@@ -232,7 +231,7 @@ export default function Tonight() {
         if (!samePick(sel, confirmed.current)) {
           setPicked(confirmed.current)
           const why = noAnswer(e)
-          setNotice(`${why ? noAnswerWords(why) : `Couldn’t switch. ${e.message}`} Still showing the plan you had.`)
+          setNotice(`${why ? noAnswerWords(why) : t('tonight.couldntSwitch', { why: e.message })} ${t('tonight.stillShowing')}`)
           if (planRef.current) return
         }
         setErr(e.message)
@@ -339,11 +338,11 @@ export default function Tonight() {
      Settings that the cameras have actually recorded. Also on the "could not load"
      screen: the plan saved for another pick ("Anything") is one tap away. */
   const chips = species.length > 0 && (
-    <div className="tn-after" role="group" aria-label="I'm after">
-      <div className="tn-after-label" aria-hidden="true">I'm after</div>
+    <div className="tn-after" role="group" aria-label={t('tonight.after')}>
+      <div className="tn-after-label" aria-hidden="true">{t('tonight.after')}</div>
       <div className="tn-chips">
         <button className="tn-chip" aria-pressed={picked.length === 0} onClick={pickAll}>
-          Anything
+          {t('tonight.anything')}
         </button>
         {species.map((s) => (
           <button
@@ -351,33 +350,33 @@ export default function Tonight() {
             className="tn-chip"
             aria-pressed={picked.includes(s.id)}
             onClick={() => toggleSpecies(s.id)}
-            title={`${s.detections} sightings`}
+            title={t('alertsSet.sightings', { count: s.detections })}
           >
             {s.common_name}
           </button>
         ))}
-        <Link to="/settings" className="tn-chip-edit">Edit list</Link>
+        <Link to="/settings" className="tn-chip-edit">{t('tonight.editList')}</Link>
       </div>
     </div>
   )
-  const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>
+  const noticeLine = notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>{t('common.ok')}</button></div>
 
   // Your sit, before the plan: "Back to sit" after the phone closed the app mid-sit,
   // and "What happened last night?" in the morning, then the morning's "log what you
   // shot" (the harvest book). With no plan saved and no signal, the way back into the
   // seat must still be there. Same place in every state below, so the plan arriving
   // doesn't start it over.
-  const top = <><h1 className="page-title">Tonight</h1><SitPrompts page="tonight" /><HarvestPrompt /></>
+  const top = <><h1 className="page-title">{t('nav.tonight')}</h1><SitPrompts page="tonight" /><HarvestPrompt /></>
 
   if (!f && err) return (
     <div className="tonight">
       {top}
-      <div className="status-panel" role="alert">Could not load tonight's plan: {err}<button className="text-action" onClick={() => load()}>Try again</button></div>
+      <div className="status-panel" role="alert">{t('tonight.couldntLoad', { why: err })}<button className="text-action" onClick={() => load()}>{t('common.tryAgain')}</button></div>
       {noticeLine}
       {chips}
     </div>
   )
-  if (!f) return <div className="tonight">{top}<div className="status-panel" role="status">Working out tonight…</div></div>
+  if (!f) return <div className="tonight">{top}<div className="status-panel" role="status">{t('tonight.working')}</div></div>
 
   const c = f.conditions
   const r = f.recommended
@@ -392,7 +391,7 @@ export default function Tonight() {
     bw.start_hour <= bw.end_hour ? hr >= bw.start_hour && hr < bw.end_hour : hr >= bw.start_hour || hr < bw.end_hour)
   // Made before this morning's 06:00: that was an earlier night's plan.
   const old = fromEarlierNight(plan!.at)
-  const oldWords = nightOf(plan!.at) === nightOf(Date.now() - 86_400_000) ? 'last night' : 'an earlier night'
+  const oldWords = nightOf(plan!.at) === nightOf(Date.now() - 86_400_000) ? t('tonight.madeLastNight') : t('tonight.madeEarlier')
   const hasNumbers = !!(f.where && f.where.length > 0) || !!f.calibration?.statement || !!d
   // A camera the Changed line is already about isn't said again under Alerts as
   // "quiet" (audit G-23). The server uses one rule for both, so "Nothing changed"
@@ -404,7 +403,7 @@ export default function Tonight() {
   return (
     <div className="tonight">
       {top}
-      {err && <div className="status-panel" role="alert">Could not refresh: {err} Showing the last plan.<button className="text-action" onClick={() => load()}>Try again</button></div>}
+      {err && <div className="status-panel" role="alert">{t('tonight.couldntRefresh', { why: err })}<button className="text-action" onClick={() => load()}>{t('common.tryAgain')}</button></div>}
       {noticeLine}
       {chips}
 
@@ -412,9 +411,9 @@ export default function Tonight() {
           screen ("No signal."), and one from an earlier night says so. */}
       <p className="tn-fresh" data-stale={old || plan!.stale} role={plan!.stale ? 'status' : undefined}>
         {plan!.stale && <>{noAnswerWords(plan!.why)} </>}
-        Plan from {ageLabel(plan!.at)}{old ? `, made for ${oldWords}. It may be out of date.` : '.'}
-        {checking && !plan!.stale && ageLabel(plan!.at) !== 'just now' && ' Checking for a newer one…'}
-        {plan!.stale && !checking && <button className="tn-fresh-retry" onClick={() => load()}>Try again</button>}
+        {old ? t('tonight.planFromOld', { ago: ageLabel(plan!.at), night: oldWords }) : t('tonight.planFrom', { ago: ageLabel(plan!.at) })}
+        {checking && !plan!.stale && minutesSince(plan!.at) >= 2 && ` ${t('tonight.checkingNewer')}`}
+        {plan!.stale && !checking && <button className="tn-fresh-retry" onClick={() => load()}>{t('common.tryAgain')}</button>}
       </p>
       <PhotoFreshness freshness={f.freshness} />
 
@@ -428,25 +427,25 @@ export default function Tonight() {
         <div className="tn-verdict-head">
           <span className="tn-verdict-glyph" style={{ color: v.color }} aria-hidden="true">{v.glyph}</span>
           <div>
-            <h2 id="tn-verdict-h" className="tn-verdict-label">{v.label}</h2>
+            <h2 id="tn-verdict-h" className="tn-verdict-label">{t(v.label)}</h2>
             {r && <div className="tn-verdict-cam">{r.camera}</div>}
           </div>
         </div>
 
         {!r && f.reason && <p className="tn-reason">{f.reason}</p>}
-        {!r && c.sunset_local && <div className="tn-sunset">Sunset {c.sunset_local}</div>}
+        {!r && c.sunset_local && <div className="tn-sunset">{t('tonight.sunset', { time: c.sunset_local })}</div>}
 
         {r && (
           <>
-            <div className="tn-hours" data-none={!r.best_window || undefined}><small>Best hours</small>{hours(r.best_window)}</div>
-            {c.sunset_local && <div className="tn-sunset">Sunset {c.sunset_local}</div>}
+            <div className="tn-hours" data-none={!r.best_window || undefined}><small>{t('tonight.bestHours')}</small>{hours(r.best_window)}</div>
+            {c.sunset_local && <div className="tn-sunset">{t('tonight.sunset', { time: c.sunset_local })}</div>}
             <div className="tn-species">{r.species}</div>
             <div className="tn-reason">{r.reason}</div>
             <div className="tn-caveat">{r.caveat}</div>
 
             {f.wind?.text && (
               <div className="tn-line">
-                <span className="tn-line-k">Wind</span>
+                <span className="tn-line-k">{t('weather.wind')}</span>
                 <span
                   className="tn-line-v"
                   data-tone={f.wind.status === 'scent_carries' ? 'warn' : undefined}
@@ -455,7 +454,7 @@ export default function Tonight() {
                   {f.wind.text}
                   {windFor(f.wind) && <span className="tn-line-when">{windFor(f.wind)}</span>}
                   {c.forecast_stale && c.forecast_fetched_at && (
-                    <span className="tn-line-when">No newer forecast: this one is from {estateTime(c.forecast_fetched_at)}.</span>
+                    <span className="tn-line-when">{t('week.oldForecast', { time: estateTime(c.forecast_fetched_at) })}</span>
                   )}
                 </span>
               </div>
@@ -464,7 +463,7 @@ export default function Tonight() {
 
             {f.changed?.text && (
               <div className="tn-line">
-                <span className="tn-line-k">Changed</span>
+                <span className="tn-line-k">{t('tonight.changed')}</span>
                 <span className="tn-line-v" data-tone={f.changed.kind === 'camera_down' ? 'down' : undefined}>
                   {f.changed.text}
                 </span>
@@ -472,16 +471,16 @@ export default function Tonight() {
             )}
 
             <div className="tn-cond">
-              {c.moon_illum != null && <span>{c.moon_illum}% moon</span>}
-              {c.darkness_minutes != null && <span>{Math.round(c.darkness_minutes / 60)} h of dark</span>}
+              {c.moon_illum != null && <span>{t('tonight.moon', { pct: fmtNumber(c.moon_illum, { maximumFractionDigits: 0 }) })}</span>}
+              {c.darkness_minutes != null && <span>{t('tonight.dark', { h: Math.round(c.darkness_minutes / 60) })}</span>}
               {c.wind_dir_deg != null && (
-                <span>Wind {compass(c.wind_dir_deg)} {Math.round(c.wind_speed_kmh ?? 0)} km/h</span>
+                <span>{t('tonight.windCond', { from: compass(c.wind_dir_deg), kmh: Math.round(c.wind_speed_kmh ?? 0) })}</span>
               )}
             </div>
 
             {f.factors && f.factors.length > 0 && (
               <div className="tn-why">
-                <h3 className="sect" style={{ marginBottom: 8 }}>Why</h3>
+                <h3 className="sect" style={{ marginBottom: 8 }}>{t('tonight.why')}</h3>
                 {f.factors.map((fac, i) => (
                   <div key={i} className="tn-why-row">
                     <span className="tn-why-impact" style={{ color: impactColor(fac.impact) }}>{fac.impact}</span>
@@ -493,11 +492,11 @@ export default function Tonight() {
 
             {r.classes && r.classes.length > 0 && (
               <>
-                <h3 className="sect" style={{ marginTop: 14, marginBottom: 6 }}>Seen here</h3>
+                <h3 className="sect" style={{ marginTop: 14, marginBottom: 6 }}>{t('tonight.seenHere')}</h3>
                 <div className="tn-classes" style={{ marginTop: 0 }}>
                   {r.classes.map((cl) => (
                     <span key={cl.label} className="tn-class">
-                      {cl.label} <span>{plural(visitsOf(cl), 'visit')}</span>
+                      {cl.label} <span>{t('common.visits', { count: visitsOf(cl) })}</span>
                     </span>
                   ))}
                 </div>
@@ -508,7 +507,7 @@ export default function Tonight() {
 
         {f.alternates.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <h3 className="sect" style={{ marginBottom: 8 }}>Other places</h3>
+            <h3 className="sect" style={{ marginBottom: 8 }}>{t('tonight.otherPlaces')}</h3>
             <div className="tn-alts">
               {f.alternates.map((a) => (
                 <div key={a.camera_id ?? a.camera} className="tn-alt">
@@ -516,7 +515,7 @@ export default function Tonight() {
                     {verdictOf(a.verdict).glyph}
                   </span>
                   <span className="tn-alt-name">{a.camera} · {a.species}</span>
-                  <span className="tn-alt-seen">Seen {a.nights_present} of {a.active_nights} nights</span>
+                  <span className="tn-alt-seen">{t('tonight.seenOf', { n: a.nights_present, count: a.active_nights })}</span>
                 </div>
               ))}
             </div>
@@ -524,9 +523,7 @@ export default function Tonight() {
         )}
 
         <div className="tn-foot">
-          {f.nights_of_data > 0
-            ? `From ${plural(f.nights_of_data, 'night')} the cameras were watching.`
-            : 'No nights of camera photos yet.'}
+          {f.nights_of_data > 0 ? t('tonight.fromNights', { count: f.nights_of_data }) : t('tonight.noNights')}
           {f.exposure?.note && <> {f.exposure.note}</>}
         </div>
       </section>
@@ -535,7 +532,7 @@ export default function Tonight() {
           empty wood, so it is reported rather than folded into the ranking. */}
       {f.alerts && f.alerts.length > 0 && (
         <section className="card tn-card" aria-labelledby="tn-cams-h">
-          <h2 id="tn-cams-h" className="sect">Cameras not sending</h2>
+          <h2 id="tn-cams-h" className="sect">{t('tonight.notSending')}</h2>
           {f.alerts.map((a) => (
             <div key={a.camera_id ?? a.camera} className="tn-camrow">
               <span className="tn-camrow-name">{a.camera}</span>
@@ -544,9 +541,7 @@ export default function Tonight() {
           ))}
           {f.alerts.some((a) => a.ranked !== false) && (
             <div className="tn-note">
-              {f.alerts.every((a) => a.ranked !== false)
-                ? 'These are ranked on what they saw before they stopped.'
-                : 'Those still in the plan are ranked on what they saw before they stopped.'}
+              {f.alerts.every((a) => a.ranked !== false) ? t('tonight.rankedAll') : t('tonight.rankedSome')}
             </div>
           )}
         </section>
@@ -554,7 +549,7 @@ export default function Tonight() {
 
       {shownAlerts.length > 0 && (
         <section className="card tn-card" aria-labelledby="tn-alerts-h">
-          <h2 id="tn-alerts-h" className="sect">Alerts</h2>
+          <h2 id="tn-alerts-h" className="sect">{t('alertsSet.alerts')}</h2>
           {shownAlerts.map((a, i) => {
             const col =
               a.severity === 'high' ? 'var(--go)' : a.severity === 'warn' ? 'var(--marginal)' : 'var(--teal)'
@@ -574,11 +569,11 @@ export default function Tonight() {
       {/* ── The numbers, folded away ───────────────── */}
       {hasNumbers && (
         <details className="tn-details">
-          <summary>Show the numbers</summary>
+          <summary>{t('weather.showNumbers')}</summary>
 
           {f.where && f.where.length > 0 && (
             <div className={`block${settling ? ' settling' : ''}`}>
-              <h2 className="sect">Every camera</h2>
+              <h2 className="sect">{t('tonight.everyCamera')}</h2>
               {f.where.map((w) => (
                 <div key={w.camera_id ?? w.camera} className="tn-where">
                   <span className="tn-where-glyph" style={{ color: verdictColor(w.verdict) }} aria-hidden="true">
@@ -588,16 +583,16 @@ export default function Tonight() {
                     <div className="tn-where-head">
                       <span className="tn-where-name">{w.camera}</span>
                       <span className="tn-where-verdict" style={{ color: verdictColor(w.verdict) }}>
-                        {verdictOf(w.verdict).label}
+                        {t(verdictOf(w.verdict).label)}
                       </span>
                       <span className="tn-where-meta">{hours(w.best_window)}</span>
-                      <span className="tn-where-meta">Seen {w.nights_present} of {w.active_nights} nights</span>
+                      <span className="tn-where-meta">{t('tonight.seenOf', { n: w.nights_present, count: w.active_nights })}</span>
                     </div>
                     <div className="tn-classes" style={{ marginTop: 5 }}>
-                      {w.classes.length === 0 && <span className="tn-where-meta">No group type identified</span>}
+                      {w.classes.length === 0 && <span className="tn-where-meta">{t('tonight.noGroup')}</span>}
                       {w.classes.map((cl) => (
                         <span key={cl.label} className="tn-class">
-                          {cl.label} <span>{plural(visitsOf(cl), 'visit')}{cl.photos != null && ` (${plural(cl.photos, 'photo')})`}</span>
+                          {cl.label} <span>{t('common.visits', { count: visitsOf(cl) })}{cl.photos != null && ` (${t('common.photos', { count: cl.photos })})`}</span>
                         </span>
                       ))}
                     </div>
@@ -605,14 +600,14 @@ export default function Tonight() {
                 </div>
               ))}
               <div className="tn-note" style={{ marginTop: 4 }}>
-                A visit is one arrival: photos of the same animal less than half an hour apart count once.
+                {t('tonight.visitIs')}
               </div>
             </div>
           )}
 
           {f.calibration?.statement && (
             <div className="block">
-              <h2 className="sect">How often this has been right</h2>
+              <h2 className="sect">{t('tonight.howOften')}</h2>
               {f.calibration.lines && f.calibration.lines.length > 0
                 ? <ul className="tn-record">{f.calibration.lines.map((line) => <li key={line}>{line}</li>)}</ul>
                 : <div style={{ fontSize: 13, lineHeight: 1.5 }}>{f.calibration.statement}</div>}
@@ -622,7 +617,7 @@ export default function Tonight() {
           {d && (
             <>
               <div className="block">
-                <h2 className="sect">Photos by hour {bw && <span className="sect-note">tonight’s best hours in green</span>}</h2>
+                <h2 className="sect">{t('tonight.byHour')} {bw && <span className="sect-note">{t('tonight.bestInGreen')}</span>}</h2>
                 <div className="tn-bars-y">
                   {d.by_hour.map((x) => (
                     <div key={x.hour} title={`${hh(x.hour)}: ${x.count}`}>
@@ -638,7 +633,7 @@ export default function Tonight() {
               </div>
 
               <div className="block">
-                <h2 className="sect">Photos by camera</h2>
+                <h2 className="sect">{t('tonight.byCamera')}</h2>
                 {d.by_camera.map((cam) => (
                   <div key={cam.id ?? cam.name} className="tn-hrow">
                     <div className="tn-hrow-name">{cam.name}</div>
@@ -652,7 +647,7 @@ export default function Tonight() {
 
               {d.by_species.length > 0 && (
                 <div className="block">
-                  <h2 className="sect">Photos by animal</h2>
+                  <h2 className="sect">{t('tonight.byAnimal')}</h2>
                   {d.by_species.slice(0, 8).map((s) => (
                     <div key={s.species} className="tn-hrow">
                       <div className="tn-hrow-name">{s.species}</div>
@@ -666,7 +661,7 @@ export default function Tonight() {
               )}
 
               <div className="tn-totals">
-                {d.totals.sightings} photos with animals · {d.totals.empty} empty photos set aside · {d.totals.nights} nights
+                {t('tonight.totals', { animals: d.totals.sightings, empty: d.totals.empty, nights: d.totals.nights })}
               </div>
             </>
           )}

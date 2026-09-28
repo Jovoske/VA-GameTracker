@@ -36,6 +36,14 @@
 //     when there isn't (audit B-06, feature 24).
 const BUILD = '__GS_BUILD__'
 const ASSETS = /*__GS_ASSETS__*/[]
+// The one thing the worker says itself, in each language the app speaks: the build
+// fills it in from src/i18n (vite.config.ts); unbuilt, English. The page asks in its
+// language (Accept-Language, src/api.ts), so the answer comes back in it.
+const TEXT = /*__GS_TEXT__*/{ en: { offline: 'Offline, and nothing cached for this yet.' } }
+const say = (req, key) => {
+  const lang = (req.headers.get('Accept-Language') || '').split(/[,;-]/)[0].trim().toLowerCase()
+  return (TEXT[lang] && TEXT[lang][key]) || TEXT.en[key]
+}
 const SHELL_PREFIX = 'gamesense-shell-'
 const SHELL_CACHE = SHELL_PREFIX + BUILD
 const API_CACHE = 'gamesense-api-v2'
@@ -147,7 +155,7 @@ async function apiWithFallback(req) {
     if (hit) return hit
     // Still JSON. Handing back the HTML shell here is what broke the app offline.
     return new Response(
-      JSON.stringify({ detail: 'Offline, and nothing cached for this yet.', offline: true }),
+      JSON.stringify({ detail: say(req, 'offline'), offline: true }),
       { status: 503, headers: { 'Content-Type': 'application/json' } },
     )
   }
@@ -223,7 +231,7 @@ async function savedApi(req) {
     const hit = await replay(cache, req, 'offline')
     if (hit) return hit
     return new Response(
-      JSON.stringify({ detail: 'Offline, and nothing cached for this yet.', offline: true }),
+      JSON.stringify({ detail: say(req, 'offline'), offline: true }),
       { status: 503, headers: { 'Content-Type': 'application/json' } },
     )
   }

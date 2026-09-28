@@ -1,5 +1,6 @@
 import { type Failure, SIT_QUEUE_KEY, api, getToken, tokenSubject } from './api'
 import { startedSitIsOn } from './night'
+import { t } from './i18n'
 
 /**
  * Sit reports that survive a valley with no signal.
@@ -126,8 +127,7 @@ export function isOn(sit: SitState, now: number = Date.now()): boolean {
 export function confirmSignOut(): boolean {
   const n = pendingCount()
   if (!n) return true
-  const what = n === 1 ? 'A sit report hasn’t reached the server yet. Signing out now deletes it' : `${n} sit reports haven’t reached the server yet. Signing out now deletes them`
-  return window.confirm(`${what} from this phone. Sign out anyway?`)
+  return window.confirm(t('sits.unsentSignOut', { count: n }))
 }
 
 /** Put a change on the phone. It goes out on the next flush. */

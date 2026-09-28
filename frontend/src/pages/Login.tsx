@@ -1,6 +1,8 @@
 import { type FormEvent, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { LAST_EMAIL_KEY, getToken, login, safeNext } from '../api'
+import LanguagePicker from '../components/LanguagePicker'
+import { t } from '../i18n'
 
 export default function Login() {
   const nav = useNavigate()
@@ -31,15 +33,15 @@ export default function Login() {
       // Replacing the sign-in page, so Back from there never comes back to it.
       nav(next, { replace: true })
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't sign in")
+      setError(err instanceof Error ? err.message : t('login.couldnt'))
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', padding: 24 }}>
-      <form onSubmit={onSubmit} className="card" style={{ width: 340, maxWidth: '100%', padding: 24 }}>
+    <div className="login-page" style={{ minHeight: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 340px)', justifyContent: 'center', justifyItems: 'center', alignContent: 'center', gap: 16, padding: 24 }}>
+      <form onSubmit={onSubmit} className="card" style={{ width: '100%', padding: 24 }}>
         <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 20 }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
         </div>
@@ -57,11 +59,11 @@ export default function Login() {
               lineHeight: 1.45,
             }}
           >
-            You were signed out. Sign in again.
+            {t('api.signedOut')}
           </div>
         )}
 
-        <label htmlFor="login-email" style={{ fontSize: 12, color: 'var(--text-dim)' }}>Email</label>
+        <label htmlFor="login-email" style={{ fontSize: 12, color: 'var(--text-dim)' }}>{t('login.email')}</label>
         <input
           id="login-email"
           className="input"
@@ -75,7 +77,7 @@ export default function Login() {
           autoFocus={!email}
         />
 
-        <label htmlFor="login-password" style={{ fontSize: 12, color: 'var(--text-dim)' }}>Password</label>
+        <label htmlFor="login-password" style={{ fontSize: 12, color: 'var(--text-dim)' }}>{t('login.password')}</label>
         <input
           id="login-password"
           className="input"
@@ -89,9 +91,10 @@ export default function Login() {
         {error && <div role="alert" style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
         <button className="btn" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? t('login.signingIn') : t('nav.signIn')}
         </button>
       </form>
+      <LanguagePicker compact />
     </div>
   )
 }

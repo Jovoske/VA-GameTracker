@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { type Got, getFresh, nightBefore, nightOf, peek } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { type Key, fmtTime, fmtWeekday, t } from '../i18n'
 import { dawnStart } from '../night'
 import { isOn, onSitSync, saveSit, withPending } from '../sits'
 import './sitprompts.css'
@@ -33,26 +34,27 @@ type MySit = {
 }
 type Mine = { live: MySit[]; to_report: MySit[] }
 
-const ANSWERS = [
-  ['nothing', 'Saw nothing'],
-  ['seen', 'Saw animals'],
-  ['shootable_no_shot', 'Had a chance, no shot'],
-  ['shot', 'Shot'],
-] as const
-const label = (outcome: string) => ANSWERS.find(([k]) => k === outcome)?.[1] ?? 'Didn’t go'
+const ANSWERS: [string, Key][] = [
+  ['nothing', 'outcome.nothing'],
+  ['seen', 'outcome.seen'],
+  ['shootable_no_shot', 'outcome.shootable_no_shot'],
+  ['shot', 'outcome.shot'],
+]
+/** What was answered, as the card says it after "Saved:". */
+const said = (outcome: string) => t(outcome === 'cancelled' ? 'sitAsk.youDidntGo' : (`outcome.said.${outcome}` as Key))
 
 // As the server asks (routes_stands.ASK_NIGHTS): older than this, the moment has gone.
 const ASK_NIGHTS = 3
 
 function whenWords(sit: MySit, tonight: string): string {
-  if (sit.night === tonight) return 'on your sit this evening'
+  if (sit.night === tonight) return t('sitAsk.thisEvening')
   // A dawn sit reserved before 06:00 belongs to the night before, but it was this morning.
-  if (sit.night === nightBefore(tonight)) return sit.started_at && dawnStart(sit.started_at, tonight) ? 'this morning' : 'last night'
-  const day = new Date(`${sit.night}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'long', timeZone: 'UTC' })
-  return `on ${day} night`
+  if (sit.night === nightBefore(tonight)) return sit.started_at && dawnStart(sit.started_at, tonight) ? t('sitAsk.thisMorning') : t('sitAsk.lastNight')
+  const day = fmtWeekday(`${sit.night}T12:00:00Z`, 'long', { timeZone: 'UTC' })
+  return t('sitAsk.onDayNight', { day })
 }
 
-const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+const clock = (iso: string) => fmtTime(iso)
 
 export default function SitPrompts({ page }: { page: 'tonight' | 'stands' }) {
   const [got, setGot] = useState<Got<Mine> | null>(() => peek<Mine>('/sits/mine'))
@@ -96,11 +98,11 @@ export default function SitPrompts({ page }: { page: 'tonight' | 'stands' }) {
       // a card painted from an old copy can't lower a report made since. "Didn't go"
       // cancels the reservation, which the server allows only while unreported.
       const how = await saveSit(sit.id, outcome === 'cancelled' ? { outcome, correct: true } : { outcome })
-      const what = outcome === 'cancelled' ? 'you didn’t go' : label(outcome).toLowerCase()
-      const words = how === 'queued' ? `Saved on this phone: ${what}. It goes when there’s signal.` : `Saved: ${what}.`
+      const what = said(outcome)
+      const words = how === 'queued' ? t('sitAsk.savedPhone', { what }) : t('sitAsk.saved', { what })
       setAnswered((a) => ({ ...a, [sit.id]: { sit, words } }))
     } catch (e) {
-      setErrs((x) => ({ ...x, [sit.id]: `That didn’t save. ${(e as Error).message}` }))
+      setErrs((x) => ({ ...x, [sit.id]: t('common.notSaved', { why: (e as Error).message }) }))
     } finally {
       setBusy(null)
     }
@@ -119,35 +121,35 @@ export default function SitPrompts({ page }: { page: 'tonight' | 'stands' }) {
   return (
     <div className="sp">
       {live.map((s) => (
-        <section key={s.id} className="card sp-live" aria-label="Your sit is on">
+        <section key={s.id} className="card sp-live" aria-label={t('sitAsk.onLabel')}>
           <p>
-            <strong>Your sit at {s.stand ?? 'your stand'} is on.</strong>
-            {s.started_at && <> Since {clock(s.started_at)}.</>}
+            <strong>{t('sitAsk.on', { stand: s.stand ?? t('sitAsk.yourStandLower') })}</strong>
+            {s.started_at && <> {t('sitAsk.since', { time: clock(s.started_at) })}</>}
           </p>
-          <Link className="sp-primary" to={`/sit/${s.id}`}>Back to sit</Link>
+          <Link className="sp-primary" to={`/sit/${s.id}`}>{t('sitAsk.back')}</Link>
         </section>
       ))}
       {cards.map(({ sit, words }) => (
         <section key={sit.id} className="card sp-ask" aria-labelledby={`sp-ask-${sit.id}`}>
-          <h2 id={`sp-ask-${sit.id}`}>What happened {whenWords(sit, tonight)}?</h2>
+          <h2 id={`sp-ask-${sit.id}`}>{t('sitAsk.whatHappened', { when: whenWords(sit, tonight) })}</h2>
           <p className="sp-where">
-            {sit.stand ?? 'Your stand'}.{' '}
-            {words ? '' : sit.ended_at ? 'You ended the sit without saying.' : sit.started_at ? 'You started the sit and didn’t say.' : 'You reserved it and didn’t say.'}
+            {sit.stand ?? t('sitAsk.yourStand')}.{' '}
+            {words ? '' : sit.ended_at ? t('sitAsk.endedSilent') : sit.started_at ? t('sitAsk.startedSilent') : t('sitAsk.reservedSilent')}
           </p>
           {words ? (
             <p className="sp-done" role="status">{words}</p>
           ) : (
             <>
-              <div className="sp-answers" role="group" aria-label={`What happened at ${sit.stand ?? 'your stand'}`}>
+              <div className="sp-answers" role="group" aria-label={t('sitAsk.whatHappenedAt', { stand: sit.stand ?? t('sitAsk.yourStandLower') })}>
                 {ANSWERS.map(([value, text]) => (
                   <button key={value} className="sp-answer" disabled={!!busy} onClick={() => answer(sit, value)}>
-                    {text}
+                    {t(text)}
                   </button>
                 ))}
               </div>
               {!sit.started_at && (
                 <button className="sp-didnt" disabled={!!busy} onClick={() => answer(sit, 'cancelled')}>
-                  I didn’t go
+                  {t('sitAsk.iDidntGo')}
                 </button>
               )}
             </>

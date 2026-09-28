@@ -5,6 +5,7 @@ import { ageLabel, getFresh, noAnswerWords, savedCopy, thumbUrl, whenLabel, type
 import CameraAlertRow from '../components/CameraAlerts'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
+import { cap, t, tn } from '../i18n'
 import { validLngLat, type Camera } from './geometry'
 import { stripPath } from './offline'
 import { OwnGpsControl, RenameControl } from './PlaceSheet'
@@ -32,9 +33,9 @@ type Photo = {
 }
 type Failure = Error & { offline?: boolean; timeout?: boolean }
 
-const batteryWords = (pct: number | null) => pct == null ? 'Battery unknown' : pct < 20 ? 'Battery low' : pct < 50 ? 'Battery half' : 'Battery good'
-const signalWords = (pct: number | null) => pct == null ? null : pct < 30 ? 'Signal weak' : pct < 60 ? 'Signal fair' : 'Signal strong'
-const visitWords = (n: number) => `${n} visit${n === 1 ? '' : 's'}`
+const batteryWords = (pct: number | null) => t(pct == null ? 'camSheet.batteryUnknown' : pct < 20 ? 'cameras.h.battery' : pct < 50 ? 'camSheet.batteryHalf' : 'camSheet.batteryGood')
+const signalWords = (pct: number | null) => pct == null ? null : t(pct < 30 ? 'camSheet.signalWeak' : pct < 60 ? 'camSheet.signalFair' : 'camSheet.signalStrong')
+const visitWords = (n: number) => t('common.visits', { count: n })
 
 type NightLine = { text: string; note: string | null; tone: 'plain' | 'quiet' | 'warn' }
 
@@ -46,23 +47,22 @@ type NightLine = { text: string; note: string | null; tone: 'plain' | 'quiet' | 
  */
 export function lastNightLine(c: Camera): NightLine {
   const s = c.last_night_status
-  const night = c.last_night_so_far ? 'last night so far' : 'last night'
-  const Night = night[0].toUpperCase() + night.slice(1)
+  const night = c.last_night_so_far ? t('camSheet.lastNightSoFar') : t('camSheet.lastNight')
   if (c.last_night.length) {
-    const note = s === 'checking' ? 'Still checking the rest of last night’s photos.'
-      : s === 'unreadable' ? `Some photos from ${night} couldn’t be checked, so this may not be everything.`
-      : s === 'incomplete' ? 'Out of photo credits last night, so this may not be everything.' : null
-    return { text: `${Night}: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
+    const note = s === 'checking' ? t('camSheet.stillRest')
+      : s === 'unreadable' ? t('camSheet.someUnchecked', { night })
+      : s === 'incomplete' ? t('camSheet.outOfCredits') : null
+    return { text: `${cap(night)}: ${c.last_night.map(v => `${v.label} · ${visitWords(v.visits)}`).join(', ')}`, note, tone: 'plain' }
   }
-  if (s === 'checking') return { text: 'Still checking last night’s photos.', note: null, tone: 'quiet' }
+  if (s === 'checking') return { text: t('camSheet.stillChecking'), note: null, tone: 'quiet' }
   // Photos the AI gave up on are not "nothing there": a broken AI read as a quiet night.
-  if (s === 'unreadable') return { text: `Nothing found ${night}, but some photos couldn’t be checked, so this may not be everything.`, note: null, tone: 'warn' }
-  if (s === 'incomplete') return { text: `Nothing on camera ${night}, but it was out of photo credits, so this may not be everything.`, note: null, tone: 'warn' }
+  if (s === 'unreadable') return { text: t('camSheet.nothingFound', { night }), note: null, tone: 'warn' }
+  if (s === 'incomplete') return { text: t('camSheet.nothingCredits', { night }), note: null, tone: 'warn' }
   // A camera that was down saw nothing because it couldn't, not because nothing came.
   const blind = s === 'blind' || (s == null && !c.health.producing)
   return blind
-    ? { text: 'No photos from last night. The camera may not have been working, so that isn’t a quiet night.', note: null, tone: 'warn' }
-    : { text: `Nothing on camera ${night}`, note: null, tone: 'plain' }
+    ? { text: t('camSheet.blind'), note: null, tone: 'warn' }
+    : { text: t('camSheet.nothing', { night }), note: null, tone: 'plain' }
 }
 
 /** What is wrong with the camera, in words, or null when it is working. A login that
@@ -70,25 +70,25 @@ export function lastNightLine(c: Camera): NightLine {
 function trouble(c: Camera): ReactNode | null {
   const h = c.health
   if (h.status === 'not_syncing') return <>
-    {h.login?.camera
-      ? `Photos not coming in. The last fetch couldn’t get them. ${h.login.error}`
+    {t('camSheet.notComing')} {h.login?.camera
+      ? t('camSheet.couldntGet', { why: h.login.error ?? '' })
       : h.login?.error
-        ? `Photos not coming in. Login needs attention${h.login.label ? ` (${h.login.label})` : ''}: ${h.login.error}`
-        : 'Photos not coming in. No photo fetch has worked for over 2 hours.'}{' '}
-    <Link className="map-link" to="/settings#accounts">Camera logins</Link>
+        ? h.login.label ? t('cameras.loginNamed', { label: h.login.label, why: h.login.error }) : t('cameras.login', { why: h.login.error })
+        : t('cameras.noFetch')}{' '}
+    <Link className="map-link" to="/settings#accounts">{t('fresh.cameraLogins')}</Link>
   </>
-  if (h.status === 'retired') return 'Retired. Left out of tonight’s plan, the alerts and Insights; its photos stay.'
-  if (h.status === 'disconnected') return 'Not connected. No camera login here fetches it now; its photos so far stay.'
-  if (h.status === 'quiet') return `${h.detail}. It sends photos only, so check it on your next visit.`
-  if (h.status === 'offline') return c.last_report_at ? `Not checking in. Last heard ${ageLabel(c.last_report_at)}.` : 'It has never checked in.'
-  if (h.status === 'out_of_credits') return 'Out of photo credits. New photos won’t come through until the plan renews.'
+  if (h.status === 'retired') return t('camSheet.retired')
+  if (h.status === 'disconnected') return t('camSheet.disconnected')
+  if (h.status === 'quiet') return t('camSheet.quiet', { detail: h.detail })
+  if (h.status === 'offline') return c.last_report_at ? t('camSheet.offline', { ago: ageLabel(c.last_report_at) }) : t('camSheet.never')
+  if (h.status === 'out_of_credits') return t('camSheet.credits')
   return null
 }
 
 export function CameraHeader({ camera }: { camera: Camera }) {
-  const last = camera.latest ? `Last photo ${whenLabel(camera.latest.captured_at)} (${ageLabel(camera.latest.captured_at)})` : 'No animal photos yet'
+  const last = camera.latest ? t('camSheet.lastPhoto', { when: whenLabel(camera.latest.captured_at), ago: ageLabel(camera.latest.captured_at) }) : t('camSheet.noAnimalPhotos')
   return <>
-    <span className="map-eyebrow">Camera</span>
+    <span className="map-eyebrow">{t('map.camera')}</span>
     <h2 className="bsheet-name">{camera.name}</h2>
     <p className="bsheet-meta">{last}</p>
   </>
@@ -128,16 +128,16 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
       .catch((e: Failure) => {
         answered = true
         if (id !== request.current) return
-        setErr(e.offline ? 'No signal, so the photos didn’t load.' : e.timeout ? 'No answer from the server, so the photos didn’t load.' : `Couldn’t load the photos. ${e.message}`)
+        setErr(e.offline ? t('camSheet.photosNoSignal') : e.timeout ? t('camSheet.photosNoAnswer') : t('camSheet.photosCouldnt', { why: e.message }))
       })
   }, [camera.id])
   useEffect(() => { setPhotos(null); setStale(null); setZoom(null) }, [camera.id])
   useEffect(() => { load(); return () => { request.current++ } }, [load, newest, notesTick])
 
   // A refresh that fails keeps the photos already shown; only an empty strip says so.
-  if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={() => { load(); onRetry() }}>Try again</button></p>
-  if (!photos) return <p className="cam-strip-msg" role="status">Loading photos…</p>
-  if (!photos.length) return <p className="cam-strip-msg">No animal photos from this camera yet.</p>
+  if (err && !photos) return <p className="map-inline-error cam-strip-msg" role="alert">{err} <button type="button" className="map-link" onClick={() => { load(); onRetry() }}>{t('common.tryAgain')}</button></p>
+  if (!photos) return <p className="cam-strip-msg" role="status">{t('photos.loading')}</p>
+  if (!photos.length) return <p className="cam-strip-msg">{t('camSheet.noneFromThis')}</p>
   const viewer: LightboxPhoto[] = photos.map(p => ({
     id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label,
     notes_count: p.notes_count, species_id: p.species_id, fixed_by: p.fixed_by,
@@ -151,8 +151,8 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
     else tiles.push({ at: i, frames: 1 })
   })
   return <>
-    {stale && <p className="cam-strip-msg cam-strip-age" role="status">{noAnswerWords(stale.why)} These photos were saved on this phone {ageLabel(stale.at)}.</p>}
-    <ul className="cam-strip-row" aria-label={`Latest photos from ${camera.name}`}>
+    {stale && <p className="cam-strip-msg cam-strip-age" role="status">{noAnswerWords(stale.why)} {t('camSheet.savedAgo', { ago: ageLabel(stale.at) })}</p>}
+    <ul className="cam-strip-row" aria-label={t('camSheet.latestFrom', { name: camera.name })}>
       {tiles.slice(0, STRIP).map(({ at, frames }) => {
         const p = photos[at]
         // A note on any frame of the burst: often the second shows the animal best.
@@ -160,7 +160,7 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
         return <li key={p.image_id}>
           {/* No "×3" on the tile: everywhere else that means three animals. The viewer
               pages through the burst's photos. */}
-          <button type="button" className="cam-strip-tile" aria-label={`${p.label}, ${whenLabel(p.captured_at)}${frames > 1 ? `, ${frames} photos` : ''}. Open photo.`} onClick={() => setZoom(at)}>
+          <button type="button" className="cam-strip-tile" aria-label={frames > 1 ? t('camSheet.tileBurst', { label: p.label, when: whenLabel(p.captured_at), n: frames }) : t('camSheet.tile', { label: p.label, when: whenLabel(p.captured_at) })} onClick={() => setZoom(at)}>
             <img src={thumbUrl(p.image_id)} alt="" loading="lazy" decoding="async" draggable={false} />
             <NoteMark count={notes} />
             <span aria-hidden="true">{whenLabel(p.captured_at)}</span>
@@ -169,7 +169,7 @@ function PhotoStrip({ camera, notesTick, onNotes, onRetry }: { camera: Camera; n
       })}
     </ul>
     {/* Over everything, the tab bar included: the sheet sits inside the map. */}
-    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel="Back to the map"
+    {zoom != null && createPortal(<PhotoLightbox photos={viewer} start={zoom} backLabel={t('camSheet.backMap')}
       onClose={() => { setZoom(null); if (fixed.current) { fixed.current = false; load() } }}
       onFixed={() => { fixed.current = true }}
       onNotesChange={(id, n) => { setPhotos(ps => ps && ps.map(p => p.image_id === id ? { ...p, notes_count: n } : p)); onNotes() }} />, document.body)}
@@ -195,15 +195,15 @@ export function CameraBody({ camera, admin, onMove, onRename, onUseOwnGps, onAle
   const [notesTick, setNotesTick] = useState(0)
   const [stripTick, setStripTick] = useState(0)
   return <>
-    {!placed && <p className="map-detail-copy">Not on the map yet.{admin ? '' : ' An admin can place it.'}</p>}
+    {!placed && <p className="map-detail-copy">{t('standWind.no_position')}{admin ? '' : ` ${t('place.adminCan')}`}</p>}
     {problem && <p className="cam-sheet-status cam-sheet-status--warn">{problem}</p>}
     {/* Words first; the numbers are one tap away. */}
     <details className="cam-sheet-numbers">
       <summary className={low ? 'cam-sheet-status--warn' : undefined}>{batteryWords(camera.battery_pct)}{signal ? ` · ${signal}` : ''}</summary>
       <p>
-        Battery {camera.battery_pct == null ? 'unknown' : `${camera.battery_pct}%`}
-        {camera.signal_pct != null && ` · Signal ${camera.signal_pct}%`}
-        {camera.last_report_at && ` · Checked in ${ageLabel(camera.last_report_at)}`}
+        {camera.battery_pct == null ? t('camSheet.batteryUnknown') : t('camSheet.batteryPct', { pct: camera.battery_pct })}
+        {camera.signal_pct != null && ` · ${t('camSheet.signalPct', { pct: camera.signal_pct })}`}
+        {camera.last_report_at && ` · ${t('camSheet.checkedIn', { ago: ageLabel(camera.last_report_at) })}`}
       </p>
     </details>
     <p className={`cam-sheet-night${night.tone === 'plain' ? '' : ` cam-sheet-night--${night.tone}`}`}>
@@ -211,17 +211,17 @@ export function CameraBody({ camera, admin, onMove, onRename, onUseOwnGps, onAle
       {night.note && <span className="cam-sheet-night-note">{night.note}</span>}
     </p>
     <PhotoStrip camera={camera} notesTick={stripTick} onNotes={() => setNotesTick(t => t + 1)} onRetry={() => setNotesTick(t => t + 1)} />
-    <Link className="map-button map-button--primary map-button--big" to={`/photos?camera=${encodeURIComponent(camera.id)}`}>See all photos</Link>
+    <Link className="map-button map-button--primary map-button--big" to={`/photos?camera=${encodeURIComponent(camera.id)}`}>{t('camSheet.seeAll')}</Link>
     <div className="cam-sheet-alerts">
-      <CameraAlertRow id={camera.id} name={camera.name} alerts={camera.alerts} label="Alerts from this camera"
-        note={camera.alerts ? 'A message when it catches an animal you picked' : 'Muted for you. The team still hears from it.'}
+      <CameraAlertRow id={camera.id} name={camera.name} alerts={camera.alerts} label={t('camSheet.alerts')}
+        note={camera.alerts ? t('camSheet.alertsOn') : t('camSheet.alertsMuted')}
         onSaved={r => onAlerts(r.alerts, r.enabled)} />
       {!camera.alerts_enabled && <p className="cam-sheet-alerts-off">
-        Your alerts are off, so nothing comes from any camera. <Link to="/settings#notifications">Turn them on in Settings</Link>
+        {tn('camSheet.alertsOff', { link: <Link to="/settings#notifications">{t('camSheet.turnOn')}</Link> })}
       </p>}
     </div>
     {(admin || camera.can_rename) && <div className="map-actions map-actions--admin">
-      {admin && <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>}
+      {admin && <button type="button" className="map-button" onClick={onMove}>{placed ? t('place.move') : t('place.placeIt')}</button>}
       {camera.can_rename && <RenameControl name={camera.name} onRename={onRename} maxLength={100} />}
     </div>}
     {admin && camera.location_is_custom && camera.provider_location && <OwnGpsControl onUse={onUseOwnGps} />}
@@ -229,7 +229,7 @@ export function CameraBody({ camera, admin, onMove, onRename, onUseOwnGps, onAle
         would move them under a thumb. Asked again with the photo strip (a note changed
         there, its Try again) and when the camera has a newer photo. Quiet when it fails:
         the photo strip already says there's no signal. */}
-    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={`${notesTick}:${camera.latest?.image_id ?? ''}`} backLabel="Back to the map"
+    <HighlightStrip className="cam-sheet-wal" cameraId={camera.id} limit={12} refreshKey={`${notesTick}:${camera.latest?.image_id ?? ''}`} backLabel={t('camSheet.backMap')}
       quietErrors onChange={() => setStripTick(t => t + 1)} />
   </>
 }

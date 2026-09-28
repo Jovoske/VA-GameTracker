@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { type Failure, type Got, HARVEST_DRAFT_KEY, api, getFresh, peek, peekMe, plainWords, whoAmI } from '../api'
 import { useRefetchOnReturn } from '../hooks'
-import { nightLabel } from '../night'
+import { type Key, cap, fmtDate, fmtTime, t } from '../i18n'
+import { nightLabel, nightParts } from '../night'
 import { newNoteId } from '../notes'
 import { onSitSync } from '../sits'
 import Overlay from './Overlay'
@@ -40,28 +41,32 @@ export type HarvestLine = {
 /** A SHOT with nothing logged yet (GET /harvests/asks). */
 export type HarvestAsk = { sit_id: string; stand_id: string; stand: string; night: string; shot_at: string | null }
 
-export const SEXES: [string, string][] = [['male', 'Male'], ['female', 'Female'], ['unknown', 'Not sure']]
-export const AGES: [string, string][] = [
-  ['juvenile', 'Young of the year'], ['young_adult', 'Young adult'], ['mature_adult', 'Adult'],
-  ['old', 'Old'], ['unknown', 'Not sure'],
+export const SEXES: [string, Key][] = [['male', 'harvest.male'], ['female', 'harvest.female'], ['unknown', 'harvest.notSure']]
+export const AGES: [string, Key][] = [
+  ['juvenile', 'harvest.juvenile'], ['young_adult', 'harvest.youngAdult'], ['mature_adult', 'harvest.adult'],
+  ['old', 'harvest.old'], ['unknown', 'harvest.notSure'],
 ]
-const word = (list: [string, string][], key: string) => list.find(([k]) => k === key)?.[1] ?? key
+const word = (list: [string, Key][], key: string) => {
+  const k = list.find(([v]) => v === key)?.[1]
+  return k ? t(k) : key
+}
 
 /** "Wild boar, male, adult · seal CU-0412": the line in a few words. */
 export function lineWords(h: HarvestLine): string {
   const parts = [h.species]
-  if (h.sex !== 'unknown') parts.push(word(SEXES, h.sex).toLowerCase())
-  if (h.age_class !== 'unknown') parts.push(word(AGES, h.age_class).toLowerCase())
-  return `${parts.join(', ')}${h.seal ? ` · seal ${h.seal}` : ''}`
+  if (h.sex !== 'unknown') parts.push(word(SEXES, h.sex).toLocaleLowerCase())
+  if (h.age_class !== 'unknown') parts.push(word(AGES, h.age_class).toLocaleLowerCase())
+  return `${parts.join(', ')}${h.seal ? ` · ${t('harvest.seal', { seal: h.seal })}` : ''}`
 }
 
 const TIMEOUT_MS = 20_000
 
-function failed(e: unknown, what: string): string {
+/** Why `what` (a key: "it wasn’t saved") went wrong, in a sentence. */
+function failed(e: unknown, what: Key): string {
   const x = e as Failure
-  if (x.offline) return `No signal, so ${what}. Nothing you wrote is lost: try again when you have a connection.`
-  if (x.timeout) return `No answer from the server, so ${what}. Try again: it won’t be logged twice.`
-  return `${plainWords(x.message || 'Something went wrong.')} ${what[0].toUpperCase()}${what.slice(1)}.`
+  if (x.offline) return t('harvest.failNoSignal', { what: t(what) })
+  if (x.timeout) return t('harvest.failTimeout', { what: t(what) })
+  return t('harvest.failOther', { reason: plainWords(x.message || t('common.wentWrong')), what: cap(t(what)) })
 }
 
 /** `2026-10-09T21:40` in this phone's clock, for a datetime-local field. */
@@ -77,8 +82,8 @@ function localInput(iso: string | number): string {
 function whenWords(local: string): string {
   const d = new Date(local)
   if (!local || Number.isNaN(d.getTime())) return ''
-  const day = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-  return `${day}, ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
+  const day = fmtDate(d, { weekday: 'short', day: 'numeric', month: 'short' })
+  return `${day}, ${fmtTime(d)}`
 }
 
 /** "78.5" or "78,5" (a Spanish keyboard) as kg; null for nothing; NaN for nonsense. */
@@ -171,7 +176,7 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
 
   function loadList() {
     setLoadErr('')
-    loadChoices().then(setChoices).catch((e) => setLoadErr(failed(e, 'the list of animals didn’t load')))
+    loadChoices().then(setChoices).catch((e) => setLoadErr(failed(e, 'harvest.what.list')))
   }
   useEffect(loadList, [])
 
@@ -181,15 +186,15 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
   async function save() {
     if (busy) return
     setErr('')
-    if (!d.species) { setErr('Pick the animal first.'); return }
+    if (!d.species) { setErr(t('harvest.pickFirst')); return }
     const weight = kg(d.weight)
     if (Number.isNaN(weight) || (weight != null && (weight <= 0 || weight >= 1000))) {
-      setErr('The weight is in kilos, like 78 or 78.5. Leave it empty if nobody weighed it.')
+      setErr(t('harvest.weightKilos'))
       return
     }
     const at = d.when ? new Date(d.when) : null
-    if (at && Number.isNaN(at.getTime())) { setErr('That time isn’t a date. Pick it again.'); return }
-    if (at && at.getTime() > Date.now() + 10 * 60_000) { setErr('That time is still to come. Check the date.'); return }
+    if (at && Number.isNaN(at.getTime())) { setErr(t('harvest.notADate')); return }
+    if (at && at.getTime() > Date.now() + 10 * 60_000) { setErr(t('harvest.future')); return }
     const body: Record<string, unknown> = {
       species_id: d.species, sex: d.sex, age_class: d.age, seal: d.seal.trim() || null,
       weight_kg: weight, notes: d.notes.trim() || null, ...(at ? { taken_at: at.toISOString() } : {}),
@@ -207,7 +212,7 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
       onSaved(saved)
       closeRef.current()
     } catch (e) {
-      setErr(failed(e, 'it wasn’t saved'))
+      setErr(failed(e, 'harvest.what.notSaved'))
     } finally {
       setBusy(null)
     }
@@ -224,17 +229,17 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
       onDeleted?.(line.id)
       closeRef.current()
     } catch (e) {
-      setErr(failed(e, 'it wasn’t taken out'))
+      setErr(failed(e, 'harvest.what.notTakenOut'))
     } finally {
       setBusy(null)
     }
   }
 
   const where = ask ? `${ask.stand} · ${nightLabel(ask.night)}` : line?.stand ? line.stand : null
-  const title = line ? 'Change the harvest' : 'Log the harvest'
+  const title = line ? t('harvest.changeTitle') : t('harvest.logTitle')
 
   return (
-    <Overlay label={title} backLabel="Back" onClose={onClose} backdrop="var(--bg)" zIndex={60}
+    <Overlay label={title} backLabel={t('common.back')} onClose={onClose} backdrop="var(--bg)" zIndex={60}
       style={{ flexDirection: 'column', alignItems: 'stretch', justifyContent: 'flex-start' }}>
       {(close) => { closeRef.current = close; return (
         <form className="hv-form" onSubmit={(e) => { e.preventDefault(); save() }} aria-busy={!!busy}>
@@ -242,9 +247,9 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
           {where && <p className="hv-where">{where}</p>}
 
           <fieldset className="hv-set">
-            <legend>What was it?</legend>
-            {!choices && !loadErr && <p className="hv-dim" role="status">Loading the animals…</p>}
-            {loadErr && <p className="hv-err" role="alert">{loadErr} <button type="button" className="hv-link" onClick={loadList}>Try again</button></p>}
+            <legend>{t('harvest.whatWasIt')}</legend>
+            {!choices && !loadErr && <p className="hv-dim" role="status">{t('harvest.loadingAnimals')}</p>}
+            {loadErr && <p className="hv-err" role="alert">{loadErr} <button type="button" className="hv-link" onClick={loadList}>{t('common.tryAgain')}</button></p>}
             <div className="hv-grid">
               {[...likely, ...(more ? rest : [])].map((c) => (
                 <button key={c.id} type="button" className="hv-choice" aria-pressed={d.species === c.id}
@@ -253,75 +258,75 @@ export function HarvestForm({ ask, line, stands, onClose, onSaved, onDeleted }: 
             </div>
             {rest.length > 0 && (
               <button type="button" className="hv-link hv-more" aria-expanded={more} onClick={() => setMore((m) => !m)}>
-                {more ? 'Fewer animals' : 'More animals'}
+                {more ? t('harvest.fewer') : t('harvest.more')}
               </button>
             )}
           </fieldset>
 
           <fieldset className="hv-set">
-            <legend>Sex</legend>
+            <legend>{t('harvest.sex')}</legend>
             <div className="hv-row">
               {SEXES.map(([k, w]) => (
-                <button key={k} type="button" className="hv-choice" aria-pressed={d.sex === k} onClick={() => set({ sex: k })}>{w}</button>
+                <button key={k} type="button" className="hv-choice" aria-pressed={d.sex === k} onClick={() => set({ sex: k })}>{t(w)}</button>
               ))}
             </div>
           </fieldset>
 
           <fieldset className="hv-set">
-            <legend>Age</legend>
+            <legend>{t('harvest.age')}</legend>
             <div className="hv-grid">
               {AGES.map(([k, w]) => (
-                <button key={k} type="button" className="hv-choice" aria-pressed={d.age === k} onClick={() => set({ age: k })}>{w}</button>
+                <button key={k} type="button" className="hv-choice" aria-pressed={d.age === k} onClick={() => set({ age: k })}>{t(w)}</button>
               ))}
             </div>
           </fieldset>
 
           <div className="hv-pair">
             <label className="hv-field">
-              <span>Seal number <small>if tagged</small></span>
+              <span>{t('harvest.sealNumber')} <small>{t('harvest.ifTagged')}</small></span>
               <input className="input" value={d.seal} maxLength={40} autoComplete="off" autoCapitalize="characters"
                 onChange={(e) => set({ seal: e.target.value })} />
             </label>
             <label className="hv-field">
-              <span>Weight, kg <small>if weighed</small></span>
+              <span>{t('harvest.weight')} <small>{t('harvest.ifWeighed')}</small></span>
               <input className="input" value={d.weight} inputMode="decimal" autoComplete="off"
                 onChange={(e) => set({ weight: e.target.value })} />
             </label>
           </div>
           <label className="hv-field">
-            <span>When <small className="hv-when">{whenWords(d.when)}</small></span>
+            <span>{t('harvest.when')} <small className="hv-when">{whenWords(d.when)}</small></span>
             <input className="input" type="datetime-local" value={d.when} max={localInput(Date.now())}
               onChange={(e) => set({ when: e.target.value })} />
           </label>
           {!ask && !line?.sit_id && stands && stands.length > 0 && (
             <label className="hv-field">
-              <span>Where</span>
+              <span>{t('harvest.where')}</span>
               <select className="input" value={stand} onChange={(e) => setStand(e.target.value)}>
-                <option value="">Not at a stand</option>
+                <option value="">{t('harvest.notAtStand')}</option>
                 {stands.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </label>
           )}
           {admin && (
             <label className="hv-field">
-              <span>Who shot it <small>{line ? '' : 'leave empty for the hunter on the sit, or you'}</small></span>
+              <span>{t('harvest.whoShot')} <small>{line ? '' : t('harvest.whoShotHint')}</small></span>
               <input className="input" value={d.hunter} maxLength={60} autoComplete="off"
                 onChange={(e) => set({ hunter: e.target.value })} />
             </label>
           )}
           <label className="hv-field">
-            <span>Notes</span>
+            <span>{t('harvest.notes')}</span>
             <textarea className="input hv-notes" rows={3} value={d.notes} maxLength={500}
               onChange={(e) => set({ notes: e.target.value })} />
           </label>
 
           {err && <p className="hv-err" role="alert">{err}</p>}
           <button type="submit" className="btn hv-save" disabled={!!busy}>
-            {busy === 'save' ? 'Saving…' : line ? 'Save the change' : 'Log it'}
+            {busy === 'save' ? t('common.saving') : line ? t('harvest.saveChange') : t('harvest.logIt')}
           </button>
           {line && onDeleted && (
             <button type="button" className="hv-link hv-delete" onClick={remove} disabled={!!busy}>
-              {busy === 'delete' ? 'Taking it out…' : sure ? 'Tap again to take it out of the book' : 'Logged by mistake? Take it out'}
+              {busy === 'delete' ? t('harvest.takingOut') : sure ? t('harvest.tapAgain') : t('harvest.mistake')}
             </button>
           )}
         </form>
@@ -334,10 +339,10 @@ type Done = { ask: HarvestAsk; words: string; line?: HarvestLine; nothing?: bool
 
 /** "last night", "on Fri night", "on the night of Fri 18 Sep": when the SHOT was. */
 function whenShot(night: string): string {
-  const w = nightLabel(night)
-  if (w === 'Last night') return 'last night'
-  if (w === 'Tonight' || w === 'Today') return 'tonight'
-  return w.startsWith('Night of ') ? `on the night of ${w.slice(9)}` : `on ${w}`
+  const n = nightParts(night)
+  if (n.kind === 'last') return t('harvest.shotLastNight')
+  if (n.kind === 'tonight' || n.kind === 'today') return t('harvest.shotTonight')
+  return n.kind === 'week' ? t('harvest.shotOnDay', { day: n.day }) : t('harvest.shotOnDate', { date: n.date })
 }
 
 /**
@@ -382,10 +387,10 @@ export default function HarvestPrompt() {
       await api(`/sits/${ask.sit_id}/no-harvest`, { method: 'POST', body: JSON.stringify({ nothing: yes }), timeoutMs: TIMEOUT_MS })
       setDone((cur) => {
         const { [ask.sit_id]: _, ...rest } = cur
-        return yes ? { ...rest, [ask.sit_id]: { ask, words: `Nothing to log from ${ask.stand}.`, nothing: true } } : rest
+        return yes ? { ...rest, [ask.sit_id]: { ask, words: t('harvest.nothingFrom', { stand: ask.stand }), nothing: true } } : rest
       })
     } catch (e) {
-      setErrs((x) => ({ ...x, [ask.sit_id]: failed(e, 'it wasn’t saved') }))
+      setErrs((x) => ({ ...x, [ask.sit_id]: failed(e, 'harvest.what.notSaved') }))
     } finally {
       setBusy(null)
     }
@@ -404,27 +409,27 @@ export default function HarvestPrompt() {
     <div className="hv-prompts">
       {cards.map(({ ask, words, line, nothing: none }) => (
         <section key={ask.sit_id} className="card hv-ask" aria-labelledby={`hv-ask-${ask.sit_id}`}>
-          <h2 id={`hv-ask-${ask.sit_id}`}>You shot at {ask.stand} {whenShot(ask.night)}</h2>
+          <h2 id={`hv-ask-${ask.sit_id}`}>{t('harvest.youShot', { stand: ask.stand, when: whenShot(ask.night) })}</h2>
           {words ? (
             <>
               <p className="hv-done" role="status">{words}</p>
               <div className="hv-after">
                 {none ? (
-                  <button type="button" className="hv-link" disabled={!!busy} onClick={() => nothing(ask, false)}>Undo</button>
+                  <button type="button" className="hv-link" disabled={!!busy} onClick={() => nothing(ask, false)}>{t('common.undo')}</button>
                 ) : (
                   <>
-                    {line && <button type="button" className="hv-link" onClick={() => setOpen({ ask, line })}>Change it</button>}
-                    <button type="button" className="hv-link" onClick={() => setOpen({ ask })}>Another animal from this sit</button>
+                    {line && <button type="button" className="hv-link" onClick={() => setOpen({ ask, line })}>{t('harvest.changeIt')}</button>}
+                    <button type="button" className="hv-link" onClick={() => setOpen({ ask })}>{t('harvest.another')}</button>
                   </>
                 )}
               </div>
             </>
           ) : (
             <>
-              <p className="hv-dim">Log it for the season’s harvest book: what it was, and the seal number if you tagged it.</p>
-              <button type="button" className="hv-primary" disabled={!!busy} onClick={() => setOpen({ ask })}>Log the animal</button>
+              <p className="hv-dim">{t('harvest.askHint')}</p>
+              <button type="button" className="hv-primary" disabled={!!busy} onClick={() => setOpen({ ask })}>{t('harvest.logAnimal')}</button>
               <button type="button" className="hv-link hv-nothing" disabled={!!busy} onClick={() => nothing(ask, true)}>
-                {busy === ask.sit_id ? 'Saving…' : 'Nothing to log (missed, or not found)'}
+                {busy === ask.sit_id ? t('common.saving') : t('harvest.nothingToLog')}
               </button>
             </>
           )}
@@ -438,7 +443,7 @@ export default function HarvestPrompt() {
           onClose={() => setOpen(null)}
           onSaved={(saved) => {
             const ask = open.ask
-            setDone((cur) => ({ ...cur, [ask.sit_id]: { ask, words: `Logged: ${lineWords(saved)}.`, line: saved } }))
+            setDone((cur) => ({ ...cur, [ask.sit_id]: { ask, words: t('harvest.logged', { line: lineWords(saved) }), line: saved } }))
           }}
         />
       )}

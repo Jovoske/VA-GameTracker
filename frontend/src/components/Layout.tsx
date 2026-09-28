@@ -9,8 +9,9 @@ import { ImagesIcon } from '@phosphor-icons/react/dist/csr/Images'
 import { SlidersHorizontalIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { signOut } from '../api'
+import { signOut, whoAmI } from '../api'
 import { useRefetchOnReturn } from '../hooks'
+import { type Key, t } from '../i18n'
 import { confirmLeave } from '../map/draftGuard'
 import { checkThisDevice, listenForNewSubscriptions } from '../push'
 import { useNewerBuild } from '../serviceWorker'
@@ -34,14 +35,14 @@ import { PageBoundary } from './ErrorBoundary'
  * tabs don't fit a thumb, and Settings used to sit off the edge behind a sideways
  * scroll nobody could see (audit K-11). There these three go under a "More" tab.
  */
-const TABS: { to: string; label: string; Ico: Icon; end?: boolean; more?: boolean }[] = [
-  { to: '/', label: 'Tonight', Ico: MoonStarsIcon, end: true },
-  { to: '/photos', label: 'Photos', Ico: ImagesIcon },
-  { to: '/stands', label: 'Stands', Ico: CrosshairIcon },
-  { to: '/cameras', label: 'Cameras', Ico: CameraIcon, more: true },
-  { to: '/map', label: 'Map', Ico: MapTrifoldIcon },
-  { to: '/insights', label: 'Insights', Ico: ChartLineUpIcon, more: true },
-  { to: '/settings', label: 'Settings', Ico: SlidersHorizontalIcon, more: true },
+const TABS: { to: string; label: Key; Ico: Icon; end?: boolean; more?: boolean }[] = [
+  { to: '/', label: 'nav.tonight', Ico: MoonStarsIcon, end: true },
+  { to: '/photos', label: 'nav.photos', Ico: ImagesIcon },
+  { to: '/stands', label: 'nav.stands', Ico: CrosshairIcon },
+  { to: '/cameras', label: 'nav.cameras', Ico: CameraIcon, more: true },
+  { to: '/map', label: 'nav.map', Ico: MapTrifoldIcon },
+  { to: '/insights', label: 'nav.insights', Ico: ChartLineUpIcon, more: true },
+  { to: '/settings', label: 'nav.settings', Ico: SlidersHorizontalIcon, more: true },
 ]
 const onTab = (path: string, t: { to: string; end?: boolean }) => (t.end ? path === t.to : path.startsWith(t.to))
 
@@ -64,9 +65,9 @@ export default function Layout() {
 
   // Browser-tab / app-switcher title follows the page.
   useEffect(() => {
-    const t = TABS.find((x) => onTab(loc.pathname, x))
-    document.title = t ? `GameSense · ${t.label}` : 'GameSense'
-  }, [loc.pathname])
+    const tab = TABS.find((x) => onTab(loc.pathname, x))
+    document.title = tab ? `GameSense · ${t(tab.label)}` : 'GameSense'
+  })
 
   // The "More" tab's list, on a small screen: shut by a choice, a tap elsewhere or Escape.
   const [more, setMore] = useState(false)
@@ -83,7 +84,7 @@ export default function Layout() {
       document.removeEventListener('keydown', esc)
     }
   }, [more])
-  const inMore = TABS.some((t) => t.more && onTab(loc.pathname, t))
+  const inMore = TABS.some((x) => x.more && onTab(loc.pathname, x))
 
   // Alerts keep coming: this phone's subscription is sent again every time the app
   // opens, which puts back a server copy lost to anything (audit D-04), and again
@@ -92,6 +93,8 @@ export default function Layout() {
   // a few hours counts as opening it.
   useEffect(() => {
     void checkThisDevice()
+    // Who is signed in, which also brings the language they chose on another phone.
+    whoAmI().catch(() => {})
     return listenForNewSubscriptions()
   }, [])
   useRefetchOnReturn(() => void checkThisDevice(), RECHECK_MS)
@@ -119,17 +122,17 @@ export default function Layout() {
 
   return (
     <div className={onMap ? 'layout layout--map' : 'layout'} style={{ maxWidth: onMap ? 1120 : 720, margin: '0 auto', minHeight: '100%' }}>
-      <a className="skip-link" href="#main-content">Skip to content</a>
+      <a className="skip-link" href="#main-content">{t('nav.skip')}</a>
       <header className="appbar">
         <div style={{ fontWeight: 600, fontSize: 16, marginRight: 6, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}>
           Game<span style={{ color: 'var(--go)' }}>Sense</span>
         </div>
 
         {/* Desktop / tablet: links in the header. On phones the bottom tab bar takes over. */}
-        <nav className="topnav" aria-label="Main navigation">
-          {TABS.map((t) => (
-            <NavLink key={t.to} to={t.to} end={t.end} style={({ isActive }) => linkStyle(isActive)}>
-              {t.label}
+        <nav className="topnav" aria-label={t('nav.main')}>
+          {TABS.map((x) => (
+            <NavLink key={x.to} to={x.to} end={x.end} style={({ isActive }) => linkStyle(isActive)}>
+              {t(x.label)}
             </NavLink>
           ))}
         </nav>
@@ -150,7 +153,7 @@ export default function Layout() {
             whiteSpace: 'nowrap',
           }}
         >
-          Sign out
+          {t('nav.signOut')}
         </button>
       </header>
 
@@ -159,8 +162,8 @@ export default function Layout() {
       <main className="page" id="main-content" tabIndex={-1}>
         {newerBuild && (
           <div className="update-ready" role="status">
-            <span>A new version of GameSense is ready.</span>
-            <button type="button" onClick={() => location.reload()}>Reload</button>
+            <span>{t('nav.newVersion')}</span>
+            <button type="button" onClick={() => location.reload()}>{t('common.reload')}</button>
           </div>
         )}
         {/* A page that breaks is replaced by a message; the tab bar stays, and
@@ -171,7 +174,7 @@ export default function Layout() {
       </main>
 
       {/* Phone: thumb-reachable bottom tabs (iOS-app style, matches the PWA delivery). */}
-      <nav className="tabbar" aria-label="Main navigation" ref={tabbar}>
+      <nav className="tabbar" aria-label={t('nav.main')} ref={tabbar}>
         {TABS.map(({ to, label, Ico, end, more: under }) => (
           <NavLink key={to} to={to} end={end}
             className={({ isActive }) => [isActive ? 'active' : '', under ? 'tab-more' : ''].join(' ').trim()}>
@@ -180,24 +183,24 @@ export default function Layout() {
                 <span className="ico">
                   <Ico size={22} weight={isActive ? 'fill' : 'regular'} />
                 </span>
-                {label}
+                <span className="tab-label">{t(label)}</span>
               </>
             )}
           </NavLink>
         ))}
-        {/* Under 380 px only (theme.css): Cameras, Insights and Settings, one tap away. */}
+        {/* Under 380 px, or 520 px in the longer languages (theme.css): Cameras, Insights and Settings, one tap away. */}
         <div className="tab-more-wrap" ref={moreRef}>
           <button type="button" className={`tab-more-btn${inMore ? ' active' : ''}`} aria-expanded={more}
             aria-controls="more-menu" onClick={() => setMore((v) => !v)}>
             <span className="ico"><DotsThreeIcon size={22} weight={inMore ? 'bold' : 'regular'} /></span>
-            More
+            <span className="tab-label">{t('nav.more')}</span>
           </button>
           {more && (
             <div className="more-menu" id="more-menu">
-              {TABS.filter((t) => t.more).map(({ to, label, Ico }) => (
+              {TABS.filter((x) => x.more).map(({ to, label, Ico }) => (
                 <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : '')}>
                   {({ isActive }) => (
-                    <><Ico size={22} weight={isActive ? 'fill' : 'regular'} aria-hidden="true" />{label}</>
+                    <><Ico size={22} weight={isActive ? 'fill' : 'regular'} aria-hidden="true" />{t(label)}</>
                   )}
                 </NavLink>
               ))}

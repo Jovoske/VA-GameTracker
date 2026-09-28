@@ -4,7 +4,8 @@ import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, thumbUr
 import PhotoLightbox, { type LightboxPhoto, morePhotosFailed } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import type { PhotoFix } from '../components/PhotoFix'
-import { useRefetchOnReturn } from '../hooks'
+import { useOnServerLanguage, useRefetchOnReturn } from '../hooks'
+import { fmtTime, t, useLang } from '../i18n'
 import { photoHeading } from '../night'
 import './photos.css'
 
@@ -69,7 +70,7 @@ function readPick(): Pick {
   }
 }
 
-const timeOf = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+const timeOf = (iso: string) => fmtTime(iso)
 
 /** Newest first, as the server orders the feed: by when the photo was taken, then id. */
 const feedOrder = (a: Photo, b: Photo) =>
@@ -245,6 +246,9 @@ export default function Photos() {
   useEffect(load, [load])
   useEffect(loadFilters, [loadFilters])
   useRefetchOnReturn(() => { if (!viewing.current) loadNewer() }, 120_000)
+  // Each photo's animal is named by the server in the person's language: a new one
+  // there names them all again, not only the ones that came in since.
+  useOnServerLanguage(() => { if (!viewing.current) load() })
 
   // Open the photo a notification pointed at: in the list when it is on the first
   // page; otherwise, by the time the alert carries, with the frames just before it
@@ -274,8 +278,8 @@ export default function Photos() {
     }
     ;(Number.isFinite(taken) ? burst() : alone())
       .catch((e: Failure) => setNotice(e.status === 404 || e.status === 422
-        ? 'That photo isn’t available any more.'
-        : `Couldn’t open that photo. ${e.message}`))
+        ? t('photos.gone')
+        : t('photos.couldntOpen', { why: e.message })))
   }, [photos, setParams, pick])
 
   /** A note was added or removed in a viewer: the tile's marker and the strip follow. */
@@ -359,6 +363,7 @@ export default function Photos() {
   // By night, as the server counts them: last night's photos after midnight are
   // under "Last night" with the rest of it, not under "Today" (audit I-27); and the
   // daytime ones under the day, as whenSeen says them ("Today", "Yesterday").
+  const lang = useLang()
   const grouped = useMemo(() => {
     const out: { day: string; label: string; start: number; items: Photo[] }[] = []
     const now = Date.now()
@@ -369,42 +374,42 @@ export default function Photos() {
       else out.push({ day: key, label, start: i, items: [p] })
     })
     return out
-  }, [photos])
+  }, [photos, lang])
 
   return (
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
-      <h1 className="page-title">Photos</h1>
+      <h1 className="page-title">{t('nav.photos')}</h1>
 
-      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>}
-      <HighlightStrip refreshKey={notesTick} backLabel="Back to photos" onChange={notesChanged}
+      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>{t('common.ok')}</button></div>}
+      <HighlightStrip refreshKey={notesTick} backLabel={t('photos.back')} onChange={notesChanged}
         onFixed={photoFixed} onClosed={closeViewer} />
 
       <div className="photos-filters" aria-busy={pending}>
         <div className="photos-filter-row">
           <button className="photos-chip" aria-pressed={everything} onClick={() => choose({ species: [], cameras: [] })}>
-            Everything
+            {t('photos.everything')}
           </button>
           {filters?.species.map((s) => (
             <button key={s.id} className="photos-chip" aria-pressed={!pick.people && pick.species.includes(s.id)}
-              title={`${s.count} photos`}
+              title={t('common.photos', { count: s.count })}
               onClick={() => choose({ ...pick, people: false, species: toggleIn(pick.people ? [] : pick.species, s.id) })}>
               {s.common_name}
             </button>
           ))}
           {peopleChip && (
             <button className="photos-chip photos-chip--people" aria-pressed={!!pick.people}
-              title={`${filters?.people ?? 0} photos. Only admins see these.`}
+              title={t('photos.peopleTitle', { count: filters?.people ?? 0 })}
               onClick={() => choose({ species: [], cameras: pick.cameras, people: !pick.people })}>
-              People &amp; vehicles
+              {t('photos.people')}
             </button>
           )}
         </div>
         {filters && filters.cameras.length > 1 && (
           <div className="photos-filter-row">
-            <span className="photos-filter-name">Cameras</span>
+            <span className="photos-filter-name">{t('nav.cameras')}</span>
             {filters.cameras.map((c) => (
               <button key={c.id} className="photos-chip" aria-pressed={pick.cameras.includes(c.id)}
-                title={`${c.count} photos`}
+                title={t('common.photos', { count: c.count })}
                 onClick={() => choose({ ...pick, cameras: toggleIn(pick.cameras, c.id) })}>
                 {c.name}
               </button>
@@ -413,23 +418,23 @@ export default function Photos() {
         )}
       </div>
 
-      {pending && photos && <div role="status" className="photos-pending">Loading…</div>}
-      {err && <div className="status-panel" role="alert">Could not load photos. {err}<button className="text-action" onClick={load}>Try again</button></div>}
+      {pending && photos && <div role="status" className="photos-pending">{t('common.loading')}</div>}
+      {err && <div className="status-panel" role="alert">{t('photos.couldntLoad', { why: err })}<button className="text-action" onClick={load}>{t('common.tryAgain')}</button></div>}
       {savedCopy && !err && (
         <div className="status-panel" role="status">
-          {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
-          <button className="text-action" onClick={load}>Try again</button>
+          {noAnswerWords(savedCopy.why)} {t('photos.savedCopy', { ago: ageLabel(savedCopy.at) })}
+          <button className="text-action" onClick={load}>{t('common.tryAgain')}</button>
         </div>
       )}
-      {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
+      {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>{t('photos.loading')}</div>}
       {pick.people && (
         <p className="photos-people-note">
-          Photos with a person or a vehicle in them. Only admins see these: they never go in the team’s photos, counts or alerts.
+          {t('photos.peopleNote')}
         </p>
       )}
       {photos && photos.length === 0 && (
         <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>
-          {pick.people ? 'No people or vehicles on camera.' : everything ? 'No animal photos yet.' : 'Nothing for that choice yet. Try fewer chips.'}
+          {pick.people ? t('photos.noPeople') : everything ? t('photos.none') : t('photos.noneForChoice')}
         </div>
       )}
 
@@ -446,7 +451,7 @@ export default function Photos() {
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => setZoom(g.start + j)}
               >
-                <img src={thumbUrl(p.image_id)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
+                <img src={thumbUrl(p.image_id)} loading="lazy" alt={t('wal.atCamera', { label: p.label, camera: p.camera })} />
                 <NoteMark count={p.notes_count} />
                 <div className="photos-tile-meta">
                   <span className={`photos-tile-label${p.has_person != null ? ' photos-tile-label--people' : ''}`}>{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
@@ -463,19 +468,19 @@ export default function Photos() {
       {moreErr && nextBefore && !loadingMore && <div className="status-panel" role="alert">{moreErr}</div>}
       {nextBefore && (
         <button className="text-action photos-more" onClick={loadMore} disabled={loadingMore}>
-          {loadingMore ? 'Loading…' : 'Show older photos'}
+          {loadingMore ? t('common.loading') : t('photos.older')}
         </button>
       )}
 
       <p style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 18 }}>
-        <Link to="/animals" style={{ color: 'inherit', display: 'inline-flex', alignItems: 'center', minHeight: 44 }}>Animals by species and named animals</Link>
+        <Link to="/animals" style={{ color: 'inherit', display: 'inline-flex', alignItems: 'center', minHeight: 44 }}>{t('photos.animalsLink')}</Link>
       </p>
 
       {zoom != null && photos && (
         <PhotoLightbox
           photos={photos.map(toViewer)}
           start={zoom}
-          backLabel="Back to photos"
+          backLabel={t('photos.back')}
           onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
           onFixed={photoFixed}
@@ -489,7 +494,7 @@ export default function Photos() {
         <PhotoLightbox
           photos={single.items.map(toViewer)}
           start={single.start}
-          backLabel="Back to photos"
+          backLabel={t('photos.back')}
           onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
           onFixed={(id, fix) => {

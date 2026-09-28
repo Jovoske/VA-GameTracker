@@ -1,6 +1,7 @@
-const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
-const compiled=ts.transpileModule(fs.readFileSync('src/map/geometry.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
-const context={exports:{}};vm.runInNewContext(compiled,context);const {windGeometry,downwind,distanceM,bearingDeg,areaM2,formatDistance,formatArea,measureLabel,validLngLat,direction,isNewCorner,nearFirstCorner,crossesItself}=context.exports;
+const assert=require('node:assert/strict'),vm=require('node:vm'),{buildSync}=require('esbuild');
+// Bundled with what it imports: its words come from src/i18n (English here).
+const compiled=buildSync({entryPoints:['src/map/geometry.ts'],bundle:true,write:false,format:'cjs',platform:'node',logLevel:'silent'}).outputFiles[0].text;
+const context={module:{exports:{}}};vm.runInNewContext(compiled,context);const {windGeometry,downwind,distanceM,bearingDeg,areaM2,formatDistance,formatArea,measureLabel,validLngLat,direction,isNewCorner,nearFirstCorner,crossesItself}=context.module.exports;
 for(const bearing of [0,45,90,135,180,225,270,315]) {
  const stand={lat:39,lon:-1.3,wind:{status:'clean',source:'synoptic',scent_bearing:bearing,range_m:300}};
  const g=windGeometry(stand,300);const shaft=g.arrow.coordinates[0],head=g.arrow.coordinates[1],tip=shaft[1];
