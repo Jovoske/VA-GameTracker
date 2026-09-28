@@ -131,7 +131,7 @@ def pushes(db_session, monkeypatch):
 
     rec = _Recorder()
     monkeypatch.setattr(dispatch.push, "send_to_user", rec)
-    monkeypatch.setattr(core_db, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    monkeypatch.setattr(core_db, "SessionLocal", core_db.server_sessions(db_session.get_bind()))
     return rec
 
 

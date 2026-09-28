@@ -317,6 +317,10 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "This is the estate's main SPYPOINT login, which is fetched already. Remove this copy."
     ),
     "sync.some_failed": "{n} of {total} cameras failed. {error}",
+    "sync.login_not_saved": (
+        "The photos came in, but the login's status couldn't be saved ({error}). "
+        "It tries again on the next fetch."
+    ),
     "ubox.snap.retry": {
         "one": "{n} photo wouldn't download. It is tried again on the next fetch.",
         "other": "{n} photos wouldn't download. They are tried again on the next fetch.",
@@ -953,6 +957,7 @@ STORED: tuple[str, ...] = (
     "ubox.err.download_http",
     "login.copy_of_primary",
     "sync.some_failed",
+    "sync.login_not_saved",
     "ubox.snap.retry",
     "ubox.snap.dropped",
     "ubox.snap.some",

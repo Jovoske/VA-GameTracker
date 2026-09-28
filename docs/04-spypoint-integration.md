@@ -50,7 +50,13 @@ This endpoint set and the host/path URL reconstruction are the genuinely valuabl
   it. Re-entering a password starts a new one.
 - **One error costs one photo or one camera.** Photo inserts and enrichment run in
   savepoints, pages commit on their own, and a login or camera failing never stops the
-  others (or UBox, or the AI pass: `app.ingestion.fetch`).
+  others (or UBox, or the AI pass: `app.ingestion.fetch`). A login's bookkeeping after
+  its cameras (its status, its kept sign-in, when its history import was tried) failing
+  costs that login only: its photos are in, and its line in the run's summary says what
+  the database refused (`logins.bookkeeping`). A database error is always named by the
+  rule it broke ("IntegrityError: pk_app_settings", `app.core.db.error_name`), in the
+  log and in what the Check button shows: on 28 Sep 2026 "IntegrityError" alone left a
+  fetch that failed every 15 minutes unexplained without the server's log.
 - **Camera clocks.** An `originDate` more than 30 days before SPYPOINT's `date`, or more
   than 3 h after it, is a reset or wrong clock: the photo is filed at `date` instead.
 - **Busy.** A 429 or 5xx with `Retry-After` of up to 30 s is waited out once (SPYPOINT

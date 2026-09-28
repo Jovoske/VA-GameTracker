@@ -209,8 +209,10 @@ def _individual(db, estate, cam, label, n, notes=None):
     ind = Individual(estate_id=estate.id, label=label, species_id="wild_boar", notes=notes)
     db.add(ind)
     db.flush()
-    for img in [_photo(db, cam, NIGHT - timedelta(hours=len(label), minutes=i), commit=False)
-                for i in range(n)]:
+    frames = [_photo(db, cam, NIGHT - timedelta(hours=len(label), minutes=i), commit=False)
+              for i in range(n)]
+    db.flush()  # the session doesn't autoflush (as the server's): the query must see them
+    for img in frames:
         det = db.scalar(select(Detection).where(Detection.image_id == img.id))
         db.add(DetectionIndividual(detection_id=det.id, individual_id=ind.id, match_conf=0.95))
     db.commit()

@@ -367,6 +367,10 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Tämä on alueen SPYPOINT-päätunnus, jolla kuvat haetaan jo. Poista tämä kopio."
     ),
     "sync.some_failed": "{n}/{total} kamerasta epäonnistui. {error}",
+    "sync.login_not_saved": (
+        "Kuvat tulivat, mutta tunnuksen tilaa ei voitu tallentaa ({error}). "
+        "Seuraava haku yrittää uudelleen."
+    ),
     "ubox.snap.retry": {
         "one": "{n} kuva ei latautunut. Seuraava haku yrittää uudelleen.",
         "other": "{n} kuvaa ei latautunut. Seuraava haku yrittää uudelleen.",

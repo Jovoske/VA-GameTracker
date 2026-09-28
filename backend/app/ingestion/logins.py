@@ -16,14 +16,18 @@ login that has not fetched lately is "busy", not stopped.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.crypto import InvalidToken, decrypt, encrypt, is_current
+from app.core.db import error_name
 from app.core.logging import get_logger
 from app.i18n import stored, t
 from app.models import AppSetting, Camera, CameraAccount, Image
@@ -98,7 +102,7 @@ def login_error(exc: BaseException, provider: str) -> str:
         return stored("login.other", text=text.rstrip("."))
     if isinstance(exc, httpx.HTTPError | OSError):
         return stored("login.unreachable", provider=name)
-    return stored("login.failed", provider=name, error=type(exc).__name__)
+    return stored("login.failed", provider=name, error=error_name(exc))
 
 
 def read_password(db: Session, account: CameraAccount) -> str:
@@ -127,10 +131,21 @@ def _primary_doc(db: Session) -> tuple[AppSetting | None, dict]:
 
 
 def _save_primary(db: Session, row: AppSetting | None, value: dict) -> None:
+    """Keep the main login's record (the caller commits).
+
+    The first one is written to the database at once, not db.add()ed. The server's
+    sessions don't autoflush (app.core.db.server_sessions), and db.get() doesn't see a
+    row that is only added: after a fetch, record() added it, keep_session() found
+    none and added a second, and the commit broke pk_app_settings. Every SPYPOINT
+    fetch failed so, until a fetch whose main login failed made the row (28 Sep
+    2026). Two runs making it at once wait for each other on the key (ON CONFLICT)
+    instead of one failing.
+    """
     if row is None:
-        db.add(AppSetting(key=PRIMARY_KEY, value=value))
-    else:
-        row.value = value
+        db.execute(pg_insert(AppSetting).values(key=PRIMARY_KEY, value=value)
+                   .on_conflict_do_nothing(index_elements=[AppSetting.key]))
+        row = db.get(AppSetting, PRIMARY_KEY)
+    row.value = value
 
 
 def saved_session(db: Session, account: CameraAccount | None) -> str | None:
@@ -206,6 +221,32 @@ def record(
         if cameras is not None:
             value["reported_cameras"] = cameras
     _save_primary(db, row, value)
+
+
+@contextmanager
+def bookkeeping(db: Session, summary: dict, *, event: str, account: str) -> Iterator[None]:
+    """A login's bookkeeping after its cameras (what this fetch learnt about it, its
+    sign-in kept for the next, when its history import was tried), committed when the
+    block ends.
+
+    Should that fail, it is the login's own problem, not the run's. Its photos are in
+    by then (each camera commits on its own). The block is rolled back and logged with
+    what stopped it (error_name: the rule the database refused), and the login's line
+    in the run's summary says so, so the Check button and the fetch banner show it;
+    the other logins and the run's summary go ahead. It used to fail the whole
+    provider's run: every SPYPOINT fetch said "failed (IntegrityError)" and 0 photos,
+    and the guest logins after the main one were never fetched (28 Sep 2026).
+    """
+    try:
+        yield
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        reason = error_name(exc)
+        log.error(event, account=account, reason=reason, error=str(exc), exc_info=True)
+        summary["not_saved"] = reason
+        if not summary.get("error"):
+            summary.update(status="partial", error=stored("sync.login_not_saved", error=reason))
 
 
 def _when(value) -> datetime | None:

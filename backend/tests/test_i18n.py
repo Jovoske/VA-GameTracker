@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import sessionmaker
 
 from app import i18n
 from app.api import throttle as throttle_mod
@@ -491,7 +490,7 @@ def rec(db_session, monkeypatch):
 
     r = _Recorder()
     monkeypatch.setattr(push, "send_to_user", r)
-    monkeypatch.setattr(core_db, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    monkeypatch.setattr(core_db, "SessionLocal", core_db.server_sessions(db_session.get_bind()))
     return r
 
 

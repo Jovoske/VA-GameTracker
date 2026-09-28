@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import sessionmaker
 
 from app import estate_area, geo, terrain
 from app.core.security import create_access_token
@@ -227,7 +226,7 @@ def background_db(db_session, monkeypatch):
     """The download runs on its own session after the answer: point it at the test DB."""
     from app.core import db as core_db
 
-    monkeypatch.setattr(core_db, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    monkeypatch.setattr(core_db, "SessionLocal", core_db.server_sessions(db_session.get_bind()))
 
 
 def _fake_elevations(monkeypatch, fn=None, calls=None):

@@ -1123,12 +1123,10 @@ def test_new_secret_refuses_when_the_environment_would_win_over_the_file(
 def test_set_password_signs_the_person_in_with_it_and_out_everywhere_else(
     client, db_session, estate, monkeypatch,
 ):
-    from sqlalchemy.orm import sessionmaker
-
     from app import manage
     from app.core import db as core_db
 
-    monkeypatch.setattr(core_db, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    monkeypatch.setattr(core_db, "SessionLocal", core_db.server_sessions(db_session.get_bind()))
     user, old_h = _user(db_session, estate, "admin", email="Admin@GameSense.local",
                         password="changeme")
     with pytest.raises(SystemExit):

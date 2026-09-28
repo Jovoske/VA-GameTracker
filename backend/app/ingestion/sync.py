@@ -33,12 +33,14 @@ from sqlalchemy.orm import Session
 
 from app import geo, jobs, media
 from app.core.config import settings
+from app.core.db import error_name
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
 from app.i18n import stored
 from app.ingestion.logins import (
     PRIMARY_LABEL,
     LoginProblem,
+    bookkeeping,
     disconnect_unlisted,
     keep_session,
     login_error,
@@ -430,10 +432,18 @@ def _record(db: Session, acct: dict, **outcome) -> None:
         record(db, row, **outcome)
 
 
-def _camera_failed(db: Session, spypoint_id: str, words: str) -> None:
-    """Say on the camera's card that its photos could not be listed (its login works)."""
-    db.execute(update(Camera).where(Camera.spypoint_id == spypoint_id)
-               .values(fetch_error=words).execution_options(synchronize_session=False))
+def _camera_failed(db: Session, spypoint_id: str, words: str, label: str) -> None:
+    """Say on the camera's card that its photos could not be listed (its login works),
+    and commit it. Should even that fail, the fetch goes on to the next camera: it is
+    logged, and the camera's failure is in the run's summary already."""
+    try:
+        db.execute(update(Camera).where(Camera.spypoint_id == spypoint_id)
+                   .values(fetch_error=words).execution_options(synchronize_session=False))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.error(f"{label}.camera_note_failed", camera=spypoint_id, reason=error_name(exc),
+                  error=str(exc))
 
 
 def _session(db: Session, acct: dict) -> str | None:
@@ -449,6 +459,12 @@ def _keep(db: Session, acct: dict, token: str | None) -> None:
         keep_session(db, None, token)
     elif (row := _account_row(db, acct)) is not None:
         keep_session(db, row, token)
+
+
+def _books(db: Session, acct: dict, summary: dict, label: str):
+    """The login's bookkeeping, committed; a failure of it is the login's, not the
+    run's (logins.bookkeeping)."""
+    return bookkeeping(db, summary, event=f"{label}.login_not_saved", account=acct["username"])
 
 
 def _list_cameras(db: Session, client: SpypointClient, acct: dict) -> list[SpypointCamera]:
@@ -506,8 +522,8 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
             if acct.get("copy_of_primary"):
                 copies.add(acct["id"])
             summary.update(status="error", error=acct["problem"])
-            _record(db, acct, error=acct["problem"])
-            db.commit()
+            with _books(db, acct, summary, label):
+                _record(db, acct, error=acct["problem"])
             continue
         client = SpypointClient(acct["username"], acct["password"])
         try:
@@ -518,9 +534,9 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
                 words = login_error(e, "spypoint")
                 summary.update(status="error", error=words)
                 log.error(f"{label}.account_failed", account=acct["username"], error=str(e))
-                _record(db, acct, error=words)
-                _keep(db, acct, None)  # sign in afresh next time
-                db.commit()
+                with _books(db, acct, summary, label):
+                    _record(db, acct, error=words)
+                    _keep(db, acct, None)  # sign in afresh next time
                 continue
             log.info(f"{label}.cameras_found", account=acct["username"], count=len(cameras))
             if cameras:
@@ -549,8 +565,7 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
                     words = login_error(e, "spypoint")
                     failures.append(words)
                     if cam.spypoint_id not in fetched:
-                        _camera_failed(db, cam.spypoint_id, words)
-                        db.commit()
+                        _camera_failed(db, cam.spypoint_id, words, label)
                     log.error(f"{label}.camera_failed", camera=cam.name, error=str(e))
                     results.append({"camera": cam.name, "account_id": key, "error": str(e)})
             if failures:
@@ -560,17 +575,17 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
                     else stored("sync.some_failed", n=len(failures), total=len(cameras),
                                 error=failures[0])
                 )
-            row = _account_row(db, acct)
-            # Its history import has been tried: a camera whose listing failed has no
-            # photos listed yet, so the routine fetch pages back through its two
-            # months (bounded per fetch) without walking the others' again.
-            if row is not None:
-                row.last_sync_at = datetime.now(UTC)
-            # A login whose every camera fails is not bringing photos in either.
-            _record(db, acct, cameras=len(cameras),
-                    error=summary["error"] if summary["status"] == "error" else None)
-            _keep(db, acct, client.token)
-            db.commit()
+            with _books(db, acct, summary, label):
+                row = _account_row(db, acct)
+                # Its history import has been tried: a camera whose listing failed has
+                # no photos listed yet, so the routine fetch pages back through its two
+                # months (bounded per fetch) without walking the others' again.
+                if row is not None:
+                    row.last_sync_at = datetime.now(UTC)
+                # A login whose every camera fails is not bringing photos in either.
+                _record(db, acct, cameras=len(cameras),
+                        error=summary["error"] if summary["status"] == "error" else None)
+                _keep(db, acct, client.token)
         finally:
             client.close()
 
@@ -658,8 +673,7 @@ def backfill_account(db: Session, account_id: str, *, months: int = 2) -> dict:
             except Exception as e:
                 db.rollback()
                 failed += 1
-                _camera_failed(db, cam.spypoint_id, login_error(e, "spypoint"))
-                db.commit()
+                _camera_failed(db, cam.spypoint_id, login_error(e, "spypoint"), "backfill_account")
                 log.error("backfill_account.camera_failed", camera=cam.name, error=str(e))
                 results.append({"camera": cam.name, "error": str(e)})
         row = _account_row(db, entry)
