@@ -44,6 +44,8 @@ CREATE TABLE users (
   email         text UNIQUE NOT NULL,
   password_hash text NOT NULL,                 -- Argon2
   role          text NOT NULL DEFAULT 'admin'  CHECK (role IN ('admin','member','viewer')),
+  language      text NOT NULL DEFAULT 'en'     -- 0033: what the server says to them
+                CHECK (language IN ('en','fi','sv','nb','es')),
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 

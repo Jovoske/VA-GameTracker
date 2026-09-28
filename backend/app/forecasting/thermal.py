@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.enrichment.astro import solar
 from app.forecasting.wind import LIGHT_WIND_KMH, compass
+from app.i18n import t
 from app.terrain import get_grid, slope_at
 
 # Below this slope there is no fall line worth speaking of; flat ground gets no
@@ -93,7 +94,7 @@ def regime(
     # nothing until the wind is known to be light (audit B-05).
     if wind_speed_kmh is None or wind_dir_deg is None:
         return {"source": "unknown", "wind_dir_deg": None, "wind_speed_kmh": None,
-                "text": "No wind forecast tonight. Check it yourself."}
+                "text": t("wind.no_forecast")}
 
     # A real wind overrides the slope. Thermals are a calm-evening phenomenon; once
     # the synoptic flow is up it mixes them out.
@@ -113,7 +114,7 @@ def regime(
     if grid is None:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": "No terrain map loaded, so the slope wind cannot be worked out.",
+            "text": t("thermal.no_terrain"),
         }
 
     slope = slope_at(grid, lat, lon)
@@ -121,23 +122,19 @@ def regime(
         # Past the edge of the hill shape is not flat ground (audit B-20).
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": ("This spot is outside the hill shape that was loaded, so the slope wind "
-                     "can’t be worked out. An admin can load the hill shape again to cover it."),
+            "text": t("thermal.off_terrain"),
         }
     if slope.get("downhill_deg") is None or slope["slope_pct"] < MIN_SLOPE_PCT:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": "Ground is near flat here. No slope for cold air to run down.",
+            "text": t("thermal.flat"),
             "slope": slope,
         }
 
     if cloud_pct is not None and cloud_pct > MAX_CLOUD_PCT:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": (
-                f"Overcast ({round(cloud_pct)}%), so the slope wind will be weak tonight. "
-                "Check it yourself."
-            ),
+            "text": t("thermal.overcast", pct=round(cloud_pct)),
             "slope": slope,
         }
 
@@ -155,12 +152,8 @@ def regime(
             "wind_speed_kmh": speed,
             "slope": slope,
             "confidence": "moderate" if settled else "low",
-            "text": (
-                f"Forecast is calm, so the slope decides. Cold air runs downhill to the "
-                f"{compass(downhill)} at about {round(speed)} km/h. "
-                + ("" if settled else "It is still settling around dusk and may swing. ")
-                + "Your scent goes with it."
-            ),
+            "text": t("thermal.katabatic" if settled else "thermal.katabatic_settling",
+                      dir=compass(downhill), speed=round(speed)),
         }
 
     # Daytime with a calm forecast: slopes lift air instead.
@@ -170,8 +163,5 @@ def regime(
         "wind_speed_kmh": speed,
         "slope": slope,
         "confidence": "low",
-        "text": (
-            f"Calm and sunny, so air is moving up the slope toward the "
-            f"{compass(uphill)}. It will turn and run back downhill around sunset."
-        ),
+        "text": t("thermal.anabatic", dir=compass(uphill)),
     }

@@ -16,16 +16,16 @@ from sqlalchemy.orm import Session
 
 from app.forecasting.changes import quiet_cameras, usual
 from app.forecasting.exposure import current_night
-from app.forecasting.model import sentence_case
+from app.i18n import day_month, species_name, t
 from app.models import Camera, Species
 
 
 def _ago(dt: datetime | None, now: datetime) -> str:
     if dt is None:
-        return "unknown"
+        return t("ago.unknown")
     if (now - dt).total_seconds() < 60:
-        return "just now"
-    return _dur(dt, now) + " ago"
+        return t("ago.just_now")
+    return t("ago.ago", span=_dur(dt, now))
 
 
 def _dur(dt: datetime, now: datetime) -> str:
@@ -35,10 +35,10 @@ def _dur(dt: datetime, now: datetime) -> str:
     the clocks go back) stamps photos in the future, which read "-40m ago" (G-23)."""
     s = max(0.0, (now - dt).total_seconds())
     if s < 3600:
-        return f"{int(s // 60)}m"
+        return t("ago.m", n=int(s // 60))
     if s < 86400:
-        return f"{int(s // 3600)}h"
-    return f"{int(s // 86400)}d"
+        return t("ago.h", n=int(s // 3600))
+    return t("ago.d", n=int(s // 86400))
 
 
 def compute_alerts(db: Session) -> list[dict]:
@@ -55,18 +55,17 @@ def compute_alerts(db: Session) -> list[dict]:
     # Hidden species and photos marked "nothing in it" are not sightings.
     v = visit_rows(start=now - timedelta(hours=48), camera_ids=cam_ids)
     rows = db.execute(
-        select(Species.common_name, func.count(), func.max(v.c.last_at))
+        select(Species.id, Species.common_name, func.count(), func.max(v.c.last_at))
         .select_from(v)
         .join(Species, Species.id == v.c.species_id)
         .where(Species.is_priority.is_(True), Species.hidden.is_(False))
-        .group_by(Species.common_name)
+        .group_by(Species.id, Species.common_name)
         .order_by(func.count().desc(), Species.common_name)
     ).all()
-    for name, cnt, last in rows[:4]:
+    for sid, name, cnt, last in rows[:4]:
         alerts.append({
-            "type": "sighting", "severity": "info", "title": sentence_case(name),
-            "text": f"Seen {int(cnt)} time{'s' if cnt != 1 else ''} in the last 2 days, "
-                    f"last one {_ago(last, now)}.",
+            "type": "sighting", "severity": "info", "title": species_name(sid, name),
+            "text": t("feed.seen", n=int(cnt), ago=_ago(last, now)),
         })
 
     # 2. Camera faults the plan's own "Cameras not sending" card can't say: a flat
@@ -81,8 +80,9 @@ def compute_alerts(db: Session) -> list[dict]:
     for c in cams:
         if camera_health(c, now, login_states.get(c.id))["status"] == "low_battery":
             alerts.append({
-                "type": "camera", "severity": "warn", "title": f"{c.name} battery low",
-                "text": f"{c.battery_pct}% left. Bring batteries on your next visit.",
+                "type": "camera", "severity": "warn",
+                "title": t("feed.battery_title", camera=c.name),
+                "text": t("feed.battery", pct=c.battery_pct),
             })
 
     # 3. Pattern break: a usually-busy camera whose last few WATCHED nights had no
@@ -97,13 +97,13 @@ def compute_alerts(db: Session) -> list[dict]:
         if q is None:
             continue
         last = q["last_seen"]
-        since = f", since the night of {last.day} {last.strftime('%b')}" if last else ""
+        since = t("feed.since", day=day_month(last)) if last else ""
         # `camera` lets Tonight leave it out when its "Changed" line is already
         # about this camera, rather than say it twice.
         alerts.append({
-            "type": "quiet", "severity": "warn", "title": f"{c.name} quiet", "camera": c.name,
-            "text": f"Nothing on its last {q['silent']} watched nights{since}. "
-                    f"It usually sees {usual(q['usual'])} a night.",
+            "type": "quiet", "severity": "warn", "title": t("feed.quiet_title", camera=c.name),
+            "camera": c.name,
+            "text": t("feed.quiet", n=q["silent"], since=since, usual=usual(q["usual"])),
         })
 
     return alerts

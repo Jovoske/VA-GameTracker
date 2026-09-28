@@ -14,19 +14,33 @@ from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from app import i18n
+
+# Everything here is written in the language being written in (app.i18n): a push is
+# composed inside `i18n.use(<its recipient's language>)`.
+
 
 def join(names: list[str]) -> str:
-    if len(names) <= 1:
-        return names[0] if names else ""
-    if len(names) == 2:
-        return f"{names[0]} and {names[1]}"
-    if len(names) == 3:
-        return f"{names[0]}, {names[1]} and {names[2]}"
-    return f"{names[0]}, {names[1]} and {len(names) - 2} more"
+    return i18n.join(names)
 
 
 def visits(n: int) -> str:
-    return f"{n} visit{'' if n == 1 else 's'}"
+    return i18n.t("count.visits", n=n)
+
+
+def name(species_id: str | None, tally: dict) -> str:
+    """What a tally is about, in the language: its species' name there, or the name
+    an admin gave it. A tally keeps the English one (dispatch.group_by_species)."""
+    return i18n.species_name(species_id, tally.get("name")) if species_id else (
+        tally.get("name") or i18n.t("class.animal"))
+
+
+def names(tallies: list[tuple[str | None, dict]]) -> list[str]:
+    """Several tallies' names for one list, most first: the first as it starts the
+    sentence, the rest as words inside it (i18n.species_inside: "Villisika,
+    saksanhirvi ja 2 muuta")."""
+    return [i18n.species_inside(sid, tally.get("name")) if i and sid else name(sid, tally)
+            for i, (sid, tally) in enumerate(tallies)]
 
 
 def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> str:
@@ -42,26 +56,26 @@ def said_at(at: datetime | None, tz: ZoneInfo, now: datetime | None = None) -> s
     from app.forecasting.exposure import current_night
 
     if at is None:
-        return "just now"
+        return i18n.t("push.just_now")
     local = at.astimezone(tz)
     hhmm = local.strftime("%H:%M")
     if now is None:
-        return hhmm
+        return i18n.t("push.time", time=hhmm)
     seen, tonight = current_night(at), current_night(now)
     if seen >= tonight:
-        return hhmm
+        return i18n.t("push.time", time=hhmm)
     if seen == tonight - timedelta(days=1):
         dark = local.hour >= 18 or local.hour < 6
-        return f"{hhmm} {'last night' if dark else 'yesterday'}"
-    return f"{hhmm} on {local.strftime('%a')} {local.day} {local.strftime('%b')}"
+        return i18n.t("push.last_night" if dark else "push.yesterday", time=hhmm)
+    return i18n.t("push.on_day", time=hhmm, day=i18n.weekday_day_month(local))
 
 
 def where_title(name: str, cameras: Counter) -> str:
     """"Wild boar at PL19", or "Wild boar on 2 cameras"."""
     cams = [c for c, _ in cameras.most_common()]
     if len(cams) == 1:
-        return f"{name} at {cams[0]}"
-    return f"{name} on {len(cams)} cameras"
+        return i18n.t("push.at_camera", name=name, camera=cams[0])
+    return i18n.t("push.on_cameras", name=name, n=len(cams))
 
 
 def _at(raw) -> datetime | None:

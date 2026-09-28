@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from app.api.visibility import VISIBLE_ANIMAL
 from app.core.config import settings
 from app.forecasting.exposure import VISIT_GAP, night_expr
-from app.forecasting.model import class_label, class_label_sql
+from app.forecasting.model import class_label, class_label_sql, say_class, sql_class_key
 from app.models import Camera, Detection, Image, Species
 
 # A photo the detector has checked and kept, of something that is not a hidden species.
@@ -249,7 +249,8 @@ def class_visits(db: Session, *, start: datetime | None = None, end: datetime | 
 
     Only named sightings of species that are not hidden, in photos the detector kept
     and nobody marked "nothing in it", from cameras nobody retired. Each row is
-    {camera_id, species_id, label, night, visits, photos}; the night is the app's
+    {camera_id, species_id, label, key, night, visits, photos} (key: model.class_key,
+    the class the same in every language); the night is the app's
     night key of the visit's first frame, so a caller can keep the nights it counts.
     """
     n = _visit_frames(start=start, end=end, camera_ids=camera_ids, species_ids=species_ids)
@@ -303,7 +304,8 @@ def class_visits(db: Session, *, start: datetime | None = None, end: datetime | 
         {
             "camera_id": r.camera_id,
             "species_id": r.species_id,
-            "label": r.cls or class_label(r.species_id, r.common_name, None, None),
+            "label": say_class(r.cls, r.species_id, r.common_name),
+            "key": sql_class_key(r.cls, r.species_id),
             "night": r.night,
             "visits": int(r.visits),
             "photos": int(r.photos),

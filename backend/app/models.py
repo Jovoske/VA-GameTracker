@@ -50,8 +50,16 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # The language the app and the server speak to this person, pushes included
+    # (app.i18n): en, fi, sv, nb or es. English until they pick another.
+    language: Mapped[str] = mapped_column(
+        String, nullable=False, default="en", server_default=text("'en'")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),
+        CheckConstraint("language IN ('en','fi','sv','nb','es')", name="language_valid"),
+    )
 
 
 class CameraAccount(Base):

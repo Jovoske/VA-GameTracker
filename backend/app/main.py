@@ -26,8 +26,10 @@ from app.api import (
     routes_users,
     routes_zones,
 )
+from app.api.refusal import Refusal, refusal_handler
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.i18n import LanguageMiddleware
 from app.version import __version__
 
 configure_logging()
@@ -49,6 +51,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# What the server says is in the person's language (app.i18n): the Accept-Language
+# the app sends, until the signed-in person's own takes over.
+app.add_middleware(LanguageMiddleware)
+# A refusal the app acts on carries a code next to its words (api.refusal).
+app.add_exception_handler(Refusal, refusal_handler)
 
 API_PREFIX = "/api"
 app.include_router(routes_health.router, prefix=API_PREFIX)

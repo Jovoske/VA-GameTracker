@@ -38,6 +38,8 @@ Thumbs.db
 backend/celerybeat-schedule*
 .claude/settings.local.json
 _*.py
+# ...but never a package's __init__.py (app/i18n's was left out of a commit by it).
+!__init__.py
 
 # Installed agent skills. The files are fetched, not authored here, and
 # .claude/skills holds NTFS junctions that git would follow and commit twice.

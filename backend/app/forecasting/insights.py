@@ -13,9 +13,10 @@ from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.enrichment.astro import moon_phase, solar
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.forecasting.exposure import current_night, night_key_start
-from app.forecasting.model import SLOT_MIN, _best_window, sentence_case
+from app.forecasting.model import SLOT_MIN, _best_window, join_class_keys
+from app.i18n import species_name, t
 from app.models import Camera
 
 _TZ = settings.estate_timezone
@@ -46,7 +47,8 @@ def _outlook(days: int = 7) -> list[dict]:
         s = solar(settings.estate_lat, settings.estate_lon, night.date())
         out.append({
             "date": night.date().isoformat(),
-            "moon_phase": phase,
+            "moon_phase": phase_words(phase),
+            "moon_phase_key": phase_key(phase),
             "moon_illum": illum,
             "darkness_minutes": s.get("darkness_minutes"),
             "sunset": s.get("sunset"),
@@ -85,7 +87,7 @@ def _on_tonight(night: date, slot: int, tonight: date) -> int:
 
 def _clock(hour: int) -> str:
     """Plain clock time for a sentence: 0 reads as midnight, 21 as 21:00."""
-    return "midnight" if hour == 0 else f"{hour:02d}:00"
+    return t("insights.midnight") if hour == 0 else f"{hour:02d}:00"
 
 
 def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
@@ -120,8 +122,8 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     w = _best_window(by_hour, sittable_only=False)
     out.append({
         "kind": "time",
-        "statement": f"Your cameras are busiest between {_clock(w['start_hour'])} "
-                     f"and {_clock(w['end_hour'])}.",
+        "statement": t("insights.busiest", start=_clock(w["start_hour"]),
+                       end=_clock(w["end_hour"])),
         "strength": w["share_pct"] / 100, "sample": total,
     })
 
@@ -131,8 +133,8 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
         sw = _best_window(sp["by_hour"], sittable_only=False)
         out.append({
             "kind": "time",
-            "statement": f"The cameras see {sp['name'].lower()} mostly between "
-                         f"{_clock(sw['start_hour'])} and {_clock(sw['end_hour'])}.",
+            "statement": t("insights.species_mostly", species=sp["name"].lower(),
+                           start=_clock(sw["start_hour"]), end=_clock(sw["end_hour"])),
             "strength": sw["share_pct"] / 100, "sample": sp["n"],
         })
 
@@ -144,12 +146,10 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     if len(cams) >= 2:
         top2 = cams[0][1] + cams[1][1]
         share = round(top2 / total * 100)
-        both = f"{name_of(cams[0][0])} and {name_of(cams[1][0])}"
+        both = t("list.two", a=name_of(cams[0][0]), b=name_of(cams[1][0]))
         concentrated = len(cams) >= 3 and cams[2][1] < cams[1][1] / 2
-        statement = (
-            f"Most of the action is at {both}. The other cameras see far less."
-            if concentrated else f"{both} are your busiest cameras."
-        )
+        statement = (t("insights.concentrated", cameras=both) if concentrated
+                     else t("insights.busiest_cameras", cameras=both))
         out.append({
             "kind": "location",
             "statement": statement,
@@ -184,7 +184,7 @@ def _correlations(db: Session) -> list[dict]:
     tonight = current_night()
     by_hour: dict[tuple, int] = {}
     for cam, sid, name, night, sl, n in rows:
-        key = (cam, sid, sentence_case(name) if name else None,
+        key = (cam, sid, species_name(sid, name) if name else None,
                _on_tonight(night, int(sl), tonight))
         by_hour[key] = by_hour.get(key, 0) + int(n)
     return _summaries([(*key, n) for key, n in by_hour.items()], names)
@@ -200,17 +200,20 @@ def _composition(db: Session) -> list[dict]:
     where: dict[str, dict] = {}
     for r in class_visits(db, start=_since()):
         lbl = r["label"]
-        t = totals.setdefault(lbl, {"visits": 0, "photos": 0})
-        t["visits"] += r["visits"]
-        t["photos"] += r["photos"]
+        tot = totals.setdefault(lbl, {"visits": 0, "photos": 0, "keys": set()})
+        tot["visits"] += r["visits"]
+        tot["photos"] += r["photos"]
+        tot["keys"].add(r["key"])
         cams = where.setdefault(lbl, {})
         cams[r["camera_id"]] = cams.get(r["camera_id"], 0) + r["visits"]
     items = []
-    for lbl, t in sorted(totals.items(), key=lambda kv: (-kv[1]["visits"], kv[0])):
+    for lbl, tot in sorted(totals.items(), key=lambda kv: (-kv[1]["visits"], kv[0])):
         cams = where.get(lbl, {})
         top_cam = max(cams.items(), key=lambda kv: kv[1])[0] if cams else None
-        items.append({"label": lbl, "count": t["visits"], "visits": t["visits"],
-                      "photos": t["photos"], "top_camera": names.get(top_cam)})
+        # `key` asks /insights/class for the class the same in every language.
+        items.append({"label": lbl, "key": join_class_keys(tot["keys"]),
+                      "count": tot["visits"], "visits": tot["visits"],
+                      "photos": tot["photos"], "top_camera": names.get(top_cam)})
     return items
 
 

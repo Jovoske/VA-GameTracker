@@ -4,6 +4,10 @@ A hunter should not have to open the app to learn that a sounder crossed PL19 at
 22:14. GameSense now pushes that to the phone, and each person chooses which
 animals they hear about from **Settings → Notifications**.
 
+Every push is written in the language of the person it goes to (their
+`users.language`), whoever's run sends it; see [19-languages.md](19-languages.md).
+The examples below are the English.
+
 ## What the user sees
 
 - **Alerts** — the master switch for their account. Turning it on also asks the

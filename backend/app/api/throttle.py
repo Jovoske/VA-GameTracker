@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException, Request
 
 from app.core.config import settings
+from app.i18n import t
 
 IP_WINDOW_S = 15 * 60
 IP_LIMIT = 20
@@ -179,11 +180,9 @@ class LoginThrottle:
             _expire(place.wrong, now - IP_WINDOW_S)
             if len(place.wrong) + place.checking >= IP_LIMIT:
                 wait = IP_WINDOW_S - (now - place.wrong[0]) if place.wrong else SOON_S
-                raise _too_many(
-                    f"Too many wrong passwords from here. Try again in {_minutes(wait)}.", wait)
+                raise _too_many(t("throttle.place", wait=_minutes(wait)), wait)
             if place.checking >= IP_AT_ONCE:
-                raise _too_many("Too many sign-ins from here at once. Try again in a few seconds.",
-                                SOON_S)
+                raise _too_many(t("throttle.at_once"), SOON_S)
 
             pair = self._pairs.get((key, email))
             if pair is not None and not pair.checking and now - pair.last >= FORGET_S:
@@ -191,22 +190,17 @@ class LoginThrottle:
                 pair = None
             if pair is not None:
                 if pair.checking:
-                    raise _too_many("Still checking your last try. Try again in a few seconds.",
-                                    SOON_S)
+                    raise _too_many(t("throttle.checking"), SOON_S)
                 wait = math.ceil(wait_for(pair.failures) - (now - pair.last))
                 if wait > 0:
-                    raise _too_many(
-                        f"Too many wrong passwords for this email. Try again in {wait} "
-                        f"second{'' if wait == 1 else 's'}.", wait)
+                    raise _too_many(t("throttle.email", n=wait), wait)
 
             everywhere = self._emails.get(email) or _Email()
             _expire(everywhere.wrong, now - EMAIL_WINDOW_S)
             if not known and len(everywhere.wrong) + everywhere.checking >= EMAIL_LIMIT:
                 wait = (EMAIL_WINDOW_S - (now - everywhere.wrong[0]) if everywhere.wrong
                         else SOON_S)
-                raise _too_many(
-                    "Too many wrong passwords for this email lately. Try again in "
-                    f"{_minutes(wait)}, or on a phone that has signed in with it before.", wait)
+                raise _too_many(t("throttle.email_lately", wait=_minutes(wait)), wait)
 
             place.checking += 1
             self._places[key] = place
@@ -275,8 +269,7 @@ def _expire(times: deque, before: float) -> None:
 
 
 def _minutes(seconds: float) -> str:
-    m = max(1, math.ceil(seconds / 60))
-    return f"{m} minute{'' if m == 1 else 's'}"
+    return t("count.minutes", n=max(1, math.ceil(seconds / 60)))
 
 
 def _too_many(detail: str, wait: float) -> HTTPException:

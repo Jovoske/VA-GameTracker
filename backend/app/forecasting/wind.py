@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.i18n import t
+
 # Below this, thermals dominate and a single-grid-point wind is not informative.
 LIGHT_WIND_KMH = 8.0
 
@@ -33,7 +35,8 @@ COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 
 def compass(deg: float) -> str:
-    return COMPASS[round(deg / 45.0) % 8]
+    """"SW", in the language being written in ("LO", "SV", "SO")."""
+    return t(f"compass.{COMPASS[round(deg / 45.0) % 8]}")
 
 
 def normalise(deg: float) -> float:
@@ -80,7 +83,7 @@ def assess(
     if wind_dir_deg is None or wind_speed_kmh is None:
         return WindVerdict(
             status="no_wind_data",
-            text=f"No wind forecast tonight. Check it yourself before you sit {stand_name}.",
+            text=t("wind.no_forecast_stand", stand=stand_name),
         )
 
     scent_bearing = normalise(wind_dir_deg + 180.0)
@@ -91,20 +94,14 @@ def assess(
         return WindVerdict(
             status="too_light",
             scent_bearing=scent_bearing,
-            text=(
-                f"Wind {from_txt} {speed} km/h, too light to call. Thermals will decide "
-                "it. Check at the truck."
-            ),
+            text=t("wind.arcs.too_light", dir=from_txt, speed=speed),
         )
 
     if not approach_dirs_deg:
         return WindVerdict(
             status="no_geometry",
             scent_bearing=scent_bearing,
-            text=(
-                f"Wind {from_txt} {speed} km/h. {stand_name} has no approach directions "
-                "set, so judge the wind yourself."
-            ),
+            text=t("wind.arcs.no_geometry", dir=from_txt, speed=speed, stand=stand_name),
         )
 
     half_cone = SCENT_CONE_DEG / 2.0
@@ -112,24 +109,20 @@ def assess(
         # Approach bearings are recorded as directions animals come FROM, which is
         # where the scent must not go.
         if arcs_overlap(scent_bearing, float(approach), half_cone, 0.0):
-            divert = f" Take {alternative_stand} instead." if alternative_stand else ""
+            divert = t("wind.arcs.divert", stand=alternative_stand) if alternative_stand else ""
             return WindVerdict(
                 status="scent_carries",
                 scent_bearing=scent_bearing,
                 conflicting_approach=float(approach),
-                text=(
-                    f"Wind {from_txt} {speed} km/h, wrong for {stand_name}. Your scent blows "
-                    f"straight into the {compass(approach)} approach.{divert}"
-                ),
+                text=t("wind.arcs.wrong", dir=from_txt, speed=speed, stand=stand_name,
+                       approach=compass(approach), divert=divert),
             )
 
     return WindVerdict(
         status="clean",
         scent_bearing=scent_bearing,
-        text=(
-            f"Wind {from_txt} {speed} km/h, clean for {stand_name}. Your scent goes "
-            f"{compass(scent_bearing)}, away from where they come in."
-        ),
+        text=t("wind.arcs.clean", dir=from_txt, speed=speed, stand=stand_name,
+               scent=compass(scent_bearing)),
     )
 
 

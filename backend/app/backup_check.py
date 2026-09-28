@@ -24,6 +24,8 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+from app.i18n import stored
+
 # What a season is made of: a restored copy with none of these is no copy.
 TABLES = ("cameras", "images", "detections", "sits", "harvests", "users", "camera_accounts")
 SAMPLE = 50
@@ -66,19 +68,20 @@ def verify(live_url: str, restored_url: str, media_dir: str | os.PathLike,
     problems = []
     for table in TABLES:
         if restored[table] is None and live[table] is not None:
-            problems.append(f"The restored copy has no {table} table.")
+            problems.append(stored("restore.no_table", table=table))
         elif live[table] and not restored[table]:
-            problems.append(f"The restored copy has no rows in {table}.")
+            problems.append(stored("restore.no_rows", table=table))
     paths = _sample_paths(restored_url, sample) if restored["images"] else []
     found = sum(1 for p in paths if (f := media.under(p, media_dir)) and os.path.isfile(f))
     if found < len(paths):
-        problems.append(f"{len(paths) - found} of {len(paths)} photos looked for are not in "
-                        "the backup's photo folder.")
+        problems.append(stored("restore.photos_missing", n=len(paths) - found, total=len(paths)))
     return {
         "ok": not problems,
         "tables": {t: {"live": live[t], "restored": restored[t]} for t in TABLES},
         "photos_checked": len(paths), "photos_found": found,
         "error": " ".join(problems) or None,
+        # Each on its own too, so Settings can say them in its reader's language.
+        "problems": problems,
     }
 
 
@@ -113,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
             result = verify(settings.database_url,
                             restored.render_as_string(hide_password=False), args.media)
         except Exception as e:
-            result = {"ok": False, "error": f"The check couldn't run ({type(e).__name__}: {e})."}
+            result = {"ok": False,
+                      "error": stored("restore.failed", error=f"{type(e).__name__}: {e}")}
         out = record(result, args.dump)
     print(json.dumps(out))
     return 0 if out["ok"] else 1

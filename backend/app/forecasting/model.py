@@ -10,9 +10,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from functools import lru_cache
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, and_, case, cast, func, literal, select
+from sqlalchemy import Integer, and_, case, cast, false, func, literal, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -28,7 +29,8 @@ from app.forecasting.conditions import (
 )
 from app.forecasting.exposure import current_night, night_key_start
 from app.forecasting.scoring import calibration
-from app.models import Camera, CameraNight, Image, Species
+from app.i18n import species_name, t
+from app.models import Camera, CameraNight, Detection, Image, Species
 
 log = get_logger(__name__)
 
@@ -84,13 +86,18 @@ def _after_sunset(night: date, slot: int) -> int | None:
     return round((local - sunset).total_seconds() / 60)
 
 
+def span(minutes: int) -> str:
+    """"1 h 30 min", "45 min", "2 h", in the language."""
+    h, m = divmod(abs(minutes), 60)
+    return " ".join(x for x in (t("time.hours", h=h) if h else "",
+                                t("time.minutes", m=m) if m else "") if x)
+
+
 def _relative(minutes: int) -> str:
     """"45 min after sunset", "sunset", "1 h 30 min before sunset"."""
     if abs(minutes) < 5:
-        return "sunset"
-    h, m = divmod(abs(minutes), 60)
-    span = " ".join(x for x in (f"{h} h" if h else "", f"{m} min" if m else "") if x)
-    return f"{span} {'after' if minutes > 0 else 'before'} sunset"
+        return t("sun.at_sunset")
+    return t("sun.after" if minutes > 0 else "sun.before", span=span(minutes))
 
 
 def _hhmm(dt: datetime) -> str:
@@ -296,12 +303,12 @@ def _camera_forecast(
     (_, visits), species_id, sp, seen = best
     others = sorted(
         (
-            (len({n for n, c in o["nights"].items() if c and n in watched}), o["name"])
+            (len({n for n, c in o["nights"].items() if c and n in watched}), o["name"], sid)
             for sid, o in ev["species"].items() if sid != species_id
         ),
         reverse=True,
     )
-    runner_up = sentence_case(others[0][1]) if others and others[0][0] else None
+    runner_up = species_name(others[0][2], others[0][1]) if others and others[0][0] else None
 
     active_nights = len(watched)
     presence = min(1.0, len(seen) / active_nights) if active_nights else 0.0
@@ -327,7 +334,7 @@ def _camera_forecast(
 
     return {
         "camera": cam.name, "camera_id": str(cam.id),
-        "species": sentence_case(sp["name"]), "species_id": species_id,
+        "species": species_name(species_id, sp["name"]), "species_id": species_id,
         "runner_up": runner_up,
         "probability": round(prob, 2), "presence": round(presence, 2),
         "nights_present": len(seen), "recent_nights": recent_nights,
@@ -366,34 +373,210 @@ def sentence_case(name: str) -> str:
     return name[:1].upper() + name[1:]
 
 
+class _Split(NamedTuple):
+    """How class_label splits red deer or wild boar: by the young one's group type,
+    then the sex, then the group's; the species' own name for the rest."""
+
+    young_type: str  # Detection.group_type of a mother with her young
+    young: str
+    male: str
+    female: str
+    group_type: str  # Detection.group_type of a group of them
+    group: str
+
+    @property
+    def classes(self) -> tuple[str, str, str, str]:
+        return self.young, self.male, self.female, self.group
+
+
+_SPLIT = {
+    "red_deer": _Split("hind_with_calf", "hind_calf", "stag", "hind", "herd", "herd"),
+    "wild_boar": _Split("sow_with_piglets", "sow_piglets", "boar", "sow", "sounder", "sounder"),
+}
+
+
+def _class_of(species_id: str | None, sex: str | None, group_type: str | None) -> str | None:
+    """"stag", "sow_piglets", "herd"… for a red deer or wild boar class_label splits
+    off; None where the class is the species' own name."""
+    split = _SPLIT.get(species_id or "")
+    if split is None:
+        return None
+    if group_type == split.young_type:
+        return split.young
+    if sex == "male":
+        return split.male
+    if sex == "female":
+        return split.female
+    return split.group if group_type == split.group_type else None
+
+
 def class_label(species_id: str | None, common_name: str | None, sex: str | None, group_type: str | None) -> str:
-    """Human class from species + sex + group composition (mirrors the gallery chip).
+    """Human class from species + sex + group composition (mirrors the gallery chip),
+    in the language being written in (app.i18n).
 
     Stag / Hind / Boar / Sow / Sounder are what the animal is; a boar or red deer
     nobody could sex is called by the species' name, so an admin's rename in Settings
     reaches those tiles too. Every other species is its name ("Roe deer", "Fallow
     deer"), so the Photos tiles, the map and the alerts all write it the same way.
     """
-    if species_id == "red_deer":
-        if group_type == "hind_with_calf":
-            return "Hind + calf"
-        if sex == "male":
-            return "Stag"
-        if sex == "female":
-            return "Hind"
-        name = sentence_case(common_name) if common_name else "Red deer"
-        return f"{name} (herd)" if group_type == "herd" else name
-    if species_id == "wild_boar":
-        if group_type == "sow_with_piglets":
-            return "Sow + piglets"
-        if sex == "male":
-            return "Boar"
-        if sex == "female":
-            return "Sow"
-        if group_type == "sounder":
-            return "Sounder"
-        return sentence_case(common_name) if common_name else "Wild boar"
-    return sentence_case(common_name) if common_name else (species_id or "Animal")
+    cls = _class_of(species_id, sex, group_type)
+    if cls == "herd":
+        return t("class.herd", name=species_name(species_id, common_name))
+    if cls:
+        return t(f"class.{cls}")
+    if common_name or species_id:
+        return species_name(species_id, common_name)
+    return t("class.animal")
+
+
+def class_key(species_id: str | None, sex: str | None, group_type: str | None) -> str | None:
+    """The class class_label names, as the app sends it back to ask for its photos:
+    the same in every language, where the label is not ("Hjort" is a stag in Swedish
+    and a red deer in Norwegian). "red_deer.stag", "wild_boar.sow_piglets", or the
+    species' id for its own name ("red_deer", "roe_deer"); None for an unnamed animal."""
+    if not species_id:
+        return None
+    cls = _class_of(species_id, sex, group_type)
+    return f"{species_id}.{cls}" if cls else species_id
+
+
+def join_class_keys(keys) -> str | None:
+    """One chip's key: class_keys comma-joined, as a label that is two classes in the
+    reader's language carries both (a boar an admin renamed "Boar" is the unsexed
+    ones and the males)."""
+    return ",".join(sorted({k for k in keys if k})) or None
+
+
+def parse_class_key(key: str | None) -> tuple[str, str | None] | None:
+    """(species id, class or None) of a class_key; None for one that is not."""
+    if not key:
+        return None
+    sid, _, cls = key.strip().partition(".")
+    if not sid:
+        return None
+    if not cls:
+        return sid, None
+    split = _SPLIT.get(sid)
+    if split is None or cls not in split.classes:
+        return None
+    return sid, cls
+
+
+def class_where(species_id: str, cls: str | None):
+    """SQL on Detection: a sighting of `species_id` that class_label puts in class
+    `cls` (None: the species' own name). Mirrors _class_of, so a class's photos are
+    the ones its tiles are labelled with."""
+    of_species = Detection.species_id == species_id
+    split = _SPLIT.get(species_id)
+    if split is None:
+        return of_species if cls is None else false()
+    not_young = or_(Detection.group_type.is_(None), Detection.group_type != split.young_type)
+    unsexed = or_(Detection.sex.is_(None), Detection.sex.notin_(("male", "female")))
+    where = {
+        split.young: Detection.group_type == split.young_type,
+        split.male: and_(not_young, Detection.sex == "male"),
+        split.female: and_(not_young, Detection.sex == "female"),
+        split.group: and_(unsexed, Detection.group_type == split.group_type),
+        None: and_(unsexed, or_(
+            Detection.group_type.is_(None),
+            Detection.group_type.notin_((split.young_type, split.group_type)),
+        )),
+    }.get(cls)
+    return false() if where is None else and_(of_species, where)
+
+
+def class_keys_where(keys: str, species_id: str | None = None):
+    """SQL on Detection for the classes a chip's key names (join_class_keys), of
+    `species_id` only when given; nothing for a key that names none."""
+    hits = []
+    for key in keys.split(","):
+        parsed = parse_class_key(key)
+        if parsed is not None and (species_id is None or parsed[0] == species_id):
+            hits.append(class_where(*parsed))
+    return or_(*hits) if hits else false()
+
+
+def class_label_filter(species_id: str, common_name: str | None, label: str):
+    """SQL on Detection, among `species_id`'s sightings, for the ones class_label
+    calls `label`, read in one language (i18n.reading_order): the reader's own first.
+    In one language a label can be two classes (a boar an admin renamed "Boar" is the
+    unsexed ones and the males both); two languages are never mixed."""
+    from app.i18n import reading_order, use
+
+    split = _SPLIT.get(species_id)
+    asked: dict[str | None, tuple[str | None, str | None]] = {None: (None, None)}
+    if split is not None:
+        asked |= {split.young: (None, split.young_type), split.male: ("male", None),
+                  split.female: ("female", None), split.group: (None, split.group_type)}
+    for lang in reading_order():
+        with use(lang):
+            hits = [cls for cls, (sex, gt) in asked.items()
+                    if class_label(species_id, common_name, sex, gt) == label]
+        if hits:
+            # Any other species is one class, its name: all of its sightings.
+            if split is None:
+                return true()
+            return or_(*(class_where(species_id, cls) for cls in hits))
+    return false()
+
+
+# class_label_sql's words for a class, and the key each is said with.
+_CLASS_KEYS = {
+    "Stag": "class.stag", "Hind": "class.hind", "Hind + calf": "class.hind_calf",
+    "Boar": "class.boar", "Sow": "class.sow", "Sow + piglets": "class.sow_piglets",
+    "Sounder": "class.sounder",
+}
+_HERD = " (herd)"
+
+
+def say_class(cls: str | None, species_id: str | None, common_name: str | None) -> str:
+    """A class as class_label_sql names it in the database ("Sow + piglets", "Red
+    deer (herd)", or empty for the species' own name), in the language being written
+    in: what class_label says for the same visit."""
+    if cls in _CLASS_KEYS:
+        return t(_CLASS_KEYS[cls])
+    if cls and cls.endswith(_HERD):
+        return t("class.herd", name=species_name(species_id or "red_deer", common_name))
+    if cls:
+        return cls
+    return class_label(species_id, common_name, None, None)
+
+
+def sql_class_key(cls: str | None, species_id: str | None) -> str | None:
+    """class_key for a class as class_label_sql names it ("Sow + piglets", "Red deer
+    (herd)", or empty for the species' own name)."""
+    if not species_id:
+        return None
+    if cls in _CLASS_KEYS:
+        return f"{species_id}.{_CLASS_KEYS[cls].removeprefix('class.')}"
+    if cls and cls.endswith(_HERD):
+        return f"{species_id}.herd"
+    return species_id
+
+
+def labels_in_english(db: Session, label: str) -> set[str]:
+    """What a class label the app sent back (a filter) may be, as class_label_sql
+    and the English screens write it: the app shows labels in its person's language
+    ("Uros", "Villisika"), the database compares English ("Stag", "Wild boar").
+
+    Read in one language (i18n.reading_order), the reader's own first: "Hjort" from
+    a Swedish reader is a stag, from a Norwegian one a red deer, never both. A label
+    no language knows is compared as it came."""
+    from app.i18n import reading_order, tr
+
+    species = db.execute(select(Species.id, Species.common_name)).all()
+    for lang in reading_order():
+        out = {en for en, key in _CLASS_KEYS.items() if label == tr(lang, key)}
+        for sid, stored in species:
+            english = sentence_case(stored) if stored else None
+            name = species_name(sid, stored, lang)
+            if label == name and english:
+                out.add(english)
+            if sid == "red_deer" and label == tr(lang, "class.herd", name=name):
+                out.add(f"{english or 'Red deer'}{_HERD}")
+        if out:
+            return out
+    return {label}
 
 
 def sentence_case_sql(name):
@@ -498,53 +681,45 @@ def _factors(top: dict, cond: dict) -> list[dict]:
     unwatched = RECENT_NIGHTS - top["recent_watched"]
     if not top.get("producing", True):
         out.append({
-            "text": (
-                f"Camera is not sending photos right now. Going on "
-                f"{top['nights_present']} nights of history."
-            ),
+            "text": t("tonight.factor.not_sending", n=top["nights_present"]),
             "impact": "•",
         })
     elif top["recent_watched"] < MIN_RECENT_WATCHED:
         # Not a quiet week: a week nobody could see. It neither helps nor counts against.
         if top.get("recent_unchecked"):
-            text = (f"Photos from {top['recent_unchecked']} of the last 7 nights are still "
-                    "being checked. Going on its history.")
+            text = t("tonight.factor.unchecked", n=top["recent_unchecked"])
         else:
-            text = (f"Only {top['recent_watched']} of the last 7 nights watched here. "
-                    "Going on its history.")
+            text = t("tonight.factor.few_watched", n=top["recent_watched"])
         out.append({"text": text, "impact": "•"})
     else:
-        gap = f" ({unwatched} not watched)" if unwatched else ""
+        gap = t("tonight.factor.not_watched", n=unwatched) if unwatched else ""
         if top["recent_nights"] > 0:
             out.append({
-                "text": (f"{top['species']} seen {top['recent_nights']} of the last 7 nights "
-                         f"here{gap}"),
+                "text": t("tonight.factor.seen_week", species=top["species"],
+                          n=top["recent_nights"], gap=gap),
                 "impact": "+++" if top["recent_nights"] >= 4 else "++",
             })
         else:
-            out.append({"text": f"No {top['species'].lower()} here in the last 7 nights{gap}",
+            out.append({"text": t("tonight.factor.none_week", species=top["species"].lower(),
+                                  gap=gap),
                         "impact": "--"})
     # Moon/weather are handled by the data-driven tonight drivers (condition_reasons),
     # so they're not hardcoded here — keeps the "why" consistent with the learned patterns.
     w = top["best_window"]
     if w is None:
         out.append({
-            "text": f"{top['species']} only seen here outside the hours you can sit, "
-                    "so there are no best hours to give",
+            "text": t("tonight.factor.outside_hours", species=top["species"]),
             "impact": "•",
         })
         return out
     after = w.get("after_sunset_min")
     out.append({
-        "text": f"Best hours {w['start']} to {w['end']}"
-                + (f", from {_relative(after)}" if after is not None else ""),
+        "text": (t("tonight.best_hours_from", start=w["start"], end=w["end"],
+                   relative=_relative(after)) if after is not None
+                 else t("tonight.best_hours", start=w["start"], end=w["end"])),
         "impact": "++",
     })
     return out
-
-
-def _plural(n: int, word: str) -> str:
-    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 def _left_out_note(top: dict, ev: dict) -> tuple[int, str]:
@@ -562,12 +737,12 @@ def _left_out_note(top: dict, ev: dict) -> tuple[int, str]:
         return 0, ""
     why = []
     if unchecked:
-        why.append(f"{unchecked} with photos not checked yet" if blind
-                   else "photos not checked yet")
+        why.append(t("tonight.left_out.unchecked_n", n=unchecked) if blind
+                   else t("tonight.left_out.unchecked"))
     if blind:
-        why.append(f"{blind} the camera may not have been watching" if unchecked
-                   else "the camera may not have been watching")
-    return total, f"{_plural(total, 'night')} at {top['camera']} left out: {', '.join(why)}."
+        why.append(t("tonight.left_out.blind_n", n=blind) if unchecked
+                   else t("tonight.left_out.blind"))
+    return total, t("tonight.left_out", n=total, camera=top["camera"], why=", ".join(why))
 
 
 def _freshness(db: Session, now: datetime) -> dict | None:
@@ -625,7 +800,7 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
             alerts.append({
                 "camera": c.name, "camera_id": str(c.id), "status": h["status"],
                 "detail": (h["detail"] + ". " if not h["producing"] else "")
-                + f"No photos for {days} days, so it is left out of tonight's ranking",
+                + t("tonight.alert.silent", n=days),
                 "ranked": False,
             })
             continue
@@ -653,12 +828,9 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
 
     if not forecasts:
         if species_ids:
-            reason = "No camera has seen the animals you picked yet."
+            reason = t("tonight.none.picked")
         else:
-            reason = (
-                "The cameras that are sending have not seen any animals yet."
-                if alerts else "No sightings yet."
-            )
+            reason = t("tonight.none.sending") if alerts else t("tonight.none.yet")
         # NO_DATA, not SKIP: we have nothing to say about the ground, which is not the
         # same as telling somebody their evening isn't worth having.
         return {"verdict": "NO_DATA", "reason": reason, "nights_of_data": nights_of_data,
@@ -706,23 +878,19 @@ def forecast_tonight(db: Session, species_ids: list[str] | None = None) -> dict:
         "wind": wind,
         "recommended": {
             "camera": top["camera"], "camera_id": top["camera_id"],
-            "species": top["species"], "runner_up": top["runner_up"],
+            "species": top["species"], "species_id": top["species_id"],
+            "runner_up": top["runner_up"],
             "probability": top["probability"], "best_window": top["best_window"],
             "expect": top_classes[0]["label"] if top_classes else top["species"],
             "classes": top_classes,
             "nights_present": top["nights_present"], "active_nights": top["active_nights"],
             "visits": top["visits"], "photos": top["photos"],
-            "reason": (
-                f"{top['species']} seen {top['nights_present']} of "
-                f"{top['active_nights']} nights at this camera."
-            ),
+            "reason": t("tonight.reason", species=top["species"], n=top["nights_present"],
+                        total=top["active_nights"]),
             # The reference class belongs in the sentence, not a footnote: a bare
             # percentage reads as "my chance of a shot tonight", which is not what
             # was measured.
-            "caveat": (
-                "The camera watches all night. You will be there a few hours, "
-                "so pick the best hours and mind the wind."
-            ),
+            "caveat": t("tonight.caveat"),
         },
         "conditions": cond,
         "factors": _factors(top, cond),

@@ -33,6 +33,7 @@ from app import jobs, media
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
+from app.i18n import stored
 from app.ingestion.logins import (
     disconnect_unlisted,
     keep_session,
@@ -99,7 +100,7 @@ def upsert_camera(db: Session, estate_id, device: UboxDevice, account_id=None) -
                         name=default_name, provider_name=default_name)
         db.add(camera)
     elif camera.estate_id != estate_id:
-        raise UboxError("This UBox camera is already linked to another estate")
+        raise UboxError(stored("ubox.err.other_estate"))
     camera.account_id = account_id
     camera.active = True  # a login lists it, so it is connected (again)
     if device.name:
@@ -122,13 +123,13 @@ def upsert_camera(db: Session, estate_id, device: UboxDevice, account_id=None) -
 
 def _jpeg(data: bytes) -> tuple[int, int]:
     if not data or len(data) > MAX_BYTES:
-        raise UboxError("Snapshot is empty or exceeds the 20 MB limit")
+        raise UboxError(stored("ubox.err.snapshot_size"))
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", PillowImage.DecompressionBombWarning)
             with PillowImage.open(io.BytesIO(data)) as image:
                 if image.format != "JPEG" or image.width * image.height > MAX_PIXELS:
-                    raise UboxError("Snapshot must be a JPEG of at most 40 megapixels")
+                    raise UboxError(stored("ubox.err.snapshot_pixels"))
                 size = image.size
                 image.verify()
             with PillowImage.open(io.BytesIO(data)) as image:
@@ -137,7 +138,7 @@ def _jpeg(data: bytes) -> tuple[int, int]:
     except UboxError:
         raise
     except Exception as exc:
-        raise UboxError("Snapshot is not a readable JPEG") from exc
+        raise UboxError(stored("ubox.err.snapshot_unreadable")) from exc
 
 
 def _ingest_photo(
@@ -155,7 +156,7 @@ def _ingest_photo(
         except Exception:
             data = None
     if data is None:
-        raise UboxError("Could not download a readable snapshot")
+        raise UboxError(stored("ubox.err.snapshot_failed"))
     digest = hashlib.sha256(data).hexdigest()
     if db.scalar(select(Image.id).where(
         Image.camera_id == camera.id, Image.file_hash == digest,
@@ -228,15 +229,11 @@ def _cleanup_uncommitted(db, paths) -> None:
 
 def _snapshot_note(failed: int, retried: int) -> str:
     """Snapshots that would not download: whether they are tried again or let go."""
-    note = f"{failed} photo{'s' if failed != 1 else ''} wouldn't download."
     if retried == failed:
-        return f"{note} {'It is' if failed == 1 else 'They are'} tried again on the next fetch."
+        return stored("ubox.snap.retry", n=failed)
     if retried == 0:
-        return (f"{note} {'It was' if failed == 1 else 'They were'} tried "
-                f"{MAX_SNAPSHOT_ATTEMPTS} times, so {'it is' if failed == 1 else 'they are'} "
-                "left out.")
-    return (f"{note} {retried} {'is' if retried == 1 else 'are'} tried again on the next "
-            f"fetch; the rest were tried {MAX_SNAPSHOT_ATTEMPTS} times and are left out.")
+        return stored("ubox.snap.dropped", n=failed, tries=MAX_SNAPSHOT_ATTEMPTS)
+    return stored("ubox.snap.some", n=retried, failed=failed, tries=MAX_SNAPSHOT_ATTEMPTS)
 
 
 def _list_devices(db: Session, client: UboxClient, account: CameraAccount) -> list[UboxDevice]:
@@ -385,7 +382,7 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
         try:
             estate = db.get(Estate, account.estate_id)
             if estate is None:
-                raise UboxError("Account has no estate")
+                raise UboxError(stored("ubox.err.no_estate"))
             with UboxClient(account.username, read_password(db, account)) as client:
                 devices = _list_devices(db, client, account)
                 session = (client.token, client.token_valid_hours)
@@ -443,7 +440,8 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
             everything = len(failures) == len(devices)
             summary["status"] = "error" if everything else "partial"
             summary["error"] = (failures[0] if everything else
-                                f"{len(failures)} of {len(devices)} cameras failed. {failures[0]}")
+                                stored("sync.some_failed", n=len(failures),
+                                       total=len(devices), error=failures[0]))
         elif failed_snapshots:
             summary.update(status="partial",
                            error=_snapshot_note(failed_snapshots, retried_snapshots))

@@ -32,11 +32,12 @@ from sqlalchemy.orm import Session
 from app import geo
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.enrichment.astro import moon_phase, solar
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
 from app.enrichment.weather import weather_at
 from app.forecasting.exposure import current_night
 from app.forecasting.thermal import SETTLING
 from app.forecasting.wind import assess, compass
+from app.i18n import t
 from app.models import Camera, Stand
 
 log = get_logger(__name__)
@@ -125,7 +126,8 @@ def tonight_conditions(now: datetime | None = None, *, night: date | None = None
         log.warning("conditions.weather_failed", error=str(e))
     return {
         "night": night.isoformat(),
-        "moon_phase": phase, "moon_illum": illum,
+        "moon_phase": phase_words(phase), "moon_phase_key": phase_key(phase),
+        "moon_illum": illum,
         "darkness_minutes": evening.get("darkness_minutes"),
         "sunset": sunset.isoformat() if sunset else None,
         "sunset_local": clock(sunset),
@@ -165,21 +167,19 @@ def _when(cond: dict, now: datetime | None) -> tuple[datetime, bool]:
 
 
 def _reading(wind_dir: float, wind_speed: float) -> str:
-    return f"Wind {compass(wind_dir)} {round(wind_speed)} km/h"
+    return t("wind.reading", dir=compass(wind_dir), speed=round(wind_speed))
 
 
 def _unjudged(stand: Stand, wind_dir, wind_speed, placed: bool) -> dict:
     """A stand the bedding model can't judge, and that has no approach arcs either."""
     if wind_dir is None or wind_speed is None:
-        return {"status": "no_wind_data",
-                "text": f"No wind forecast tonight. Check it yourself before you sit {stand.name}."}
+        return {"status": "no_wind_data", "text": t("wind.no_forecast_stand", stand=stand.name)}
     if not placed:
         return {"status": "no_position",
-                "text": f"{_reading(wind_dir, wind_speed)}. {stand.name} isn't on the map yet, "
-                        "so where your scent goes can't be worked out."}
+                "text": t("wind.no_position", reading=_reading(wind_dir, wind_speed),
+                          stand=stand.name)}
     return {"status": "no_bedding",
-            "text": f"{_reading(wind_dir, wind_speed)}. No bedding drawn yet, so where your "
-                    "scent lands can't be worked out. Draw where they lie up on the map."}
+            "text": t("wind.no_bedding", reading=_reading(wind_dir, wind_speed))}
 
 
 def wind_verdict(db: Session, stand: Stand, cond: dict, *, now: datetime | None = None) -> dict:
@@ -247,11 +247,10 @@ def no_stand_verdict(camera: str, cond: dict, *, now: datetime | None = None) ->
     at, is_now = _when(cond, now)
     wind_dir, wind_speed = cond.get("wind_dir_deg"), cond.get("wind_speed_kmh")
     if wind_dir is None or wind_speed is None:
-        status, text = "no_wind_data", "No wind forecast tonight. Check it yourself."
+        status, text = "no_wind_data", t("wind.no_forecast")
     else:
         status = "no_stand"
-        text = (f"{_reading(wind_dir, wind_speed)}. No stand near {camera} yet, so it "
-                "can't be judged for a seat. Judge it yourself.")
+        text = t("wind.no_stand", reading=_reading(wind_dir, wind_speed), camera=camera)
     return {"status": status, "text": text, "is_advice": False,
             "at": at.isoformat(), "at_local": clock(at), "now": is_now,
             "stand": None, "stand_id": None}

@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.i18n import t, use
 from app.models import Camera, Detection, Image, Notification, NotificationPref, Sit, Species
 from app.notifications import push, words
 
@@ -101,11 +102,11 @@ def still_there(db: Session, rows: list[Notification], pref: NotificationPref) -
     ids: set[uuid.UUID] = set()
     kept: dict[str, list[dict]] = {}
     for r in rows:
-        for sid, t in words.tallies_of(r.species_id, r.detail).items():
-            if t.get("images") is not None:
-                ids.update(uuid.UUID(i) for i in t["images"])
+        for sid, tally in words.tallies_of(r.species_id, r.detail).items():
+            if tally.get("images") is not None:
+                ids.update(uuid.UUID(i) for i in tally["images"])
             else:  # counted without its photos: kept as it was counted
-                kept.setdefault(sid, []).append(t)
+                kept.setdefault(sid, []).append(tally)
     out = {sid: words.merge(ts) for sid, ts in kept.items()}
     if not ids:
         return out
@@ -142,10 +143,10 @@ def compose_held(rows: list[Notification], why: str, now: datetime,
     if tallies is None:
         per: dict[str, list[dict]] = {}
         for r in rows:
-            for sid, t in words.tallies_of(r.species_id, r.detail).items():
-                per.setdefault(sid, []).append(t)
+            for sid, tally in words.tallies_of(r.species_id, r.detail).items():
+                per.setdefault(sid, []).append(tally)
         tallies = {sid: words.merge(ts) for sid, ts in per.items()}
-    tallies = {sid: t for sid, t in tallies.items() if t.get("visits")}
+    tallies = {sid: tally for sid, tally in tallies.items() if tally.get("visits")}
     order = sorted(tallies, key=lambda s: (-tallies[s]["visits"], tallies[s]["name"]))
     notes = [r for r in rows if r.kind == "team_note"]
     # An alert kept from before alerts counted (no tally) still says it was there.
@@ -156,18 +157,21 @@ def compose_held(rows: list[Notification], why: str, now: datetime,
 
     parts: list[str] = []
     if len(order) == 1 and not notes and not bare:
-        t = tallies[order[0]]
-        cams = [c for c, _ in sorted(t["cameras"].items(), key=lambda kv: -kv[1])]
-        parts.append(f"{t['name']}: {words.visits(t['visits'])} at {words.join(cams)}")
+        one = tallies[order[0]]
+        cams = [c for c, _ in sorted(one["cameras"].items(), key=lambda kv: -kv[1])]
+        parts.append(t("held.one", name=words.name(order[0], one),
+                       visits=words.visits(one["visits"]), cameras=words.join(cams)))
     else:
-        parts += [f"{tallies[s]['name']} {words.visits(tallies[s]['visits'])}" for s in order]
+        said = words.names([(s, tallies[s]) for s in order])
+        parts += [t("held.each", name=said[i], visits=words.visits(tallies[s]["visits"]))
+                  for i, s in enumerate(order)]
         parts += [r.title for r in bare]
         if notes:
-            parts.append(f"{len(notes)} photo{'' if len(notes) == 1 else 's'} marked Worth a look")
-    times = [words.latest(t) for t in tallies.values()] + [r.created_at for r in notes + bare]
-    last = max((t for t in times if t), default=None)
-    title = "While you sat" if why == "sit" else "During your quiet hours"
-    body = f"{words.join(parts)}, last one {words.said_at(last, tz, now)}."
+            parts.append(t("held.worth_a_look", n=len(notes)))
+    times = [words.latest(x) for x in tallies.values()] + [r.created_at for r in notes + bare]
+    last = max((x for x in times if x), default=None)
+    title = t("held.title.sit") if why == "sit" else t("held.title.quiet")
+    body = t("held.body", parts=words.join(parts), when=words.said_at(last, tz, now))
 
     if order:
         url = f"{SUMMARY_URL}?{urlencode({'species': ','.join(order)})}"
@@ -209,7 +213,8 @@ def deliver_held(db: Session, now: datetime | None = None, user_ids=None) -> dic
             continue
         whys = [(r.detail or {}).get("held") for r in rows]
         why = "sit" if "sit" in whys else "quiet"
-        told = compose_held(rows, why, now, still_there(db, rows, pref))
+        with use(push.languages(db, [user_id]).get(user_id)):
+            told = compose_held(rows, why, now, still_there(db, rows, pref))
         if told is None:
             # Everything that waited was marked "nothing in it", hidden or muted
             # since: no message about an animal no other screen shows.

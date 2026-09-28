@@ -37,6 +37,7 @@ from app.core.logging import get_logger
 from app.forecasting.conditions import clock, sunset_of
 from app.forecasting.exposure import current_night
 from app.forecasting.model import sentence_case
+from app.i18n import DEFAULT, species_name, t, use
 from app.models import Camera, Forecast, ModelRun, Notification, NotificationPref, Species
 from app.notifications import hold, push
 
@@ -46,18 +47,18 @@ PLAN_LEAD = timedelta(hours=2)
 PLAN_URL = "/"
 # Verdicts by shape and word, as Tonight writes them.
 VERDICTS = {
-    "BEST_ODDS": ("▲", "Best odds"),
-    "WORTH_A_LOOK": ("◐", "Worth a look"),
-    "QUIET": ("○", "Quiet"),
-    "NO_DATA": ("▨", "Not enough to say"),
+    "BEST_ODDS": ("▲", "verdict.best_odds"),
+    "WORTH_A_LOOK": ("◐", "verdict.worth_a_look"),
+    "QUIET": ("○", "verdict.quiet"),
+    "NO_DATA": ("▨", "verdict.no_data"),
 }
 # The wind in two or three words. A stand that can't be judged (not on the map, no
 # bedding drawn) leaves the wind out rather than guess.
 WIND = {
-    "clean": "wind right",
-    "scent_carries": "wind wrong",
-    "too_light": "wind too light to call",
-    "no_wind_data": "no wind forecast",
+    "clean": "plan.wind.clean",
+    "scent_carries": "plan.wind.wrong",
+    "too_light": "plan.wind.too_light",
+    "no_wind_data": "plan.wind.no_forecast",
 }
 _LOCK = zlib.crc32(b"gamesense.notify.plan") & 0x7FFFFFFF
 
@@ -109,6 +110,7 @@ def recorded_plan(db: Session, night: date) -> dict | None:
         "verdict": (f.factors or {}).get("verdict") or "NO_DATA",
         "camera": camera, "camera_id": f.camera_id,
         "species": sentence_case(species) if species else None,
+        "species_id": f.species_id,
         "start": _hhmm(f.best_window_start), "end": _hhmm(f.best_window_end),
         "source": "claim",
     }
@@ -126,7 +128,7 @@ def live_plan(db: Session) -> dict:
     return {
         "verdict": f.get("verdict") or "NO_DATA",
         "camera": rec.get("camera"), "camera_id": rec.get("camera_id"),
-        "species": rec.get("species"),
+        "species": rec.get("species"), "species_id": rec.get("species_id"),
         "start": w.get("start"), "end": w.get("end"),
         "wind": f.get("wind"), "source": "live",
     }
@@ -158,25 +160,29 @@ def _wind(db: Session, plan: dict, now: datetime) -> dict | None:
 
 def compose_plan(plan: dict, sunset: datetime | None) -> tuple[str, str]:
     """(title, body): "▲ Charca · wind right · sunset 19:56" /
-    "Best odds. Wild boar, best 20:40 to 22:10." The answer first; the rest after."""
-    glyph, label = VERDICTS.get(plan.get("verdict") or "NO_DATA", VERDICTS["NO_DATA"])
+    "Best odds. Wild boar, best 20:40 to 22:10." The answer first; the rest after.
+    In the language being written in: each recipient's (send_daily_plan)."""
+    glyph, key = VERDICTS.get(plan.get("verdict") or "NO_DATA", VERDICTS["NO_DATA"])
+    label = t(key)
     camera = plan.get("camera")
-    bits = [f"{glyph} {camera}" if camera else f"{glyph} {label} tonight"]
+    bits = [f"{glyph} {camera}" if camera else f"{glyph} {t('plan.tonight', verdict=label)}"]
     wind = WIND.get(((plan.get("wind") or {}).get("status")) or "")
     if camera and wind:
-        bits.append(wind)
+        bits.append(t(wind))
     if sunset is not None:
-        bits.append(f"sunset {clock(sunset)}")
+        bits.append(t("plan.sunset", time=clock(sunset)))
     title = " · ".join(bits)
 
     if not camera:
-        return title, ("Not enough watched nights to judge tonight. "
-                       "Open the app for what the cameras saw.")
+        return title, t("plan.no_camera")
     body = f"{label}."
     if plan.get("species"):
-        hours = (f", best {plan['start']} to {plan['end']}"
-                 if plan.get("start") and plan.get("end") else "")
-        body += f" {plan['species']}{hours}."
+        species = species_name(plan.get("species_id"), plan["species"])
+        if plan.get("start") and plan.get("end"):
+            body += " " + t("plan.species_hours", species=species, start=plan["start"],
+                            end=plan["end"])
+        else:
+            body += f" {species}."
     return title, body
 
 
@@ -220,7 +226,8 @@ def send_daily_plan(db: Session, now: datetime | None = None) -> dict:
     # transaction's lock with it).
     plan = recorded_plan(db, night) or live_plan(db)
     plan["wind"] = _wind(db, plan, now)
-    title, body = compose_plan(plan, sunset)
+    with use(DEFAULT):
+        title, _ = compose_plan(plan, sunset)
 
     db.execute(text("SELECT pg_advisory_xact_lock(:ns, :night)"),
                {"ns": _LOCK, "night": night.toordinal()})
@@ -230,6 +237,8 @@ def send_daily_plan(db: Session, now: datetime | None = None) -> dict:
         db.commit()
         return {"status": "nobody_waiting", "night": night.isoformat()}
     on = hold.sitting(db, now, [p.user_id for p in prefs])
+    # Each in its recipient's language.
+    langs = push.languages(db, [p.user_id for p in prefs])
     # A send that reached no phone earlier this evening is sent again on its own row.
     again = {n.user_id: n for n in db.scalars(
         _tonights(night).where(Notification.push_status.in_(RETRY))).all()}
@@ -243,7 +252,9 @@ def send_daily_plan(db: Session, now: datetime | None = None) -> dict:
             db.add(n)
         else:
             detail["tries"] = int((n.detail or {}).get("tries") or 1) + 1
-        n.title, n.body, n.created_at = title, body, now
+        with use(langs.get(p.user_id)):
+            n.title, n.body = compose_plan(plan, sunset)
+        n.created_at = now
         n.detail = {**detail, "skipped": why} if why else detail
         # None while it is on its way: a run after this one finds the row and stops.
         n.push_status = "skipped" if why else None

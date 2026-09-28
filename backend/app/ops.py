@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 
 from app import jobs
 from app.core.config import settings
+from app.i18n import localize, t
 
 DEPLOY_FILE = "deploy-status.json"
 BACKUP_FILE = "backup-status.json"
@@ -124,8 +125,8 @@ def backup(now: datetime | None = None) -> dict | None:
         "photos_in_backup": _int(s.get("photos_in_backup")),
         "target_free_gb": (s.get("target_free_gb")
                            if isinstance(s.get("target_free_gb"), int | float) else None),
-        "error": _text(s.get("error")) or ("Its status file can't be read."
-                                           if s.get("unreadable") else None),
+        "error": localize(_text(s.get("error"))) or (t("ops.unreadable")
+                                                     if s.get("unreadable") else None),
     }
 
 
@@ -142,9 +143,17 @@ def restore_check(now: datetime | None = None) -> dict | None:
         "dump": _text(s.get("dump"), 200),
         "photos_checked": _int(s.get("photos_checked")),
         "photos_found": _int(s.get("photos_found")),
-        "error": _text(s.get("error")) or ("Its status file can't be read."
-                                           if s.get("unreadable") else None),
+        "error": _problems(s) or (t("ops.unreadable") if s.get("unreadable") else None),
     }
+
+
+def _problems(s: dict) -> str | None:
+    """What the restore rehearsal found wrong, in the reader's language (kept in
+    English, each on its own, by app.backup_check)."""
+    problems = s.get("problems")
+    if isinstance(problems, list) and problems and all(isinstance(p, str) for p in problems):
+        return " ".join(localize(p) for p in problems)[:300]
+    return localize(_text(s.get("error")))
 
 
 def disk_free(path: str | None = None) -> int | None:

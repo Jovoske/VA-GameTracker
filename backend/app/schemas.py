@@ -27,3 +27,5 @@ class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     role: str
+    # en, fi, sv, nb or es: what the app and the server speak to this person (app.i18n).
+    language: str = "en"

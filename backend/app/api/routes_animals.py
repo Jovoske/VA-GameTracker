@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_admin, get_current_user
 from app.api.visibility import NO_PEOPLE
 from app.core.db import get_db
+from app.i18n import DEFAULT, current, localize, renamed, species_name, t
 from app.models import (
     Camera,
     Detection,
@@ -91,8 +92,8 @@ def list_animals(
     return [
         {
             "id": str(r.id),
-            "label": r.label,
-            "species": r.common_name or r.species_id,
+            "label": said_label(r.label, r.species_id),
+            "species": species_name(r.species_id, r.common_name),
             "species_id": r.species_id,
             "status": r.status,
             "sightings": r.sightings,
@@ -114,7 +115,7 @@ def get_animal(
 ) -> dict:
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "Animal not found.")
+        raise HTTPException(404, t("animals.not_found"))
     sightings = db.execute(
         select(
             Image.id,
@@ -133,9 +134,9 @@ def get_animal(
     sp = db.get(Species, ind.species_id) if ind.species_id else None
     return {
         "id": str(ind.id),
-        "label": ind.label,
+        "label": said_label(ind.label, ind.species_id),
         "status": ind.status,
-        "species": sp.common_name if sp else ind.species_id,
+        "species": species_name(ind.species_id, sp.common_name if sp else None),
         "notes": ind.notes,
         "first_seen": ind.first_seen,
         "last_seen": ind.last_seen,
@@ -168,6 +169,15 @@ def is_auto_label(label: str | None) -> bool:
     return not label or bool(_AUTO_LABEL.fullmatch(label.strip()))
 
 
+def said_label(label: str | None, species_id: str | None) -> str | None:
+    """A group's name in the reader's language: "Villisika #3" for the "Wild boar #3"
+    Look for repeats gave it. A name a hunter chose is theirs, as they wrote it."""
+    m = re.fullmatch(r"(.+) #(\d+)", (label or "").strip())
+    if m is None or not species_id or current() == DEFAULT or renamed(species_id, m.group(1)):
+        return label
+    return f"{species_name(species_id, None)} #{m.group(2)}"
+
+
 def _confirm(db: Session, individual_id: uuid.UUID) -> None:
     """Every sighting of the animal is the hunter's word now: "Look for repeats" keeps
     an animal with a confirmed sighting as it is, and rebuilds the rest."""
@@ -193,24 +203,25 @@ def patch_animal(
     """
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "That animal isn't on the app any more.")
+        raise HTTPException(404, t("animals.gone"))
     if body.label is not None:
         label = " ".join(body.label.split())
         if not label:
-            raise HTTPException(422, "Type a name first.")
+            raise HTTPException(422, t("animals.name_first"))
         if len(label) > 60:
-            raise HTTPException(422, "A name is at most 60 characters.")
+            raise HTTPException(422, t("animals.name_long"))
         ind.label = label
     if body.status is not None:
         if body.status not in _STATUSES:
-            raise HTTPException(422, f"status must be one of {_STATUSES}")
+            raise HTTPException(422, t("animals.bad_status", statuses=_STATUSES))
         ind.status = body.status
     if body.notes is not None:
         ind.notes = body.notes.strip() or None
     if body.model_fields_set & {"label", "status", "notes"}:
         _confirm(db, individual_id)
     db.commit()
-    return {"ok": True, "id": str(ind.id), "label": ind.label, "status": ind.status,
+    return {"ok": True, "id": str(ind.id), "label": said_label(ind.label, ind.species_id),
+            "status": ind.status,
             "notes": ind.notes, "confirmed": True}
 
 
@@ -246,7 +257,7 @@ def merge_animals(
     """
     target = db.get(Individual, body.target_id)
     if target is None:
-        raise HTTPException(404, "The animal to merge into was not found.")
+        raise HTTPException(404, t("animals.merge_target"))
     sources = [db.get(Individual, sid) for sid in dict.fromkeys(body.source_ids)
                if sid != body.target_id]
     sources = [ind for ind in sources if ind is not None]
@@ -271,7 +282,7 @@ def merge_animals(
     _confirm(db, body.target_id)
     _refresh_range(db, target)
     db.commit()
-    return {"ok": True, "merged": moved, "label": target.label}
+    return {"ok": True, "merged": moved, "label": said_label(target.label, target.species_id)}
 
 
 @router.post("/{individual_id}/confirm")
@@ -282,7 +293,7 @@ def confirm_animal(
 ) -> dict:
     ind = db.get(Individual, individual_id)
     if ind is None:
-        raise HTTPException(404, "Animal not found.")
+        raise HTTPException(404, t("animals.not_found"))
     _confirm(db, individual_id)
     db.commit()
     return {"ok": True}
@@ -322,11 +333,11 @@ def recompute_animals(
     from app import jobs
 
     if jobs.holder("reid") is not None:
-        return {"status": "busy", "note": "Already looking. This takes a few minutes."}
+        return {"status": "busy", "note": t("animals.reid_running")}
     if not jobs.spawn("reid"):
-        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
+        raise HTTPException(503, t("cameras.start_failed"))
     jobs.note(db, REID_STATUS, state="queued", queued_at=datetime.now(UTC))
-    return {"status": "started", "note": "Looking for repeats. This takes a few minutes."}
+    return {"status": "started", "note": t("animals.reid_started")}
 
 
 @router.get("/recompute/status")
@@ -349,5 +360,5 @@ def recompute_status(
             state = "failed"
     elif state == "queued" and marked and jobs.holder("pipeline") is not None:
         state = "waiting"
-    return {"state": state, "result": note.get("result"), "error": note.get("error"),
+    return {"state": state, "result": note.get("result"), "error": localize(note.get("error")),
             "finished_at": note.get("finished_at")}

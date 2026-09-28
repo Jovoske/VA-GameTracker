@@ -30,7 +30,8 @@ from app.api.visibility import (
     team_sees,
 )
 from app.core.db import get_db
-from app.forecasting.model import class_label, sentence_case
+from app.forecasting.model import class_label
+from app.i18n import species_name, t
 from app.models import Camera, Detection, Image, PhotoNote, Species, User
 from app.notes import note_counts, notes_for
 from app.people import name_for
@@ -85,7 +86,7 @@ def filters(user: User = Depends(get_current_user), db: Session = Depends(get_db
         "people": people,
         "species": [
             # Written as every tile and the map write it: "Roe deer", not "Roe Deer".
-            {"id": sid, "common_name": sentence_case(name), "count": int(n)}
+            {"id": sid, "common_name": species_name(sid, name), "count": int(n)}
             for sid, name, n in sp_rows if n
         ],
         "cameras": [{"id": str(cid), "name": name, "count": int(n), "connected": bool(active)}
@@ -128,7 +129,7 @@ def feed(
     `has_person` and `has_vehicle`, and its label leads with them.
     """
     if people and user.role != "admin":
-        raise HTTPException(403, "Only an admin sees the photos with people or vehicles in them.")
+        raise HTTPException(403, t("photos.people_admin_only"))
     species_ids = _csv(species)
     camera_ids = []
     for c in _csv(cameras):
@@ -176,7 +177,7 @@ def people_items(db: Session, rows) -> list[dict]:
     )} if ids else {}
     for item, r in zip(items, rows, strict=True):
         person, vehicle = flags.get(r.id, (False, False))
-        who = PEOPLE_WORDS[(person, vehicle)]
+        who = t(PEOPLE_WORDS[(person, vehicle)])
         item.update(
             label=f"{who} · {item['label']}" if item["species_id"] else who,
             has_person=person, has_vehicle=vehicle, notes_count=0,
@@ -185,8 +186,8 @@ def people_items(db: Session, rows) -> list[dict]:
 
 
 PEOPLE_WORDS = {
-    (True, True): "Person and vehicle", (True, False): "Person", (False, True): "Vehicle",
-    (False, False): "Person or vehicle",
+    (True, True): "people.person_vehicle", (True, False): "people.person",
+    (False, True): "people.vehicle", (False, False): "people.person_or_vehicle",
 }
 
 
@@ -243,11 +244,11 @@ def _items(db: Session, rows) -> list[dict]:
     counts = note_counts(db, ids)
     # A photo nobody has named is "Animal" only once the AI has looked at it.
     states = photo_states(db, [i for i in ids if i not in labels])
-    unfinished = {"waiting": NOT_CHECKED_YET, "failed": COULD_NOT_CHECK}
+    unfinished = {"waiting": t(NOT_CHECKED_YET), "failed": t(COULD_NOT_CHECK)}
 
     items = []
     for r in rows:
-        unnamed = unfinished.get(states.get(r.id), "Animal")
+        unnamed = unfinished.get(states.get(r.id)) or t("class.animal")
         label, sid, size = labels.get(r.id, (unnamed, None, None))
         items.append({
             "image_id": str(r.id),
@@ -335,5 +336,5 @@ def one_photo(
         )
     ).first()
     if row is None:
-        raise HTTPException(404, "That photo isn't available any more.")
+        raise HTTPException(404, t("photos.gone"))
     return _items(db, [row])[0]

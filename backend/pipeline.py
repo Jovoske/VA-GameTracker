@@ -57,6 +57,7 @@ from app import jobs  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.db import SessionLocal  # noqa: E402
 from app.core.logging import configure_logging, get_logger  # noqa: E402
+from app.i18n import stored  # noqa: E402
 from app.version import read_commit  # noqa: E402
 
 log = get_logger("pipeline")
@@ -223,7 +224,7 @@ def _run(mode: str, args: list[str], db) -> int:
             from app.ai.reid import ModelUnavailable
 
             words = str(e) if isinstance(e, ModelUnavailable) else (
-                f"Something went wrong ({type(e).__name__}).")
+                stored("reid.failed", error=type(e).__name__))
             jobs.note(db, "reid_status", state="failed", finished_at=datetime.now(UTC),
                       error=words)
             if isinstance(e, ModelUnavailable):
@@ -232,8 +233,7 @@ def _run(mode: str, args: list[str], db) -> int:
             raise
         if result.get("stopped"):
             jobs.note(db, "reid_status", state="failed", finished_at=datetime.now(UTC),
-                      error="It stopped partway: the server was held up too long. "
-                            "Tap it again to finish.")
+                      error=stored("reid.stopped"))
             log.warning("pipeline.reid_lost_lock", result=result)
             return 0
         jobs.note(db, "reid_status", state="done", finished_at=datetime.now(UTC), result=result)

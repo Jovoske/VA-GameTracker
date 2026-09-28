@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_admin, user_from_token
 from app.core.db import get_db
 from app.core.logging import get_logger
+from app.i18n import t
 from app.models import ClientError, User
 from app.people import name_for
 
@@ -118,16 +119,16 @@ async def _report_body(request: Request) -> ClientErrorIn:
     """
     declared = request.headers.get("content-length") or ""
     if declared.isdigit() and int(declared) > MAX_BODY:
-        raise HTTPException(413, "Report too large")
+        raise HTTPException(413, t("crash.too_large"))
     raw = bytearray()
     async for chunk in request.stream():
         raw += chunk
         if len(raw) > MAX_BODY:
-            raise HTTPException(413, "Report too large")
+            raise HTTPException(413, t("crash.too_large"))
     try:
         return ClientErrorIn.model_validate_json(bytes(raw))
     except ValidationError as e:
-        raise HTTPException(422, "That isn't a crash report.") from e
+        raise HTTPException(422, t("crash.not_a_report")) from e
 
 
 def happened_at(claimed: datetime | None, now: datetime) -> datetime | None:
@@ -152,7 +153,8 @@ def _reporter(creds: HTTPAuthorizationCredentials | None, db: Session) -> User |
 
 
 def device_of(user_agent: str | None) -> str:
-    """"iPhone", "Android", "Windows"...: enough to tell phones apart in a list."""
+    """"iPhone", "Android", "Windows"...: enough to tell phones apart in a list, or
+    "Unknown device" in the language being written in."""
     ua = user_agent or ""
     for needle, name in (
         ("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"),
@@ -160,7 +162,7 @@ def device_of(user_agent: str | None) -> str:
     ):
         if needle in ua:
             return name
-    return "Unknown device"
+    return t("crash.unknown_device")
 
 
 @router.post("/client-errors", status_code=202)
@@ -173,7 +175,7 @@ def report(
     user = _reporter(creds, db)
     key = f"user:{user.id}" if user else "anonymous"
     if not _allow(key, PER_PERSON if user else ANONYMOUS):
-        raise HTTPException(429, "Too many reports. Later ones are dropped.")
+        raise HTTPException(429, t("crash.too_many"))
 
     ua = (request.headers.get("user-agent") or "")[:300] or None
     when = happened_at(body.at, datetime.now(UTC))
@@ -236,7 +238,7 @@ def recent(
             "route": e.route,
             "build": e.build,
             "device": device_of(e.user_agent),
-            "who": name_for(u) if u is not None else "Removed person",
+            "who": name_for(u) if u is not None else t("people.removed"),
         }
         for e, u in rows
     ]

@@ -183,6 +183,7 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert _columns(eng, "harvests")
         assert "people_cleared" in _columns(eng, "images")
         assert "no_harvest_at" in _columns(eng, "sits")
+        assert "language" in _columns(eng, "users")
     finally:
         eng.dispose()
 
@@ -1446,6 +1447,73 @@ def test_harvest_and_people_upgrade_down_and_up_again(fresh_db):
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert "people_cleared" in _columns(eng, "images")
         assert _index(eng, "harvests", "ix_harvests_sit_id") == ["sit_id"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_user_language_upgrade_down_and_up_again(fresh_db):
+    """0033 on a real 0030 database: everyone already there reads English, as before;
+    only the five languages the app speaks are accepted; going down takes the column
+    and keeps the people; going up again (or twice) is not an error."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0030_harvest_and_people")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0030 shape first.
+            c.execute(text("ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_language_valid"))
+            c.execute(text("ALTER TABLE users DROP COLUMN language"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            for email, role in (("owner@e.local", "admin"), ("pedro@e.local", "member"),
+                                ("guest@e.local", "viewer")):
+                c.execute(text(
+                    "INSERT INTO users (id,estate_id,email,password_hash,role) VALUES "
+                    "(gen_random_uuid(),:e,:m,'x',:r)"), {"e": estate, "m": email, "r": role})
+        assert "language" not in _columns(eng, "users")
+
+        command.upgrade(cfg, "0033_user_language")
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT email, language FROM users ORDER BY email")).all() == [
+                ("guest@e.local", "en"), ("owner@e.local", "en"), ("pedro@e.local", "en")]
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("UPDATE users SET language = 'fi' WHERE email = 'pedro@e.local'"))
+            c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) SELECT "
+                "gen_random_uuid(),estate_id,'new@e.local','x','member' FROM users LIMIT 1"))
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT language FROM users WHERE email = 'new@e.local'")).scalar_one() == "en"
+        for bad in ("de", "EN", ""):
+            with pytest.raises(IntegrityError), eng.begin() as c:
+                c.execute(text("UPDATE users SET language = :l"), {"l": bad})
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE users SET language = NULL"))
+
+        command.downgrade(cfg, "0030_harvest_and_people")
+        assert "language" not in _columns(eng, "users")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM users")).scalar_one() == 4
+
+        command.upgrade(cfg, "head")
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT DISTINCT language FROM users")).scalars().all() == ["en"]
+        command.stamp(cfg, "0030_harvest_and_people")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "language" in _columns(eng, "users")
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE users SET language = 'de'"))
     finally:
         eng.dispose()
 

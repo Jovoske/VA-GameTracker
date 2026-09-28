@@ -40,6 +40,7 @@ from app.forecasting.visits import (
     map_night_window,
     part_hours,
 )
+from app.i18n import join_all, t
 from app.models import Camera, CameraNight, Image
 
 WATCHED = ("CONFIRMED", "PRESUMED_UP")
@@ -56,7 +57,8 @@ BUSY_SHARE = 1 / 3
 # Up to this many visits, their times say more than any window.
 LIST_TIMES = 3
 PART_WORDS = {
-    "dusk": "at dusk", "night": "in the middle of the night", "dawn": "at dawn", "all": "",
+    "dusk": "activity.part.dusk", "night": "activity.part.night", "dawn": "activity.part.dawn",
+    "all": "",
 }
 
 
@@ -159,53 +161,56 @@ def watched_nights(db: Session, camera_ids: list, nights: list[date]) -> dict:
 # ── the activity map ────────────────────────────────────────────────────────
 
 
-def activity_read(*, who: str, visits: int, watched: int, nights: int, nights_with: int,
-                  blind: int, checking: int, part: str, peak: str | None, share: float,
-                  times: list[datetime], so_far: bool = False, unreadable: int = 0) -> str:
+def activity_read(*, who: str | None, visits: int, watched: int, nights: int,
+                  nights_with: int, blind: int, checking: int, part: str, peak: str | None,
+                  share: float, times: list[datetime], so_far: bool = False,
+                  unreadable: int = 0) -> str:
     """The one line the card leads with: "Wild boar on 5 of 7 nights, mostly 21–23 h".
 
-    `who` is the species ("Wild boar") or "Animals" for all of them. The count of
+    `who` is the species ("Wild boar"), or None for every animal. The count of
     nights is the nights that counted; when that is fewer than the period, it says
     why ("it was working", "checked so far"), so 3 of 5 never reads as 3 of 7.
     A few visits are given by their times, which say more than a window. `so_far`:
-    last night hasn't reached 08:00 yet, and the one-night read says so.
+    last night hasn't reached 08:00 yet, and the one-night read says so. In the
+    language being written in (app.i18n).
     """
-    when = PART_WORDS[part]
+    when = " " + t(PART_WORDS[part]) if PART_WORDS[part] else ""
     # Mid-sentence: "No roe deer", not the stored "Roe Deer".
-    lower = who.lower()
+    lower = who.lower() if who else None
     if not watched:
         if checking:
-            return ("Still checking last night’s photos." if nights == 1
-                    else "Still checking the photos.")
+            return t("activity.checking_last" if nights == 1 else "activity.checking")
         if unreadable and not blind:
-            return ("Not counted: last night’s photos couldn’t all be checked." if nights == 1
-                    else "Not counted: the photos couldn’t all be checked.")
-        return ("Not counted: the camera may not have been working last night." if nights == 1
-                else "Not counted: the camera wasn’t working on these nights.")
+            return t("activity.unreadable_last" if nights == 1 else "activity.unreadable")
+        return t("activity.blind_last" if nights == 1 else "activity.blind")
     tail = ""
     if 0 < len(times) <= LIST_TIMES:
         # In the order of the night: 23:10 comes before 02:15.
-        local = sorted((_local(t) for t in times), key=lambda t: (t.hour < 12, t.time()))
-        clocks = [f"{t:%H:%M}" for t in local]
-        tail = ", at " + (", ".join(clocks[:-1]) + " and " if len(clocks) > 1 else "") + clocks[-1]
+        local = sorted((_local(x) for x in times), key=lambda x: (x.hour < 12, x.time()))
+        tail = t("activity.tail.times", times=join_all([f"{x:%H:%M}" for x in local]))
     elif peak:
-        tail = f", {'mostly' if share > MOSTLY_SHARE else 'busiest'} {peak} h"
+        tail = t("activity.tail.mostly" if share > MOSTLY_SHARE else "activity.tail.busiest",
+                 peak=peak)
     elif visits > 1:
-        tail = ", at no set time"
+        tail = t("activity.tail.no_set_time")
     if nights == 1:
-        night = "last night so far" if so_far else "last night"
+        night = t("activity.last_night_so_far" if so_far else "activity.last_night")
         if not visits:
-            nothing = "Nothing on camera" if who == "Animals" else f"No {lower}"
-            return f"{nothing}{' ' + when if when else ''} {night}."
-        noun = "animal" if who == "Animals" else lower
-        plural = "" if visits == 1 else "s"
-        return f"{visits} {noun} visit{plural}{' ' + when if when else ''} {night}{tail}"
-    qualifier = (" it was working" if blind else " that could be checked" if unreadable
-                 else " checked so far" if checking else "")
+            if who is None:
+                return t("activity.one.nothing_all", when=when, night=night)
+            return t("activity.one.nothing", species=lower, when=when, night=night)
+        if who is None:
+            return t("activity.one.visits_all", n=visits, when=when, night=night, tail=tail)
+        return t("activity.one.visits", n=visits, species=lower, when=when, night=night,
+                 tail=tail)
+    qualifier = (t("activity.q.working") if blind else t("activity.q.checkable") if unreadable
+                 else t("activity.q.so_far") if checking else "")
     if not visits:
-        none = "No animals" if who == "Animals" else f"No {lower}"
-        return f"{none}{' ' + when if when else ''} on the {watched} nights{qualifier}."
-    return f"{who} on {nights_with} of {watched} nights{qualifier}{tail}"
+        if who is None:
+            return t("activity.none_all", when=when, n=watched, qualifier=qualifier)
+        return t("activity.none", species=lower, when=when, n=watched, qualifier=qualifier)
+    return t("activity.some", who=who if who is not None else t("class.animals"), n=nights_with,
+             total=watched, qualifier=qualifier, tail=tail)
 
 
 def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: int, part: str,
@@ -236,7 +241,7 @@ def activity(db: Session, *, cameras: list[Camera], last_night: date, nights: in
         if v["species_id"] and v["map_night"] is not None:
             seen[v["species_id"]] += 1
             labels[v["species_id"]] = v["label"]
-    who = (species_label or labels.get(species) or species) if species else "Animals"
+    who = (species_label or labels.get(species) or species) if species else None
 
     out = []
     for cam in cameras:

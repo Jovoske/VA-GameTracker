@@ -37,6 +37,7 @@ from app.core.config import settings
 from app.enrichment.weather import forecast_hours
 from app.forecasting.conditions import release, sun_times, wind_verdict
 from app.forecasting.exposure import current_night
+from app.i18n import current, join, t, weekday
 from app.models import Stand, TerrainGrid, Zone
 
 # 17:00 to 24:00 on the estate's clock: an evening sit, from before sunset in
@@ -55,8 +56,6 @@ UNJUDGED = ("no_position", "no_bedding", "no_geometry")
 # for a request between midnight and 06:00, when tonight is still the evening before.
 FORECAST_DAYS = EVENINGS + 2
 
-# The evenings by name, whatever language the server's own clock speaks.
-DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 _CACHE: dict = {}
 _CACHE_GUARD = threading.Lock()
@@ -78,7 +77,7 @@ def _hours_of(night: date) -> list[tuple[int, datetime]]:
 
 def _span(run: list[int]) -> str:
     """"19–21 h", or "21 h" for one hour."""
-    return f"{run[0]} h" if len(run) == 1 else f"{run[0]}–{run[-1]} h"
+    return t("time.clock", h=run[0] if len(run) == 1 else f"{run[0]}–{run[-1]}")
 
 
 def _runs(hours: list[dict]) -> list[list[int]]:
@@ -127,17 +126,17 @@ def _fingerprint(db: Session, stand_id) -> str:
 def _line(name: str, status: str, tonight: str | None, days: list[str], has_forecast: bool) -> str:
     """The one line up front."""
     if status == "no_position":
-        return f"{name} isn’t on the map yet, so its wind can’t be judged."
+        return t("week.no_position", stand=name)
     if status == "no_bedding":
-        return f"No bedding drawn yet, so the wind can’t be judged for {name}."
+        return t("week.no_bedding", stand=name)
     if status == "no_geometry":
-        return f"{name} has no approach directions set, so judge its wind yourself."
+        return t("week.no_geometry", stand=name)
     if not has_forecast:
-        return "No wind forecast for the week yet."
-    right = ([f"tonight {tonight}"] if tonight else []) + days
+        return t("week.no_forecast")
+    right = ([t("week.tonight_hours", hours=tonight)] if tonight else []) + days
     if right:
-        return f"Right wind for {name}: {', '.join(right)}"
-    return f"No right wind for {name} this week."
+        return t("week.right", stand=name, when=", ".join(right))
+    return t("week.none", stand=name)
 
 
 def _judge(
@@ -153,7 +152,7 @@ def _judge(
     nights = nights[:EVENINGS]
     evenings = [{
         "night": n.isoformat(),
-        "day": "Tonight" if n == tonight else DAYS[n.weekday()],
+        "day": t("week.tonight") if n == tonight else weekday(n),
         "tonight": n == tonight,
         "sunset_local": sun_times(n)["sunset_local"],
     } for n in nights]
@@ -189,7 +188,7 @@ def _judge(
                          "right": [_span(r) for r in runs],
                          "right_evening": any(len(r) >= MIN_RUN for r in runs)})
             if n == tonight:
-                tonight_right = " and ".join(_span(r) for r in _named(runs)) or None
+                tonight_right = join([_span(r) for r in _named(runs)]) or None
         stand_status = next(
             (u for u in UNJUDGED if u in statuses and statuses <= {u, "no_wind_data"}), "ok")
         has_forecast = statuses != {"no_wind_data"}
@@ -219,7 +218,9 @@ def week(db: Session, *, stand_id=None, now: datetime | None = None) -> dict:
     forecast = forecast_hours(settings.estate_lat, settings.estate_lon, current_night(now),
                               FORECAST_DAYS, tz=settings.estate_timezone)
     fetched = forecast["fetched_at"]
-    key = (bucket, fingerprint, fetched, forecast["stale"], str(stand_id) if stand_id else None)
+    # Its words are in the reader's language, so each language keeps its own answer.
+    key = (bucket, fingerprint, fetched, forecast["stale"], str(stand_id) if stand_id else None,
+           current())
     with _CACHE_GUARD:
         hit = _CACHE.get(key)
     if hit is None:
