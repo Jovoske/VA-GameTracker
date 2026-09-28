@@ -6,6 +6,10 @@ lists everything newest first, filtered by any mix of animals and cameras, and
 leaves out empty frames and hidden species. The team's "Worth a look" photos have
 their own strip (highlights), and one photo can be asked for by id, which is what a
 push opens.
+
+Frames with a person or a vehicle in them are never in the feed (visibility.PEOPLE).
+An admin has them apart, with `people=true`: "People & vehicles" (feature 25). Nor
+is a frame the AI hasn't looked at yet, except for an admin (visibility.team_sees).
 """
 import uuid
 from datetime import datetime
@@ -17,9 +21,17 @@ from sqlalchemy.orm import Session
 
 from app.ai.checking import COULD_NOT_CHECK, NOT_CHECKED_YET, photo_states
 from app.api.deps import get_current_user
-from app.api.visibility import VISIBLE_ANIMAL
+from app.api.visibility import (
+    HAS_PERSON,
+    HAS_VEHICLE,
+    NO_PEOPLE,
+    PEOPLE,
+    VISIBLE_ANIMAL,
+    team_sees,
+)
 from app.core.db import get_db
-from app.forecasting.model import class_label, sentence_case
+from app.forecasting.model import class_label
+from app.i18n import species_name, t
 from app.models import Camera, Detection, Image, PhotoNote, Species, User
 from app.notes import note_counts, notes_for
 from app.people import name_for
@@ -32,16 +44,18 @@ def _csv(value: str | None) -> list[str]:
 
 
 @router.get("/filters")
-def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+def filters(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """The chips: every animal that is not hidden and every camera, with photo counts.
 
-    Counted as the feed shows them: a photo marked "nothing in it" (a false alarm)
-    or one without its file is not one of the animal's photos.
+    Counted as the feed shows them: a photo marked "nothing in it" (a false alarm),
+    one with a person or a vehicle in it, or one without its file is not one of the
+    animal's photos. `people` is how many photos "People & vehicles" has, for an
+    admin; null for everyone else, who never sees them.
     """
     shown = (
         select(Detection.image_id, Detection.species_id)
         .join(Image, Image.id == Detection.image_id)
-        .where(Image.original_path.isnot(None), Image.is_empty_frame.isnot(True))
+        .where(Image.original_path.isnot(None), Image.is_empty_frame.isnot(True), NO_PEOPLE)
         .subquery()
     )
     n_photos = func.count(func.distinct(shown.c.image_id))
@@ -56,15 +70,23 @@ def filters(_: User = Depends(get_current_user), db: Session = Depends(get_db)) 
     # history is still worth filtering to.
     cam_rows = db.execute(
         select(Camera.id, Camera.name, Camera.active, func.count(Image.id))
-        .outerjoin(Image, (Image.camera_id == Camera.id) & VISIBLE_ANIMAL)
+        .outerjoin(Image, (Image.camera_id == Camera.id) & VISIBLE_ANIMAL & team_sees(user))
         .group_by(Camera.id, Camera.name, Camera.active)
         .having(or_(Camera.active.is_(True), func.count(Image.id) > 0))
         .order_by(Camera.name)
     ).all()
+    people = None
+    if user.role == "admin":
+        people = db.scalar(
+            select(func.count(Image.id))
+            .join(Camera, Camera.id == Image.camera_id)
+            .where(Camera.estate_id == user.estate_id, Image.original_path.isnot(None), PEOPLE)
+        ) or 0
     return {
+        "people": people,
         "species": [
             # Written as every tile and the map write it: "Roe deer", not "Roe Deer".
-            {"id": sid, "common_name": sentence_case(name), "count": int(n)}
+            {"id": sid, "common_name": species_name(sid, name), "count": int(n)}
             for sid, name, n in sp_rows if n
         ],
         "cameras": [{"id": str(cid), "name": name, "count": int(n), "connected": bool(active)}
@@ -84,7 +106,10 @@ def feed(
     checked: bool = Query(
         False, description="Only photos the detector has checked and kept, as on the map",
     ),
-    _: User = Depends(get_current_user),
+    people: bool = Query(
+        False, description="Admins: the photos with a person or a vehicle in them instead",
+    ),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Newest first. `next_before` and `next_before_id` page on; null on the last page.
@@ -96,7 +121,15 @@ def feed(
 
     `checked` leaves out frames the detector hasn't reached yet (most turn out
     empty): the camera sheet's strip asks for it so it agrees with the map's photo.
+    For all but an admin they are left out anyway until the AI has looked at them
+    for people (visibility.team_sees): minutes after a sync.
+
+    `people` lists the frames with a person or a vehicle in them instead, whatever
+    else is in them, for an admin only (the animal chips don't apply). Each says
+    `has_person` and `has_vehicle`, and its label leads with them.
     """
+    if people and user.role != "admin":
+        raise HTTPException(403, t("photos.people_admin_only"))
     species_ids = _csv(species)
     camera_ids = []
     for c in _csv(cameras):
@@ -108,9 +141,12 @@ def feed(
     q = (
         select(Image.id, Image.captured_at, Image.camera_id, Camera.name)
         .join(Camera, Camera.id == Image.camera_id)
-        .where(Image.original_path.isnot(None), VISIBLE_ANIMAL)
+        .where(Image.original_path.isnot(None), PEOPLE if people else VISIBLE_ANIMAL,
+               team_sees(user))
     )
-    if species_ids:
+    if people:
+        q = q.where(Camera.estate_id == user.estate_id)
+    elif species_ids:
         q = q.where(
             select(Detection.id)
             .where(Detection.image_id == Image.id, Detection.species_id.in_(species_ids))
@@ -118,16 +154,41 @@ def feed(
         )
     if camera_ids:
         q = q.where(Image.camera_id.in_(camera_ids))
-    if checked:
+    if checked and not people:
         q = q.where(Image.is_empty_frame.is_(False))
     q = after_cursor(q, before, before_id)
     rows = db.execute(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit + 1)).all()
     more = len(rows) > limit
     rows = rows[:limit]
     return {
-        "items": _items(db, rows),
+        "items": people_items(db, rows) if people else _items(db, rows),
         **next_cursor(rows, more),
     }
+
+
+def people_items(db: Session, rows) -> list[dict]:
+    """Feed items for frames of people or vehicles: labelled "Person", "Vehicle" or
+    "Person and vehicle" first, then the animal when one is named ("Person · Boar"),
+    with `has_person` and `has_vehicle`. No team notes: they never go on these."""
+    items = _items(db, rows)
+    ids = [r.id for r in rows]
+    flags = {r[0]: (bool(r[1]), bool(r[2])) for r in db.execute(
+        select(Image.id, HAS_PERSON, HAS_VEHICLE).where(Image.id.in_(ids))
+    )} if ids else {}
+    for item, r in zip(items, rows, strict=True):
+        person, vehicle = flags.get(r.id, (False, False))
+        who = t(PEOPLE_WORDS[(person, vehicle)])
+        item.update(
+            label=f"{who} · {item['label']}" if item["species_id"] else who,
+            has_person=person, has_vehicle=vehicle, notes_count=0,
+        )
+    return items
+
+
+PEOPLE_WORDS = {
+    (True, True): "people.person_vehicle", (True, False): "people.person",
+    (False, True): "people.vehicle", (False, False): "people.person_or_vehicle",
+}
 
 
 def after_cursor(q, before: datetime | None, before_id: uuid.UUID | None):
@@ -183,11 +244,11 @@ def _items(db: Session, rows) -> list[dict]:
     counts = note_counts(db, ids)
     # A photo nobody has named is "Animal" only once the AI has looked at it.
     states = photo_states(db, [i for i in ids if i not in labels])
-    unfinished = {"waiting": NOT_CHECKED_YET, "failed": COULD_NOT_CHECK}
+    unfinished = {"waiting": t(NOT_CHECKED_YET), "failed": t(COULD_NOT_CHECK)}
 
     items = []
     for r in rows:
-        unnamed = unfinished.get(states.get(r.id), "Animal")
+        unnamed = unfinished.get(states.get(r.id)) or t("class.animal")
         label, sid, size = labels.get(r.id, (unnamed, None, None))
         items.append({
             "image_id": str(r.id),
@@ -237,6 +298,7 @@ def highlights(
         .join(Camera, Camera.id == Image.camera_id)
         .where(
             Camera.estate_id == user.estate_id, Image.original_path.isnot(None), VISIBLE_ANIMAL,
+            team_sees(user),
         )
         .group_by(Image.id, Camera.id)
         .order_by(marked.desc(), Image.id.desc())
@@ -270,9 +332,9 @@ def one_photo(
         .join(Camera, Camera.id == Image.camera_id)
         .where(
             Image.id == image_id, Camera.estate_id == user.estate_id,
-            Image.original_path.isnot(None), VISIBLE_ANIMAL,
+            Image.original_path.isnot(None), VISIBLE_ANIMAL, team_sees(user),
         )
     ).first()
     if row is None:
-        raise HTTPException(404, "That photo isn't available any more.")
+        raise HTTPException(404, t("photos.gone"))
     return _items(db, [row])[0]

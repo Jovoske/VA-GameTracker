@@ -19,12 +19,14 @@ measurement: it needs clear skies to work, it reverses around dusk and dawn, and
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.enrichment.astro import solar
 from app.forecasting.wind import LIGHT_WIND_KMH, compass
+from app.i18n import t
 from app.terrain import get_grid, slope_at
 
 # Below this slope there is no fall line worth speaking of; flat ground gets no
@@ -48,6 +50,30 @@ def _speed_estimate(slope_pct: float) -> float:
     return round(min(8.0, 1.5 + slope_pct * 0.35), 1)
 
 
+def air_draining(when: datetime) -> tuple[bool, bool]:
+    """(draining, settled) at `when`: whether cold air is running downhill, and
+    whether it has settled or is still turning over around dusk.
+
+    Drainage runs from half an hour before sunset until sunrise. Both are taken for
+    the estate's own calendar day and compared as instants: astral answers in UTC,
+    and comparing its clock time with Madrid's called the dark before dawn "calm and
+    sunny, air moving upslope" (audit G-07, A-22).
+    """
+    tz = ZoneInfo(settings.estate_timezone)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=tz)
+    local = when.astimezone(tz)
+    s = solar(settings.estate_lat, settings.estate_lon, local.date())
+    sunset, sunrise = s.get("sunset"), s.get("sunrise")
+    if sunset is None or sunrise is None:
+        return (local.hour >= 19 or local.hour <= 6), True
+    if when < sunrise:
+        return True, True  # before dawn: it has been draining all night
+    if when >= sunset - timedelta(minutes=30):
+        return True, when >= sunset + SETTLING
+    return False, True
+
+
 def regime(
     db: Session,
     *,
@@ -64,9 +90,15 @@ def regime(
     an effective `wind_dir_deg` (the direction it blows FROM, matching the forecast
     convention so callers need no special case), and `text` explaining itself.
     """
+    # No forecast is not a calm one: it could be blowing 30 km/h. The slope says
+    # nothing until the wind is known to be light (audit B-05).
+    if wind_speed_kmh is None or wind_dir_deg is None:
+        return {"source": "unknown", "wind_dir_deg": None, "wind_speed_kmh": None,
+                "text": t("wind.no_forecast")}
+
     # A real wind overrides the slope. Thermals are a calm-evening phenomenon; once
     # the synoptic flow is up it mixes them out.
-    if wind_speed_kmh is not None and wind_speed_kmh >= LIGHT_WIND_KMH:
+    if wind_speed_kmh >= LIGHT_WIND_KMH:
         return {
             "source": "synoptic",
             "wind_dir_deg": wind_dir_deg,
@@ -82,62 +114,46 @@ def regime(
     if grid is None:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": "No terrain map loaded, so the slope wind cannot be worked out.",
+            "text": t("thermal.no_terrain"),
         }
 
     slope = slope_at(grid, lat, lon)
-    if slope is None or slope.get("downhill_deg") is None or slope["slope_pct"] < MIN_SLOPE_PCT:
+    if slope is None:
+        # Past the edge of the hill shape is not flat ground (audit B-20).
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": "Ground is near flat here. No slope for cold air to run down.",
+            "text": t("thermal.off_terrain"),
+        }
+    if slope.get("downhill_deg") is None or slope["slope_pct"] < MIN_SLOPE_PCT:
+        return {
+            "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
+            "text": t("thermal.flat"),
             "slope": slope,
         }
 
     if cloud_pct is not None and cloud_pct > MAX_CLOUD_PCT:
         return {
             "source": "unknown", "wind_dir_deg": wind_dir_deg, "wind_speed_kmh": wind_speed_kmh,
-            "text": (
-                f"Overcast ({round(cloud_pct)}%), so the slope wind will be weak tonight. "
-                "Check it yourself."
-            ),
+            "text": t("thermal.overcast", pct=round(cloud_pct)),
             "slope": slope,
         }
-
-    s = solar(settings.estate_lat, settings.estate_lon, when.date())
-    sunset, sunrise = s.get("sunset"), s.get("sunrise")
-    local = when.astimezone(__import__("zoneinfo").ZoneInfo(settings.estate_timezone))
 
     downhill = float(slope["downhill_deg"])
     # Air arrives FROM uphill and leaves downhill; the forecast convention is the
     # direction it blows from, so the drainage "wind_dir" is the uphill bearing.
     uphill = (downhill + 180.0) % 360.0
     speed = _speed_estimate(slope["slope_pct"])
-
-    draining = False
-    if sunset is not None:
-        try:
-            draining = local >= (sunset - timedelta(minutes=30))
-            if sunrise is not None and local.time() < sunrise.time():
-                draining = True  # still before dawn: drainage has been running all night
-        except Exception:
-            draining = local.hour >= 19 or local.hour <= 6
-    else:
-        draining = local.hour >= 19 or local.hour <= 6
+    draining, settled = air_draining(when)
 
     if draining:
-        settled = sunset is None or local >= (sunset + SETTLING)
         return {
             "source": "katabatic",
             "wind_dir_deg": uphill,
             "wind_speed_kmh": speed,
             "slope": slope,
             "confidence": "moderate" if settled else "low",
-            "text": (
-                f"Forecast is calm, so the slope decides. Cold air runs downhill to the "
-                f"{compass(downhill)} at about {round(speed)} km/h. "
-                + ("" if settled else "It is still settling around dusk and may swing. ")
-                + "Your scent goes with it."
-            ),
+            "text": t("thermal.katabatic" if settled else "thermal.katabatic_settling",
+                      dir=compass(downhill), speed=round(speed)),
         }
 
     # Daytime with a calm forecast: slopes lift air instead.
@@ -147,8 +163,5 @@ def regime(
         "wind_speed_kmh": speed,
         "slope": slope,
         "confidence": "low",
-        "text": (
-            f"Calm and sunny, so air is moving up the slope toward the "
-            f"{compass(uphill)}. It will turn and run back downhill around sunset."
-        ),
+        "text": t("thermal.anabatic", dir=compass(uphill)),
     }

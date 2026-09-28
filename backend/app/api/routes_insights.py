@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
@@ -11,8 +11,14 @@ from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.db import get_db
 from app.forecasting.insights import compute_insights
-from app.forecasting.model import class_label_sql, sentence_case_sql
+from app.forecasting.model import (
+    class_keys_where,
+    class_label_sql,
+    labels_in_english,
+    sentence_case_sql,
+)
 from app.forecasting.patterns import compute_patterns
+from app.i18n import t
 from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/insights", tags=["insights"])
@@ -29,22 +35,28 @@ def patterns(_: User = Depends(get_current_user), db: Session = Depends(get_db))
     return compute_patterns(db)
 
 
-def _in_class(label: str):
+def _in_class(labels: set[str]):
     """SQL on a Detection joined to its Species: it is of this class (Stag, Sow +
     piglets, Roe deer). The same split as model.class_label, so the photos are the
     ones labelled with the class the Insights makeup names (a visit it counted as
-    "Sow + piglets" may have plain "Wild boar" frames too; those list under that)."""
+    "Sow + piglets" may have plain "Wild boar" frames too; those list under that).
+    `labels`: the class as the database writes it (model.labels_in_english)."""
     split = class_label_sql(Detection.species_id, Detection.sex, Detection.group_type,
                             Species.common_name)
-    return or_(split == label,
-               and_(split.is_(None), sentence_case_sql(Species.common_name) == label))
+    names = sorted(labels)
+    return or_(split.in_(names),
+               and_(split.is_(None), sentence_case_sql(Species.common_name).in_(names)))
 
 
 @router.get("/class")
 def class_images(
-    label: str,
     _: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    label: Annotated[str | None, Query(
+        description="The class as the makeup names it, in the reader's language")] = None,
+    key: Annotated[str | None, Query(
+        description="The class by the makeup's `key` (e.g. 'red_deer.stag'), the same "
+                    "in every language; over `label`")] = None,
     before: Annotated[datetime | None, Query(
         description="Only photos taken before this instant")] = None,
     before_id: Annotated[uuid.UUID | None, Query(
@@ -57,17 +69,27 @@ def class_images(
 
     Only photos anybody can see: not a hidden species, not a photo marked "nothing
     in it", not a retired camera (which the makeup leaves out too).
+
+    The class is best asked for by the `key` the makeup gave it: a label is a word
+    in one language, and two languages can share one for different classes. A label
+    is read in the reader's own language first (model.labels_in_english).
     """
+    if key:
+        in_class = class_keys_where(key)
+    elif label:
+        in_class = _in_class(labels_in_english(db, label))
+    else:
+        raise HTTPException(422, t("insights.class_missing"))
     of_class = (
         select(Detection.image_id)
         .join(Species, Species.id == Detection.species_id)
         .join(Image, Image.id == Detection.image_id)
-        .where(_in_class(label), VISIBLE_SIGHTING)
+        .where(in_class, VISIBLE_SIGHTING)
     )
     group = (
         select(func.max(Detection.group_size))
         .join(Species, Species.id == Detection.species_id)
-        .where(Detection.image_id == Image.id, _in_class(label))
+        .where(Detection.image_id == Image.id, in_class)
         .scalar_subquery()
     )
     q = (

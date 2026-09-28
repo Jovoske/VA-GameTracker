@@ -165,8 +165,10 @@ def _input_tensor(image_path: str, bbox: list[float] | None):
     import torch
     from PIL import Image as PILImage
 
+    from app.media import resolve
+
     _get_model()  # ensures _mean / _std are populated
-    img = PILImage.open(image_path).convert("RGB")
+    img = PILImage.open(resolve(image_path)).convert("RGB")
     if bbox:
         img = img.crop(square(bbox))
     img = img.resize((CROP_SIZE, CROP_SIZE))

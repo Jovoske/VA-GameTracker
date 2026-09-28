@@ -1,6 +1,7 @@
 """Structured JSON logging via structlog."""
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -52,8 +53,45 @@ def _open_log(path: Path):
     return open(path, "a", encoding="utf-8")  # noqa: SIM115 - lives as long as the process
 
 
+_TOKEN = re.compile(r"((?:^|[?&])token=)[^&\s\"]+")
+
+
+class RedactTokens(logging.Filter):
+    """Blank ?token= in the access log's request lines.
+
+    uvicorn logs each request's path with its query string, and a photo's address
+    carries a photo pass there (app.core.security). A pass is short-lived and opens
+    only photos, but a log is read by more people than it should be, for longer than
+    a pass lasts; an old app on a phone may still send its sign-in (audit D-08, H-13).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN.sub(r"\1…", a) if isinstance(a, str) else a for a in record.args
+            )
+        if isinstance(record.msg, str):
+            record.msg = _TOKEN.sub(r"\1…", record.msg)
+        return True
+
+
+def redact_access_log() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, RedactTokens) for f in access.filters):
+        access.addFilter(RedactTokens())
+
+
+# Libraries that log every HTTP request at INFO: a photo fetch makes hundreds (full
+# addresses, signed query strings and all), and a scheduled task keeps stderr in its
+# error file (deploy/register-tasks.ps1), where they would bury the reason a job died.
+QUIET = ("httpx", "httpcore")
+
+
 def configure_logging(level: str = "INFO", log_file: str | Path | None = None) -> None:
     logging.basicConfig(format="%(message)s", level=getattr(logging, level, logging.INFO))
+    for name in QUIET:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    redact_access_log()
     out = sys.stdout
     if log_file is not None:
         try:

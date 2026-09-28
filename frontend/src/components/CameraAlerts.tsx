@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../api'
+import { t } from '../i18n'
 import SwitchRow from './SwitchRow'
 
 type Failure = Error & { offline?: boolean; timeout?: boolean }
@@ -46,18 +47,18 @@ export default function CameraAlertRow({ id, name, alerts, label, note, onSaved 
         method: 'PUT', body: JSON.stringify({ alerts: next }), timeoutMs: 20_000,
       })
       onSaved?.(r)
-      setSaid({ err: false, text: r.alerts ? `Saved. Alerts from ${name} are on.` : `Saved. No alerts from ${name}.` })
+      setSaid({ err: false, text: r.alerts ? t('alerts.savedOn', { name }) : t('alerts.savedOff', { name }) })
     } catch (e) {
       const x = e as Failure
-      const why = x.offline ? 'No signal, so that didn’t save.' : x.timeout ? 'No answer from the server, so that didn’t save.' : `That didn’t save. ${x.message}`
-      setSaid({ err: true, text: `${why} Alerts from ${name} are still ${alerts ? 'on' : 'off'}.` })
+      const why = x.offline ? t('common.noSignalNotSaved') : x.timeout ? t('common.noAnswerNotSaved') : t('common.notSaved', { why: x.message })
+      setSaid({ err: true, text: `${why} ${alerts ? t('alerts.stillOn', { name }) : t('alerts.stillOff', { name })}` })
     } finally {
       setPending(null)
     }
   }
 
   return <>
-    <SwitchRow label={label ?? name} note={pending != null ? 'Saving…' : note} on={on} onChange={change} disabled={pending != null} />
+    <SwitchRow label={label ?? name} note={pending != null ? t('common.saving') : note} on={on} onChange={change} disabled={pending != null} />
     {said && <p className={`switch-said${said.err ? ' switch-said--err' : ''}`} role={said.err ? 'alert' : 'status'}>{said.text}</p>}
   </>
 }

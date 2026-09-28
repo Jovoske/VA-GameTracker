@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -20,6 +21,9 @@ from app.forecasting.exposure import recompute_camera_nights
 from app.models import Camera, CameraNight, Detection, Estate, Image, Species
 
 from .conftest import requires_db
+
+# Members press Check for new photos too (audit C-09, E-09).
+MEMBER = SimpleNamespace(role="member")
 
 BOAR = [{"confidence": 0.93, "bbox": [100.0, 100.0, 400.0, 300.0]}]
 
@@ -54,7 +58,7 @@ def models(monkeypatch):
         return state["species"](path) if callable(state["species"]) else state["species"]
 
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", detect)
+    monkeypatch.setattr(checking, "detect", detect)
     monkeypatch.setattr(species, "detect_animals", detect)
     monkeypatch.setattr(species, "classify_crop", classify)
     monkeypatch.setattr(checking, "models_work", lambda: state["broken"])
@@ -236,12 +240,12 @@ def test_a_hunters_flag_while_the_detector_looks_is_never_overwritten(db_session
         return BOAR
 
     models["boxes"] = {}
-    checking_detect = checking.detect_animals
+    checking_detect = checking.detect
     try:
-        checking.detect_animals = detect_while_hunter_flags
+        checking.detect = detect_while_hunter_flags
         checking.check_photos(db_session)
     finally:
-        checking.detect_animals = checking_detect
+        checking.detect = checking_detect
         other.close()
     db_session.refresh(img)
     assert (img.reviewed, img.is_empty_frame) == (True, True)
@@ -259,7 +263,8 @@ def test_a_photo_flagged_before_the_detector_reached_it_does_not_blind_its_night
     from app.main import app
     from app.models import User
 
-    user = User(estate_id=cam.estate_id, email="m@x.local", password_hash="x", role="member")
+    # An admin: only they see a frame the detector hasn't reached (R6BE-2).
+    user = User(estate_id=cam.estate_id, email="m@x.local", password_hash="x", role="admin")
     db_session.add(user)
     img = _frame(db_session, cam, NIGHT)
     app.dependency_overrides[get_db] = lambda: db_session
@@ -714,7 +719,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
 
     from app.enrichment import enrich, weather
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(weather, "_DAY_CACHE", {})
     calls = []
 
@@ -725,7 +730,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
     monkeypatch.setattr(httpx, "get", down)
     frames = [_frame(db_session, cam, NIGHT + timedelta(minutes=i)) for i in range(5)]
     snaps = [enrich.enrich_image(db_session, f) for f in frames]
-    assert calls == [weather.TIMEOUT_SECONDS]  # once, not once per photo
+    assert calls == [weather.TIMEOUT]  # once, not once per photo
     assert {s.source for s in snaps} == {"unavailable"}
 
     class Answer:
@@ -736,7 +741,7 @@ def test_a_slow_weather_service_is_asked_once_and_filled_in_later(db_session, ca
             hours = [f"2026-09-20T{h:02d}:00" for h in range(24)]
             return {"hourly": {"time": hours, "temperature_2m": [14.0] * 24}}
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Answer())
     again = enrich.enrich_image(db_session, frames[0])
     assert again.id == snaps[0].id and again.temp_c == 14.0 and again.source != "unavailable"
@@ -752,7 +757,7 @@ def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch
     from app.ingestion.fetch import check_and_recount
     from app.models import EnvSnapshot
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(weather, "_DAY_CACHE", {})
     recent = datetime.now(UTC) - timedelta(hours=20)
 
@@ -766,7 +771,7 @@ def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch
     enrich.enrich_image(db_session, old)
     db_session.commit()
     # Still down: the fetch ends as before, nothing filled in, asked once.
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     assert check_and_recount(db_session)[0]["weather_refilled"] == 0
 
     class Answer:
@@ -778,7 +783,7 @@ def test_weather_stored_while_open_meteo_was_down_is_filled_in_by_the_next_fetch
             return {"hourly": {"time": [f"{day}T{h:02d}:00" for h in range(24)],
                                "temperature_2m": [14.0] * 24}}
 
-    monkeypatch.setattr(weather, "_down_until", 0.0)
+    monkeypatch.setattr(weather, "_down_until", {})
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Answer())
     assert check_and_recount(db_session)[0]["weather_refilled"] == 3
     db_session.expire_all()
@@ -838,12 +843,12 @@ def test_the_check_button_starts_a_job_and_reads_running_until_it_has_the_lock(
 ):
     from app.api.routes_cameras import sync_status, trigger_sync
 
-    assert trigger_sync(None, db_session)["status"] == "started"
+    assert trigger_sync(MEMBER, db_session)["status"] == "started"
     assert spawned == [("sync",)]
     # Its process is still starting: not someone else's old result.
     assert sync_status(None, db_session)["status"] == "running"
     held = jobs.try_acquire("pipeline", "sync")
-    assert trigger_sync(None, db_session)["status"] == "busy"
+    assert trigger_sync(MEMBER, db_session)["status"] == "busy"
     assert spawned == [("sync",)]
     held.release()
 
@@ -857,14 +862,14 @@ def test_the_check_button_queues_a_fetch_behind_another_job_and_says_so(
     from app.api.routes_cameras import sync_status, trigger_sync
 
     reid = jobs.try_acquire("pipeline", "reid")
-    r = trigger_sync(None, db_session)
+    r = trigger_sync(MEMBER, db_session)
     assert r["status"] == "queued" and r["since"] is not None
     assert r["note"] == ("The server is looking for repeat visitors. "
                          "New photos come in when it finishes.")
     assert spawned == [("sync", "queued")]
     assert sync_status(None, db_session)["status"] == "running"
     queued = jobs.try_acquire("fetchqueue", "sync")  # its process, waiting for the lock
-    again = trigger_sync(None, db_session)
+    again = trigger_sync(MEMBER, db_session)
     assert again["status"] == "queued" and "Already asked" in again["note"]
     assert spawned == [("sync", "queued")]  # one is on its way: not a second
     reid.release()

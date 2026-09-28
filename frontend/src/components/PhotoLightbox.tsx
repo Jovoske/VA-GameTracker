@@ -2,8 +2,9 @@ import { DownloadSimpleIcon } from '@phosphor-icons/react/dist/csr/DownloadSimpl
 import { MagnifyingGlassMinusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassMinus'
 import { MagnifyingGlassPlusIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassPlus'
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
-import { type Failure, imageUrl, plainWords, whoAmI } from '../api'
+import { type Failure, api, imageUrl, plainWords, whoAmI } from '../api'
 import { useReducedMotion } from '../hooks'
+import { fmtDate, t } from '../i18n'
 import { estateStamp } from '../night'
 import Overlay from './Overlay'
 import { FixSheet, type PhotoFix, type Saved, fixSpecies, markEmpty, undoFix } from './PhotoFix'
@@ -21,6 +22,10 @@ import PhotoNotesPanel from './PhotoNotes'
  * turned on its side (and a wide screen) the band goes beside the photo instead,
  * where it costs width the photo has to spare rather than height it hasn't.
  *
+ * A photo with a person or a vehicle in it (Photos' "People & vehicles", admins only)
+ * has neither notes nor "Wrong?": it never goes to the team. It has "Nobody in it?"
+ * instead, for a feeder or a rock the detector read as a vehicle, with Undo.
+ *
  * Members and admins also have "Wrong?" (PhotoFix): say what the animal really is,
  * or that there's nothing in it. The viewer shows the new name at once, with Undo,
  * on the photo and on the other photos of its visit that followed it; the list that
@@ -36,9 +41,9 @@ import PhotoNotesPanel from './PhotoNotes'
 /** Why the next page of photos didn't come, in words, for `moreError`. */
 export function morePhotosFailed(e: unknown): string {
   const x = e as Failure
-  if (x.offline) return 'No signal, so older photos didn’t load.'
-  if (x.timeout) return 'No answer from the server, so older photos didn’t load.'
-  return `Older photos didn’t load. ${plainWords(x.message || '')}`.trim()
+  if (x.offline) return t('lb.olderNoSignal')
+  if (x.timeout) return t('lb.olderNoAnswer')
+  return t('lb.olderFailed', { why: plainWords(x.message || '') }).trim()
 }
 
 export type LightboxPhoto = {
@@ -56,6 +61,8 @@ export type LightboxPhoto = {
   species_id?: string | null
   /** Who said what it is, when a hunter did ("Fixed by Pedro"). */
   fixed_by?: string | null
+  /** A frame of people or vehicles (Photos' admin-only "People & vehicles"). */
+  people?: { person: boolean; vehicle: boolean } | null
 }
 
 /** A fix made in this viewer, and how to take it back. */
@@ -84,7 +91,7 @@ function downloadName(cam: string, capturedAt: string): string {
 /** ", with the 2 other photos of this visit": the rest of a burst followed the fix. */
 function visitWords(n: number): string {
   if (!n) return ''
-  return n === 1 ? ', with the other photo of this visit' : `, with the ${n} other photos of this visit`
+  return t('lb.withVisit', { count: n })
 }
 
 /** A phone with a share sheet: that is where "Save image" lives. */
@@ -101,6 +108,7 @@ export default function PhotoLightbox({
   onNotesChange,
   onKept,
   onFixed,
+  onPeopleCleared,
   hasMore = false,
   onNeedMore,
   moreError,
@@ -117,6 +125,8 @@ export default function PhotoLightbox({
   /** "Wrong?" (or its Undo) changed what the photo is. A list drops a photo that no
    *  longer belongs in it when the viewer closes, never under it. */
   onFixed?: (imageId: string, fix: PhotoFix) => void
+  /** An admin said nobody is in a frame of people (true), or took it back (false). */
+  onPeopleCleared?: (imageId: string, cleared: boolean) => void
   /** The list has older photos than these; `onNeedMore` asks for the next page. */
   hasMore?: boolean
   onNeedMore?: () => void
@@ -147,6 +157,13 @@ export default function PhotoLightbox({
   const [undoing, setUndoing] = useState(false)
   const [changeErr, setChangeErr] = useState('')
   const [writer, setWriter] = useState(false)
+  const [admin, setAdmin] = useState(false)
+  // "Nobody in it?" on a frame of people: what was said here, by photo, and the last
+  // one for its Undo.
+  const [cleared, setCleared] = useState<Record<string, boolean>>({})
+  const [peopleChange, setPeopleChange] = useState<{ id: string; cleared: boolean } | null>(null)
+  const [peopleBusy, setPeopleBusy] = useState(false)
+  const [peopleErr, setPeopleErr] = useState('')
   // Next was pressed at the end of what is loaded: go on once the next page is in.
   const [waitingMore, setWaitingMore] = useState(false)
   const holding = useRef(false)
@@ -170,7 +187,11 @@ export default function PhotoLightbox({
 
   useEffect(() => {
     let live = true
-    whoAmI().then((me) => { if (live) setWriter(me.role !== 'viewer') }).catch(() => {})
+    whoAmI().then((me) => {
+      if (!live) return
+      setWriter(me.role !== 'viewer')
+      setAdmin(me.role === 'admin')
+    }).catch(() => {})
     return () => { live = false }
   }, [])
 
@@ -201,6 +222,12 @@ export default function PhotoLightbox({
     const t = window.setTimeout(() => setChange(null), 10_000)
     return () => window.clearTimeout(t)
   }, [change, undoing, changeErr])
+
+  useEffect(() => {
+    if (!peopleChange || peopleBusy || peopleErr) return
+    const t = window.setTimeout(() => setPeopleChange(null), 10_000)
+    return () => window.clearTimeout(t)
+  }, [peopleChange, peopleBusy, peopleErr])
 
   // The photos either side load while this one is looked at, so a swipe on a weak
   // signal shows the next at once rather than "Loading photo…" (audit C-04).
@@ -452,7 +479,7 @@ export default function PhotoLightbox({
 
   /** What the photo is now, as this viewer knows it. */
   const current = (p: LightboxPhoto): PhotoFix => fixes[p.id] ?? {
-    label: p.empty && kept[p.id] ? 'Animal' : p.label,
+    label: p.empty && kept[p.id] ? t('lb.animal') : p.label,
     species_id: p.species_id ?? null,
     empty: !!p.empty && !kept[p.id],
     hidden: false,
@@ -494,10 +521,28 @@ export default function PhotoLightbox({
       setChange(null)
     } catch (e) {
       const x = e as Failure
-      setChangeErr(x.offline ? 'No signal, so it wasn’t undone. Try again.' : x.timeout
-        ? 'No answer from the server, so it wasn’t undone. Try again.' : `It wasn’t undone. ${x.message}`)
+      setChangeErr(x.offline ? t('lb.undoNoSignal') : x.timeout ? t('lb.undoNoAnswer') : t('lb.undoFailed', { why: x.message }))
     } finally {
       setUndoing(false)
+    }
+  }
+
+  /** Say nobody is in this frame of people (a feeder read as a vehicle), or take it back. */
+  async function clearPeople(id: string, yes: boolean) {
+    if (peopleBusy) return
+    setPeopleBusy(true)
+    setPeopleErr('')
+    try {
+      await api(`/images/${id}/people`, { method: 'POST', body: JSON.stringify({ cleared: yes }), timeoutMs: 20_000 })
+      setCleared((c) => ({ ...c, [id]: yes }))
+      setPeopleChange({ id, cleared: yes })
+      onPeopleCleared?.(id, yes)
+    } catch (e) {
+      const x = e as Failure
+      setPeopleChange({ id, cleared: yes })  // what was asked for, for Try again
+      setPeopleErr(x.offline ? t('lb.saveNoSignal') : x.timeout ? t('lb.saveNoAnswer') : t('lb.saveFailed', { why: x.message }))
+    } finally {
+      setPeopleBusy(false)
     }
   }
 
@@ -507,13 +552,14 @@ export default function PhotoLightbox({
   const empty = now.empty
   const label = now.label
   const shownChange = change && change.id === im.id ? change : null
-  const when = new Date(im.captured_at).toLocaleString(undefined, {
-    weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
-  })
+  const peopleFrame = !!im.people
+  const nobody = !!cleared[im.id]
+  const shownPeople = peopleChange && peopleChange.id === im.id ? peopleChange : null
+  const when = fmtDate(im.captured_at, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 
   return (
     <Overlay
-      label={`${im.camera} · Photo ${idx + 1} of ${photos.length}${hasMore ? '+' : ''}`}
+      label={t('lb.label', { camera: im.camera, n: idx + 1, of: `${photos.length}${hasMore ? '+' : ''}` })}
       backLabel={backLabel}
       onClose={onClose}
       backdrop="rgba(0, 0, 0, 0.92)"
@@ -523,21 +569,27 @@ export default function PhotoLightbox({
         // The things you do with a photo once it is big: put its name right, get
         // closer, and keep it.
         <>
-          {writer && (
+          {peopleFrame && admin && !nobody && (
+            <button className="ov-tool ov-tool--text" onClick={() => clearPeople(im.id, true)} disabled={peopleBusy}
+              aria-label={t('lb.nobodyLabel')} title={t('lb.nobodyTitle')}>
+              {t('lb.nobody')}
+            </button>
+          )}
+          {writer && !peopleFrame && (
             <button className="ov-tool ov-tool--text" onClick={() => { setChange(null); setFixing(true) }}
-              disabled={sheetOpen || fixing} aria-label="Wrong animal? Fix it" title="Wrong animal, or nothing in it? Fix it">
-              Wrong?
+              disabled={sheetOpen || fixing} aria-label={t('lb.wrongLabel')} title={t('lb.wrongTitle')}>
+              {t('lb.wrong')}
             </button>
           )}
           <button
             className="ov-tool"
             onClick={toggleZoom}
-            aria-label={view.s > 1 ? 'Fit photo to screen' : 'Zoom in'}
-            title={view.s > 1 ? 'Fit to screen' : 'Zoom in. Double-tap or pinch works too'}
+            aria-label={view.s > 1 ? t('lb.fitLabel') : t('lb.zoomIn')}
+            title={view.s > 1 ? t('lb.fit') : t('lb.zoomTitle')}
           >
             {view.s > 1 ? <MagnifyingGlassMinusIcon size={20} /> : <MagnifyingGlassPlusIcon size={20} />}
           </button>
-          <button className="ov-tool" onClick={download} disabled={saving} aria-label="Save photo" title="Save photo">
+          <button className="ov-tool" onClick={download} disabled={saving} aria-label={t('lb.save')} title={t('lb.save')}>
             <DownloadSimpleIcon size={20} />
           </button>
         </>
@@ -561,25 +613,39 @@ export default function PhotoLightbox({
               onPointerCancel={pointerCancel}
               style={{ cursor: view.s > 1 ? 'grab' : 'default' }}
             >
-              {imgError && <div role="alert" className="lb-status">This photo did not load. Try the next one.</div>}
-              {!imgReady && !imgError && <span role="status" className="lb-status">Loading photo…</span>}
+              {imgError && <div role="alert" className="lb-status">{t('lb.didntLoad')}</div>}
+              {!imgReady && !imgError && <span role="status" className="lb-status">{t('lb.loading')}</span>}
               {shownChange && (
                 <div className="lb-toast" role={changeErr ? 'alert' : 'status'}
                   onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
                   <span>
                     {changeErr || (shownChange.choice === 'nothing'
-                      ? 'Marked: nothing here. It leaves the photo lists.'
-                      : `Changed to ${shownChange.fix.label}${visitWords(shownChange.fix.visit.length)}.${shownChange.fix.hidden ? ' That animal is hidden in Settings, so the photo leaves the lists.' : ''}`)}
+                      ? t('lb.markedNothing')
+                      : `${t('lb.changedTo', { label: shownChange.fix.label, visit: visitWords(shownChange.fix.visit.length) })}${shownChange.fix.hidden ? ` ${t('lb.hiddenLeaves')}` : ''}`)}
                   </span>
-                  <button type="button" className="lb-note-btn" onClick={undo} disabled={undoing}>{undoing ? 'Undoing…' : 'Undo'}</button>
+                  <button type="button" className="lb-note-btn" onClick={undo} disabled={undoing}>{undoing ? t('lb.undoing') : t('common.undo')}</button>
                 </div>
               )}
-              {waitingMore && <span role="status" className="lb-status lb-status--more">Loading older photos…</span>}
+              {shownPeople && (
+                <div className="lb-toast" role={peopleErr ? 'alert' : 'status'}
+                  onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                  <span>
+                    {peopleErr || (shownPeople.cleared ? t('lb.markedNobody') : t('lb.backWithPeople'))}
+                  </span>
+                  {(shownPeople.cleared || peopleErr) && (
+                    <button type="button" className="lb-note-btn" disabled={peopleBusy}
+                      onClick={() => clearPeople(im.id, peopleErr ? shownPeople.cleared : false)}>
+                      {peopleBusy ? t('common.saving') : peopleErr ? t('common.tryAgain') : t('common.undo')}
+                    </button>
+                  )}
+                </div>
+              )}
+              {waitingMore && <span role="status" className="lb-status lb-status--more">{t('lb.loadingOlder')}</span>}
               {!waitingMore && moreError && hasMore && idx === photos.length - 1 && (
                 <div className="lb-toast lb-more-err" role="alert"
                   onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
                   <span>{moreError}</span>
-                  <button type="button" className="lb-note-btn" onClick={() => step(1, true)}>Try again</button>
+                  <button type="button" className="lb-note-btn" onClick={() => step(1, true)}>{t('common.tryAgain')}</button>
                 </div>
               )}
               <img
@@ -609,13 +675,17 @@ export default function PhotoLightbox({
               <div className="lb-caption" onClick={(e) => e.stopPropagation()}>
                 <b>{im.camera}</b>
                 <span data-label>{label}</span>
-                {now.fixed_by && <span className="lb-fixed-by">fixed by {now.fixed_by}</span>}
+                {now.fixed_by && <span className="lb-fixed-by">{t('lb.fixedBy', { name: now.fixed_by })}</span>}
                 <span style={{ opacity: 0.75 }}>{when}</span>
                 <span style={{ opacity: 0.55, fontVariantNumeric: 'tabular-nums' }}>
                   {idx + 1} / {photos.length}{hasMore ? '+' : ''}
                 </span>
               </div>
-              <PhotoNotesPanel
+              {peopleFrame ? (
+                <p className="lb-people-note">
+                  {nobody ? t('lb.nobodyNow') : t('lb.adminsOnly')}
+                </p>
+              ) : <PhotoNotesPanel
                 key={im.id}
                 imageId={im.id}
                 label={label}
@@ -636,7 +706,7 @@ export default function PhotoLightbox({
                   })
                   onKept?.(id)
                 }}
-              />
+              />}
             </div>
           </div>
           {fixing && (
@@ -657,7 +727,7 @@ export default function PhotoLightbox({
             className="lb-nav lb-nav--prev"
             disabled={idx === 0 || sheetOpen || fixing}
             onClick={(e) => { e.stopPropagation(); step(-1) }}
-            aria-label="Previous photo"
+            aria-label={t('lb.prev')}
           >
             ‹
           </button>
@@ -665,7 +735,7 @@ export default function PhotoLightbox({
             className="lb-nav lb-nav--next"
             disabled={(idx === photos.length - 1 && !hasMore) || sheetOpen || fixing || waitingMore}
             onClick={(e) => { e.stopPropagation(); step(1) }}
-            aria-label="Next photo"
+            aria-label={t('lb.next')}
           >
             ›
           </button>

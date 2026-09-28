@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -22,9 +22,12 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_admin, get_current_user
 from app.core.config import settings
 from app.core.db import get_db
+from app.forecasting.conditions import sun_times
 from app.forecasting.inference import dark_exit, suggest_approach_arcs
-from app.forecasting.wind import assess, shooting_arcs_conflict
+from app.forecasting.wind import shooting_arcs_conflict
+from app.i18n import t
 from app.models import Camera, Estate, Sit, Stand, User
+from app.notifications.hold import deliver_held_in_background, has_held
 
 router = APIRouter(tags=["stands"])
 
@@ -41,11 +44,17 @@ def tonight(now: datetime | None = None) -> date:
     return (local - timedelta(hours=6)).date()
 
 
+# Finite and on the planet, as for a camera: one pin at latitude 1000 took the map
+# down for everyone (audit B-08).
+Lat = Annotated[float | None, Field(ge=-90, le=90, allow_inf_nan=False)]
+Lon = Annotated[float | None, Field(ge=-180, le=180, allow_inf_nan=False)]
+
+
 class StandIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     camera_id: uuid.UUID | None = None
-    lat: float | None = None
-    lon: float | None = None
+    lat: Lat = None
+    lon: Lon = None
     shooting_dirs_deg: list[int] | None = None
     approach_dirs_deg: list[int] | None = None
     notes: str | None = None
@@ -54,8 +63,8 @@ class StandIn(BaseModel):
 class StandPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     camera_id: uuid.UUID | None = None
-    lat: float | None = None
-    lon: float | None = None
+    lat: Lat = None
+    lon: Lon = None
     shooting_dirs_deg: list[int] | None = None
     approach_dirs_deg: list[int] | None = None
     notes: str | None = None
@@ -110,7 +119,7 @@ def bootstrap_stands(
     """
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
-        raise HTTPException(400, "Set up the estate first.")
+        raise HTTPException(400, t("stands.no_estate"))
 
     taken = {s.camera_id for s in db.scalars(select(Stand)).all() if s.camera_id}
     created = []
@@ -118,7 +127,7 @@ def bootstrap_stands(
         if cam.id in taken:
             continue
         stand = Stand(
-            estate_id=estate.id, camera_id=cam.id, name=f"{cam.name} stand",
+            estate_id=estate.id, camera_id=cam.id, name=t("stands.auto_name", camera=cam.name),
             lat=cam.lat, lon=cam.lon,
         )
         db.add(stand)
@@ -127,10 +136,7 @@ def bootstrap_stands(
     return {
         "created": [s.name for s in created],
         "skipped": len(taken),
-        "note": (
-            "Each stand is placed at its camera. Move it to where you actually sit. "
-            "Wind advice starts once you set the directions animals come in from."
-        ),
+        "note": t("stands.auto_note"),
     }
 
 
@@ -140,9 +146,9 @@ def create_stand(
 ) -> dict:
     estate = db.scalar(select(Estate).order_by(Estate.created_at))
     if estate is None:
-        raise HTTPException(400, "Set up the estate first.")
+        raise HTTPException(400, t("stands.no_estate"))
     if body.camera_id and db.get(Camera, body.camera_id) is None:
-        raise HTTPException(404, "That camera isn't on the app.")
+        raise HTTPException(404, t("stands.camera_gone"))
     stand = Stand(estate_id=estate.id, **body.model_dump())
     db.add(stand)
     db.commit()
@@ -158,7 +164,7 @@ def update_stand(
 ) -> dict:
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "That stand isn't on the app.")
+        raise HTTPException(404, t("stands.gone"))
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(stand, k, v)
     db.commit()
@@ -171,14 +177,10 @@ def delete_stand(
 ) -> None:
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "That stand isn't on the app.")
+        raise HTTPException(404, t("stands.gone"))
     sits = db.scalar(select(func.count(Sit.id)).where(Sit.stand_id == stand_id))
     if sits:
-        raise HTTPException(
-            409,
-            f"{sits} sit{'' if sits == 1 else 's'} recorded at this stand. Deleting it would wipe "
-            "that history. Rename it instead.",
-        )
+        raise HTTPException(409, t("stands.has_sits", n=sits))
     db.delete(stand)
     db.commit()
 
@@ -248,6 +250,11 @@ def _sit_out(s: Sit, stand_name: str | None = None) -> dict:
         "species_seen": s.species_seen,
         "wind_status": s.wind_status,
         "wind_text": s.wind_text,
+        # The moment that verdict was for (the sit time when it was reserved).
+        "wind_at": s.wind_at,
+        # The sit's sunset and the sunrise after it, so Sit mode can show them with
+        # no signal and nothing else loaded (sunset_local, sunrise_local).
+        **sun_times(s.night),
     }
 
 
@@ -295,11 +302,11 @@ def _own_sit(db: Session, sit_id: uuid.UUID, user: User) -> Sit:
     """
     sit = db.get(Sit, sit_id, with_for_update=True, populate_existing=True)
     if sit is None:
-        raise HTTPException(404, "That sit isn't on the app.")
+        raise HTTPException(404, t("sits.gone"))
     if user.role == "viewer":
-        raise HTTPException(403, "Viewers can look at the sits but can't change them.")
+        raise HTTPException(403, t("sits.viewer"))
     if sit.user_id != user.id and user.role != "admin":
-        raise HTTPException(403, "That sit is another hunter's.")
+        raise HTTPException(403, t("sits.not_yours"))
     return sit
 
 
@@ -373,7 +380,7 @@ def _refusal(db: Session, stand: Stand, user: User, night: date) -> Sit | str | 
         if other.stand_id == stand.id:
             if other.user_id == user.id:
                 return other
-            return f"{stand.name} is already claimed tonight by another hunter."
+            return t("stands.claimed", stand=stand.name)
 
     # Safety interlock: never put two people in each other's fire lanes. Only
     # fires when both stands actually have recorded arcs — absent geometry must
@@ -383,10 +390,7 @@ def _refusal(db: Session, stand: Stand, user: User, night: date) -> Sit | str | 
         if other_stand and shooting_arcs_conflict(
             stand.shooting_dirs_deg, other_stand.shooting_dirs_deg
         ):
-            return (
-                f"{stand.name} and {other_stand.name} share a shooting arc, and "
-                f"{other_stand.name} is taken tonight. Pick another stand."
-            )
+            return t("stands.arc_conflict", stand=stand.name, other=other_stand.name)
     return None
 
 
@@ -396,6 +400,43 @@ def _lock_night(db: Session, night: date) -> None:
         text("SELECT pg_advisory_xact_lock(:ns, :night)"),
         {"ns": _CLAIM_LOCK, "night": night.toordinal()},
     )
+
+
+def _stand_wind(db: Session, stand: Stand, night: date | None = None) -> dict:
+    """Tonight's wind verdict for a stand (conditions.wind_verdict), with tonight's
+    sunset and sunrise. The forecast is fetched with no database connection held
+    (K-04). `night`: a dawn sit's, once that night is over, for the air now."""
+    from app.forecasting.conditions import release, wind_verdict
+    from app.forecasting.model import _tonight_conditions
+
+    now = datetime.now(UTC)
+    release(db)
+    try:
+        cond = _tonight_conditions(now) if night is None else _tonight_conditions(now, night=night)
+    except Exception:
+        cond = {}
+    return {**wind_verdict(db, stand, cond, now=now),
+            "sunset_local": cond.get("sunset_local"), "sunrise_local": cond.get("sunrise_local")}
+
+
+@router.get("/stands/{stand_id}/wind")
+def stand_wind(stand_id: uuid.UUID, _: CurrentUser, db: DB, sit: uuid.UUID | None = None) -> dict:
+    """Tonight's wind for one stand, as the map, Stands and Tonight give it: what Sit
+    mode refreshes its wind line from, so the seat never tells a different story.
+
+    `sit` is the sit Sit mode is showing. A dawn sit still on after 06:00 belongs to
+    a night that is over, and is judged for now, not for the coming evening."""
+    stand = db.get(Stand, stand_id)
+    if stand is None:
+        raise HTTPException(404, t("stands.gone"))
+    night = None
+    if sit is not None:
+        now = datetime.now(UTC)
+        # On now (_live) at this stand, and of a night already over: a dawn sit.
+        mine = db.scalar(select(Sit).where(Sit.id == sit, Sit.stand_id == stand.id, _live(now)))
+        if mine is not None and mine.night < tonight(now):
+            night = mine.night
+    return _stand_wind(db, stand, night)
 
 
 @router.post("/sits", status_code=201)
@@ -413,24 +454,14 @@ def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
     should queue behind somebody else's weather call.
     """
     if user.role not in ("admin", "member"):
-        raise HTTPException(403, "Viewers can look at the stands but can't reserve one.")
+        raise HTTPException(403, t("stands.viewer"))
     stand = db.get(Stand, body.stand_id)
     if stand is None:
-        raise HTTPException(404, "That stand isn't on the app.")
+        raise HTTPException(404, t("stands.gone"))
 
-    # Record what the app told them about the wind, so the advice can be scored later.
-    from app.forecasting.model import _tonight_conditions
-
-    try:
-        cond = _tonight_conditions(datetime.now(UTC))
-    except Exception:
-        cond = {}
-    verdict = assess(
-        stand_name=stand.name,
-        wind_dir_deg=cond.get("wind_dir_deg"),
-        wind_speed_kmh=cond.get("wind_speed_kmh"),
-        approach_dirs_deg=stand.approach_dirs_deg,
-    )
+    # Record what the app told them about the wind, so the advice can be scored
+    # later: the verdict every other screen gives this stand, for the sit time.
+    verdict = _stand_wind(db, stand)
 
     night = tonight()
     _lock_night(db, night)
@@ -447,8 +478,9 @@ def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
         user_id=user.id,
         night=night,
         outcome="unreported",
-        wind_status=verdict.status,
-        wind_text=verdict.text,
+        wind_status=verdict["status"],
+        wind_text=verdict["text"],
+        wind_at=datetime.fromisoformat(verdict["at"]),
     )
     db.add(sit)
     try:
@@ -465,9 +497,7 @@ def claim_stand(body: ClaimIn, user: CurrentUser, db: DB) -> dict:
         )
         if mine is not None:
             return _sit_out(mine, stand.name)
-        raise HTTPException(
-            409, f"{stand.name} is already claimed tonight by another hunter."
-        ) from None
+        raise HTTPException(409, t("stands.claimed", stand=stand.name)) from None
     return _sit_out(sit, stand.name)
 
 
@@ -490,19 +520,19 @@ def update_sit(sit_id: uuid.UUID, body: OutcomeIn, user: CurrentUser, db: DB) ->
     """
     sit = _own_sit(db, sit_id, user)
     if body.outcome not in OUTCOMES:
-        raise HTTPException(422, f"outcome must be one of {', '.join(OUTCOMES)}")
+        raise HTTPException(422, t("sits.bad_outcome", outcomes=", ".join(OUTCOMES)))
 
     current, target = sit.outcome, body.outcome
     if current == "cancelled":
         if target == "cancelled":
             return _done(db, sit)
-        raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
+        raise HTTPException(409, t("sits.cancelled"))
 
     at = _client_time(body.at, datetime.now(UTC))
     if sit.reported_at is not None and at < sit.reported_at:
         return _done(db, sit)
     if target == "cancelled" and current != "unreported":
-        raise HTTPException(409, "You've already said what happened on this sit.")
+        raise HTTPException(409, t("sits.already_reported"))
 
     if target == current:
         took, same = False, True
@@ -535,7 +565,7 @@ def start_sit(
     """Sit mode opened. Idempotent: the first start the server hears is kept."""
     sit = _own_sit(db, sit_id, user)
     if sit.outcome == "cancelled":
-        raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
+        raise HTTPException(409, t("sits.cancelled"))
     if sit.started_at is None:
         at = _client_time(body.at if body else None, datetime.now(UTC))
         sit.started_at = max(at, sit.claimed_at) if sit.claimed_at else at
@@ -543,21 +573,30 @@ def start_sit(
 
 
 @router.post("/sits/{sit_id}/end")
-def end_sit(sit_id: uuid.UUID, user: CurrentUser, db: DB, body: TapIn | None = None) -> dict:
+def end_sit(
+    sit_id: uuid.UUID, user: CurrentUser, db: DB, background: BackgroundTasks,
+    body: TapIn | None = None,
+) -> dict:
     """END SIT. Idempotent: the first end the server hears is the one it keeps.
 
     The outcome is left alone. A sit ended with nothing reported stays
     'unreported' and the phone asks what happened; a blank sit is never assumed.
+
+    The alerts that waited while the hunter sat go out now, as one message, once
+    this has answered (app.notifications.hold).
     """
     sit = _own_sit(db, sit_id, user)
     if sit.outcome == "cancelled":
-        raise HTTPException(409, "That reservation was cancelled. Reserve the stand again.")
+        raise HTTPException(409, t("sits.cancelled"))
     if sit.started_at is None:
-        raise HTTPException(409, "That sit hasn't started.")
+        raise HTTPException(409, t("sits.not_started"))
     if sit.ended_at is None:
         at = _client_time(body.at if body else None, datetime.now(UTC))
         sit.ended_at = max(at, sit.started_at)
-    return _done(db, sit)
+    out = _done(db, sit)
+    if sit.user_id is not None and has_held(db, sit.user_id):
+        background.add_task(deliver_held_in_background, sit.user_id)
+    return out
 
 
 @router.get("/stands/{stand_id}/suggested-arcs")
@@ -571,7 +610,7 @@ def suggested_arcs(
     """
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "That stand isn't on the app.")
+        raise HTTPException(404, t("stands.gone"))
     return suggest_approach_arcs(db, stand)
 
 
@@ -582,5 +621,5 @@ def stand_dark_exit(
     """When to walk out. Stands die from how you leave them, not how you arrive."""
     stand = db.get(Stand, stand_id)
     if stand is None:
-        raise HTTPException(404, "That stand isn't on the app.")
+        raise HTTPException(404, t("stands.gone"))
     return dark_exit(db, stand)

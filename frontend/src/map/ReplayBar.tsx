@@ -2,13 +2,13 @@ import { PauseIcon } from '@phosphor-icons/react/dist/csr/Pause'
 import { PlayIcon } from '@phosphor-icons/react/dist/csr/Play'
 import { createPortal } from 'react-dom'
 import PhotoLightbox, { type LightboxPhoto } from '../components/PhotoLightbox'
-import { SPEEDS, clock, hourMarks, minutesInto, nightLabel } from './activity'
+import { t as tr } from '../i18n'
+import { SPEEDS, clock, hourMarks, minutesInto, nightLabel, nightParts } from './activity'
 import type { Camera } from './geometry'
 import type { useReplay } from './useReplay'
 
 const STEP = 5
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
-const nightCount = (visits: number) => visits ? plural(visits, 'visit') : 'nothing'
+const nightCount = (visits: number) => visits ? tr('common.visits', { count: visits }) : tr('replay.nothing')
 
 /**
  * The replay's controls, docked under the map: which night, the timeline from
@@ -34,39 +34,40 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
     camera: names.get(v.camera_id) ?? '', label: v.group_size > 1 ? `${v.label} (${v.group_size})` : v.label,
   }))
   // Nothing is loading once a load has failed: the error and its Try again say it all.
-  const status = r.err || r.nightsErr ? null : !r.data ? (r.nights && !r.nights.length ? 'No nights yet' : 'Loading…')
-    : empty ? 'No visits' : `${r.soFar} of ${plural(r.visits.length, 'visit')}`
+  const status = r.err || r.nightsErr ? null : !r.data ? (r.nights && !r.nights.length ? tr('replay.noNights') : tr('common.loading'))
+    : empty ? tr('replay.noVisits') : tr('replay.soFar', { n: r.soFar, count: r.visits.length })
   const marks = r.data ? hourMarks(r.data.start, r.data.end) : []
   const at = r.nights?.findIndex(n => n.night === r.night) ?? -1
-  const shown = r.nights && at >= 0 ? { date: nightLabel(r.nights[at].night, at === 0, r.nights[at].so_far), count: nightCount(r.nights[at].visits) } : null
-  return <section className="mode-bar mode-bar--replay" aria-label="Replay a night">
+  const shown = r.nights && at >= 0 ? { ...nightParts(r.nights[at].night, at === 0, r.nights[at].so_far), count: nightCount(r.nights[at].visits) } : null
+  return <section className="mode-bar mode-bar--replay" aria-label={tr('replay.label')}>
     <div className="mode-bar-row">
       <label className="replay-night">
-        <span className="sr-only">Night</span>
+        <span className="sr-only">{tr('replay.night')}</span>
         {/* What the closed picker shows, drawn over it so a narrow phone cuts the date
             short and never the count. The real select is on top, and takes the tap. */}
         <span className="replay-night-shown" aria-hidden="true">
-          <span className="replay-night-date">{shown ? shown.date : r.nightsErr ? 'Nights didn’t load' : 'Loading nights…'}</span>
+          {shown?.prefix && <span className="replay-night-prefix">{shown.prefix}&nbsp;·&nbsp;</span>}
+          <span className="replay-night-date">{shown ? shown.day : r.nightsErr ? tr('replay.nightsFailed') : tr('replay.loadingNights')}</span>
           {shown && <span className="replay-night-count">&nbsp;· {shown.count}</span>}
         </span>
         <select value={r.night ?? ''} disabled={!r.nights?.length} onChange={e => r.setNight(e.target.value)}>
-          {!r.nights && <option value="">{r.nightsErr ? 'Nights didn’t load' : 'Loading nights…'}</option>}
+          {!r.nights && <option value="">{r.nightsErr ? tr('replay.nightsFailed') : tr('replay.loadingNights')}</option>}
           {r.nights?.map((n, i) => <option key={n.night} value={n.night}>{nightLabel(n.night, i === 0, n.so_far)} · {nightCount(n.visits)}</option>)}
         </select>
       </label>
-      <button type="button" className="mode-bar-x" aria-label="Close replay, back to the camera photos" onClick={onClose}>
+      <button type="button" className="mode-bar-x" aria-label={tr('replay.close')} onClick={onClose}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
       </button>
     </div>
-    {r.nightsErr && <p className="map-inline-error" role="alert">{r.nightsErr} <button type="button" className="map-link" onClick={r.reloadNights}>Try again</button></p>}
-    {r.err && <p className="map-inline-error" role="alert">{r.err} <button type="button" className="map-link" onClick={r.reload}>Try again</button></p>}
+    {r.nightsErr && <p className="map-inline-error" role="alert">{r.nightsErr} <button type="button" className="map-link" onClick={r.reloadNights}>{tr('common.tryAgain')}</button></p>}
+    {r.err && <p className="map-inline-error" role="alert">{r.err} <button type="button" className="map-link" onClick={r.reload}>{tr('common.tryAgain')}</button></p>}
     <div className="replay-controls">
-      <button type="button" className="map-button replay-step" disabled={!r.data || r.t <= 0} onClick={() => r.setT(r.t - STEP)} aria-label="Back 5 minutes">−5 min</button>
+      <button type="button" className="map-button replay-step" disabled={!r.data || r.t <= 0} onClick={() => r.setT(r.t - STEP)} aria-label={tr('replay.back5')}>{tr('replay.minus5')}</button>
       <button type="button" className="map-button map-button--primary replay-play" disabled={!r.data || empty} onClick={r.play}
-        aria-label={r.playing ? 'Pause' : 'Play'}>
+        aria-label={r.playing ? tr('replay.pause') : tr('replay.play')}>
         {r.playing ? <PauseIcon size={26} weight="fill" /> : <PlayIcon size={26} weight="fill" />}
       </button>
-      <button type="button" className="map-button replay-step" disabled={!r.data || r.t >= r.total} onClick={() => r.setT(r.t + STEP)} aria-label="Forward 5 minutes">+5 min</button>
+      <button type="button" className="map-button replay-step" disabled={!r.data || r.t >= r.total} onClick={() => r.setT(r.t + STEP)} aria-label={tr('replay.fwd5')}>{tr('replay.plus5')}</button>
       <p className="replay-now">
         <strong>{now}</strong>
         {status && <span>{status}</span>}
@@ -80,23 +81,23 @@ export default function ReplayBar({ replay: r, cameras, photo, onPhoto, onClose 
         })}
       </div>
       <input type="range" min={0} max={r.total} step={1} value={Math.round(r.t)} disabled={!r.data}
-        aria-label="Time of night" aria-valuetext={`${now}, ${status ?? ''}`} onChange={e => r.setT(Number(e.target.value))} />
+        aria-label={tr('replay.time')} aria-valuetext={`${now}, ${status ?? ''}`} onChange={e => r.setT(Number(e.target.value))} />
       <div className="replay-hours" aria-hidden="true">
         {marks.map(x => <span key={x.m} style={{ left: pct(x.m) }}>{x.label}</span>)}
       </div>
     </div>
     <div className="replay-foot">
-      <div className="mode-seg replay-speed" role="radiogroup" aria-label="Speed">
-        {SPEEDS.map(s => <button key={s.id} type="button" role="radio" aria-checked={r.speed === s.id} title={s.note} aria-label={`${s.label}: ${s.note.toLowerCase()}`} onClick={() => r.setSpeed(s.id)}>{s.label}</button>)}
+      <div className="mode-seg replay-speed" role="radiogroup" aria-label={tr('replay.speed')}>
+        {SPEEDS.map(s => <button key={s.id} type="button" role="radio" aria-checked={r.speed === s.id} title={tr(s.note)} aria-label={`${s.label}: ${tr(s.note).toLocaleLowerCase()}`} onClick={() => r.setSpeed(s.id)}>{s.label}</button>)}
       </div>
       {/* On a phone on its side only the guess line stays: it is what says the arrow is a guess. */}
       <p className="replay-note">
-        <span className="replay-note-speed">{SPEEDS.find(s => s.id === r.speed)?.note}.</span>
-        {!!r.data?.links.length && <span className="replay-note-guess"><i className="replay-note-arrow" aria-hidden="true" />Likely went this way: a guess, from the same animal at the next camera within 3 h.</span>}
-        {r.offMap > 0 && <span className="replay-note-off">{plural(r.offMap, 'visit')} at cameras not on the map.</span>}
+        <span className="replay-note-speed">{tr(SPEEDS.find(s => s.id === r.speed)?.note ?? 'replay.speed1')}.</span>
+        {!!r.data?.links.length && <span className="replay-note-guess"><i className="replay-note-arrow" aria-hidden="true" />{tr('replay.guess')}</span>}
+        {r.offMap > 0 && <span className="replay-note-off">{tr('replay.offMap', { count: r.offMap })}</span>}
       </p>
     </div>
     {photo != null && viewer[photo] && createPortal(
-      <PhotoLightbox photos={viewer} start={photo} backLabel="Back to the replay" onClose={() => onPhoto(null)} />, document.body)}
+      <PhotoLightbox photos={viewer} start={photo} backLabel={tr('replay.backTo')} onClose={() => onPhoto(null)} />, document.body)}
   </section>
 }

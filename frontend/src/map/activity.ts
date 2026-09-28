@@ -1,4 +1,5 @@
 import type { Map as MlMap } from 'maplibre-gl'
+import { type Key, fmtDate, fmtNumber, t } from '../i18n'
 import { setSource } from './layers'
 import { bearingDeg, distanceM, offset, validLngLat, type LngLat } from './geometry'
 
@@ -15,24 +16,24 @@ import { bearingDeg, distanceM, offset, validLngLat, type LngLat } from './geome
  * everywhere, so these agree with the camera sheet's "Last night".
  */
 export type View = 'cameras' | 'activity' | 'replay'
-export const VIEWS: { id: View; label: string; note: string }[] = [
-  { id: 'cameras', label: 'Cameras', note: 'Each camera’s latest photo, and what is new to you.' },
-  { id: 'activity', label: 'Activity', note: 'Where the game is: visits a night at each camera.' },
-  { id: 'replay', label: 'Replay', note: 'Play a night back, camera by camera.' },
+export const VIEWS: { id: View; label: Key; note: Key }[] = [
+  { id: 'cameras', label: 'nav.cameras', note: 'view.camerasNote' },
+  { id: 'activity', label: 'view.activity', note: 'view.activityNote' },
+  { id: 'replay', label: 'view.replay', note: 'view.replayNote' },
 ]
 export const isView = (v: string | null): v is View => VIEWS.some(x => x.id === v)
 
 // ── activity ──
 export type Part = 'all' | 'dusk' | 'night' | 'dawn'
 export type Nights = 1 | 7 | 30
-export const PERIODS: { id: Nights; label: string }[] = [
-  { id: 1, label: 'Last night' }, { id: 7, label: '7 nights' }, { id: 30, label: '30 nights' },
+export const PERIODS: { id: Nights; label: Key }[] = [
+  { id: 1, label: 'night.lastNight' }, { id: 7, label: 'activity.7nights' }, { id: 30, label: 'activity.30nights' },
 ]
-export const PARTS: { id: Part; label: string; hours: string }[] = [
-  { id: 'all', label: 'All night', hours: '18–08' },
-  { id: 'dusk', label: 'Dusk', hours: '18–22' },
-  { id: 'night', label: 'Night', hours: '22–03' },
-  { id: 'dawn', label: 'Dawn', hours: '03–08' },
+export const PARTS: { id: Part; label: Key; hours: string }[] = [
+  { id: 'all', label: 'activity.allNight', hours: '18–08' },
+  { id: 'dusk', label: 'activity.dusk', hours: '18–22' },
+  { id: 'night', label: 'activity.night', hours: '22–03' },
+  { id: 'dawn', label: 'activity.dawn', hours: '03–08' },
 ]
 export type SpeciesVisits = { species_id: string | null; label: string; visits: number }
 export type ActivityCamera = {
@@ -76,11 +77,13 @@ export function legendSizes(max: number): [number, number] {
   const i = big < 0 ? LADDER.length - 1 : Math.max(2, big)
   return [LADDER[i - 2], LADDER[i]]
 }
-/** "2 a night", "0.8 a night", "1 every 3 nights": never "every 1 nights". */
-export function rateWords(perNight: number): string {
-  if (!(perNight > 0)) return 'none'
+/** "2 a night", "0.8 a night", "1 every 3 nights": never "every 1 nights". In a
+ *  sentence (`inSentence`), "one every 3 nights". */
+export function rateWords(perNight: number, inSentence = false): string {
+  if (!(perNight > 0)) return t('rate.none')
   const every = Math.round(1 / perNight)
-  return every >= 2 ? `1 every ${every} nights` : `${Math.round(perNight * 10) / 10} a night`
+  return every >= 2 ? t(inSentence ? 'rate.everyInSentence' : 'rate.every', { n: every })
+    : t('rate.perNight', { n: fmtNumber(Math.round(perNight * 10) / 10) })
 }
 
 /** The activity circles (GL layers 'activity-circles', 'activity-quiet' and 'activity-checking'). */
@@ -106,19 +109,24 @@ export type Replay = { night: string; start: string; end: string; visits: Replay
 /** so_far: last night, before 08:00, when it is still going. */
 export type ReplayNight = { night: string; visits: number; so_far?: boolean }
 /** Minutes of the night that pass in one second of playback. Real time would take 14 hours. */
-export const SPEEDS: { id: number; label: string; note: string }[] = [
-  { id: 1, label: '1×', note: 'An hour in a minute' },
-  { id: 10, label: '10×', note: 'An hour in 6 seconds' },
-  { id: 60, label: '60×', note: 'An hour a second' },
+export const SPEEDS: { id: number; label: string; note: Key }[] = [
+  { id: 1, label: '1×', note: 'replay.speed1' },
+  { id: 10, label: '10×', note: 'replay.speed10' },
+  { id: 60, label: '60×', note: 'replay.speed60' },
 ]
 export const minutesInto = (iso: string, start: string) => (Date.parse(iso) - Date.parse(start)) / 60_000
 const pad = (n: number) => String(n).padStart(2, '0')
 /** 24-hour clock, as the rest of the map ("mostly 21–23 h"). */
 export const clock = (ms: number) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
 export function nightLabel(night: string, first: boolean, soFar = false): string {
-  const d = new Date(`${night}T12:00:00`)
-  const day = d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-  return first ? `Last night${soFar ? ' (so far)' : ''} · ${day}` : day
+  const { prefix, day } = nightParts(night, first, soFar)
+  return prefix ? `${prefix} · ${day}` : day
+}
+/** nightLabel in its two parts, for a picker that lets "Last night" go first on a
+ *  narrow phone rather than the date it is there to show. */
+export function nightParts(night: string, first: boolean, soFar = false): { prefix: string | null; day: string } {
+  const day = fmtDate(new Date(`${night}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })
+  return { prefix: first ? (soFar ? t('replay.lastNightSoFar') : t('night.lastNight')) : null, day }
 }
 /**
  * The hours under the timeline: every third hour on the clock (18, 21, 00, 03, 06)

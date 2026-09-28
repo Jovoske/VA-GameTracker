@@ -37,6 +37,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.astro import moon_phase, solar
 from app.forecasting.exposure import current_night, night_key_start, visits_by_night
+from app.i18n import fixed, t
 from app.models import Camera, CameraNight
 
 log = get_logger(__name__)
@@ -65,19 +66,17 @@ SHUFFLES = 200           # how many reshuffled seasons the real one is compared 
 SHUFFLE_BLOCK = 7        # nights moved together, so a busy week stays a busy week
 CHANCE_LEVEL = 0.95      # a finding beats this share of the reshuffled seasons
 LEVEL_DAYS = 14          # the level: nights this close either side, a moon cycle in all
-SCOPES = [("all", "All animals"), ("wild_boar", "Wild boar"), ("red_deer", "Red deer")]
+# The scopes, and what each is called (said in the reader's language).
+SCOPES = [("all", "class.animals_all"), ("wild_boar", "species.wild_boar"),
+          ("red_deer", "species.red_deer")]
 WATCHED = ("CONFIRMED", "PRESUMED_UP")
 
-# key, label, description-when-high, description-when-low
+# key, label, description-when-high, description-when-low: keys of what each is
+# called, said in the reader's language (patterns.<key>.label / .high / .low).
 _VARS = [
-    ("moon_illum", "Moonlight", "a bright moon", "a dark moon"),
-    ("pressure", "Pressure", "high pressure", "low pressure"),
-    ("pressure_trend", "Pressure trend", "rising pressure", "falling pressure"),
-    ("temp", "Temperature", "warm weather", "cool weather"),
-    ("wind", "Wind", "wind", "still air"),
-    ("rain", "Rain", "rain", "dry weather"),
-    ("cloud", "Cloud cover", "cloud", "clear skies"),
-    ("darkness", "Dark hours", "a long night", "a short night"),
+    (key, f"patterns.{key}.label", f"patterns.{key}.high", f"patterns.{key}.low")
+    for key in ("moon_illum", "pressure", "pressure_trend", "temp", "wind", "rain", "cloud",
+                "darkness")
 ]
 _WEATHER_VARS = {"pressure", "pressure_trend", "temp", "wind", "rain", "cloud"}
 
@@ -180,8 +179,8 @@ def _fetch_weather(key: tuple, lat: float, lon: float, start: date, end: date, *
             log.warning("patterns.weather_failed", error=str(ex))
             failed = True
             continue
-        for i, t in enumerate(h.get("time", [])):
-            hours[t] = {
+        for i, stamp in enumerate(h.get("time", [])):
+            hours[stamp] = {
                 "temp": _at(h, "temperature_2m", i), "pressure": _at(h, "surface_pressure", i),
                 "wind": _at(h, "wind_speed_10m", i), "rain": _at(h, "precipitation", i),
                 "cloud": _at(h, "cloud_cover", i),
@@ -322,6 +321,7 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
     hi_rate = _mean([c for _, c in pairs[-hi_n:]])
     overall = _mean([c for _, c in pairs]) or 1.0
     r = _pearson([v for v, _ in pairs], [c for _, c in pairs])
+    hi_desc, lo_desc, label = t(hi_desc), t(lo_desc), t(label)
     if hi_rate >= lo_rate:
         desc, base, peak = hi_desc, lo_rate, hi_rate
     else:
@@ -330,10 +330,8 @@ def _driver(key: str, label: str, hi_desc: str, lo_desc: str, pairs: list[tuple[
     # effect_pct is a normalized contrast. Its denominator is the overall mean, NOT
     # the low group. It must never be presented as a percent increase or a ratio
     # between groups.
-    statement = (
-        f"About {hi_rate:.1f} visits a night with {hi_desc}, "
-        f"about {lo_rate:.1f} with {lo_desc}."
-    )
+    statement = t("patterns.statement", hi=fixed(hi_rate), hi_desc=hi_desc,
+                  lo=fixed(lo_rate), lo_desc=lo_desc)
     buckets = [{"label": "low", "rate": round(lo_rate, 1), "days": lo_n,
                 "min": pairs[0][0], "max": pairs[lo_n - 1][0]}]
     if n - lo_n - hi_n > 0:
@@ -516,7 +514,7 @@ def compute_patterns(db: Session) -> dict:
     scopes = []
     for key, label in SCOPES:
         s = _scope_drivers(dates, counts, weather, moon, key)
-        s["key"], s["label"] = key, label
+        s["key"], s["label"] = key, t(label)
         if s["sightings"] >= MIN_NIGHTS:  # only show a scope with enough visits to mean anything
             scopes.append(s)
     bar = _shuffle_test(scopes)

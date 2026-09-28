@@ -7,7 +7,7 @@ includes muting a camera: it silences it for you, not for the team.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, time, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.db import get_db
-from app.forecasting.model import sentence_case
+from app.i18n import species_name, t
 from app.models import (
     Camera,
     Detection,
@@ -28,6 +28,7 @@ from app.models import (
     User,
 )
 from app.notifications.prefs import effective_prefs, locked_prefs, muted_cameras
+from app.notifications.push import delivery as push_delivery
 from app.notifications.push import send_to_user
 from app.notifications.vapid import get_vapid
 
@@ -55,7 +56,7 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
     species = [
         {
             "id": s.id,
-            "common_name": sentence_case(s.common_name),  # "Roe deer", as the app writes it
+            "common_name": species_name(s.id, s.common_name),  # "Roe deer", as the app writes it
             "selected": s.id in chosen,
             "detections": int(counts.get(s.id, 0)),
         }
@@ -64,9 +65,14 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
     # most-seen first — the animals that actually turn up sit at the top
     species.sort(key=lambda r: (-r["detections"], r["common_name"]))
     muted = muted_cameras(db, user.id)
+    row = db.get(NotificationPref, user.id)
     return {
         "enabled": enabled,
-        "configured": db.get(NotificationPref, user.id) is not None,
+        "configured": row is not None,
+        # Quiet hours ("23:00", "07:00") or none, and tonight's plan before sunset.
+        "quiet_start": _hhmm(row.quiet_start) if row else None,
+        "quiet_end": _hhmm(row.quiet_end) if row else None,
+        "plan_push": bool(row.plan_push) if row else False,
         "species": species,
         "cameras": [
             {"id": str(c.id), "name": c.name, "alerts": str(c.id) not in muted}
@@ -76,6 +82,10 @@ def get_settings(user: User = Depends(get_current_user), db: Session = Depends(g
         "public_key": get_vapid(db).public_key,
         "subscriptions": _subscription_count(db, user),
     }
+
+
+def _hhmm(t: time | None) -> str | None:
+    return t.strftime("%H:%M") if t else None
 
 
 def _estate_cameras(db: Session, user: User) -> list[Camera]:
@@ -98,7 +108,7 @@ def _camera_ids(db: Session, user: User, ids: list[str]) -> list[str]:
         else:
             unknown.append(str(raw))
     if unknown:
-        raise HTTPException(400, f"Unknown camera: {', '.join(sorted(unknown))}")
+        raise HTTPException(400, t("alerts.unknown_camera", ids=", ".join(sorted(unknown))))
     return sorted(out)
 
 
@@ -107,6 +117,11 @@ class SettingsBody(BaseModel):
     species_ids: list[str] | None = None
     # The whole list of cameras you hear nothing from; [] turns every camera back on.
     muted_camera_ids: list[str] | None = None
+    # Quiet hours on the estate's clock, "23:00" to "07:00"; `quiet: false` clears them.
+    quiet: bool | None = None
+    quiet_start: time | None = None
+    quiet_end: time | None = None
+    plan_push: bool | None = None
 
 
 @router.put("/settings")
@@ -118,10 +133,14 @@ def put_settings(
         known = set(db.scalars(select(Species.id)).all())
         unknown = sorted(set(body.species_ids) - known)
         if unknown:
-            raise HTTPException(400, f"Unknown species: {', '.join(unknown)}")
+            raise HTTPException(400, t("alerts.unknown_species", ids=", ".join(unknown)))
     muted = None
     if body.muted_camera_ids is not None:
         muted = _camera_ids(db, user, body.muted_camera_ids)
+    if body.quiet and (body.quiet_start is None or body.quiet_end is None):
+        raise HTTPException(400, t("alerts.quiet_needs_both"))
+    if body.quiet and body.quiet_start == body.quiet_end:
+        raise HTTPException(400, t("alerts.quiet_same"))
     row = locked_prefs(db, user.id)
     if body.enabled is not None:
         row.enabled = body.enabled
@@ -129,12 +148,25 @@ def put_settings(
         row.species_ids = sorted(set(body.species_ids))
     if muted is not None:
         row.muted_camera_ids = muted
+    if body.quiet is not None:
+        row.quiet_start = _minute(body.quiet_start) if body.quiet else None
+        row.quiet_end = _minute(body.quiet_end) if body.quiet else None
+    if body.plan_push is not None:
+        row.plan_push = body.plan_push
     row.updated_at = datetime.now(UTC)
     db.commit()
+    # What was saved, whole, so the screen can show the server's copy as confirmed.
     return {
         "enabled": row.enabled, "species_ids": row.species_ids,
         "muted_camera_ids": row.muted_camera_ids,
+        "quiet_start": _hhmm(row.quiet_start), "quiet_end": _hhmm(row.quiet_end),
+        "plan_push": row.plan_push,
     }
+
+
+def _minute(t: time | None) -> time | None:
+    """To the minute, with no zone: quiet hours are on the estate's clock."""
+    return t.replace(second=0, microsecond=0, tzinfo=None) if t else None
 
 
 class CameraAlertsBody(BaseModel):
@@ -158,7 +190,7 @@ def put_camera_alerts(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     row = locked_prefs(db, user.id)
     muted = set(row.muted_camera_ids or [])
     key = str(camera_id)
@@ -192,7 +224,7 @@ def subscribe(
 ) -> dict:
     """Register this browser's push endpoint. Re-posting the same endpoint updates it."""
     if not body.endpoint.startswith("https://"):
-        raise HTTPException(400, "Push endpoint must be an https URL")
+        raise HTTPException(400, t("alerts.endpoint_https"))
     sub = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint))
     if sub is None:
         sub = PushSubscription(endpoint=body.endpoint, user_id=user.id, p256dh="", auth="")
@@ -205,7 +237,14 @@ def subscribe(
     sub.user_agent = (body.user_agent or "")[:300] or None
     sub.failures = 0
     db.commit()
-    return {"status": "subscribed", "subscriptions": _subscription_count(db, user)}
+    # The app sends its subscription every time it opens (push.ts), so a row lost
+    # to anything comes back by itself. The key tells it whether it subscribed under
+    # the server's current one, and `enabled` whether anything will come.
+    enabled, _ = effective_prefs(db, user.id)
+    return {
+        "status": "subscribed", "subscriptions": _subscription_count(db, user),
+        "public_key": get_vapid(db).public_key, "enabled": enabled,
+    }
 
 
 class UnsubscribeBody(BaseModel):
@@ -229,36 +268,56 @@ def feed(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """What this user has been sent, newest first — the record behind every push."""
+    """What this user has been sent, newest first — the record behind every push.
+
+    A quiet update inside the two-hour cooldown is not listed on its own: it is shown
+    as the alert it updates, with the latest running total and how many updates there
+    were. One sounder all night used to fill the list with near-identical rows and
+    push the plan and the team's notes out of view.
+    """
+    update_of = Notification.detail["update_of"].astext
     rows = db.scalars(
         select(Notification)
-        .where(Notification.user_id == user.id)
+        .where(Notification.user_id == user.id, update_of.is_(None))
         .order_by(Notification.created_at.desc())
         .limit(limit)
     ).all()
+    latest: dict[str, Notification] = {}
+    count: dict[str, int] = {}
+    if rows:
+        for u in db.scalars(
+            select(Notification)
+            .where(Notification.user_id == user.id, update_of.in_([str(n.id) for n in rows]))
+            .order_by(Notification.created_at)
+        ).all():
+            key = u.detail["update_of"]
+            latest[key] = u
+            count[key] = count.get(key, 0) + 1
     unread = db.scalar(
         select(func.count(Notification.id)).where(
             Notification.user_id == user.id, Notification.read_at.is_(None)
         )
     ) or 0
-    return {
-        "unread": int(unread),
-        "items": [
-            {
-                "id": str(n.id),
-                "kind": n.kind,
-                "title": n.title,
-                "body": n.body,
-                "url": n.url,
-                "species_id": n.species_id,
-                "image_id": str(n.image_id) if n.image_id else None,
-                "push_status": n.push_status,
-                "created_at": n.created_at,
-                "read_at": n.read_at,
-            }
-            for n in rows
-        ],
-    }
+
+    def item(n: Notification) -> dict:
+        last = latest.get(str(n.id), n)
+        return {
+            "id": str(n.id),
+            "kind": n.kind,
+            "title": last.title,
+            "body": last.body,
+            "url": last.url,
+            "species_id": n.species_id,
+            "image_id": str(last.image_id) if last.image_id else None,
+            "push_status": n.push_status,
+            "created_at": n.created_at,
+            "read_at": n.read_at,
+            # Quiet updates folded into this alert, and when the last one was.
+            "updates": count.get(str(n.id), 0),
+            "updated_at": last.created_at if last is not n else None,
+        }
+
+    return {"unread": int(unread), "items": [item(n) for n in rows]}
 
 
 @router.post("/read")
@@ -276,19 +335,18 @@ def mark_read(user: User = Depends(get_current_user), db: Session = Depends(get_
 def send_test(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     """Push a test message to every device this user has subscribed."""
     if _subscription_count(db, user) == 0:
-        raise HTTPException(
-            400, "No phone is getting alerts yet. Turn alerts on from that phone first."
-        )
+        raise HTTPException(400, t("alerts.no_phone"))
     now = datetime.now(timezone.utc)
     n = Notification(
-        user_id=user.id, kind="test", title="Test alert",
-        body="Alerts are working on this phone.", url="/settings", created_at=now,
+        user_id=user.id, kind="test", title=t("alerts.test_title"),
+        body=t("alerts.test_body"), url="/settings", created_at=now,
     )
     db.add(n)
     db.flush()
     result = send_to_user(db, user.id, {
-        "title": n.title, "body": n.body, "url": n.url, "tag": "test", "at": now.isoformat(),
+        "title": n.title, "body": n.body, "url": n.url, "tag": "test", "renotify": True,
+        "at": now.isoformat(),
     })
-    n.push_status = "sent" if result["sent"] else "failed"
+    n.push_status = push_delivery(result)
     db.commit()
     return result

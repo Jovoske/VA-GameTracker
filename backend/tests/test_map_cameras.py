@@ -20,7 +20,7 @@ from app.ai import empty_filter
 from app.api import routes_images, routes_map
 from app.api.routes_map import NEW_CAP, last_completed_night, night_window
 from app.core.config import settings
-from app.core.security import create_access_token
+from app.core.security import create_access_token, image_token
 from app.models import Camera, CameraNight, CameraView, Detection, Estate, Image, Species, User
 
 from .conftest import requires_db
@@ -130,7 +130,7 @@ def test_thumb_is_a_small_upright_webp_made_once_and_cached(
         assert thumb.format == "WEBP"
         assert thumb.size == (320, 427)  # upright, 320 wide
     db_session.refresh(img)
-    assert img.thumbnail_path and img.thumbnail_path.startswith(str(media / "thumbs"))
+    assert img.thumbnail_path == f"thumbs/{str(img.id)[:2]}/{img.id}.webp"  # under MEDIA_ROOT
 
     # The second request is served from disk, not made again.
     monkeypatch.setattr(routes_images, "make_thumb", lambda *a: pytest.fail("made twice"))
@@ -138,17 +138,19 @@ def test_thumb_is_a_small_upright_webp_made_once_and_cached(
     assert again.status_code == 200 and again.content == r.content
 
 
-def test_thumb_takes_the_token_in_the_query_like_the_file_does(
+def test_thumb_takes_the_photo_pass_in_the_query_like_the_file_does(
     client, db_session, estate, media, tmp_path,
 ):
     user, _ = _user(db_session, estate, "member")
     cam = _camera(db_session, estate)
     img = _photo(db_session, cam, datetime.now(UTC), path=_jpeg(tmp_path / "a.jpg"))
-    token = create_access_token(str(user.id))
 
     assert client.get(f"/api/images/{img.id}/thumb").status_code == 401
     assert client.get(f"/api/images/{img.id}/thumb?token=not-a-token").status_code == 401
-    assert client.get(f"/api/images/{img.id}/thumb?token={token}").status_code == 200
+    assert client.get(f"/api/images/{img.id}/thumb?token={image_token(user)}").status_code == 200
+    # The sign-in itself is not taken in an address (audit C-19, H-13).
+    signin = create_access_token(str(user.id))
+    assert client.get(f"/api/images/{img.id}/thumb?token={signin}").status_code == 401
 
 
 def test_photo_files_are_for_this_estates_logins_only(client, db_session, estate, media, tmp_path):
@@ -171,7 +173,8 @@ def test_photo_files_are_for_this_estates_logins_only(client, db_session, estate
     assert client.post(f"/api/images/{img.id}/flag", headers=stranger,
                        json={"is_empty": True}).status_code == 404
 
-    token = guest_h["Authorization"].split()[1]
+    token = image_token(guest)
+    assert [client.get(f"{u}?token={token}").status_code for u in urls] == [200, 200]
     db_session.delete(guest)
     db_session.commit()
     assert [client.get(u, headers=guest_h).status_code for u in urls] == [401, 401]
@@ -336,7 +339,7 @@ def test_a_photo_stored_while_you_look_still_counts_as_new(client, db_session, e
 
 def _detector(monkeypatch, *, animal: bool):
     """What the detector pass does to a frame: judge it and stamp it (empty_filter)."""
-    monkeypatch.setattr(empty_filter, "detect_animals",
+    monkeypatch.setattr(empty_filter, "detect",
                         lambda path: [{"confidence": 0.9}] if animal else [])
 
 
@@ -703,20 +706,23 @@ def test_a_frame_the_detector_has_not_checked_is_not_on_the_map_yet(client, db_s
 
 
 def test_the_camera_sheets_strip_agrees_with_the_map(client, db_session, estate):
-    """The strip asks /photos for checked frames only; the Photos page still sees all."""
-    _, headers = _user(db_session, estate, "viewer")
+    """The strip asks /photos for checked frames only; the Photos page still sees all
+    (an admin's: a frame the AI hasn't looked at is theirs alone until it has)."""
+    _, headers = _user(db_session, estate, "admin")
+    _, viewer = _user(db_session, estate, "viewer")
     cam = _camera(db_session, estate)
     now = datetime.now(UTC)
     boar = _photo(db_session, cam, now - timedelta(hours=1))
     frame = _photo(db_session, cam, now - timedelta(minutes=5), (), empty=None)
 
-    def feed(query=""):
-        r = client.get(f"/api/photos?cameras={cam.id}{query}", headers=headers)
+    def feed(query="", who=headers):
+        r = client.get(f"/api/photos?cameras={cam.id}{query}", headers=who)
         assert r.status_code == 200, r.text
         return [p["image_id"] for p in r.json()["items"]]
 
     assert feed() == [str(frame.id), str(boar.id)]
     assert feed("&checked=true") == [str(boar.id)]
+    assert feed(who=viewer) == feed("&checked=true", who=viewer) == [str(boar.id)]
     assert _map(client, headers)["Charca"]["latest"]["image_id"] == feed("&checked=true")[0]
 
 

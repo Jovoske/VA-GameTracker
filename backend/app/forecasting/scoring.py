@@ -46,6 +46,7 @@ from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.forecasting.exposure import current_night
+from app.i18n import t
 from app.models import (
     Camera,
     CameraNight,
@@ -72,7 +73,8 @@ MIN_CAMERA_ROWS = 10
 # Kept for callers that read it: the row count behind the old hit rate.
 MIN_EVALUATED = 30
 GRADED = ("BEST_ODDS", "WORTH_A_LOOK", "QUIET")
-VERDICT_WORDS = {"BEST_ODDS": "Best odds", "WORTH_A_LOOK": "Worth a look", "QUIET": "Quiet"}
+VERDICT_WORDS = {"BEST_ODDS": "verdict.best_odds", "WORTH_A_LOOK": "verdict.worth_a_look",
+                 "QUIET": "verdict.quiet"}
 # The evening a claim is about starts here, local time: a boar photographed at 09:00
 # was already known to the plan written at 17:00, and is not a hit.
 NIGHT_STARTS = time(18)
@@ -127,8 +129,8 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
                 target_date=target,
                 species_id=entry.get("species_id"),
                 probability=float(entry.get("probability") or 0.0),
-                best_window_start=time(hour=int(w.get("start_hour", 0))),
-                best_window_end=time(hour=int(w.get("end_hour", 0))),
+                best_window_start=_clock_time(w.get("start"), w.get("start_hour")),
+                best_window_end=_clock_time(w.get("end"), w.get("end_hour")),
                 factors={
                     "verdict": entry.get("verdict"),
                     "nights_present": entry.get("nights_present"),
@@ -144,6 +146,16 @@ def persist_tonight(db: Session, forecast: dict, *, target: date | None = None) 
     db.commit()
     log.info("forecast.persisted", written=written, target=str(target))
     return run
+
+
+def _clock_time(hhmm: str | None, hour) -> time | None:
+    """"20:45" as a time; a plan from before best hours followed sunset has only the
+    hour, and a claim with no best hours (animals never seen when you can sit) none."""
+    try:
+        h, m = (int(x) for x in str(hhmm).split(":"))
+        return time(hour=h, minute=m)
+    except (TypeError, ValueError):
+        return time(hour=int(hour)) if hour is not None else None
 
 
 def night_window(night: date, claimed_at: datetime | None = None) -> tuple[datetime, datetime]:
@@ -313,10 +325,7 @@ def calibration(db: Session, *, days: int = 90, today: date | None = None) -> di
             "n_evaluated": n,
             "nights": nights,
             "needed": MIN_SCORED_NIGHTS,
-            "statement": (
-                f"{nights} night{'s' if nights != 1 else ''} checked so far. How often it "
-                f"was right shows after {MIN_SCORED_NIGHTS}."
-            ),
+            "statement": t("record.too_few", n=nights, needed=MIN_SCORED_NIGHTS),
         }
 
     # A claim is one camera on one night, so with four cameras fourteen nights make
@@ -330,10 +339,8 @@ def calibration(db: Session, *, days: int = 90, today: date | None = None) -> di
                            "nights": len({fc.target_date for fc, _ in rows
                                           if _verdict_of(fc) == verdict})})
         if len(graded) >= MIN_PER_VERDICT:
-            lines.append(
-                f"When it called a camera {VERDICT_WORDS[verdict]}, animals came there "
-                f"{came} of {len(graded)} times."
-            )
+            lines.append(t("record.verdict", verdict=t(VERDICT_WORDS[verdict]), came=came,
+                           n=len(graded)))
 
     ys = [1.0 if occurred else 0.0 for _, occurred in rows]
     ps = [min(1.0, max(0.0, fc.probability)) for fc, _ in rows]
@@ -373,13 +380,9 @@ def calibration(db: Session, *, days: int = 90, today: date | None = None) -> di
     # Beating the camera's own rate by a hair is not beating it.
     beats = bool(bss_clim is not None and bss_clim > 0.02)
     if nights >= MIN_SKILL_NIGHTS and bss_clim is not None:
-        lines.append(
-            "Its odds were closer to what happened than each camera's usual rate."
-            if beats else
-            "Its odds were no closer to what happened than each camera's usual rate."
-        )
+        lines.append(t("record.beats") if beats else t("record.no_better"))
     if not lines:
-        lines.append(f"{nights} nights checked, too few of any one verdict to say yet.")
+        lines.append(t("record.too_few_each", n=nights))
 
     return {
         "available": True,

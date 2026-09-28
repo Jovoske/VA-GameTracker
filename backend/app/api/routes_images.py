@@ -1,5 +1,5 @@
 """Serve stored image files (the original and a small copy); let the user flag a frame
-or say what is in it."""
+or say what is in it, and an admin say nobody is in one the detector read as people."""
 import os
 import re
 import uuid
@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -17,15 +16,18 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import media
 from app.ai import species as species_ai
 from app.ai.checking import hunter_decided
 from app.ai.classifier import ESTATE_KEYS
-from app.api.deps import get_current_user
+from app.api.deps import get_current_admin, get_current_user, user_from_token
+from app.api.visibility import hidden_from, is_people, people_in
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.logging import get_logger
-from app.core.security import decode_token
+from app.core.security import IMAGE_SCOPE
 from app.forecasting.model import class_label
+from app.i18n import t
 from app.models import Camera, Detection, Image, Species, User
 from app.thumbs import make_thumb, thumb_path
 
@@ -40,7 +42,8 @@ _optional_bearer = HTTPBearer(auto_error=False)
 # a night on a weak signal costs nothing the second time.
 PHOTO_CACHE = "private, max-age=31536000, immutable"
 
-VIEWERS_LOOK = "Viewers can look at the photos but can't change them."
+VIEWERS_LOOK = "images.viewer"
+OLD_LINK = "images.old_link"
 
 
 def download_name(camera_name: str | None, captured_at) -> str:
@@ -61,35 +64,39 @@ def download_name(camera_name: str | None, captured_at) -> str:
 def _require_user(
     db: Session, creds: HTTPAuthorizationCredentials | None, token: str | None,
 ) -> User:
-    # Trail cameras photograph people, not only animals, so photos are not open to
-    # anyone holding a UUID. An <img> tag cannot send an Authorization header, so
-    # the token may arrive as ?token= instead. Query-string tokens can leak via proxy
-    # logs and Referer, so this is a deliberate trade rather than a clean win;
-    # short-lived per-image signed URLs remain the better answer.
-    raw = (creds.credentials if creds else None) or token
-    if not raw:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to view photos.")
-    expired = HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired. Sign in again.")
+    """Who is asking for a photo: the sign-in in the Authorization header (a fetch
+    can send one), or a photo pass in ?token= (an <img> tag can't).
+
+    Trail cameras photograph people, not only animals, so photos are not open to
+    anyone holding a UUID. The query string used to carry the 30-day sign-in itself,
+    which then sat in server logs and copied links as a working login (audit C-19,
+    H-13); only a photo pass is taken there now (app.core.security), and a link made
+    the old way is refused in words. A removed person, or one whose password changed
+    since, is refused either way (deps.user_from_token).
+    """
+    if creds is not None:
+        return user_from_token(creds.credentials, db)[0]
+    if not token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("images.sign_in"))
     try:
-        user_id = uuid.UUID(decode_token(raw).get("sub"))
-    except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
-        raise expired from None
-    # A login the admin removed stops working for photos too, as it does everywhere.
-    user = db.get(User, user_id)
-    if user is None:
-        raise expired
-    return user
+        return user_from_token(token, db, scope=IMAGE_SCOPE)[0]
+    except HTTPException:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, t(OLD_LINK)) from None
 
 
 def _estate_image(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
-    """The photo and its camera, if it is on this person's estate; 404 otherwise."""
+    """The photo and its camera, if it is on this person's estate; 404 otherwise.
+
+    A frame with a person or a vehicle in it is the admin's alone (visibility.PEOPLE),
+    and so is one the AI hasn't looked at yet: for anyone else it is not there, file
+    and all, even by its address (visibility.hidden_from)."""
     row = db.execute(
         select(Image, Camera)
         .join(Camera, Camera.id == Image.camera_id)
         .where(Image.id == image_id, Camera.estate_id == user.estate_id)
     ).first()
-    if row is None:
-        raise HTTPException(404, "Photo not found.")
+    if row is None or hidden_from(user, row[0]):
+        raise HTTPException(404, t("notes.photo_not_found"))
     return row[0], row[1]
 
 
@@ -102,19 +109,19 @@ def image_file(
     db: Session = Depends(get_db),
 ) -> FileResponse:
     image, cam = _estate_image(db, image_id, _require_user(db, creds, token))
-    if not image.original_path or not os.path.exists(image.original_path):
-        raise HTTPException(404, "Photo not found.")
+    source = media.resolve(image.original_path)
+    if not source or not os.path.exists(source):
+        raise HTTPException(404, t("notes.photo_not_found"))
     if download:
         # Content-Disposition: attachment, so the lightbox's Download button saves
         # a file instead of opening the photo in a tab the user then has to leave.
         return FileResponse(
-            image.original_path,
+            source,
             media_type="image/jpeg",
             filename=download_name(cam.name, image.captured_at),
             headers={"Cache-Control": PHOTO_CACHE},
         )
-    return FileResponse(image.original_path, media_type="image/jpeg",
-                        headers={"Cache-Control": PHOTO_CACHE})
+    return FileResponse(source, media_type="image/jpeg", headers={"Cache-Control": PHOTO_CACHE})
 
 
 @router.get("/{image_id}/thumb")
@@ -132,26 +139,26 @@ def image_thumb(
     tile still shows and the next request tries again.
     """
     image, _ = _estate_image(db, image_id, _require_user(db, creds, token))
-    cached = Path(image.thumbnail_path) if image.thumbnail_path else thumb_path(image.id)
+    cached = Path(media.resolve(image.thumbnail_path) or thumb_path(image.id))
     # The small copy may outlive the original (originals are pruned after a while).
     if cached.is_file():
         return FileResponse(
             cached, media_type="image/webp", headers={"Cache-Control": PHOTO_CACHE}
         )
-    if not image.original_path or not os.path.exists(image.original_path):
-        raise HTTPException(404, "Photo not found.")
+    source = media.resolve(image.original_path)
+    if not source or not os.path.exists(source):
+        raise HTTPException(404, t("notes.photo_not_found"))
 
     dest = thumb_path(image.id)
     try:
-        make_thumb(image.original_path, dest)
+        make_thumb(source, dest)
     except Exception as e:  # a corrupt upload, an odd format, a full disk
         log.warning("thumb.failed", image_id=str(image.id), error=f"{type(e).__name__}: {e}")
         return FileResponse(
-            image.original_path, media_type="image/jpeg",
-            headers={"Cache-Control": "private, no-cache"},
+            source, media_type="image/jpeg", headers={"Cache-Control": "private, no-cache"},
         )
-    if image.thumbnail_path != str(dest):
-        image.thumbnail_path = str(dest)
+    if image.thumbnail_path != media.stored(dest):
+        image.thumbnail_path = media.stored(dest)
         db.commit()
     return FileResponse(dest, media_type="image/webp", headers={"Cache-Control": PHOTO_CACHE})
 
@@ -170,7 +177,7 @@ def flag_image(
     """Manual override of the detector. Sticky — the auto-scan won't touch it again.
     Members and admins: it hides the photo (or brings it back) for everyone."""
     if user.role == "viewer":
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
     image, _ = _estate_image(db, image_id, user)
     if not body.is_empty and image.is_empty_frame is not False:
         # Kept by hand: it shows on the map from now, so it is new to whoever hasn't
@@ -265,13 +272,13 @@ def set_species(
     takes the fix back.
     """
     if user.role == "viewer":
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
     key = body.species_id.strip()
     if key not in ESTATE_KEYS:
-        raise HTTPException(422, "Pick one of the animals on the list.")
+        raise HTTPException(422, t("harvest.bad_species"))
     image, camera = _estate_image(db, image_id, user)
     if not image.original_path:
-        raise HTTPException(409, "This photo has no picture yet, so there's nothing to fix.")
+        raise HTTPException(409, t("images.no_picture"))
     visit = species_ai.set_by_hand(db, image, key, user.id)
     db.commit()
     fixed = _fixed(db, image, camera, visit)
@@ -289,10 +296,46 @@ def undo_species(
     """Take a hunter's fix back to what the AI had said (the viewer's Undo), the rest
     of its burst with it (`visit`)."""
     if user.role == "viewer":
-        raise HTTPException(403, VIEWERS_LOOK)
+        raise HTTPException(403, t(VIEWERS_LOOK))
     image, camera = _estate_image(db, image_id, user)
     visit = species_ai.undo_by_hand(db, image)
     db.commit()
     fixed = _fixed(db, image, camera, visit)
     recount_after_flag(db, image.camera_id, image.captured_at)
     return fixed
+
+
+class PeopleBody(BaseModel):
+    # True: nobody is in it (a feeder read as a vehicle), so it is an animal photo
+    # again. False takes that back (the viewer's Undo).
+    cleared: bool
+
+
+@router.post("/{image_id}/people")
+def clear_people(
+    image_id: uuid.UUID,
+    body: PeopleBody,
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """An admin says there is no person or vehicle in a frame the detector read as one.
+
+    The detector's confidences stay as they were; the frame is simply one of animals
+    (or empty) again, in every list and count, until the admin takes it back. What it
+    counts changed, so the camera's nights are counted again, as after a flag.
+    """
+    image, _ = _estate_image(db, image_id, user)
+    if not body.cleared and not image.people_cleared:
+        return _people_out(image)
+    if body.cleared and not image.people_cleared and not is_people(image):
+        raise HTTPException(409, t("images.no_people"))
+    image.people_cleared = body.cleared
+    db.commit()
+    recount_after_flag(db, image.camera_id, image.captured_at)
+    return _people_out(image)
+
+
+def _people_out(image: Image) -> dict:
+    person, vehicle = people_in(image)
+    return {"id": str(image.id), "people_cleared": image.people_cleared,
+            "has_person": person, "has_vehicle": vehicle}

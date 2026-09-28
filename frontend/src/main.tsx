@@ -7,13 +7,17 @@ import { RouterProvider, createBrowserRouter } from 'react-router-dom'
 // Spanish estate from ever downloading the Cyrillic subset.
 import '@fontsource-variable/ibm-plex-sans/wght.css'
 import App from './App'
+import { installPhotoRetry } from './api'
 import { RouteCrash } from './components/ErrorBoundary'
 import { installCrashReporting } from './crash'
+import { startLanguage } from './i18n'
 import { registerServiceWorker } from './serviceWorker'
 import './theme.css'
 
 // First, so a crash while the app starts is reported too.
 installCrashReporting()
+// A photo whose pass ran out loads again with a new one instead of showing broken.
+installPhotoRetry()
 
 // A data router, so a page can hold back a navigation it would lose work to: the
 // map asks before Back or a tab throws away an unsaved outline (useBlocker needs
@@ -21,10 +25,14 @@ installCrashReporting()
 // a page (the frame, sign-in, Sit mode) lands on RouteCrash, never a blank screen.
 const router = createBrowserRouter([{ path: '*', element: <App />, errorElement: <RouteCrash /> }])
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <RouterProvider router={router} />
-  </React.StrictMode>,
-)
+// In the phone's language from the first paint: its words are fetched first (from the
+// phone itself once the app is installed), for a couple of seconds at most.
+void startLanguage().then(() => {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <RouterProvider router={router} />
+    </React.StrictMode>,
+  )
+})
 
 registerServiceWorker()

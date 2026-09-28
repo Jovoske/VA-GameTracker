@@ -12,6 +12,23 @@ MOON_PHASES = [
     "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent",
 ]
 _REF_NEW_MOON = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+
+
+def phase_key(phase: str) -> str:
+    """A MOON_PHASES name as a key the same in every language ("full_moon"), sent
+    beside phase_words for an app that says it in its own words."""
+    return phase.lower().replace(" ", "_")
+
+
+def phase_words(phase: str) -> str:
+    """A MOON_PHASES name ("Full Moon", kept as data) as the reader says it."""
+    from app.i18n import t
+
+    if phase not in MOON_PHASES:
+        return phase
+    return t(f"moon.{phase_key(phase)}")
+
+
 _SYNODIC_SECONDS = 29.53058867 * 86400
 
 
@@ -21,7 +38,9 @@ def moon_phase(dt: datetime) -> tuple[str, float]:
         dt = dt.replace(tzinfo=timezone.utc)
     frac = ((dt - _REF_NEW_MOON).total_seconds() % _SYNODIC_SECONDS) / _SYNODIC_SECONDS
     illum = (1 - math.cos(2 * math.pi * frac)) / 2
-    return MOON_PHASES[int(frac * 8) % 8], round(illum * 100, 1)
+    # Each name is centred on its exact phase (the full moon night reads "Full Moon",
+    # not the three nights after it, audit F-21).
+    return MOON_PHASES[int(frac * 8 + 0.5) % 8], round(illum * 100, 1)
 
 
 def _safe(fn, obs: Observer, on_date: date, **kw) -> datetime | None:

@@ -21,6 +21,7 @@ from typing_extensions import Literal
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.i18n import stored
 from app.models import Detection, Image
 
 log = get_logger(__name__)
@@ -111,7 +112,9 @@ def _b64_crop(image_path: str, bbox: list[float] | None) -> str:
     """Padded JPEG crop (extra headroom for antlers), base64-encoded."""
     from PIL import Image as PILImage
 
-    img = PILImage.open(image_path).convert("RGB")
+    from app.media import resolve
+
+    img = PILImage.open(resolve(image_path)).convert("RGB")
     if bbox:
         x1, y1, x2, y2 = bbox
         w, h = x2 - x1, y2 - y1
@@ -210,23 +213,21 @@ def _stop_words(e: Exception) -> str | None:
     import anthropic
 
     if isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
-        return "Anthropic refused the API key. Check ANTHROPIC_API_KEY in the server's .env."
+        return stored("sexpass.key_refused")
     if isinstance(e, anthropic.BadRequestError):
         if "credit" in str(e).lower():
-            return ("The Anthropic account is out of credit. "
-                    "Top it up to label stags and hinds again.")
+            return stored("sexpass.no_credit")
         return None  # something about this photo's request
     if isinstance(e, anthropic.NotFoundError):
-        return (f"Anthropic does not know the model {MODEL}. "
-                "Ask whoever runs the server to update it.")
+        return stored("sexpass.no_model", model=MODEL)
     if isinstance(e, anthropic.RateLimitError):
-        return "Anthropic is limiting requests just now. It tries again next hour."
+        return stored("sexpass.limited")
     if isinstance(e, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
-        return "Couldn't reach Anthropic. It tries again next hour."
+        return stored("sexpass.unreachable")
     if isinstance(e, anthropic.APIStatusError):
-        return f"Anthropic had a problem (HTTP {e.status_code}). It tries again next hour."
+        return stored("sexpass.http", status=e.status_code)
     if isinstance(e, anthropic.APIError):
-        return "Anthropic did not answer properly. It tries again next hour."
+        return stored("sexpass.bad_answer")
     return None
 
 

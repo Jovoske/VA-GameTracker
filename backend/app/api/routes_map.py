@@ -29,10 +29,18 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.api.routes_stands import tonight
 from app.core.db import get_db
-from app.forecasting.activity import activity, replay, replay_nights, still_running
+from app.forecasting.activity import (
+    PATH_NIGHTS,
+    activity,
+    replay,
+    replay_nights,
+    still_running,
+    usual_paths,
+)
 from app.forecasting.model import class_label
 from app.forecasting.visits import CHECKED_ANIMAL, map_night_window, visit_rows
 from app.health import camera_health
+from app.i18n import t
 from app.ingestion.logins import camera_logins
 from app.models import Camera, CameraNight, CameraView, Detection, Image, Species, User
 from app.notifications.prefs import effective_prefs, muted_cameras
@@ -204,7 +212,7 @@ def latest_photos(db: Session, image_ids: list) -> dict:
             "captured_at": r.captured_at,
             "species_id": r.species_id if named else None,
             "label": class_label(r.species_id, r.common_name, r.sex, r.group_type)
-            if named else "Animal",
+            if named else t("class.animal"),
         }
     return out
 
@@ -279,6 +287,10 @@ def map_cameras(user: CurrentUser, db: DB) -> list[dict]:
             "name": c.name,
             "lat": c.lat,
             "lon": c.lon,
+            # Placed by hand (the provider's GPS doesn't move it), and whether the
+            # camera has reported a position of its own to go back to.
+            "location_is_custom": c.location_is_custom,
+            "provider_location": c.provider_lat is not None and c.provider_lon is not None,
             "battery_pct": c.battery_pct,
             "signal_pct": c.signal_pct,
             "last_report_at": c.last_report_at,
@@ -328,14 +340,14 @@ def map_activity(
     camera wasn't working are left out, never counted as quiet. Any role.
     """
     if nights not in PERIODS:
-        raise HTTPException(422, "nights is 1, 7 or 30.")
+        raise HTTPException(422, t("map.bad_nights"))
     label = None
     if species != "all":
         # No species id holds a control character, and the database can't take a NUL.
         sp = db.get(Species, species) if species.isprintable() else None
         # A hidden species is out of the app altogether, filters included.
         if sp is None or sp.hidden:
-            raise HTTPException(404, "No such species.")
+            raise HTTPException(404, t("map.no_species"))
         label = class_label(sp.id, sp.common_name, None, None)
     return activity(
         db, cameras=_estate_cameras(db, user), last_night=last_completed_night(),
@@ -356,6 +368,17 @@ def map_replay_nights(
     )
 
 
+@router.get("/paths")
+def map_paths(user: CurrentUser, db: DB) -> dict:
+    """The map's "Likely paths": pairs of cameras the replay linked (the same
+    species at the other camera within three hours, at a pace the animals could
+    walk) on two or more of the last 30 nights, one line per pair, with the nights,
+    which way, and the species by nights. A guess from the cameras, not a track, and
+    the map says so. Any role."""
+    return usual_paths(db, cameras=_estate_cameras(db, user), last_night=last_completed_night(),
+                       nights=PATH_NIGHTS)
+
+
 @router.get("/replay")
 def map_replay(user: CurrentUser, db: DB, night: date) -> dict:
     """One night, 18:00 to 08:00 local, as the map replays it.
@@ -369,5 +392,5 @@ def map_replay(user: CurrentUser, db: DB, night: date) -> dict:
     # Nights the app could hold: not before any camera, not after tonight (and not
     # the year 9999, whose morning is past the calendar's end).
     if not REPLAY_FIRST <= night <= tonight():
-        raise HTTPException(422, "There is no replay for that night.")
+        raise HTTPException(422, t("map.no_replay"))
     return replay(db, cameras=_estate_cameras(db, user), night=night)

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, thumbUrl } from '../api'
+import { type Got, ageLabel, api, getFresh, noAnswerWords, peek, peekMe, thumbUrl } from '../api'
 import PhotoLightbox, { type LightboxPhoto, morePhotosFailed } from '../components/PhotoLightbox'
 import HighlightStrip, { NoteMark } from '../components/WorthALook'
 import type { PhotoFix } from '../components/PhotoFix'
-import { useRefetchOnReturn } from '../hooks'
+import { useOnServerLanguage, useRefetchOnReturn } from '../hooks'
+import { fmtTime, t, useLang } from '../i18n'
 import { photoHeading } from '../night'
 import './photos.css'
 
@@ -14,9 +15,14 @@ import './photos.css'
  * clock) and by day for the daytime ones ("Today", "Yesterday"). Pick the animals and
  * cameras you want with the chips, or none for everything. Empty frames and hidden animals (Settings) never appear here. Above
  * them, the photos the team marked "Worth a look", once there are any.
+ *
+ * Frames with a person or a vehicle in them are never in the feed. An admin has them
+ * apart, behind the "People & vehicles" chip (feature 25); nobody else ever sees them.
  */
 
 type Filters = {
+  /** How many photos "People & vehicles" has: admins only, null for everyone else. */
+  people?: number | null
   species: { id: string; common_name: string; count: number }[]
   cameras: { id: string; name: string; count: number }[]
 }
@@ -31,6 +37,9 @@ type Photo = {
   group_size: number | null
   notes_count: number
   fixed_by?: string | null
+  /** In "People & vehicles" only: what the detector saw. */
+  has_person?: boolean
+  has_vehicle?: boolean
 }
 /** A page, and where the next starts: the last photo's time and id (a burst can
  *  share one time, and paging by time alone skipped its frames at a page break). */
@@ -42,21 +51,26 @@ type Failure = Error & { status?: number }
 const toViewer = (p: Photo): LightboxPhoto => ({
   id: p.image_id, file_url: p.file_url, captured_at: p.captured_at, camera: p.camera, label: p.label, notes_count: p.notes_count,
   species_id: p.species_id, fixed_by: p.fixed_by,
+  people: p.has_person != null || p.has_vehicle != null ? { person: !!p.has_person, vehicle: !!p.has_vehicle } : null,
 })
 
 const PICK_KEY = 'gs.photos.pick'
 const PAGE = 60
 
-function readPick(): { species: string[]; cameras: string[] } {
+type Pick = { species: string[]; cameras: string[]; people?: boolean }
+
+function readPick(): Pick {
   try {
     const v = JSON.parse(localStorage.getItem(PICK_KEY) || '')
-    return { species: v.species ?? [], cameras: v.cameras ?? [] }
+    // "People & vehicles" only for an admin: a phone signed in as someone else since
+    // never asks for them.
+    return { species: v.species ?? [], cameras: v.cameras ?? [], people: !!v.people && peekMe()?.role === 'admin' }
   } catch {
     return { species: [], cameras: [] }
   }
 }
 
-const timeOf = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+const timeOf = (iso: string) => fmtTime(iso)
 
 /** Newest first, as the server orders the feed: by when the photo was taken, then id. */
 const feedOrder = (a: Photo, b: Photo) =>
@@ -65,7 +79,7 @@ const feedOrder = (a: Photo, b: Photo) =>
 export default function Photos() {
   const [params, setParams] = useSearchParams()
   const [filters, setFilters] = useState<Filters | null>(null)
-  const [pick, setPick] = useState(() => {
+  const [pick, setPick] = useState<Pick>(() => {
     // A link from a notification names the animal and camera; otherwise last choice.
     const sp = params.get('species')
     const cam = params.get('camera')
@@ -85,12 +99,16 @@ export default function Photos() {
   // The feed on screen is what this session saw earlier, because the network didn't answer.
   const [savedCopy, setSavedCopy] = useState<Got<Page> | null>(null)
   const [zoom, setZoom] = useState<number | null>(null)
-  // A photo a link named that isn't in the loaded pages: opened on its own.
-  const [single, setSingle] = useState<Photo | null>(null)
+  // A photo a link named that isn't in the loaded pages: opened with the frames
+  // taken just before it (its burst), or on its own.
+  const [single, setSingle] = useState<{ items: Photo[]; start: number } | null>(null)
   const [notice, setNotice] = useState('')
   // Bumped when a note changes from the grid, so the strip above asks again.
   const [notesTick, setNotesTick] = useState(0)
   const wantImage = useRef<string | null>(params.get('image'))
+  // When that photo was taken (an alert's link carries it), to find it however many
+  // newer photos came in since (audit K-07).
+  const wantAt = useRef<string | null>(params.get('at'))
   const request = useRef(0)
   // The older page being asked for, by the request it belongs to. A new choice of
   // chips drops it, so a slow page can neither hold "Loading…" for good nor land in
@@ -114,7 +132,8 @@ export default function Photos() {
 
   const query = useCallback((after?: Cursor | null) => {
     const q = new URLSearchParams()
-    if (pick.species.length) q.set('species', pick.species.join(','))
+    if (pick.people) q.set('people', 'true')
+    else if (pick.species.length) q.set('species', pick.species.join(','))
     if (pick.cameras.length) q.set('cameras', pick.cameras.join(','))
     if (after) {
       q.set('before', after.before)
@@ -155,9 +174,11 @@ export default function Photos() {
         if (got.stale) return
         const sp = new Set(got.data.species.map((x) => x.id))
         const cams = new Set(got.data.cameras.map((x) => x.id))
+        // "People & vehicles" is an admin's: gone for anyone the server doesn't count it for.
+        const people = got.data.people != null
         setPick((p) => {
-          const next = { species: p.species.filter((x) => sp.has(x)), cameras: p.cameras.filter((x) => cams.has(x)) }
-          if (next.species.length === p.species.length && next.cameras.length === p.cameras.length) return p
+          const next = { species: p.species.filter((x) => sp.has(x)), cameras: p.cameras.filter((x) => cams.has(x)), people: !!p.people && people }
+          if (next.species.length === p.species.length && next.cameras.length === p.cameras.length && next.people === !!p.people) return p
           try { localStorage.setItem(PICK_KEY, JSON.stringify(next)) } catch { /* private mode */ }
           return next
         })
@@ -225,23 +246,41 @@ export default function Photos() {
   useEffect(load, [load])
   useEffect(loadFilters, [loadFilters])
   useRefetchOnReturn(() => { if (!viewing.current) loadNewer() }, 120_000)
+  // Each photo's animal is named by the server in the person's language: a new one
+  // there names them all again, not only the ones that came in since.
+  useOnServerLanguage(() => { if (!viewing.current) load() })
 
   // Open the photo a notification pointed at: in the list when it is on the first
-  // page, otherwise asked for by itself (a push tapped the next morning can be
-  // many pages down by then).
+  // page; otherwise, by the time the alert carries, with the frames just before it
+  // (a push tapped the next morning can be many pages down by then); otherwise
+  // asked for by itself. A photo gone since (hidden, or deleted) says so.
   useEffect(() => {
     const want = wantImage.current
     if (!want || !photos) return
+    const taken = Date.parse(wantAt.current ?? '')
     wantImage.current = null
+    wantAt.current = null
     setParams({}, { replace: true })
     const at = photos.findIndex((p) => p.image_id === want)
     if (at >= 0) { setZoom(at); return }
-    api<Photo>(`/photos/${encodeURIComponent(want)}`, { timeoutMs: 20_000 })
-      .then(setSingle)
+    const alone = () => api<Photo>(`/photos/${encodeURIComponent(want)}`, { timeoutMs: 20_000 })
+      .then((p) => setSingle({ items: [p], start: 0 }))
+    const burst = () => {
+      const q = new URLSearchParams()
+      if (pick.species.length) q.set('species', pick.species.join(','))
+      q.set('before', new Date(taken + 1).toISOString())
+      q.set('limit', '6')
+      return api<Page>(`/photos?${q.toString()}`, { timeoutMs: 20_000 }).then((page) => {
+        const i = page.items.findIndex((p) => p.image_id === want)
+        if (i < 0) return alone()
+        setSingle({ items: page.items, start: i })
+      })
+    }
+    ;(Number.isFinite(taken) ? burst() : alone())
       .catch((e: Failure) => setNotice(e.status === 404 || e.status === 422
-        ? 'That photo isn’t available any more.'
-        : `Couldn’t open that photo. ${e.message}`))
-  }, [photos, setParams])
+        ? t('photos.gone')
+        : t('photos.couldntOpen', { why: e.message })))
+  }, [photos, setParams, pick])
 
   /** A note was added or removed in a viewer: the tile's marker and the strip follow. */
   const notesChanged = useCallback((id: string, n: number) => {
@@ -275,6 +314,13 @@ export default function Photos() {
   /** "Wrong?" in the viewer: the tile takes the new name now; a photo that no longer
    *  belongs here (nothing in it, a hidden animal, or not one of the chosen animals)
    *  goes when the viewer closes. */
+  /** "Nobody in it?" in the viewer: the photo leaves "People & vehicles" when it
+   *  closes (and comes back with Undo). */
+  const peopleCleared = useCallback((id: string, cleared: boolean) => {
+    if (cleared) leaving.current.add(id)
+    else leaving.current.delete(id)
+    anyFix.current = true
+  }, [])
   const photoFixed = useCallback((id: string, fix: PhotoFix) => {
     setPhotos((prev) => prev && prev.map((p) => (p.image_id === id
       ? { ...p, label: fix.empty ? p.label : fix.label, species_id: fix.species_id, fixed_by: fix.fixed_by }
@@ -306,16 +352,18 @@ export default function Photos() {
     return () => io.disconnect()
   }, [nextBefore, loadMore])
 
-  function choose(next: { species: string[]; cameras: string[] }) {
+  function choose(next: Pick) {
     setPick(next)
     try { localStorage.setItem(PICK_KEY, JSON.stringify(next)) } catch { /* private mode */ }
   }
   const toggleIn = (list: string[], id: string) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
-  const everything = pick.species.length === 0 && pick.cameras.length === 0
+  const everything = pick.species.length === 0 && pick.cameras.length === 0 && !pick.people
+  const peopleChip = filters?.people != null && (filters.people > 0 || !!pick.people)
 
   // By night, as the server counts them: last night's photos after midnight are
   // under "Last night" with the rest of it, not under "Today" (audit I-27); and the
   // daytime ones under the day, as whenSeen says them ("Today", "Yesterday").
+  const lang = useLang()
   const grouped = useMemo(() => {
     const out: { day: string; label: string; start: number; items: Photo[] }[] = []
     const now = Date.now()
@@ -326,35 +374,42 @@ export default function Photos() {
       else out.push({ day: key, label, start: i, items: [p] })
     })
     return out
-  }, [photos])
+  }, [photos, lang])
 
   return (
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
-      <h1 className="page-title">Photos</h1>
+      <h1 className="page-title">{t('nav.photos')}</h1>
 
-      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>OK</button></div>}
-      <HighlightStrip refreshKey={notesTick} backLabel="Back to photos" onChange={notesChanged}
+      {notice && <div className="status-panel" role="status">{notice}<button className="text-action" onClick={() => setNotice('')}>{t('common.ok')}</button></div>}
+      <HighlightStrip refreshKey={notesTick} backLabel={t('photos.back')} onChange={notesChanged}
         onFixed={photoFixed} onClosed={closeViewer} />
 
       <div className="photos-filters" aria-busy={pending}>
         <div className="photos-filter-row">
           <button className="photos-chip" aria-pressed={everything} onClick={() => choose({ species: [], cameras: [] })}>
-            Everything
+            {t('photos.everything')}
           </button>
           {filters?.species.map((s) => (
-            <button key={s.id} className="photos-chip" aria-pressed={pick.species.includes(s.id)}
-              title={`${s.count} photos`}
-              onClick={() => choose({ ...pick, species: toggleIn(pick.species, s.id) })}>
+            <button key={s.id} className="photos-chip" aria-pressed={!pick.people && pick.species.includes(s.id)}
+              title={t('common.photos', { count: s.count })}
+              onClick={() => choose({ ...pick, people: false, species: toggleIn(pick.people ? [] : pick.species, s.id) })}>
               {s.common_name}
             </button>
           ))}
+          {peopleChip && (
+            <button className="photos-chip photos-chip--people" aria-pressed={!!pick.people}
+              title={t('photos.peopleTitle', { count: filters?.people ?? 0 })}
+              onClick={() => choose({ species: [], cameras: pick.cameras, people: !pick.people })}>
+              {t('photos.people')}
+            </button>
+          )}
         </div>
         {filters && filters.cameras.length > 1 && (
           <div className="photos-filter-row">
-            <span className="photos-filter-name">Cameras</span>
+            <span className="photos-filter-name">{t('nav.cameras')}</span>
             {filters.cameras.map((c) => (
               <button key={c.id} className="photos-chip" aria-pressed={pick.cameras.includes(c.id)}
-                title={`${c.count} photos`}
+                title={t('common.photos', { count: c.count })}
                 onClick={() => choose({ ...pick, cameras: toggleIn(pick.cameras, c.id) })}>
                 {c.name}
               </button>
@@ -363,18 +418,23 @@ export default function Photos() {
         )}
       </div>
 
-      {pending && photos && <div role="status" className="photos-pending">Loading…</div>}
-      {err && <div className="status-panel" role="alert">Could not load photos. {err}<button className="text-action" onClick={load}>Try again</button></div>}
+      {pending && photos && <div role="status" className="photos-pending">{t('common.loading')}</div>}
+      {err && <div className="status-panel" role="alert">{t('photos.couldntLoad', { why: err })}<button className="text-action" onClick={load}>{t('common.tryAgain')}</button></div>}
       {savedCopy && !err && (
         <div className="status-panel" role="status">
-          {noAnswerWords(savedCopy.why)} Showing what you saw {ageLabel(savedCopy.at)}.
-          <button className="text-action" onClick={load}>Try again</button>
+          {noAnswerWords(savedCopy.why)} {t('photos.savedCopy', { ago: ageLabel(savedCopy.at) })}
+          <button className="text-action" onClick={load}>{t('common.tryAgain')}</button>
         </div>
       )}
-      {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>Loading photos…</div>}
+      {!photos && !err && <div role="status" style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>{t('photos.loading')}</div>}
+      {pick.people && (
+        <p className="photos-people-note">
+          {t('photos.peopleNote')}
+        </p>
+      )}
       {photos && photos.length === 0 && (
         <div style={{ color: 'var(--text-dim)', fontSize: 13, padding: 8 }}>
-          {everything ? 'No animal photos yet.' : 'Nothing for that choice yet. Try fewer chips.'}
+          {pick.people ? t('photos.noPeople') : everything ? t('photos.none') : t('photos.noneForChoice')}
         </div>
       )}
 
@@ -391,10 +451,10 @@ export default function Photos() {
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click() } }}
                 onClick={() => setZoom(g.start + j)}
               >
-                <img src={thumbUrl(p.image_id)} loading="lazy" alt={`${p.label} at ${p.camera}`} />
+                <img src={thumbUrl(p.image_id)} loading="lazy" alt={t('wal.atCamera', { label: p.label, camera: p.camera })} />
                 <NoteMark count={p.notes_count} />
                 <div className="photos-tile-meta">
-                  <span className="photos-tile-label">{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
+                  <span className={`photos-tile-label${p.has_person != null ? ' photos-tile-label--people' : ''}`}>{p.label}{p.group_size && p.group_size > 1 ? ` ×${p.group_size}` : ''}</span>
                   <span className="photos-tile-when">{timeOf(p.captured_at)}</span>
                 </div>
                 <div className="photos-tile-cam">{p.camera}</div>
@@ -408,22 +468,23 @@ export default function Photos() {
       {moreErr && nextBefore && !loadingMore && <div className="status-panel" role="alert">{moreErr}</div>}
       {nextBefore && (
         <button className="text-action photos-more" onClick={loadMore} disabled={loadingMore}>
-          {loadingMore ? 'Loading…' : 'Show older photos'}
+          {loadingMore ? t('common.loading') : t('photos.older')}
         </button>
       )}
 
       <p style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 18 }}>
-        <Link to="/animals" style={{ color: 'inherit' }}>Animals by species and named animals</Link>
+        <Link to="/animals" style={{ color: 'inherit', display: 'inline-flex', alignItems: 'center', minHeight: 44 }}>{t('photos.animalsLink')}</Link>
       </p>
 
       {zoom != null && photos && (
         <PhotoLightbox
           photos={photos.map(toViewer)}
           start={zoom}
-          backLabel="Back to photos"
+          backLabel={t('photos.back')}
           onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
           onFixed={photoFixed}
+          onPeopleCleared={peopleCleared}
           hasMore={!!nextBefore}
           onNeedMore={loadMore}
           moreError={moreErr}
@@ -431,11 +492,15 @@ export default function Photos() {
       )}
       {single && (
         <PhotoLightbox
-          photos={[toViewer(single)]}
-          backLabel="Back to photos"
+          photos={single.items.map(toViewer)}
+          start={single.start}
+          backLabel={t('photos.back')}
           onClose={closeViewer}
           onNotesChange={(id, n) => { notesChanged(id, n); setNotesTick((t) => t + 1) }}
-          onFixed={(id, fix) => { photoFixed(id, fix); setSingle((p) => p && { ...p, label: fix.label }) }}
+          onFixed={(id, fix) => {
+            photoFixed(id, fix)
+            setSingle((cur) => cur && { ...cur, items: cur.items.map((p) => (p.image_id === id ? { ...p, label: fix.label } : p)) })
+          }}
         />
       )}
     </div>

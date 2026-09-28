@@ -207,7 +207,8 @@ def test_a_marked_photo_leaves_the_animals_page_and_the_chips(world, client, db_
     chips = client.get("/api/photos/filters", headers=world.headers()).json()["species"]
     assert chips == [{"id": "wild_boar", "common_name": "Wild boar", "count": 5}]
     overview = client.get("/api/analytics/overview", headers=world.headers()).json()
-    assert overview["by_species"] == [{"species": "Wild Boar", "count": 5}]
+    assert overview["by_species"] == [{"species": "Wild boar", "species_id": "wild_boar",
+                                       "count": 5}]
 
 
 @requires_db
@@ -224,6 +225,35 @@ def test_a_hidden_species_has_no_named_animals(world, client, db_session):
     db_session.commit()
     named = client.get("/api/animals", headers=world.headers()).json()
     assert [a["species_id"] for a in named] == ["wild_boar"]
+    # Nor by its address: the hidden fox's page is not there.
+    fox = db_session.query(Individual).filter_by(species_id="fox").one()
+    assert client.get(f"/api/animals/{fox.id}", headers=world.headers()).status_code == 404
+
+
+@requires_db
+def test_a_marked_photo_leaves_a_named_animals_page(world, client, db_session):
+    """The list counted 3 sightings and the animal's own page listed 4, the photo
+    marked "nothing in it" among them, and could show it as the animal's picture."""
+    boar = Individual(estate_id=world.estate.id, label="Wild boar #1", species_id="wild_boar")
+    db_session.add(boar)
+    db_session.flush()
+    # Its clearest frame is the bush.
+    for img in world.bush[:4]:
+        det = db_session.query(Detection).filter_by(image_id=img.id).one()
+        det.species_conf = 0.99 if img is world.bush[0] else 0.5
+        db_session.add(DetectionIndividual(detection_id=det.id, individual_id=boar.id,
+                                           match_conf=0.9))
+    db_session.commit()
+    got = client.post(f"/api/images/{world.bush[0].id}/flag", json={"is_empty": True},
+                      headers=world.headers())
+    assert got.status_code == 200
+
+    listed = client.get("/api/animals", headers=world.headers()).json()
+    assert [(a["label"], a["sightings"]) for a in listed] == [("Wild boar #1", 3)]
+    assert listed[0]["thumb_image_id"] != str(world.bush[0].id)
+    page = client.get(f"/api/animals/{boar.id}", headers=world.headers()).json()
+    assert len(page["sightings"]) == 3
+    assert str(world.bush[0].id) not in {s["image_id"] for s in page["sightings"]}
 
 
 # ── The track record ────────────────────────────────────────────────────────
@@ -277,7 +307,7 @@ def test_marking_a_photo_grades_the_night_again(world, client, db_session):
     assert db_session.get(ForecastOutcome, fc.id).occurred is False
 
 
-# ── Push, bedding routes and the stand's hints ──────────────────────────────
+# ── Push, likely paths and the stand's hints ──────────────────────────────
 
 
 def _sighting(db, cam, species: str, when: datetime, *, marked=False, created=None) -> Image:
@@ -311,7 +341,7 @@ def test_hidden_and_marked_photos_send_no_push(db_session, estate_with_fox, monk
 
     sent = []
 
-    def send(db, user_id, payload):
+    def send(db, user_id, payload, quiet=False):
         sent.append(payload)
         return {"sent": 1, "failed": 0, "removed": 0, "subscriptions": 1}
 
@@ -345,31 +375,33 @@ def test_hidden_and_marked_photos_send_no_push(db_session, estate_with_fox, monk
 
 
 @requires_db
-def test_hidden_and_marked_photos_make_no_bedding_route(db_session, estate_with_fox):
-    """A route from a bedding area to a camera needs five sightings there. Hidden foxes
-    and a marked bush made one out of four real boar."""
-    from app.forecasting.bedding import MIN_ROUTE_DETECTIONS, routes
-    from app.models import Zone
+def test_hidden_and_marked_photos_make_no_likely_path(db_session, estate_with_fox):
+    """The map's likely paths join visits of one species at two cameras within three
+    hours, on two nights or more. Hidden foxes walking Charca to Loma every night, and
+    a bush marked "nothing in it" at both, make no path; one real boar night isn't one."""
+    from app.forecasting.activity import usual_paths
 
-    cam = Camera(estate_id=estate_with_fox.id, name="Charca", lat=39.090, lon=-1.360)
-    db_session.add(cam)
-    db_session.add(Zone(estate_id=estate_with_fox.id, kind="bedding", name="Umbría",
-                        polygon={"type": "Polygon", "coordinates": [[
-                            [-1.364, 39.093], [-1.362, 39.093], [-1.362, 39.095],
-                            [-1.364, 39.095], [-1.364, 39.093]]]}))
+    charca = Camera(estate_id=estate_with_fox.id, name="Charca", lat=39.090, lon=-1.360)
+    loma = Camera(estate_id=estate_with_fox.id, name="Loma", lat=39.095, lon=-1.355)
+    db_session.add_all([charca, loma])
     db_session.flush()
-    for n in range(1, MIN_ROUTE_DETECTIONS):
-        _sighting(db_session, cam, "wild_boar", at(ago(n), 22))
     for n in range(1, 8):
-        _sighting(db_session, cam, "fox", at(ago(n), 23))
-        _sighting(db_session, cam, "wild_boar", at(ago(n), 21), marked=True)
+        _sighting(db_session, charca, "fox", at(ago(n), 21))
+        _sighting(db_session, loma, "fox", at(ago(n), 22))
+        _sighting(db_session, charca, "wild_boar", at(ago(n), 23), marked=True)
+        _sighting(db_session, loma, "wild_boar", at(ago(n), 23, 50), marked=True)
+    _sighting(db_session, charca, "wild_boar", at(ago(1), 19))
+    _sighting(db_session, loma, "wild_boar", at(ago(1), 20))
     db_session.commit()
-    assert routes(db_session) == []
+    paths = lambda: usual_paths(db_session, cameras=[charca, loma], last_night=ago(1))["paths"]  # noqa: E731
+    assert paths() == []
 
-    _sighting(db_session, cam, "wild_boar", at(ago(MIN_ROUTE_DETECTIONS), 22))
+    _sighting(db_session, charca, "wild_boar", at(ago(3), 19))
+    _sighting(db_session, loma, "wild_boar", at(ago(3), 20, 30))
     db_session.commit()
-    [route] = routes(db_session)
-    assert (route["camera"], route["detections"]) == ("Charca", MIN_ROUTE_DETECTIONS)
+    [path] = paths()
+    assert (path["cameras"], path["nights"]) == (["Charca", "Loma"], 2)
+    assert [(s["label"], s["nights"]) for s in path["species"]] == [("Wild boar", 2)]
 
 
 @requires_db
@@ -403,4 +435,12 @@ def test_hidden_and_marked_photos_move_no_stand_hint(db_session, estate_with_fox
 
     assert suggest_approach_arcs(db_session, stand)["suggestions"] == []
     exit_ = dark_exit(db_session, stand)
-    assert (exit_["hour"], exit_["share_pct"]) == (23, 0.0)
+    # The first hour after a normal sit (3 h after tonight's sunset) is empty of boar;
+    # the foxes that walked it are hidden.
+    from app.forecasting.inference import SIT_ENDS_AFTER_SUNSET
+    from app.forecasting.model import _sunset
+
+    first = _sunset(current_night()) + SIT_ENDS_AFTER_SUNSET
+    quarter = datetime.fromtimestamp(round(first.timestamp() / 900) * 900, tz=UTC)
+    assert exit_["share_pct"] == 0.0
+    assert exit_["time"] == quarter.astimezone(ZoneInfo("Europe/Madrid")).strftime("%H:%M")

@@ -104,7 +104,7 @@ const assert=require('node:assert/strict');
  assert.match(await card('Suntek').locator('.cam-health').innerText(),/^No photos since /);
  assert.equal(await card('Viejo Pino').locator('.cam-health').innerText(),'Not connected');
  assert.equal(await card('Pinar').locator('.cam-health-note').innerText(),`The last fetch couldn’t get its photos. ${camError} Camera logins`);
- assert.doesNotMatch(await page.locator('.cam-list').innerText(),/check battery|battery and signal|Quiet since/i);
+ assert.doesNotMatch(await page.locator('.cam-list').innerText(),/check battery|battery and signal|Quiet since|No check-in since/i);
 
  // Check while a fetch is running: it waits, gives the count while the detector looks,
  // then ends on the count and the login that needs a look, never on a spinner.

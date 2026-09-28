@@ -20,7 +20,14 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
+# JIT off: every query here is a short read or write, and the planner's row guesses
+# for the visit queries (a few EXISTS per photo) are far enough off that Postgres
+# would spend most of a Tonight or Insights call compiling LLVM code it runs once.
+_connect_args = (
+    {"options": "-c jit=off"} if settings.database_url.startswith("postgresql") else {}
+)
+engine = create_engine(settings.database_url, pool_pre_ping=True, future=True,
+                       connect_args=_connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=Session)
 
 

@@ -1,14 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
+import { onServerLanguage } from './api'
 
 /**
  * Re-run `fn` when the user comes back to the app (tab visible / window focused),
  * at most once per `minIntervalMs`. Keeps a phone that's been asleep from showing
  * stale data without hammering the API on every focus flicker.
+ *
+ * And at once when a language chosen on this phone reaches the server: what the
+ * page holds from it (the plan's lines, reasons, animal names) was written in the
+ * old one (useOnServerLanguage).
  */
 export function useRefetchOnReturn(fn: () => void, minIntervalMs = 60_000) {
   const fnRef = useRef(fn)
   fnRef.current = fn
   const last = useRef(Date.now())
+
+  useOnServerLanguage(() => {
+    last.current = Date.now()
+    fnRef.current()
+  })
 
   useEffect(() => {
     const maybe = () => {
@@ -24,6 +34,18 @@ export function useRefetchOnReturn(fn: () => void, minIntervalMs = 60_000) {
       window.removeEventListener('focus', maybe)
     }
   }, [minIntervalMs])
+}
+
+/**
+ * Run `fn` when the server starts answering this person in another language (a
+ * choice made on this phone reached it), for a page whose words from the server
+ * should follow: signed in with Suomi picked on the sign-in page, Tonight's lines
+ * came in the person's old language until then (api.ts onServerLanguage).
+ */
+export function useOnServerLanguage(fn: () => void) {
+  const fnRef = useRef(fn)
+  fnRef.current = fn
+  useEffect(() => onServerLanguage(() => fnRef.current()), [])
 }
 
 /**

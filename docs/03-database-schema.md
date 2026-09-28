@@ -44,6 +44,8 @@ CREATE TABLE users (
   email         text UNIQUE NOT NULL,
   password_hash text NOT NULL,                 -- Argon2
   role          text NOT NULL DEFAULT 'admin'  CHECK (role IN ('admin','member','viewer')),
+  language      text NOT NULL DEFAULT 'en'     -- 0033: what the server says to them
+                CHECK (language IN ('en','fi','sv','nb','es')),
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
@@ -77,6 +79,9 @@ CREATE TABLE cameras (
   provider_name varchar,                        -- latest imported/default name
   name_is_custom boolean NOT NULL DEFAULT false,-- keep app rename across provider sync
   location      geometry(Point,4326),           -- GPS (auto from SPYPOINT, draggable)
+  location_is_custom boolean NOT NULL DEFAULT false, -- placed by hand: the sync leaves it
+  provider_lat  double precision,               -- the position SPYPOINT last reported
+  provider_lon  double precision,
   altitude_m    real,
   model         text,
   battery_pct   int,
@@ -244,6 +249,17 @@ CREATE TABLE sync_log (
 ```
 
 ## Notes & decisions baked in
+
+- **Harvest book (`0030_harvest_and_people`, feature 23):** `harvests` holds one line
+  per animal taken: the sit it came from (optional), its stand, who shot it
+  (`user_id`, and `hunter`, the name the line carries, kept when the person is
+  removed), species, sex, age class, seal (precinto) number, weight, notes and when.
+  Logged the morning after a SHOT (`sits.no_harvest_at` marks a shot with nothing to
+  log) and exported per season (1 April to 31 March) as a CSV by an admin. No tallies
+  or rankings are computed from it.
+- **People and vehicles (`0030`, feature 25):** `images.person_conf` / `vehicle_conf`
+  are MegaDetector's surest person and vehicle box; `images.people_cleared` is an
+  admin's "nobody in it". See docs/05-ai-pipeline.md, Stage 1.
 
 - **UBox (`0013_ubox`):** existing camera accounts default to `spypoint`; UBox uses
   the same encrypted credential storage, camera rows and image pipeline. A provider

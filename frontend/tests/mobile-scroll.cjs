@@ -1,13 +1,15 @@
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 (async () => {
- const browser = await chromium.launch({ headless: true, channel: 'msedge' });
+ // PW_CHANNEL= (empty, the default) uses Playwright's own Chromium; BASE_URL points at the app.
+ const channel = process.env.PW_CHANNEL || '', base = process.env.BASE_URL || 'http://127.0.0.1:5173';
+ const browser = await chromium.launch({ headless: true, ...(channel ? { channel } : {}) });
  try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
   await page.addInitScript(() => localStorage.setItem('gs_token', 'scroll-test-fixture'));
   await page.route('**/api/**', route => route.fulfill({json: new URL(route.request().url()).pathname === '/api/cameras'
    ? Array.from({length: 12}, (_, i) => ({ id: `c${i}`, name: `Camera ${i + 1}`, image_count: 24, empty_count: 4, battery_pct: 72, signal_pct: 80, health: null })) : []}));
-  await page.goto('http://127.0.0.1:5173/cameras');
+  await page.goto(base + '/cameras');
   await page.getByText('Camera 12', {exact: true}).waitFor();
   await page.evaluate(() => window.scrollTo(0, 600));
   await page.waitForFunction(() => scrollY >= 600);

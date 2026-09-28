@@ -7,9 +7,11 @@ No cloud files or previously imported images are deleted.
 Catching up: a routine fetch reads back to where the last complete one stopped (less
 two hours), however long ago that was, up to the week UBox keeps listing. A snapshot
 that will not download is a warning, not a failed login: it is tried again on the
-next MAX_SNAPSHOT_ATTEMPTS fetches (Camera.import_failures) and then given up on, so
-one dead link can neither hold the camera's catch-up back for good nor turn every
-fetch red. What each login did is recorded for Settings (app.ingestion.logins).
+next fetches (Camera.import_failures) and given up on after MAX_SNAPSHOT_ATTEMPTS
+tries at least RETRY_SPACING apart, so one dead link can neither hold the camera's
+catch-up back for good nor turn every fetch red, and an outage of a few hours
+(UBox's side, or a full disk here) loses nothing. What each login did is recorded
+for Settings (app.ingestion.logins).
 """
 from __future__ import annotations
 
@@ -29,10 +31,11 @@ from PIL import Image as PillowImage
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import jobs, media
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
+from app.i18n import stored
 from app.ingestion.logins import (
     disconnect_unlisted,
     keep_session,
@@ -50,8 +53,11 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 40_000_000
 # How far back a fetch reaches after an outage: about what UBox keeps listing.
 CATCH_UP = timedelta(days=7)
-# A snapshot that will not download is tried on this many fetches, then given up on.
+# A snapshot that will not download is tried again on every fetch; this many of those
+# tries, counted at most one per RETRY_SPACING, and it is given up on. Counted per
+# fetch, three fetches 15 minutes apart gave up on a photo after half an hour (E-01).
 MAX_SNAPSHOT_ATTEMPTS = 3
+RETRY_SPACING = timedelta(hours=1)
 COUNTERS = ("seen", "downloaded", "duplicate", "interval_skipped", "daily_limit_skipped",
             "no_image", "failed", "given_up")
 
@@ -99,7 +105,7 @@ def upsert_camera(db: Session, estate_id, device: UboxDevice, account_id=None) -
                         name=default_name, provider_name=default_name)
         db.add(camera)
     elif camera.estate_id != estate_id:
-        raise UboxError("This UBox camera is already linked to another estate")
+        raise UboxError(stored("ubox.err.other_estate"))
     camera.account_id = account_id
     camera.active = True  # a login lists it, so it is connected (again)
     if device.name:
@@ -122,13 +128,13 @@ def upsert_camera(db: Session, estate_id, device: UboxDevice, account_id=None) -
 
 def _jpeg(data: bytes) -> tuple[int, int]:
     if not data or len(data) > MAX_BYTES:
-        raise UboxError("Snapshot is empty or exceeds the 20 MB limit")
+        raise UboxError(stored("ubox.err.snapshot_size"))
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", PillowImage.DecompressionBombWarning)
             with PillowImage.open(io.BytesIO(data)) as image:
                 if image.format != "JPEG" or image.width * image.height > MAX_PIXELS:
-                    raise UboxError("Snapshot must be a JPEG of at most 40 megapixels")
+                    raise UboxError(stored("ubox.err.snapshot_pixels"))
                 size = image.size
                 image.verify()
             with PillowImage.open(io.BytesIO(data)) as image:
@@ -137,7 +143,7 @@ def _jpeg(data: bytes) -> tuple[int, int]:
     except UboxError:
         raise
     except Exception as exc:
-        raise UboxError("Snapshot is not a readable JPEG") from exc
+        raise UboxError(stored("ubox.err.snapshot_unreadable")) from exc
 
 
 def _ingest_photo(
@@ -155,7 +161,7 @@ def _ingest_photo(
         except Exception:
             data = None
     if data is None:
-        raise UboxError("Could not download a readable snapshot")
+        raise UboxError(stored("ubox.err.snapshot_failed"))
     digest = hashlib.sha256(data).hexdigest()
     if db.scalar(select(Image.id).where(
         Image.camera_id == camera.id, Image.file_hash == digest,
@@ -175,7 +181,8 @@ def _ingest_photo(
         os.replace(temporary, path)
         image = Image(
             camera_id=camera.id, ubox_event_id=event.event_id,
-            captured_at=event.captured_at, original_path=str(path), cdn_url=event.image_url,
+            captured_at=event.captured_at, original_path=media.stored(path),
+            cdn_url=event.image_url,
             file_hash=digest, width=width, height=height,
         )
         db.add(image)
@@ -214,7 +221,7 @@ def _cleanup_uncommitted(db, paths) -> None:
     """A failed commit may have succeeded remotely; check before removing a file."""
     for path in paths:
         try:
-            exists = db.scalar(select(Image.id).where(Image.original_path == str(path)))
+            exists = db.scalar(select(Image.id).where(media.same_file(Image.original_path, path)))
             if not exists:
                 path.unlink(missing_ok=True)
         except Exception:
@@ -227,15 +234,11 @@ def _cleanup_uncommitted(db, paths) -> None:
 
 def _snapshot_note(failed: int, retried: int) -> str:
     """Snapshots that would not download: whether they are tried again or let go."""
-    note = f"{failed} photo{'s' if failed != 1 else ''} wouldn't download."
     if retried == failed:
-        return f"{note} {'It is' if failed == 1 else 'They are'} tried again on the next fetch."
+        return stored("ubox.snap.retry", n=failed)
     if retried == 0:
-        return (f"{note} {'It was' if failed == 1 else 'They were'} tried "
-                f"{MAX_SNAPSHOT_ATTEMPTS} times, so {'it is' if failed == 1 else 'they are'} "
-                "left out.")
-    return (f"{note} {retried} {'is' if retried == 1 else 'are'} tried again on the next "
-            f"fetch; the rest were tried {MAX_SNAPSHOT_ATTEMPTS} times and are left out.")
+        return stored("ubox.snap.dropped", n=failed, tries=MAX_SNAPSHOT_ATTEMPTS)
+    return stored("ubox.snap.some", n=retried, failed=failed, tries=MAX_SNAPSHOT_ATTEMPTS)
 
 
 def _list_devices(db: Session, client: UboxClient, account: CameraAccount) -> list[UboxDevice]:
@@ -283,7 +286,8 @@ def _sync_camera(
         account.ubox_max_images_per_day, estate.timezone,
     )
     known = {r.ubox_event_id for r in existing if r.ubox_event_id}
-    # Snapshots that would not download before: {event_id: [attempts, captured_at]}.
+    # Snapshots that would not download before:
+    # {event_id: [attempts, captured_at, last counted try]}.
     failures = {
         event_id: entry for event_id, entry in (camera.import_failures or {}).items()
         if datetime.fromisoformat(entry[1]) >= until - CATCH_UP - timedelta(days=1)
@@ -340,12 +344,17 @@ def _sync_camera(
             except Exception as exc:
                 result["failed"] += 1
                 window_failures += 1
-                failures[event.event_id] = [attempts + 1, event.captured_at.isoformat()]
-                if attempts + 1 < MAX_SNAPSHOT_ATTEMPTS:
+                entry = failures.get(event.event_id)
+                last = datetime.fromisoformat(entry[2]) if entry and len(entry) > 2 else None
+                if last is None or until - last >= RETRY_SPACING:
+                    attempts, last = attempts + 1, until
+                failures[event.event_id] = [attempts, event.captured_at.isoformat(),
+                                            last.isoformat()]
+                if attempts < MAX_SNAPSHOT_ATTEMPTS:
                     result["retried"] += 1
                     hold = min(hold or event.captured_at, event.captured_at)
                 log.warning("ubox.snapshot_failed", camera=str(camera.id),
-                            attempt=attempts + 1, error=type(exc).__name__)
+                            attempt=attempts, error=type(exc).__name__)
                 if window_failures >= 5:
                     # Stale links/outages must not cause thousands of GETs; what is
                     # left of this window is read again next time.
@@ -384,7 +393,7 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
         try:
             estate = db.get(Estate, account.estate_id)
             if estate is None:
-                raise UboxError("Account has no estate")
+                raise UboxError(stored("ubox.err.no_estate"))
             with UboxClient(account.username, read_password(db, account)) as client:
                 devices = _list_devices(db, client, account)
                 session = (client.token, client.token_valid_hours)
@@ -442,7 +451,8 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
             everything = len(failures) == len(devices)
             summary["status"] = "error" if everything else "partial"
             summary["error"] = (failures[0] if everything else
-                                f"{len(failures)} of {len(devices)} cameras failed. {failures[0]}")
+                                stored("sync.some_failed", n=len(failures),
+                                       total=len(devices), error=failures[0]))
         elif failed_snapshots:
             summary.update(status="partial",
                            error=_snapshot_note(failed_snapshots, retried_snapshots))

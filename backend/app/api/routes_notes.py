@@ -18,10 +18,12 @@ from sqlalchemy.orm import Session
 
 from app.ai.checking import hunter_decided
 from app.api.deps import get_current_user
+from app.api.refusal import Refusal
 from app.api.routes_images import recount_after_flag
 from app.api.routes_map import latest_photos
-from app.api.visibility import ONLY_HIDDEN_SPECIES
+from app.api.visibility import ONLY_HIDDEN_SPECIES, hidden_from, is_people, not_looked_at
 from app.core.db import get_db
+from app.i18n import t
 from app.models import Camera, Image, PhotoNote, User
 from app.notes import (
     can_remove,
@@ -41,14 +43,16 @@ DB = Annotated[Session, Depends(get_db)]
 
 
 def _photo(db: Session, image_id: uuid.UUID, user: User) -> tuple[Image, Camera]:
-    """The photo and its camera, if it is this estate's; 404 otherwise."""
+    """The photo and its camera, if it is this estate's; 404 otherwise. A frame with a
+    person or a vehicle in it, or one the AI hasn't looked at yet, is not there for
+    anyone but an admin (visibility.hidden_from)."""
     row = db.execute(
         select(Image, Camera)
         .join(Camera, Camera.id == Image.camera_id)
         .where(Image.id == image_id, Camera.estate_id == user.estate_id)
     ).first()
-    if row is None:
-        raise HTTPException(404, "Photo not found.")
+    if row is None or hidden_from(user, row[0]):
+        raise HTTPException(404, t("notes.photo_not_found"))
     return row[0], row[1]
 
 
@@ -79,23 +83,38 @@ class NoteBody(BaseModel):
     keep: bool = False
 
 
-EMPTY_FRAME = "This photo is marked “nothing in it”. Keep it as an animal photo first."
-HIDDEN_ONLY = "Only animals hidden from the app are in this photo, so the team can’t see it."
+# Why a photo takes no note, as the app is told it: a code the same in every
+# language (api.refusal), and the words' catalog key. The app offers "Save again to
+# keep it as an animal photo" on empty_frame.
+EMPTY_FRAME = ("empty_frame", "notes.empty_frame")
+HIDDEN_ONLY = ("hidden_only", "notes.hidden_only")
+PEOPLE_ONLY = ("people_only", "notes.people_only")
+NOT_LOOKED = ("not_looked", "notes.not_looked")
+
+
+def _refuse(why: tuple[str, str]) -> Refusal:
+    code, key = why
+    return Refusal(409, code, t(key))
 
 
 def _markable(db: Session, image: Image, keep: bool) -> bool:
     """Refuse a note on a photo the team would never see; True when `keep` un-flagged it.
 
     A note sends the team to the photo (the strips, a push), so it goes only on one
-    the app shows: never one of nothing but hidden animals, and not one marked
-    "nothing in it" unless the hunter says to keep it.
+    the app shows: never one of nothing but hidden animals, never one with a person
+    or a vehicle in it (nor one the AI hasn't looked at for them yet: only an admin
+    sees it), and not one marked "nothing in it" unless the hunter says to keep it.
     """
     if db.scalar(select(Image.id).where(Image.id == image.id, ONLY_HIDDEN_SPECIES)) is not None:
-        raise HTTPException(409, HIDDEN_ONLY)
+        raise _refuse(HIDDEN_ONLY)
+    if is_people(image):
+        raise _refuse(PEOPLE_ONLY)
+    if not_looked_at(image):
+        raise _refuse(NOT_LOOKED)
     if not image.is_empty_frame:
         return False
     if not keep:
-        raise HTTPException(409, EMPTY_FRAME)
+        raise _refuse(EMPTY_FRAME)
     image.is_empty_frame = False
     image.reviewed = True  # sticky, like the Keep button: the auto-scan leaves it be
     image.processed_at = datetime.now(UTC)  # on the map from now, so new (routes_map.shown_after)
@@ -116,7 +135,7 @@ def add_note(
     `id` is the same note: its words are updated, and the team is told once.
     """
     if not can_write(user):
-        raise HTTPException(403, "Viewers can see notes but not add them.")
+        raise HTTPException(403, t("notes.viewer"))
     try:
         text = clean_text(body.text)
     except ValueError as e:
@@ -135,7 +154,7 @@ def add_note(
     note = db.get(PhotoNote, note_id)
     if note is None or note.user_id != user.id or note.image_id != image.id:
         db.rollback()
-        raise HTTPException(409, "That note couldn’t be saved. Close it and try again.")
+        raise HTTPException(409, t("notes.not_saved"))
     if not fresh:
         note.text = text  # the words on the last try are the ones meant
     told = told_about(db, note)
@@ -143,9 +162,14 @@ def add_note(
     muted = listeners(db, camera, user)[1] if body.tell_team else 0
     if body.tell_team and not told:
         shown = latest_photos(db, [image.id]).get(image.id)
+
+        def label() -> str:
+            """What the photo shows, in the language each teammate is told in."""
+            again = latest_photos(db, [image.id]).get(image.id)
+            return again["label"] if again else t("class.animal")
+
         new_told = told = tell_team(
-            db, note, user, image, camera,
-            label=shown["label"] if shown else "Animal",
+            db, note, user, image, camera, label=label,
             species_id=shown["species_id"] if shown else None,
         )
     db.commit()
@@ -174,10 +198,10 @@ def remove_note(note_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
     """
     note = db.get(PhotoNote, note_id)
     if note is None:
-        raise HTTPException(404, "That note is already gone.")
+        raise HTTPException(404, t("notes.gone"))
     _photo(db, note.image_id, user)  # another estate's note is not found either
     if not can_remove(note, user):
-        raise HTTPException(403, "Only the person who wrote it or an admin can remove a note.")
+        raise HTTPException(403, t("notes.remove_forbidden"))
     image_id = note.image_id
     for told in told_about(db, note):
         db.delete(told)

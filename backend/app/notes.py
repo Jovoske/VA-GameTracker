@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.i18n import t, use
 from app.models import Camera, Image, Notification, NotificationPref, PhotoNote, User
-from app.notifications import push
+from app.notifications import hold, push
 from app.people import name_for
 
 log = get_logger(__name__)
@@ -96,17 +98,18 @@ def clean_text(value: str | None) -> str | None:
     try:
         text.encode("utf-8")
     except UnicodeEncodeError:
-        raise ValueError("That note has characters it can’t save. Type it again.") from None
+        raise ValueError(t("notes.bad_chars")) from None
     if len(text) > MAX_TEXT:
-        raise ValueError(f"Keep the note to {MAX_TEXT} characters.")
+        raise ValueError(t("notes.too_long", n=MAX_TEXT))
     return text or None
 
 
 def compose(label: str, camera: str, author: User, text: str | None) -> tuple[str, str]:
-    """("Worth a look: Wild boar at Charca", "Pedro: Big boar, third night running")."""
+    """("Worth a look: Wild boar at Charca", "Pedro: Big boar, third night running"),
+    in the language being written in (tell_team: each recipient's)."""
     name = name_for(author)
-    body = f"{name}: {text}" if text else f"{name} marked a photo"
-    return f"Worth a look: {label} at {camera}", body
+    body = t("notes.push_body", name=name, text=text) if text else t("notes.push_marked", name=name)
+    return t("notes.push_title", label=label, camera=camera), body
 
 
 def told_about(db: Session, note: PhotoNote) -> list[Notification]:
@@ -145,8 +148,8 @@ def listeners(db: Session, camera: Camera, author: User) -> tuple[list, int]:
 
 
 def tell_team(
-    db: Session, note: PhotoNote, author: User, image: Image, camera: Camera, label: str,
-    species_id: str | None = None, now: datetime | None = None,
+    db: Session, note: PhotoNote, author: User, image: Image, camera: Camera,
+    label: str | Callable[[], str], species_id: str | None = None, now: datetime | None = None,
 ) -> list[Notification]:
     """One in-app record for every other person who has alerts on, ready to push.
 
@@ -157,35 +160,45 @@ def tell_team(
     note. The records carry the note's time (see told_about).
     """
     now = now or note.created_at or datetime.now(UTC)
-    title, body = compose(label, camera.name, author, note.text)
-    out = [
-        Notification(
+    reached = listeners(db, camera, author)[0]
+    langs = push.languages(db, reached)
+    out = []
+    for user_id in reached:
+        # In each recipient's language: `label` may be worked out for it (a callable).
+        with use(langs.get(user_id)):
+            title, body = compose(label() if callable(label) else label, camera.name, author,
+                                  note.text)
+        out.append(Notification(
             user_id=user_id, kind="team_note", title=title, body=body,
             url=photo_url(image.id), species_id=species_id, image_id=image.id, created_at=now,
-        )
-        for user_id in listeners(db, camera, author)[0]
-    ]
+        ))
     db.add_all(out)
     db.flush()
     return out
 
 
 def deliver(db: Session, notification_ids: list) -> dict:
-    """Push each record to its person's devices and note how it went."""
+    """Push each record to its person's devices and note how it went.
+
+    Someone sitting, or inside their quiet hours, is told after, in one message with
+    everything else that waited (app.notifications.hold)."""
     sent = 0
-    for n in db.scalars(select(Notification).where(Notification.id.in_(notification_ids))).all():
+    now = datetime.now(UTC)
+    rows = db.scalars(select(Notification).where(Notification.id.in_(notification_ids))).all()
+    on = hold.sitting(db, now, {n.user_id for n in rows})
+    for n in rows:
+        why = hold.reason(db.get(NotificationPref, n.user_id), n.user_id, now, on)
+        if why:
+            n.push_status = hold.HELD
+            n.detail = {"held": why}
+            continue
         result = push.send_to_user(db, n.user_id, {
             "title": n.title, "body": n.body, "url": n.url,
             # One banner per photo: a second note on it replaces the first.
-            "tag": f"note-{n.image_id}",
+            "tag": f"note-{n.image_id}", "renotify": True,
             "at": n.created_at.isoformat(),
         })
-        if result["sent"]:
-            n.push_status = "sent"
-        elif result["subscriptions"] == 0:
-            n.push_status = "no_subscription"
-        else:
-            n.push_status = "failed"
+        n.push_status = push.delivery(result)
         sent += result["sent"]
     db.commit()
     log.info("notes.told_team", notifications=len(notification_ids), pushed=sent)

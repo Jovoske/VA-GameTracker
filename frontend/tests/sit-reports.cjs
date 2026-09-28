@@ -23,7 +23,7 @@
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert=require('node:assert/strict');
 (async()=>{
- const channel=process.env.PW_CHANNEL??'msedge',base=process.env.BASE_URL||'http://127.0.0.1:5173';
+ const channel=process.env.PW_CHANNEL??'',base=process.env.BASE_URL||'http://127.0.0.1:5173';
  const browser=await chromium.launch({headless:true,...(channel?{channel}:{}),args:['--enable-unsafe-swiftshader']});
  const errors=[];
  try {
@@ -139,7 +139,9 @@ const assert=require('node:assert/strict');
  assert.deepEqual(writes.filter(w=>w.m==='PATCH').map(w=>[w.body.outcome,w.body.correct]),[['nothing',true]]);
 
  // ── Tonight, the next morning: Back to sit, and "What happened last night?" ──
- sits=[sit('live')];past=[sit('p1',{night:last,started_at:null,stand:'Charca stand'}),sit('p2',{night:last,started_at:ago(900),ended_at:ago(700),stand:'Encinar tower'})];writes.length=0;
+ // Last night's sit ran in the evening (a fixed 20:30, whatever the time now): one that
+ // began after dawn is asked about as "this morning" instead.
+ sits=[sit('live')];past=[sit('p1',{night:last,started_at:null,stand:'Charca stand'}),sit('p2',{night:last,started_at:last+'T18:30:00Z',ended_at:last+'T20:00:00Z',stand:'Encinar tower'})];writes.length=0;
  await page.goto(base+'/');
  await page.getByText('Your sit at Barranco high seat is on.').waitFor();
  await until(async()=>(await page.locator('.sp-ask').count())===2,'two cards');

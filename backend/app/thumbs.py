@@ -16,6 +16,7 @@ from pathlib import Path
 from PIL import Image as PImage
 from PIL import ImageOps
 
+from app import media
 from app.core.config import settings
 
 # Grids, strips and the map show photos at 56-150px. A 320px-wide WebP is sharp at
@@ -71,10 +72,11 @@ def make_thumb(source: str, dest: Path) -> None:
 def ensure_thumb(image) -> bool:
     """Make the photo's small copy if it has none yet and note where it is. False
     when there is no file to make it from."""
-    if not image.original_path or not os.path.exists(image.original_path):
+    source = media.resolve(image.original_path)
+    if not source or not os.path.exists(source):
         return False
     dest = thumb_path(image.id)
     if not dest.is_file():
-        make_thumb(image.original_path, dest)
-    image.thumbnail_path = str(dest)
+        make_thumb(source, dest)
+    image.thumbnail_path = media.stored(dest)
     return True

@@ -7,7 +7,9 @@ const camera = {id:'cam1', name:'Oak ridge', battery_pct:72, signal_pct:null, mo
 const species = {id:'boar', name:'Wild Boar', count:2, last_seen:photos[0].captured_at, thumb_image_id:'p1', classes:[]};
 const insights = {outlook:[{date:'2026-09-08',moon_phase:'Waxing',moon_illum:42,civil_twilight_end:'2026-09-08T19:00:00Z'}], composition:[{label:'Wild Boar',count:2,top_camera:'Oak ridge'}], correlations:[]};
 (async()=>{
- const browser=await chromium.launch({headless:true,channel:process.env.BROWSER_CHANNEL || 'msedge'});
+ // PW_CHANNEL= (empty, the default) uses Playwright's own Chromium.
+ const channel=process.env.PW_CHANNEL||'';
+ const browser=await chromium.launch({headless:true,...(channel?{channel}:{})});
  const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
  await context.addInitScript(()=>localStorage.setItem('gs_token','ux-test-fixture'));
  const page=await context.newPage();
@@ -19,14 +21,14 @@ const insights = {outlook:[{date:'2026-09-08',moon_phase:'Waxing',moon_illum:42,
   if ((failStands && u.pathname==='/api/stands') || (failForecast && u.pathname==='/api/forecast/tonight')) return route.fulfill({status:503,json:{detail:'Test connection failure'}});
   if (u.pathname==='/api/forecast/tonight') return route.fulfill({json:{verdict:'NO_DATA',conditions:{},alternates:[],nights_of_data:0}});
   if (u.pathname==='/api/analytics/overview') return route.fulfill({status:503,json:{detail:'Analytics unavailable'}});
-  if ((failGallery && u.pathname.includes('/species/boar/images')) || (failCameras && u.pathname==='/api/cameras')) return route.fulfill({status:503,json:{detail:'Test connection failure'}});
-  const data=u.pathname==='/api/cameras'?(emptyCameras?[]:[camera]):u.pathname.includes('/cameras/cam1/images')?photos:u.pathname==='/api/species/spotted'?[species]:u.pathname.includes('/species/boar/images')?photos:u.pathname==='/api/insights'?insights:u.pathname==='/api/insights/class'?photos:u.pathname==='/api/insights/patterns'?{scopes:[],nights:0}:[];
+  if ((failGallery && u.pathname.includes('/species/boar/photos')) || (failCameras && u.pathname==='/api/cameras')) return route.fulfill({status:503,json:{detail:'Test connection failure'}});
+  const data=u.pathname==='/api/cameras'?(emptyCameras?[]:[camera]):u.pathname.includes('/cameras/cam1/images')?photos:u.pathname==='/api/species/spotted'?[species]:u.pathname.includes('/species/boar/photos')?{items:photos,next_before:null,next_before_id:null}:u.pathname==='/api/insights'?insights:u.pathname==='/api/insights/class'?photos:u.pathname==='/api/insights/patterns'?{scopes:[],nights:0}:[];
   await route.fulfill({json:data});
  });
- const url=process.env.UX_BASE_URL || 'http://127.0.0.1:5173';
+ const url=process.env.BASE_URL || process.env.UX_BASE_URL || 'http://127.0.0.1:5173';
  const waitDialogs=async n=>{await page.waitForFunction(n=>document.querySelectorAll('[role="dialog"]').length===n,n)};
  await page.goto(url+'/cameras');
- const first=page.getByRole('button',{name:'Open photo from Oak ridge: Wild Boar'}).first();
+ const first=page.getByRole('button',{name:'Open photo from Oak ridge: wild boar',exact:true}).first();
  await first.waitFor(); await first.focus(); await page.keyboard.press('Enter');await waitDialogs(1);
  await page.getByRole('button',{name:'Back to cameras'}).waitFor();
  assert.equal(await page.evaluate(()=>document.body.style.overflow),'hidden');
@@ -36,7 +38,7 @@ const insights = {outlook:[{date:'2026-09-08',moon_phase:'Waxing',moon_illum:42,
  await page.keyboard.press('Tab');
  assert.equal(await page.evaluate(()=>document.querySelector('[role="dialog"]').contains(document.activeElement)),true);
  await page.getByRole('button',{name:'Back to cameras'}).click();await waitDialogs(0);
- assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Open photo from Oak ridge: Wild Boar');
+ assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Open photo from Oak ridge: wild boar');
  assert.notEqual(await page.evaluate(()=>document.body.style.overflow),'hidden');
  await first.click();await waitDialogs(1);await page.goBack();await waitDialogs(0);
  assert.equal(new URL(page.url()).pathname,'/cameras');
@@ -54,14 +56,14 @@ const insights = {outlook:[{date:'2026-09-08',moon_phase:'Waxing',moon_illum:42,
  assert.equal(new URL(page.url()).pathname,'/animals');
  failGallery=true;await page.getByTitle('All Wild Boar photos').first().click();await waitDialogs(1);
  await page.getByRole('alert').waitFor();assert.equal(await page.getByText('No photos.',{exact:true}).count(),0);
- failGallery=false;await page.getByRole('button',{name:'Retry loading photos'}).click();await page.getByRole('dialog').locator('img').first().waitFor();
+ failGallery=false;await page.getByRole('dialog').getByRole('alert').getByRole('button',{name:'Try again'}).click();await page.getByRole('dialog').locator('img').first().waitFor();
  await page.getByRole('button',{name:'Back to animals'}).click();await waitDialogs(0);
- await page.goto(url+'/insights');await page.getByTitle('View the 2 Wild Boar photos').click();await waitDialogs(1);
+ await page.goto(url+'/insights');await page.getByTitle('See the Wild Boar photos').click();await waitDialogs(1);
  await page.getByRole('dialog').getByRole('button').filter({has:page.locator('img')}).first().click();await waitDialogs(2);
  await page.keyboard.press('Escape');await waitDialogs(1);await page.keyboard.press('Escape');await waitDialogs(0);
- failCameras=true;await page.goto(url+'/cameras');await page.getByRole('button',{name:'Retry loading cameras'}).waitFor();failCameras=false;emptyCameras=true;await page.getByRole('button',{name:'Retry loading cameras'}).click();await page.getByText('No cameras connected yet').waitFor();
- await page.goto(url+'/stands');await page.getByRole('button',{name:'Retry loading stands'}).waitFor();assert.equal(await page.getByText('No stands yet',{exact:true}).count(),0);failStands=false;await page.getByRole('button',{name:'Retry loading stands'}).click();await page.getByText('No stands yet',{exact:true}).waitFor();
- await page.goto(url+'/');await page.getByRole('button',{name:'Retry forecast'}).waitFor();failForecast=false;await page.getByRole('button',{name:'Retry forecast'}).click();await page.getByText('NO DATA',{exact:true}).waitFor();
+ failCameras=true;await page.goto(url+'/cameras');await page.locator('.cam-error').getByRole('button',{name:'Try again'}).waitFor();failCameras=false;emptyCameras=true;await page.locator('.cam-error').getByRole('button',{name:'Try again'}).click();await page.getByText('No cameras yet',{exact:true}).waitFor();
+ await page.goto(url+'/stands');await page.getByRole('alert').getByRole('button',{name:'Try again'}).waitFor();assert.equal(await page.getByText('No stands yet',{exact:true}).count(),0);failStands=false;await page.getByRole('alert').getByRole('button',{name:'Try again'}).click();await page.getByText('No stands yet',{exact:true}).waitFor();
+ await page.goto(url+'/');await page.getByRole('alert').filter({hasText:/Could not load tonight.s plan/}).getByRole('button',{name:'Try again'}).waitFor();failForecast=false;await page.getByRole('alert').getByRole('button',{name:'Try again'}).click();await page.getByText('Not enough to say',{exact:true}).first().waitFor();
  assert.deepEqual(errors,[]);
  console.log('PASS: photo return button, browser Back, Escape, nested galleries, focus restoration, scroll lock, image paging, mobile/tablet/desktop overflow, gallery error/retry, camera and stands error/retry/empty states, forecast retry and independence from analytics failures.');
  await browser.close();

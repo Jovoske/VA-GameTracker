@@ -1,16 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { validLngLat, windColor, windGeometry, type MapStand, type Zone } from './geometry'
+import { cap, t, tOr } from '../i18n'
+import { validLngLat, windColor, windFor, windGeometry, type MapStand, type Zone } from './geometry'
 
-// One short verdict per stand. The forecast's own sentence follows it.
-const WIND_HEAD: Record<string, string> = {
-  clean: 'Wind is right. Scent goes away from bedding.',
-  scent_carries: 'Wind is wrong. Scent blows into bedding.',
-  too_light: 'Wind too light to call.',
-  no_wind_data: 'No wind forecast tonight.',
-  no_bedding: 'No bedding drawn yet.',
-  no_position: 'Not on the map yet.',
-}
+// One short verdict per stand (the same lines as Stands). The forecast's own sentence follows it.
+const windHead = (status: string) => tOr(`standWind.${status}`, t('place.windUnknown'))
 
 /** An error that appears inside the sheet scrolls itself into view, so it is never below the fold. */
 export function InlineError({ text }: { text: string }) {
@@ -29,12 +23,15 @@ function Heading({ kind, name, children }: { kind: string; name: string; childre
 
 export function StandHeader({ stand }: { stand: MapStand }) {
   const status = validLngLat(stand.lon, stand.lat) ? stand.wind.status : 'no_position'
-  return <Heading kind="Stand" name={stand.name}>
-    <p className="bsheet-verdict" style={{ color: windColor(status) }}>{WIND_HEAD[status] ?? 'Wind unknown.'}</p>
+  // The time the call is for, as on Stands and in Sit mode: "For 20:39", "Now".
+  const at = windFor(stand.wind, status)
+  return <Heading kind={t('map.stand')} name={stand.name}>
+    <p className="bsheet-verdict" style={{ color: windColor(status) }}>{windHead(status)}</p>
+    {at && <p className="bsheet-meta">{cap(at)}</p>}
   </Heading>
 }
 export function ZoneHeader({ zone }: { zone: Zone }) {
-  return <Heading kind="Bedding" name={zone.name}><p className="bsheet-meta">Where the animals lie up.</p></Heading>
+  return <Heading kind={t('msheet.bedding')} name={zone.name}><p className="bsheet-meta">{t('msheet.beddingNote')}</p></Heading>
 }
 
 /**
@@ -51,12 +48,12 @@ function RemoveControl({ name, onRemove }: { name: string; onRemove: () => Promi
     setBusy(true); setErr(''); setFinal(false)
     try { await onRemove() } catch (e) { setErr((e as Error).message); setFinal(!!(e as Error & { final?: boolean }).final) } finally { setBusy(false) }
   }
-  if (!asking) return <button type="button" className="map-link" onClick={() => setAsking(true)}>Remove…</button>
-  return <div className="map-confirm" role="group" aria-label={`Remove ${name}`}>
-    <p>Remove {name} from the map?</p>
+  if (!asking) return <button type="button" className="map-link" onClick={() => setAsking(true)}>{t('place.removeDots')}</button>
+  return <div className="map-confirm" role="group" aria-label={t('admin.removeNamed', { name })}>
+    <p>{t('place.removeFromMap', { name })}</p>
     <div className="map-actions">
-      {!final && <button type="button" className="map-button" disabled={busy} onClick={run}>{busy ? 'Removing…' : err ? 'Try again' : 'Remove'}</button>}
-      <button type="button" className="map-button" disabled={busy} onClick={() => { setAsking(false); setErr(''); setFinal(false) }}>{final ? 'OK' : 'Keep'}</button>
+      {!final && <button type="button" className="map-button" disabled={busy} onClick={run}>{busy ? t('common.removing') : err ? t('common.tryAgain') : t('common.remove')}</button>}
+      <button type="button" className="map-button" disabled={busy} onClick={() => { setAsking(false); setErr(''); setFinal(false) }}>{final ? t('common.ok') : t('common.keep')}</button>
     </div>
     {err && <InlineError text={err} />}
   </div>
@@ -66,23 +63,27 @@ export function RenameControl({ name, onRename, maxLength = 80 }: { name: string
   const [value, setValue] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  if (value == null) return <button type="button" className="map-button" onClick={() => setValue(name)}>Rename</button>
+  if (value == null) return <button type="button" className="map-button" onClick={() => setValue(name)}>{t('cameras.rename')}</button>
   async function save() {
     if (!value?.trim() || busy) return
     setBusy(true); setErr('')
     try { await onRename(value.trim()); setValue(null) } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
   return <form className="map-rename" onSubmit={e => { e.preventDefault(); save() }}>
-    <label className="map-field">New name<input maxLength={maxLength} value={value} disabled={busy} onChange={e => setValue(e.target.value)} /></label>
-    <div className="map-actions"><button className="map-button map-button--primary" disabled={busy || !value.trim()}>{busy ? 'Saving…' : err ? 'Try again' : 'Save name'}</button><button type="button" className="map-button" disabled={busy} onClick={() => { setValue(null); setErr('') }}>Cancel</button></div>
+    <label className="map-field">{t('place.newName')}<input maxLength={maxLength} value={value} disabled={busy} onChange={e => setValue(e.target.value)} /></label>
+    <div className="map-actions"><button className="map-button map-button--primary" disabled={busy || !value.trim()}>{busy ? t('common.saving') : err ? t('common.tryAgain') : t('place.saveName')}</button><button type="button" className="map-button" disabled={busy} onClick={() => { setValue(null); setErr('') }}>{t('common.cancel')}</button></div>
     {err && <InlineError text={err} />}
   </form>
 }
 
-export function StandBody({ stand, scentRange, admin, onMove, onRemove, onRename }: {
+export function StandBody({ stand, scentRange, admin, viewer = false, me = null, onMove, onRemove, onRename }: {
   stand: MapStand
   scentRange: number
   admin: boolean
+  /** A viewer can't reserve: no button that promises it. */
+  viewer?: boolean
+  /** Who is signed in (their id), to tell their own reservation from another's. */
+  me?: string | null
   onMove: () => void
   onRemove: () => Promise<void>
   onRename: (name: string) => Promise<void>
@@ -92,21 +93,56 @@ export function StandBody({ stand, scentRange, admin, onMove, onRemove, onRename
   return <>
     {/* An unplaced stand has no wind to give: the header already says it isn't on the map. */}
     {placed && <p className="map-detail-copy">{stand.wind.text}</p>}
-    {placed && stand.wind.source && stand.wind.source !== 'synoptic' && stand.wind.source !== 'unknown' && <p className="map-detail-copy">That’s the slope air at this seat, not the forecast wind above.</p>}
-    {drawn && <p className="map-caveat">The cone shows how far scent carries tonight. An indication only: wind near the ground swirls.</p>}
-    {!placed && !admin && <p className="map-detail-copy">An admin can place it.</p>}
-    <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>Reserve this stand</Link>
+    {placed && stand.wind.source && stand.wind.source !== 'synoptic' && stand.wind.source !== 'unknown' && <p className="map-detail-copy">{t('place.slopeAir')}</p>}
+    {drawn && <p className="map-caveat">{t('place.cone')}</p>}
+    {!placed && !admin && <p className="map-detail-copy">{t('place.adminCan')}</p>}
+    {/* Reserve only where it can happen: never for a viewer, and never on a stand
+        somebody holds tonight. Your own goes to Stands, where Start sit is. */}
+    {!viewer && (stand.claimed_tonight && stand.claimed_by && stand.claimed_by === me
+      ? <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>{t('stands.yours')} · {t('stands.startSit')}</Link>
+      : stand.claimed_tonight
+        ? <p className="map-detail-copy">{stand.claimed_by && me == null ? t('stands.reserved') : t('stands.taken')}</p>
+        : <Link className="map-button map-button--primary map-button--big" to={`/stands?stand=${stand.id}`}>{t('place.reserve')}</Link>)}
     {admin && <div className="map-actions map-actions--admin">
-      <button type="button" className="map-button" onClick={onMove}>{placed ? 'Move' : 'Place it on the map'}</button>
+      <button type="button" className="map-button" onClick={onMove}>{placed ? t('place.move') : t('place.placeIt')}</button>
       <RenameControl name={stand.name} onRename={onRename} />
       <RemoveControl name={stand.name} onRemove={onRemove} />
     </div>}
   </>
 }
 
-export function ZoneBody({ zone, admin, onRemove }: { zone: Zone; admin: boolean; onRemove: () => Promise<void> }) {
+export function ZoneBody({ zone, admin, onRemove, onRename, onRedraw }: {
+  zone: Zone
+  admin: boolean
+  onRemove: () => Promise<void>
+  onRename: (name: string) => Promise<void>
+  /** Draw the outline again, keeping its name and its place in the wind calls (B-22). */
+  onRedraw: () => void
+}) {
   return <>
-    <p className="map-detail-copy">Every wind call on this map is about keeping scent out of here.</p>
-    {admin && <div className="map-actions map-actions--admin"><RemoveControl name={zone.name} onRemove={onRemove} /></div>}
+    <p className="map-detail-copy">{t('place.everyCall')}</p>
+    {admin && <div className="map-actions map-actions--admin">
+      <button type="button" className="map-button" onClick={onRedraw}>{t('place.redraw')}</button>
+      <RenameControl name={zone.name} onRename={onRename} />
+      <RemoveControl name={zone.name} onRemove={onRemove} />
+    </div>}
   </>
+}
+
+/**
+ * For a camera placed by hand that also reports a position of its own: say that the
+ * hand placement holds, and offer the camera's own back (B-09, E-16).
+ */
+export function OwnGpsControl({ onUse }: { onUse: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  async function run() {
+    setBusy(true); setErr('')
+    try { await onUse() } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+  }
+  return <div className="map-own-gps">
+    <p className="map-detail-copy">{t('place.byHand')}</p>
+    <button type="button" className="map-button" disabled={busy} onClick={run}>{busy ? t('common.saving') : err ? t('common.tryAgain') : t('place.useGps')}</button>
+    {err && <InlineError text={err} />}
+  </div>
 }

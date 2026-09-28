@@ -25,7 +25,9 @@ from sqlalchemy import delete, distinct, func, select, update
 from sqlalchemy.orm import Session
 
 from app import jobs
+from app.api.visibility import NO_PEOPLE
 from app.core.logging import get_logger
+from app.i18n import stored
 from app.models import (
     Detection,
     DetectionIndividual,
@@ -70,9 +72,8 @@ def embed_detections(db: Session, *, limit: int = EMBED_PER_RUN) -> int:
         try:
             load()
         except Exception as e:
-            raise ModelUnavailable(
-                f"The species model could not start ({type(e).__name__}: {str(e)[:150]})."
-            ) from e
+            raise ModelUnavailable(stored(
+                "ai.classifier_failed", error=f"{type(e).__name__}: {str(e)[:150]}")) from e
     done = 0
     for det_id, path, bbox in rows:
         if jobs.lock_lost():
@@ -160,9 +161,10 @@ def cluster(db: Session, *, threshold: float = DEFAULT_THRESHOLD) -> dict:
         )
         .join(Image, Detection.image_id == Image.id)
         .join(Species, Species.id == Detection.species_id)
-        # Hidden species and photos marked "nothing in it" make no animals.
+        # Hidden species, photos marked "nothing in it" and frames with a person or a
+        # vehicle in them (the dog on a walk) make no animals.
         .where(Detection.embedding.isnot(None), Species.hidden.is_(False),
-               Image.is_empty_frame.isnot(True))
+               Image.is_empty_frame.isnot(True), NO_PEOPLE)
         .order_by(Detection.species_id, Image.captured_at)
     ).all()
 

@@ -18,8 +18,9 @@ to be silent, and it is left out of the plan and the numbers (retired).
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from app.i18n import day_month, localize, t, weekday
 from app.models import Camera
 
 OFFLINE_HOURS = 36  # SPYPOINT and UBox cameras check in at least daily
@@ -28,14 +29,25 @@ OFFLINE_HOURS = 36  # SPYPOINT and UBox cameras check in at least daily
 QUIET_DAYS = 7
 LOW_BATTERY_PCT = 20
 
-NOT_SYNCING = "Photos not coming in. The camera login needs attention."
-# No login error, just no good fetch for hours: the scheduled fetch itself has stopped
-# (or is stuck behind a long job), so the login is not blamed.
-NOT_FETCHED = "Photos not coming in. No photo fetch has worked for over 2 hours."
+# "health.not_syncing": the login stopped working. "health.not_fetched": no login
+# error, just no good fetch for hours: the scheduled fetch itself has stopped (or is
+# stuck behind a long job), so the login is not blamed.
 
 
 def _day(when: datetime) -> str:
-    return f"{when.day} {when.strftime('%b')}"
+    return day_month(when)
+
+
+def _since(when: datetime, now: datetime) -> str:
+    """The day a camera last checked in, as the Cameras card and the map sheet say
+    it: its weekday within the week ("Thursday"), else its date. Hours past a day
+    ("No check-in for 240h") are not how a hunter counts."""
+    from zoneinfo import ZoneInfo
+
+    from app.core.config import settings
+
+    local = when.astimezone(ZoneInfo(settings.estate_timezone))
+    return weekday(local, short=False) if now - when < timedelta(days=6) else day_month(local)
 
 
 def camera_health(cam: Camera, now: datetime | None = None, login: dict | None = None) -> dict:
@@ -59,37 +71,45 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
     if getattr(cam, "retired_at", None) is not None:
         # An admin took it down: its silence is expected, and nothing is to be checked.
         status = "retired"
-        detail = f"Retired {_day(cam.retired_at)}. Left out of tonight's plan and the numbers"
+        detail = t("health.retired", day=_day(cam.retired_at))
     elif cam.active is False:
         status = "disconnected"
-        detail = "Not connected: no camera login here fetches it now"
+        detail = t("health.disconnected")
     elif login_down:
         status = "not_syncing"
-        detail = NOT_SYNCING if login.get("state") == "failing" else NOT_FETCHED
+        detail = t("health.not_syncing" if login.get("state") == "failing"
+                   else "health.not_fetched")
     elif fetch_error:
         # Its login works, but the fetch could not list this camera's photos.
         status = "not_syncing"
-        detail = f"Photos not coming in. {fetch_error}"
+        fetch_error = localize(fetch_error)
+        detail = t("health.fetch_error", error=fetch_error)
     elif not heartbeat:
         # Photo-only: its last photo is the only sign of life, and a week of none is
         # "have a look", never "check the battery" (it may just be quiet ground).
         status = "quiet" if quiet else "ok"
         if quiet:
-            detail = f"No photos since {_day(last)}" if last else "No photos yet"
+            detail = t("health.no_photos_since", day=_day(last)) if last else t("health.no_photos")
         else:
-            detail = "Sends photos only, no check-ins"
+            detail = t("health.photos_only")
+        ahead = getattr(cam, "clock_ahead_min", None)
+        if ahead:
+            # Put right on import (ftp_import._timestamp), but the camera should be told.
+            hours = round(ahead / 60)
+            detail += t("health.clock_fast", h=hours)
     elif offline:
         status = "offline"
-        detail = "No check-in" + (f" for {round(hours)}h" if hours is not None else " yet")
+        detail = (t("health.no_checkin_for", day=_since(last, now)) if last is not None
+                  else t("health.no_checkin"))
     elif out_of_credits:
         status = "out_of_credits"
-        detail = f"Photo limit reached ({cam.photo_count}/{cam.photo_limit})"
+        detail = t("health.photo_limit", count=cam.photo_count, limit=cam.photo_limit)
     elif low_battery:
         status = "low_battery"
-        detail = f"Battery low ({cam.battery_pct}%)"
+        detail = t("health.battery_low", pct=cam.battery_pct)
     else:
         status = "ok"
-        detail = "Reporting normally"
+        detail = t("health.ok")
 
     # Producing = we can trust the recent absence of photos as genuine (few animals),
     # rather than a camera fault. Offline or out-of-credits cameras are NOT producing,
@@ -109,7 +129,7 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
         "hours_since_report": round(hours) if hours is not None else None,
     }
     if status == "not_syncing" and login_down:
-        out["login"] = {"label": login.get("label"), "error": login.get("error")}
+        out["login"] = {"label": login.get("label"), "error": localize(login.get("error"))}
     elif status == "not_syncing":
         # `camera`: the login is fine, only this camera's listing failed.
         out["login"] = {"label": (login or {}).get("label"), "error": fetch_error,

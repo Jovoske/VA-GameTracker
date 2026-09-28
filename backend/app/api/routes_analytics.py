@@ -9,8 +9,9 @@ from app.api.deps import get_current_user
 from app.api.visibility import VISIBLE_ANIMAL, VISIBLE_SIGHTING
 from app.core.config import settings
 from app.core.db import get_db
-from app.enrichment.astro import moon_phase, solar
-from app.forecasting.exposure import night_expr
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
+from app.forecasting.exposure import current_night, night_expr
+from app.i18n import species_name
 from app.models import Camera, Detection, Image, Species, User
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -80,20 +81,24 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
 
     # A photo marked "nothing in it" keeps its sighting row (so keeping it again
     # brings it back); it is not counted while it is marked.
+    # By species id, named in the reader's language as every other list names it.
     sp_rows = db.execute(
-        select(Species.common_name, func.count(Detection.id))
+        select(Species.id, Species.common_name, func.count(Detection.id))
         .join(Detection, Detection.species_id == Species.id)
         .join(Image, Image.id == Detection.image_id)
         .join(Camera, Camera.id == Image.camera_id)
         .where(VISIBLE_SIGHTING, kept)
-        .group_by(Species.common_name)
-        .order_by(func.count(Detection.id).desc())
+        .group_by(Species.id, Species.common_name)
+        .order_by(func.count(Detection.id).desc(), Species.id)
     ).all()
-    by_species = [{"species": n, "count": int(c)} for n, c in sp_rows]
+    by_species = [{"species": species_name(sid, n), "species_id": sid, "count": int(c)}
+                  for sid, n, c in sp_rows]
 
     now = datetime.now(timezone.utc)
     phase, illum = moon_phase(now)
-    s = solar(settings.estate_lat, settings.estate_lon, now.date())
+    # Tonight's sun is the night key's (the estate's evening, until 06:00), never the
+    # UTC calendar day's.
+    s = solar(settings.estate_lat, settings.estate_lon, current_night(now))
 
     return {
         "totals": {
@@ -105,7 +110,8 @@ def overview(user: User = Depends(get_current_user), db: Session = Depends(get_d
         "by_species": by_species,
         "best_window": _best_window(by_hour),
         "tonight": {
-            "moon_phase": phase,
+            "moon_phase": phase_words(phase),
+            "moon_phase_key": phase_key(phase),
             "moon_illum": illum,
             "sunset": s.get("sunset"),
             "darkness_minutes": s.get("darkness_minutes"),

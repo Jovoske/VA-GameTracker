@@ -26,8 +26,8 @@ const seen = new Set<string>()
 /** Noise that isn't a fault in the app: an observer that skipped a frame, another
  *  site's script, a request this app gave up on itself, a phone with no signal. */
 function ignorable(message: string, err: unknown): boolean {
-  const x = err as { name?: string; offline?: boolean; timeout?: boolean; status?: number; stack?: string }
-  if (x?.name === 'AbortError' || x?.offline || x?.timeout) return true
+  const x = err as { name?: string; offline?: boolean; timeout?: boolean; signedOut?: boolean; status?: number; stack?: string }
+  if (x?.name === 'AbortError' || x?.offline || x?.timeout || x?.signedOut) return true
   // A refusal (4xx) is an answer and a dead server (5xx) is the server's own log's
   // business, not a crash on the phone; so is being signed out.
   if (x?.status && x.status >= 400) return true

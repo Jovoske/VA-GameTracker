@@ -19,14 +19,15 @@ whether a stand survives being sat.
 from __future__ import annotations
 
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.visibility import VISIBLE_SIGHTING
 from app.core.config import settings
-from app.forecasting.exposure import local_hour
+from app.i18n import clock, t
 from app.models import Camera, Detection, Image, Species, Stand
 
 # Two cameras seeing the same species within this gap is plausibly one animal
@@ -54,11 +55,11 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
     advice costs more trust than an honest "yours to solve".
     """
     if stand.camera_id is None:
-        return {"suggestions": [], "reason": "This stand is not linked to a camera."}
+        return {"suggestions": [], "reason": t("arcs.no_camera")}
 
     target = db.get(Camera, stand.camera_id)
     if target is None or target.lat is None or target.lon is None:
-        return {"suggestions": [], "reason": "The linked camera has no position recorded."}
+        return {"suggestions": [], "reason": t("arcs.camera_unplaced")}
 
     others = [
         c
@@ -66,7 +67,7 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
         if c.lat is not None and c.lon is not None
     ]
     if not others:
-        return {"suggestions": [], "reason": "No other positioned cameras to infer movement from."}
+        return {"suggestions": [], "reason": t("arcs.no_others")}
 
     # Detections at the target camera, and at every other camera, by species/time.
     rows = db.execute(
@@ -106,10 +107,8 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
             "from_camera": name,
             "approach_deg": round(v["bearing"]),
             "sequences": v["count"],
-            "note": (
-                f"{v['count']} times, animals reached {target.name} within "
-                f"{int(MAX_TRAVEL_GAP.total_seconds() // 60)} min of passing {name}."
-            ),
+            "note": t("arcs.note", n=v["count"], camera=target.name, other=name,
+                      minutes=int(MAX_TRAVEL_GAP.total_seconds() // 60)),
         }
         for name, v in sorted(tally.items(), key=lambda kv: -kv[1]["count"])
         if v["count"] >= MIN_SEQUENCES
@@ -119,61 +118,78 @@ def suggest_approach_arcs(db: Session, stand: Stand) -> dict:
         "suggestions": suggestions,
         "reason": None
         if suggestions
-        else (
-            "No repeated movement between cameras yet — not enough to propose an "
-            "approach line, so the app will keep saying this one is yours to solve."
-        ),
+        else t("arcs.none"),
     }
 
 
-def dark_exit(db: Session, stand: Stand, *, after_hour: int = 23) -> dict:
+# A normal evening sit ends about this long after sunset: 23:00 in late September,
+# 21:00 in November. The walk out is looked for from here.
+SIT_ENDS_AFTER_SUNSET = timedelta(hours=3)
+# How far back the dark exit reads: the season.
+EXIT_HISTORY_NIGHTS = 365
+
+
+def dark_exit(db: Session, stand: Stand, *, after: timedelta = SIT_ENDS_AFTER_SUNSET) -> dict:
     """Earliest hour after the sit when this stand's ground is historically empty.
 
     Stands die from how you leave them, not how you arrive. This is the hour at
     which walking out is least likely to push animals off the estate.
+
+    Counted in visits (arrivals), placed by the minutes after their own night's
+    sunset and put back on tonight's clock with tonight's sunset, as best hours are:
+    a fixed clock hour drifts an hour at the clock change and two over the season
+    (audit J-08).
     """
+    from app.forecasting.exposure import current_night, night_key_start
+    from app.forecasting.model import _sunset
+    from app.forecasting.visits import visit_rows
+
     if stand.camera_id is None:
-        return {"hour": None, "reason": "This stand is not linked to a camera."}
+        return {"hour": None, "reason": t("arcs.no_camera")}
 
-    h = local_hour(Image.captured_at).label("h")
-    rows = db.execute(
-        select(h, func.count(Detection.id))
-        .select_from(Detection)
-        .join(Image, Image.id == Detection.image_id)
-        .join(Species, Species.id == Detection.species_id)
-        .where(Image.camera_id == stand.camera_id, VISIBLE_SIGHTING)
-        .group_by(h)
-    ).all()
-    if not rows:
-        return {"hour": None, "reason": "No detection history at this stand's camera yet."}
+    tonight = current_night()
+    v = visit_rows(start=night_key_start(tonight - timedelta(days=EXIT_HISTORY_NIGHTS)),
+                   end=night_key_start(tonight), camera_ids=[stand.camera_id], nights=True)
+    offsets = []
+    for night, first_at in db.execute(select(v.c.night, v.c.first_at)).all():
+        sunset = _sunset(night)
+        if sunset is not None:
+            offsets.append((first_at - sunset).total_seconds() / 60)
+    sunset = _sunset(tonight)
+    if not offsets or sunset is None:
+        return {"hour": None, "reason": t("exit.no_visits")}
 
-    counts = {int(hour): int(n) for hour, n in rows}
-    total = sum(counts.values()) or 1
+    total = len(offsets)
+    start_min = after.total_seconds() / 60
 
-    # Walk forward from the end of a normal sit and take the first quiet hour.
-    for offset in range(0, 8):
-        hour = (after_hour + offset) % 24
-        share = counts.get(hour, 0) / total
-        if share <= 0.02:
+    def share(k: int) -> float:
+        lo = start_min + k * 60
+        return sum(1 for o in offsets if lo <= o < lo + 60) / total
+
+    def on_clock(k: int):
+        at = sunset + after + timedelta(hours=k)
+        # A quarter hour on the clock reads better than 22:56 and is as true.
+        return datetime.fromtimestamp(round(at.timestamp() / 900) * 900, tz=UTC).astimezone(
+            ZoneInfo(_TZ))
+
+    # Walk forward from the end of a normal sit and take the first quiet hour, up to
+    # 06:00: a visit after that is the next night's, so the hours past it would look
+    # quiet whatever walked there.
+    night_ends = datetime.combine(tonight + timedelta(days=1), time(6), tzinfo=ZoneInfo(_TZ))
+    hours = [k for k in range(8) if sunset + after + timedelta(hours=k + 1) <= night_ends] or [0]
+    for k in hours:
+        if share(k) <= 0.02:
+            at = on_clock(k)
             return {
-                "hour": hour,
-                "share_pct": round(share * 100, 1),
+                "hour": at.hour, "time": at.strftime("%H:%M"),
+                "share_pct": round(share(k) * 100, 1),
                 "reason": None,
-                "text": (
-                    f"Dark exit {hour:02d}:00 — only {round(share * 100)}% of this camera's "
-                    "sightings fall in that hour, so walking out then disturbs least."
-                ),
+                "text": t("exit.quiet", time=clock(at), pct=round(share(k) * 100)),
             }
 
-    quietest = min(
-        ((h_, counts.get(h_, 0)) for h_ in [(after_hour + o) % 24 for o in range(8)]),
-        key=lambda kv: kv[1],
-    )[0]
+    quietest = on_clock(min(hours, key=share))
     return {
-        "hour": quietest,
-        "reason": "No genuinely quiet hour — this stand is busy all night.",
-        "text": (
-            f"No quiet hour after {after_hour:02d}:00 at this stand — it is busy all night. "
-            f"{quietest:02d}:00 is the least-bad exit."
-        ),
+        "hour": quietest.hour, "time": quietest.strftime("%H:%M"),
+        "reason": t("exit.busy_reason"),
+        "text": t("exit.busy", after=clock(on_clock(0)), time=clock(quietest)),
     }

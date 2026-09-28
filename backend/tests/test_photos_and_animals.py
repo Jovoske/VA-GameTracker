@@ -19,7 +19,7 @@ from app.ai import species as species_ai
 from app.ai.checking import WAITING
 from app.ai.classifier import ESTATE_KEYS, common_name, default_name
 from app.api.routes_species import class_filter
-from app.core.security import create_access_token
+from app.core.security import create_access_token, image_token
 from app.forecasting.model import class_label, sentence_case
 from app.models import (
     Camera,
@@ -301,8 +301,11 @@ def test_class_filter_for_any_other_species_is_its_name():
 
 def test_the_camera_card_counts_what_its_strip_shows(client, db_session, estate):
     """1 boar, 3 rabbit-only (hidden), 2 empty, 1 not checked yet, 1 with no file:
-    '1 with animals, 2 empty'. It used to say 7 with animals."""
-    _, headers = _user(db_session, estate)
+    '1 with animals, 2 empty'. It used to say 7 with animals. The one not checked yet
+    is the admin's until the AI has looked at it (R6BE-2): the team's card and strip
+    both leave it out."""
+    _, member = _user(db_session, estate)
+    _, headers = _user(db_session, estate, "admin")
     cam = _camera(db_session, estate)
     _photo(db_session, cam, NIGHT)
     for i in range(3):
@@ -325,6 +328,10 @@ def test_the_camera_card_counts_what_its_strip_shows(client, db_session, estate)
     with_empty = client.get(f"/api/cameras/{cam.id}/images?include_empty=true",
                             headers=headers).json()
     assert len(with_empty) == len(strip) + card["empty_count"]
+    card = client.get("/api/cameras", headers=member).json()[0]
+    assert (card["animal_count"], card["unchecked_count"], card["empty_count"]) == (1, 0, 2)
+    strip = client.get(f"/api/cameras/{cam.id}/images", headers=member).json()
+    assert len(strip) == card["animal_count"] + card["unchecked_count"]
 
 
 def test_listing_cameras_costs_the_same_for_two_as_for_ten(client, db_session, estate):
@@ -415,7 +422,7 @@ def test_a_photo_file_is_kept_by_the_phone(client, db_session, estate, tmp_path)
     img.original_path = str(tmp_path / "a.jpg")
     PImage.new("RGB", (64, 48), (90, 120, 60)).save(img.original_path, "JPEG")
     db_session.commit()
-    token = create_access_token(str(user.id))
+    token = image_token(user)
     for url in (f"/api/images/{img.id}/file", f"/api/images/{img.id}/file?download=1"):
         r = client.get(f"{url}{'&' if '?' in url else '?'}token={token}")
         assert r.status_code == 200
@@ -445,16 +452,16 @@ def test_the_ai_pass_makes_the_small_copy_of_each_animal_photo(db_session, estat
     db_session.commit()
     boxes = {photos["boar"].original_path: [{"bbox": [0.1, 0.1, 0.5, 0.5], "confidence": 0.9}]}
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", lambda path: boxes.get(path, []))
+    monkeypatch.setattr(checking, "detect", lambda path: boxes.get(path, []))
     monkeypatch.setattr(species_ai, "classify_crop",
                         lambda path, bbox: ("wild_boar", "Wild boar", 0.9))
     checking.check_photos(db_session, now=datetime(2026, 9, 21, 20, 0, tzinfo=UTC))
     db_session.expire_all()
     boar, grass = (db_session.get(Image, photos[k].id) for k in ("boar", "grass"))
     assert grass.is_empty_frame is True and grass.thumbnail_path is None
-    assert boar.thumbnail_path == str(tmp_path / "media" / "thumbs" / str(boar.id)[:2]
-                                      / f"{boar.id}.webp")
-    with PImage.open(boar.thumbnail_path) as thumb:
+    # Written under MEDIA_ROOT (audit H-21), where thumbs.thumb_path puts it.
+    assert boar.thumbnail_path == f"thumbs/{str(boar.id)[:2]}/{boar.id}.webp"
+    with PImage.open(tmp_path / "media" / boar.thumbnail_path) as thumb:
         assert thumb.size == (320, 180)
 
     # A file the thumbnail can't be made from never holds the pass up.
@@ -548,7 +555,8 @@ def test_the_ai_never_changes_a_hunters_fix(client, db_session, estate, monkeypa
 
 
 def test_a_photo_the_ai_never_named_or_never_reached_can_be_named(client, db_session, estate):
-    _, headers = _user(db_session, estate)
+    # An admin: one the AI never reached is theirs alone until it has (R6BE-2).
+    _, headers = _user(db_session, estate, "admin")
     cam = _camera(db_session, estate)
     waiting = _photo(db_session, cam, NIGHT, species=(), empty=None)
     assert db_session.scalar(select(Image.id).where(Image.id == waiting.id, WAITING))
@@ -686,7 +694,7 @@ def test_undo_on_a_photo_never_checked_lets_the_detector_look(client, db_session
     assert (img.processed_at, img.reviewed, img.is_empty_frame) == (None, False, None)
 
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", lambda path: [])
+    monkeypatch.setattr(checking, "detect", lambda path: [])
     monkeypatch.setattr(species_ai, "classify_crop",
                         lambda path, bbox: ("wild_boar", "Wild boar", 0.2))
     checking.check_photos(db_session, now=datetime(2026, 9, 21, 20, 0, tzinfo=UTC))
@@ -698,8 +706,9 @@ def test_undo_on_a_photo_never_checked_lets_the_detector_look(client, db_session
 
 def test_undo_puts_the_photo_back_as_the_ai_left_it(client, db_session, estate):
     """Empty by the AI (so the daytime rescan may look again), or given up on: after a
-    fix and Undo it is exactly that again, not "checked by a hunter"."""
-    _, headers = _user(db_session, estate)
+    fix and Undo it is exactly that again, not "checked by a hunter". (An admin: a
+    frame the AI never managed to look at is theirs alone, R6BE-2.)"""
+    _, headers = _user(db_session, estate, "admin")
     cam = _camera(db_session, estate)
     empty = _photo(db_session, cam, NIGHT, species=(), empty=True)
     failed = _photo(db_session, cam, NIGHT - timedelta(hours=2), species=(), empty=None)
@@ -896,6 +905,10 @@ def test_settings_is_told_when_the_photo_disk_runs_low(client, db_session, estat
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * 1024**3, 0, 1024**3))
     disk = client.get("/api/admin/status", headers=admin).json()["disk"]
-    assert disk == {"free_gb": 1.0, "total_gb": 100.0, "low": True}
+    assert disk == {"free_gb": 1.0, "total_gb": 100.0, "low": True, "full": True}
+    # Under 20 GB is worth saying (amber); under 5 GB the fetch stops downloading (red).
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * 1024**3, 0, 12 * 1024**3))
+    disk = client.get("/api/admin/status", headers=admin).json()["disk"]
+    assert disk["low"] is True and disk["full"] is False
     monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * 1024**3, 0, 40 * 1024**3))
     assert client.get("/api/admin/status", headers=admin).json()["disk"]["low"] is False

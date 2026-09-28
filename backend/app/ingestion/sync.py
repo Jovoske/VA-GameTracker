@@ -31,10 +31,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import geo, jobs, media
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
+from app.i18n import stored
 from app.ingestion.logins import (
     PRIMARY_LABEL,
     LoginProblem,
@@ -58,7 +59,10 @@ from app.models import Camera, CameraAccount, Estate, Image, SyncLog
 
 log = get_logger(__name__)
 
-# A photo whose file would not download is tried again on this many fetches.
+# A photo whose file would not download is tried again on this many fetches from
+# the link saved with it (repair_missing). While SPYPOINT still lists it, with a
+# fresh link each time, it is tried on every fetch whatever the count: a CDN outage
+# or a full disk longer than an hour used to lose the photo for good (E-01).
 MAX_DOWNLOAD_ATTEMPTS = 5
 # Photos with no file that a fetch retries per camera, beyond those it lists anyway.
 REPAIR_PER_CAMERA = 20
@@ -72,9 +76,7 @@ OVERLAP_PAGES = 3
 # A routine fetch reads at most this many pages (of 100) per camera.
 MAX_PAGES = 20
 
-DUPLICATE_OF_PRIMARY = (
-    "This is the estate's main SPYPOINT login, which is fetched already. Remove this copy."
-)
+DUPLICATE_OF_PRIMARY = stored("login.copy_of_primary")
 # upsert_camera's account_id when the camera stays with the login it has: another
 # login listed it first in this run.
 KEEP = object()
@@ -145,9 +147,14 @@ def upsert_camera(db: Session, estate_id, cam: SpypointCamera, account_id=KEEP) 
         row.signal_pct = cam.signal_pct
     if cam.model:
         row.model = cam.model
-    if cam.lat is not None and cam.lng is not None:
-        row.lat = cam.lat
-        row.lon = cam.lng
+    # The provider's position is kept as its own, and moves the map's only while
+    # nobody has placed the camera by hand: that is usually a cell-tower guess, and a
+    # hand placement snapped back to it every 15 minutes (audit B-09, E-16). A (0, 0)
+    # or impossible fix is a camera with no GPS lock, not a position.
+    if geo.plausible_position(cam.lat, cam.lng):
+        row.provider_lat, row.provider_lon = cam.lat, cam.lng
+        if not row.location_is_custom or row.lat is None or row.lon is None:
+            row.lat, row.lon = cam.lat, cam.lng
     if cam.last_report_at is not None:
         row.last_report_at = cam.last_report_at
     row.battery_level = cam.battery_level
@@ -189,7 +196,7 @@ def _store_file(estate_id, camera: Camera, image: Image, data: bytes) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    image.original_path = path
+    image.original_path = media.stored(path)
     image.file_hash = hashlib.sha256(data).hexdigest()
 
 
@@ -225,14 +232,17 @@ def _ingest_photo(
     """Download + store + enrich one photo. True if its file is newly on disk.
 
     A photo already stored without its file (the download failed last time) is tried
-    again with the link this listing gave, so a CDN hiccup no longer loses it.
+    again with the link this listing gave, on every fetch that lists it: the link is
+    fresh, so an outage of any length loses nothing while SPYPOINT still lists it.
     """
     if not photo.spypoint_id:
         return False
     existing = db.scalar(select(Image).where(Image.spypoint_photo_id == photo.spypoint_id))
     if existing is not None:
-        if existing.original_path or existing.download_attempts >= MAX_DOWNLOAD_ATTEMPTS:
-            return False  # dedupe — already have it, or have given up on its file
+        if existing.original_path:
+            return False  # dedupe — already have it
+        if not photo.url and existing.download_attempts >= MAX_DOWNLOAD_ATTEMPTS:
+            return False  # no new link, and the old one has been tried enough
         if photo.url:
             existing.cdn_url = photo.url  # the freshest link
         if tried is not None:
@@ -547,7 +557,8 @@ def _run(db: Session, *, label: str, per_camera, per_new_camera=None) -> dict:
                 summary["status"] = "error" if len(failures) == len(cameras) else "partial"
                 summary["error"] = (
                     failures[0] if summary["status"] == "error"
-                    else f"{len(failures)} of {len(cameras)} cameras failed. {failures[0]}"
+                    else stored("sync.some_failed", n=len(failures), total=len(cameras),
+                                error=failures[0])
                 )
             row = _account_row(db, acct)
             # Its history import has been tried: a camera whose listing failed has no

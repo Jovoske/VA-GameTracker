@@ -1,9 +1,9 @@
 """Tests for the claims the forecast is now allowed — and no longer allowed — to make."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
-from app.forecasting.exposure import recompute_camera_nights
+from app.forecasting.exposure import current_night, recompute_camera_nights
 from app.forecasting.model import MIN_NIGHTS_TO_JUDGE, _verdict, forecast_tonight
 from app.models import Camera, Detection, Estate, Image, Species
 
@@ -98,7 +98,9 @@ def test_payload_no_longer_carries_a_fabricated_confidence(db_session, monkeypat
     db_session.add(cam)
     db_session.flush()
 
-    base = datetime.now(timezone.utc).replace(hour=21, minute=0, second=0, microsecond=0)
+    # 21:00 UTC on the 20 nights before tonight's, which are over at any hour: between
+    # midnight and 06:00 in Madrid the UTC date is already the next night's.
+    base = datetime.combine(current_night(), time(21), tzinfo=timezone.utc)
     base -= timedelta(days=20)
     for i in range(20):
         animal = i % 2 == 0

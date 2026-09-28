@@ -144,26 +144,40 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  assert.match(await page.locator('.map-editor-status').innerText(),/^3 corners/,'the outline is kept');
  await page.getByRole('button',{name:'Cancel'}).click();await page.getByRole('button',{name:'Throw away'}).click();
 
- // S1-M3: with no signal the wind bar says it has no wind, not that the air is calm.
- offline=true;await page.reload();await page.getByText('No signal, so the map didn’t load.').waitFor({timeout:15000});
+ // S1-M3: with no signal and nothing saved on the phone, the wind bar says it has no
+ // wind, not that the air is calm.
+ offline=true;await page.evaluate(()=>Object.keys(localStorage).filter(k=>k.startsWith('gs_cache:/map/')).forEach(k=>localStorage.removeItem(k)));
+ await page.reload();await page.getByText('No signal, so the map didn’t load.').waitFor({timeout:15000});
  assert.match(await page.locator('.map-windbar').innerText(),/Wind not loaded/);offline=false;
+ // B-06: with the copy the phone saved, the map opens with no signal and says how old it is.
+ await page.reload();await page.locator('.map-pin').first().waitFor();const pinsOnline=await page.locator('.map-pin').count();
+ offline=true;await page.reload();await page.locator('.map-pill--age').waitFor({timeout:15000});
+ assert.match(await page.locator('.map-pill--age').innerText(),/^No signal\. Map from just now\./);
+ assert.equal(await page.locator('.map-pin').count(),pinsOnline,'every stand and camera from the saved copy');
+ assert.equal(await page.getByText('didn’t load.').count(),0);
+ offline=false;await page.reload();await page.locator('.map-pin').first().waitFor();
+ assert.equal(await page.locator('.map-pill--age').count(),0,'signal back: no age line');
 
  // S2R-3: last night's line says how far to trust it. Frames still being checked are not
  // a quiet night nor a dead camera; a camera out of credits may not have sent everything.
+ // (The map paints what the phone saved first, then the answer: wait for the answer.)
+ const night=async(text)=>{await page.waitForFunction(t=>document.querySelector('.cam-sheet-night')?.innerText===t,text,{timeout:10000}).catch(()=>{});return page.locator('.cam-sheet-night').innerText()};
  cameras[1].last_night_status='checking';cameras[0].last_night_status='incomplete';
  await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
- assert.equal(await page.locator('.cam-sheet-night').innerText(),'Still checking last night’s photos.');
+ assert.equal(await night('Still checking last night’s photos.'),'Still checking last night’s photos.');
  await page.goto(base+'/map?camera=c1');await page.locator('.bsheet[aria-label="Camera: Valley camera"]').waitFor();
- assert.equal(await page.locator('.cam-sheet-night').innerText(),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nOut of photo credits last night, so this may not be everything.');
+ assert.equal(await night('Last night: Wild boar · 2 visits, Red deer · 1 visit\nOut of photo credits last night, so this may not be everything.'),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nOut of photo credits last night, so this may not be everything.');
  // R2BE-1: photos the AI gave up on are not "nothing on camera": a broken AI read as a quiet night.
  cameras[1].last_night_status='unreadable';cameras[0].last_night_status='unreadable';
  await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
- assert.equal(await page.locator('.cam-sheet-night').innerText(),'Nothing found last night, but some photos couldn’t be checked, so this may not be everything.');
+ assert.equal(await night('Nothing found last night, but some photos couldn’t be checked, so this may not be everything.'),'Nothing found last night, but some photos couldn’t be checked, so this may not be everything.');
  await page.goto(base+'/map?camera=c1');await page.locator('.bsheet[aria-label="Camera: Valley camera"]').waitFor();
- assert.equal(await page.locator('.cam-sheet-night').innerText(),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nSome photos from last night couldn’t be checked, so this may not be everything.');
+ assert.equal(await night('Last night: Wild boar · 2 visits, Red deer · 1 visit\nSome photos from last night couldn’t be checked, so this may not be everything.'),'Last night: Wild boar · 2 visits, Red deer · 1 visit\nSome photos from last night couldn’t be checked, so this may not be everything.');
  cameras[1].last_night_status='blind';cameras[1].health={...ok,status:'offline',producing:false};cameras[1].last_report_at=new Date(Date.now()-3*86400e3).toISOString();
  await page.goto(base+'/map?camera=c2');await page.locator('.bsheet[aria-label="Camera: Track camera"]').waitFor();
- assert.equal(await page.locator('.cam-sheet-status--warn').first().innerText(),'Not checking in. Last heard 3 d ago.');
+ // The Cameras card's words and Tonight's: the day it last checked in, never hours.
+ await page.getByText(/^No check-in since /).waitFor({timeout:10000});
+ assert.match(await page.locator('.cam-sheet-status--warn').first().innerText(),/^No check-in since (Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)( night)?\.$/);
  assert.match(await page.locator('.cam-sheet-night').innerText(),/^No photos from last night\. The camera may not have been working/);
 
  await page.goto(base+'/stands');

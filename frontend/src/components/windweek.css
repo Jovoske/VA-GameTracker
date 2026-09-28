@@ -1,0 +1,37 @@
+/* The wind hour by hour (WindWeek): the line up front, the week's strip behind a fold. */
+
+.ww-line { margin: 0; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
+.ww-line[data-right] { color: var(--text); }
+
+.ww { margin: 8px 0 4px; }
+/* Eight hours and the evening's name fit a 320 px screen: fixed columns, no sideways scroll. */
+.ww-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 2px; font-variant-numeric: tabular-nums; }
+.ww-table th { font-size: 12px; font-weight: 500; color: var(--text-dim); padding: 0 0 2px; text-align: center; }
+.ww-table thead th:first-child, .ww-table tbody th { width: 52px; text-align: left; }
+.ww-table tbody th { padding: 0; }
+/* The evening's name is the row's handle; a tap anywhere on the row shows its speeds. */
+.ww-table tbody tr:not(.ww-speeds) { cursor: pointer; }
+.ww-day {
+  display: block; width: 100%; min-height: 44px; padding: 0 2px; border: 0; background: none; text-align: left;
+  font: inherit; font-size: 13px; font-weight: 500; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ww-table tbody tr[data-right] .ww-day { color: var(--v-best); font-weight: 600; }
+.ww-table tbody tr[data-open] .ww-day { text-decoration: underline; text-underline-offset: 3px; }
+.ww-table td {
+  height: 44px; padding: 2px 0; text-align: center; vertical-align: middle;
+  background: var(--surface-2); border-radius: var(--r-chip);
+}
+.ww-table td[data-status='clean'] { background: color-mix(in srgb, var(--v-best) 16%, var(--surface-2)); }
+.ww-table td[data-gone] { opacity: 0.4; }
+.ww-glyph { display: block; font-size: 14px; font-weight: 700; line-height: 1.1; }
+/* Where the wind comes from: eight points, two letters at most, readable at dusk. */
+.ww-from { display: block; font-size: 12px; font-weight: 500; line-height: 1.25; color: var(--text-dim); }
+/* An evening's speeds, under it, hour by hour. */
+.ww-table tr.ww-speeds th { font-size: 12px; color: var(--text-dim); padding-left: 2px; }
+.ww-table tr.ww-speeds td { height: 28px; background: none; font-size: 13px; color: var(--text); }
+.ww-note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+@media (min-width: 420px) {
+  .ww-table thead th:first-child, .ww-table tbody th { width: 58px; }
+  .ww-from { font-size: 13px; }
+}

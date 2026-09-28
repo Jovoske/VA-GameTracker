@@ -9,42 +9,42 @@ filtered by what each person asked to hear about.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.forecasting.exposure import current_night, night_key_start
-from app.forecasting.model import sentence_case
-from app.models import Camera, CameraNight, Species
-
-# A camera with at least this many visits in the last month is "usually busy", and
-# this many watched nights in a row without one is worth a look.
-QUIET_USUAL_VISITS = 15
-QUIET_NIGHTS = 3
-QUIET_LOOKBACK = 30
+from app.forecasting.changes import quiet_cameras, usual
+from app.forecasting.exposure import current_night
+from app.i18n import day_month, species_name, t
+from app.models import Camera, Species
 
 
 def _ago(dt: datetime | None, now: datetime) -> str:
     if dt is None:
-        return "unknown"
-    return _dur(dt, now) + " ago"
+        return t("ago.unknown")
+    if (now - dt).total_seconds() < 60:
+        return t("ago.just_now")
+    return t("ago.ago", span=_dur(dt, now))
 
 
 def _dur(dt: datetime, now: datetime) -> str:
-    """Bare duration ("9d", "5h", "32m") for phrases like 'quiet for 9d'."""
-    s = (now - dt).total_seconds()
+    """Bare duration ("9d", "5h", "32m") for phrases like 'quiet for 9d'.
+
+    Never below nothing: a camera whose clock runs ahead (left on summer time after
+    the clocks go back) stamps photos in the future, which read "-40m ago" (G-23)."""
+    s = max(0.0, (now - dt).total_seconds())
     if s < 3600:
-        return f"{int(s // 60)}m"
+        return t("ago.m", n=int(s // 60))
     if s < 86400:
-        return f"{int(s // 3600)}h"
-    return f"{int(s // 86400)}d"
+        return t("ago.h", n=int(s // 3600))
+    return t("ago.d", n=int(s // 86400))
 
 
 def compute_alerts(db: Session) -> list[dict]:
     from app.forecasting.visits import visit_rows
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     alerts: list[dict] = []
     # A retired camera is in a drawer: nothing it did or didn't see is news.
     cams = db.scalars(select(Camera).where(Camera.retired_at.is_(None))).all()
@@ -55,18 +55,17 @@ def compute_alerts(db: Session) -> list[dict]:
     # Hidden species and photos marked "nothing in it" are not sightings.
     v = visit_rows(start=now - timedelta(hours=48), camera_ids=cam_ids)
     rows = db.execute(
-        select(Species.common_name, func.count(), func.max(v.c.last_at))
+        select(Species.id, Species.common_name, func.count(), func.max(v.c.last_at))
         .select_from(v)
         .join(Species, Species.id == v.c.species_id)
         .where(Species.is_priority.is_(True), Species.hidden.is_(False))
-        .group_by(Species.common_name)
+        .group_by(Species.id, Species.common_name)
         .order_by(func.count().desc(), Species.common_name)
     ).all()
-    for name, cnt, last in rows[:4]:
+    for sid, name, cnt, last in rows[:4]:
         alerts.append({
-            "type": "sighting", "severity": "info", "title": sentence_case(name),
-            "text": f"Seen {int(cnt)} time{'s' if cnt != 1 else ''} in the last 2 days, "
-                    f"last one {_ago(last, now)}.",
+            "type": "sighting", "severity": "info", "title": species_name(sid, name),
+            "text": t("feed.seen", n=int(cnt), ago=_ago(last, now)),
         })
 
     # 2. Camera faults the plan's own "Cameras not sending" card can't say: a flat
@@ -81,49 +80,30 @@ def compute_alerts(db: Session) -> list[dict]:
     for c in cams:
         if camera_health(c, now, login_states.get(c.id))["status"] == "low_battery":
             alerts.append({
-                "type": "camera", "severity": "warn", "title": f"{c.name} battery low",
-                "text": f"{c.battery_pct}% left. Bring batteries on your next visit.",
+                "type": "camera", "severity": "warn",
+                "title": t("feed.battery_title", camera=c.name),
+                "text": t("feed.battery", pct=c.battery_pct),
             })
 
     # 3. Pattern break: a usually-busy camera whose last few WATCHED nights had no
     # visit. Only a night the camera was demonstrably watching counts as quiet, so a
-    # flat battery or a backlog of unchecked photos is never "the animals left".
-    tonight = current_night(now)
-    since = tonight - timedelta(days=QUIET_LOOKBACK)
-    watched: dict = {}
-    for cam_id, night in db.execute(
-        select(CameraNight.camera_id, CameraNight.night).where(
-            CameraNight.camera_id.in_(cam_ids), CameraNight.night >= since,
-            CameraNight.night < tonight,
-            CameraNight.exposure_state.in_(("CONFIRMED", "PRESUMED_UP")),
-        )
-    ).all():
-        watched.setdefault(cam_id, set()).add(night)
-    recent = visit_rows(start=night_key_start(since - timedelta(days=1)),
-                        end=night_key_start(tonight), camera_ids=cam_ids)
-    busy = db.execute(
-        select(recent.c.camera_id, recent.c.night, func.count())
-        .where(recent.c.night >= since)
-        .group_by(recent.c.camera_id, recent.c.night)
-    ).all()
-    per_camera: dict = {}
-    for cam_id, night, n in busy:
-        per_camera.setdefault(cam_id, {})[night] = int(n)
+    # flat battery or a backlog of unchecked photos is never "the animals left". The
+    # rule is the Changed line's own (changes.quiet_cameras): it used to be a total
+    # over the month here and a nightly median there, so Tonight could say "Nothing
+    # changed" beside "Puente quiet" (G-23).
+    quiet = quiet_cameras(db, tonight=current_night(now))
     for c in cams:
-        nights = per_camera.get(c.id, {})
-        if not c.active or sum(nights.values()) < QUIET_USUAL_VISITS:
+        q = quiet.get(c.id)
+        if q is None:
             continue
-        run = 0
-        for night in sorted(watched.get(c.id, set()), reverse=True):
-            if nights.get(night):
-                break
-            run += 1
-        if run >= QUIET_NIGHTS:
-            last = max(nights)
-            alerts.append({
-                "type": "quiet", "severity": "warn", "title": f"{c.name} quiet",
-                "text": f"Nothing on its last {run} watched nights, since the night of "
-                        f"{last.day} {last.strftime('%b')}. This camera usually sees more.",
-            })
+        last = q["last_seen"]
+        since = t("feed.since", day=day_month(last)) if last else ""
+        # `camera` lets Tonight leave it out when its "Changed" line is already
+        # about this camera, rather than say it twice.
+        alerts.append({
+            "type": "quiet", "severity": "warn", "title": t("feed.quiet_title", camera=c.name),
+            "camera": c.name,
+            "text": t("feed.quiet", n=q["silent"], since=since, usual=usual(q["usual"])),
+        })
 
     return alerts

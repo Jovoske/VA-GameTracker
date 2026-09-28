@@ -23,11 +23,46 @@
 //   * A small set of read-only API answers is kept and replayed when the network
 //     is gone or the server is down, tagged with when it was stored, so the page
 //     says how old it is. An /api/ request is never answered with HTML.
+//   * Photos are kept by their address without the photo pass (?token=), which
+//     changes every few hours (audit C-19): a photo never changes, so one seen
+//     yesterday opens from the phone today, pass or no pass, signal or none. The
+//     newest few hundred small copies and few dozen full photos are kept; signing
+//     out clears them (src/api.ts). A download (?download=1) always asks the server.
+//   * "Download the estate" (src/map/offline.ts) keeps the estate's map pictures,
+//     the likely paths and each camera's sheet (its photo strip, marked photos and
+//     small photos) in ESTATE_CACHE. Saved map pictures and small photos are served
+//     from there first: they don't change, and the valley has no signal. The rest is
+//     asked of the network first, kept fresh while there is signal, and replayed
+//     when there isn't (audit B-06, feature 24).
 const BUILD = '__GS_BUILD__'
 const ASSETS = /*__GS_ASSETS__*/[]
+// The one thing the worker says itself, in each language the app speaks: the build
+// fills it in from src/i18n (vite.config.ts); unbuilt, English. The page asks in its
+// language (Accept-Language, src/api.ts), so the answer comes back in it.
+const TEXT = /*__GS_TEXT__*/{ en: { offline: 'Offline, and nothing cached for this yet.' } }
+const say = (req, key) => {
+  const lang = (req.headers.get('Accept-Language') || '').split(/[,;-]/)[0].trim().toLowerCase()
+  return (TEXT[lang] && TEXT[lang][key]) || TEXT.en[key]
+}
 const SHELL_PREFIX = 'gamesense-shell-'
 const SHELL_CACHE = SHELL_PREFIX + BUILD
 const API_CACHE = 'gamesense-api-v2'
+// What "Download the estate" saved. Never pruned on activate: a deploy must not
+// cost a hunter the map they saved for the valley.
+const ESTATE_CACHE = 'gamesense-estate-v1'
+// The base maps a phone may keep a copy of: IGN's public WMTS (PNOA aerial, MTN
+// topo), free to reuse with credit. Esri's terms don't allow offline copies of its
+// imagery, and Catastro's parcels are asked for as they are needed.
+const SAVED_TILES = ['https://www.ign.es/wmts/']
+// Same-site answers a saved estate may hold: the camera sheets (photo strip, marked
+// photos), the likely paths, the estate's box, and small photos.
+const SAVED_API = ['/api/photos', '/api/photos/highlights', '/api/map/paths', '/api/estate']
+const THUMB = /^\/api\/images\/[^/]+\/thumb$/
+const PHOTO = /^\/api\/images\/[^/]+\/file$/
+// Photos opened on this phone, by address without the pass; the newest kept.
+const THUMB_CACHE = 'gamesense-thumbs-v1'
+const PHOTO_CACHE = 'gamesense-photos-v1'
+const KEEP = { [THUMB_CACHE]: 800, [PHOTO_CACHE]: 60 }
 // The one cache the worker before this one kept everything in.
 const LEGACY_CACHE = 'gamesense-v2'
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png']
@@ -35,7 +70,7 @@ const NAV_WAIT_MS = 3000
 
 // Endpoints worth replaying offline: the plan and the ground it describes. Writes
 // are never served from cache.
-const CACHEABLE_API = ['/api/forecast/tonight', '/api/stands', '/api/sits', '/api/alerts']
+const CACHEABLE_API = ['/api/forecast/tonight', '/api/forecast/wind-week', '/api/stands', '/api/sits', '/api/alerts', '/api/map/tonight', '/api/map/cameras']
 
 self.addEventListener('install', (e) => {
   e.waitUntil(storeBuild().then(() => self.skipWaiting()))
@@ -79,7 +114,7 @@ self.addEventListener('activate', (e) => {
         const keepPrevious = older[older.length - 1]
         return Promise.all(
           keys
-            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== keepPrevious)
+            .filter((k) => k !== SHELL_CACHE && k !== API_CACHE && k !== ESTATE_CACHE && !(k in KEEP) && k !== keepPrevious)
             .map((k) => caches.delete(k)),
         )
       })
@@ -120,7 +155,7 @@ async function apiWithFallback(req) {
     if (hit) return hit
     // Still JSON. Handing back the HTML shell here is what broke the app offline.
     return new Response(
-      JSON.stringify({ detail: 'Offline, and nothing cached for this yet.', offline: true }),
+      JSON.stringify({ detail: say(req, 'offline'), offline: true }),
       { status: 503, headers: { 'Content-Type': 'application/json' } },
     )
   }
@@ -139,6 +174,78 @@ async function apiWithFallback(req) {
   }
   if (serverDown(res)) return (await replay(cache, req, 'server')) || res
   // 401 and the other 4xx pass through: the app signs out on a 401.
+  return res
+}
+
+// ── the estate saved on this phone ──
+
+/** A saved map picture first (it doesn't change), the network for the rest. A
+ *  download asking again (cache: 'reload') goes to the network. */
+async function savedTile(req) {
+  if (req.cache !== 'reload' && req.cache !== 'no-store') {
+    const hit = await caches.match(req.url, { cacheName: ESTATE_CACHE })
+    if (hit) return hit
+  }
+  return fetch(req)
+}
+
+/** A photo, or its small copy: the copy on the phone first (a photo never changes),
+ *  looked up without the photo pass, which changes; else the network, keeping what
+ *  comes for next time. A refusal (an old pass) is passed on, never kept: the page
+ *  asks for a new pass and loads it again. */
+async function savedPhoto(req, url) {
+  const key = url.origin + url.pathname
+  const name = THUMB.test(url.pathname) ? THUMB_CACHE : PHOTO_CACHE
+  const hit = (name === THUMB_CACHE && (await caches.match(key, { cacheName: ESTATE_CACHE, ignoreSearch: true })))
+    || (await caches.match(key, { cacheName: name }))
+  if (hit) return hit
+  const res = await fetch(req)
+  // Only a photo the server says never changes; a stand-in (a small copy it couldn't
+  // make) is asked for again next time.
+  if (res.ok && (res.headers.get('Cache-Control') || '').includes('immutable')) {
+    const copy = res.clone()
+    caches.open(name).then((c) => c.put(key, copy)).then(() => trim(name)).catch(() => {})
+  }
+  return res
+}
+
+// Checked every so many new photos, not on each: listing a big cache costs.
+const trimEvery = { [THUMB_CACHE]: 0, [PHOTO_CACHE]: 0 }
+async function trim(name) {
+  if (++trimEvery[name] % 20 !== 1) return
+  const c = await caches.open(name)
+  const keys = await c.keys()
+  // Oldest first, as they were put: those go.
+  await Promise.all(keys.slice(0, Math.max(0, keys.length - KEEP[name])).map((k) => c.delete(k)))
+}
+
+/** The network first. An answer the estate keeps is kept fresh while there is
+ *  signal, and replayed, marked stale, when there isn't or the server is down. */
+async function savedApi(req) {
+  const cache = await caches.open(ESTATE_CACHE)
+  let res
+  try {
+    res = await fetch(req)
+  } catch (err) {
+    if (req.signal && req.signal.aborted) throw err
+    const hit = await replay(cache, req, 'offline')
+    if (hit) return hit
+    return new Response(
+      JSON.stringify({ detail: say(req, 'offline'), offline: true }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  if (res.ok) {
+    if (await cache.match(req)) {
+      const body = await res.clone().text()
+      cache.put(req, new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'X-GameSense-Cached-At': new Date().toISOString() },
+      }))
+    }
+    return res
+  }
+  if (serverDown(res)) return (await replay(cache, req, 'server')) || res
   return res
 }
 
@@ -197,11 +304,17 @@ self.addEventListener('fetch', (e) => {
   const req = e.request
   if (req.method !== 'GET') return
   const url = new URL(req.url)
-  // Map tiles and anything else from another site go straight to the network.
-  if (url.origin !== self.location.origin) return
+  // Anything else from another site goes straight to the network; IGN's map
+  // pictures come from the saved estate when they are in it.
+  if (url.origin !== self.location.origin) {
+    if (SAVED_TILES.some((p) => req.url.startsWith(p))) e.respondWith(savedTile(req))
+    return
+  }
 
   if (url.pathname.startsWith('/api/')) {
     if (isCacheableApi(url)) e.respondWith(apiWithFallback(req))
+    else if ((THUMB.test(url.pathname) || PHOTO.test(url.pathname)) && !url.searchParams.has('download')) e.respondWith(savedPhoto(req, url))
+    else if (SAVED_API.includes(url.pathname)) e.respondWith(savedApi(req))
     return // other API calls pass through untouched
   }
   if (req.mode === 'navigate') return e.respondWith(navigate(req))
@@ -210,10 +323,15 @@ self.addEventListener('fetch', (e) => {
 })
 
 // ── Web Push ──
-// The server sends a small JSON body: { title, body, url, tag, at }. Same `tag` per
-// species, so a second sounder an hour later replaces the first banner rather than
-// stacking under it. Anything unparseable still shows as a plain notification —
-// a push that arrived and was silently dropped is the worst outcome.
+// The server sends a small JSON body: { title, body, url, tag, renotify, silent, at }.
+// Same `tag` per species, so a second sounder an hour later replaces the first banner
+// rather than stacking under it. Whether the replacement buzzes again is the server's
+// call (`renotify`): once per animal per two hours, and a quiet update of the banner
+// in between (`silent`), so one sounder at the feeder no longer buzzes the phone every
+// 15 minutes all night (audit K-06). Safari ignores all three and sounds every push,
+// so the server sends an iPhone the buzz alone. Anything unparseable still shows as a
+// plain notification — a push that arrived and was silently dropped is the worst
+// outcome. frontend/tests/sw-push.cjs checks this side.
 self.addEventListener('push', (e) => {
   let data = {}
   try {
@@ -227,7 +345,9 @@ self.addEventListener('push', (e) => {
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     tag: data.tag || undefined,
-    renotify: Boolean(data.tag),
+    // renotify needs a tag; without one every banner is new anyway.
+    renotify: Boolean(data.tag) && data.renotify === true,
+    silent: data.silent === true,
     data: { url: data.url || '/' },
     timestamp: data.at ? Date.parse(data.at) || Date.now() : Date.now(),
   }
@@ -250,4 +370,20 @@ self.addEventListener('notificationclick', (e) => {
       return self.clients.openWindow(target)
     }),
   )
+})
+
+// The browser replaced this phone's push subscription (it expired, or the push
+// service rotated it). Subscribe again with the same options; the worker can't sign
+// in, so any open page is asked to send the new one to the server, and if none is
+// open the app does it the next time it opens (src/push.ts, checkThisDevice). The
+// old one's pushes are refused from now on, and the server drops it then.
+self.addEventListener('pushsubscriptionchange', (e) => {
+  e.waitUntil((async () => {
+    const options = e.oldSubscription && e.oldSubscription.options
+    if (!e.newSubscription && options) {
+      await self.registration.pushManager.subscribe(options).catch(() => null)
+    }
+    const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    list.forEach((c) => c.postMessage({ type: 'gs-push-changed' }))
+  })())
 })

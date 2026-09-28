@@ -6,13 +6,14 @@
 // A sit started and not ended is on while its night lasts; after 06:00 only a dawn
 // sit (reserved before 06:00, started from 03:00) is, for 6 hours, as the server's
 // routes_stands._live says. An evening sit nobody ended must be over at 06:00.
-// No browser: node tests/night-rule.cjs (esbuild, which Vite brings, reads the .ts).
-const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path')
-const { transformSync } = require('esbuild')
+// No browser: node tests/night-rule.cjs (esbuild, which Vite brings, bundles the .ts).
+const assert = require('node:assert/strict'), path = require('node:path')
+const { buildSync } = require('esbuild')
 
-const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'night.ts'), 'utf8')
+// Bundled with what it imports (its words come from src/i18n, English here).
+const built = buildSync({ entryPoints: [path.join(__dirname, '..', 'src', 'night.ts')], bundle: true, write: false, format: 'cjs', platform: 'node', logLevel: 'silent' })
 const mod = { exports: {} }
-new Function('module', 'exports', transformSync(src, { loader: 'ts', format: 'cjs' }).code)(mod, mod.exports)
+new Function('module', 'exports', 'require', built.outputFiles[0].text)(mod, mod.exports, require)
 const { nightOf, fromEarlierNight, nightBefore, startedSitIsOn, nightLabel, photoHeading, whenSeen, estateStamp } = mod.exports
 
 // On each clock-change morning, 05:59 is still the night before and 06:00 is the new one.

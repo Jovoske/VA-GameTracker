@@ -1,5 +1,10 @@
+import { type Lang, ago, fmtDate, fmtTime, fmtWeekday, isLang, lang, setLanguage, t } from './i18n'
+import { currentSubscription, forgetThisDevice } from './push'
+
 const TOKEN_KEY = 'gs_token'
 const ME_KEY = 'gs_me'
+const PASS_KEY = 'gs_img'
+const LOGIN_PATH = '/auth/login'
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
@@ -10,7 +15,28 @@ export function setToken(token: string | null): void {
   else {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(ME_KEY)
+    setImagePass(null)
   }
+}
+
+/**
+ * The same person's sign-in, renewed by the server (X-Session-Token): a sign-in a
+ * week old is swapped for a fresh one as it is used, so a hunter using the app
+ * daily is never sent to the sign-in page at the 30-day mark (audit D-11). Who is
+ * signed in stays known under the new token, so nothing on screen changes.
+ */
+function renewToken(next: string): void {
+  const old = getToken()
+  if (!old || old === next) return
+  try {
+    localStorage.setItem(TOKEN_KEY, next)
+    const saved = JSON.parse(localStorage.getItem(ME_KEY) || 'null')
+    if (saved && saved.token === old) localStorage.setItem(ME_KEY, JSON.stringify({ ...saved, token: next }))
+  } catch {
+    // Storage blocked: the old sign-in keeps working until it runs out.
+  }
+  if (meKnown?.token === old) meKnown = { ...meKnown, token: next }
+  if (meCache?.token === old) meCache = { ...meCache, token: next }
 }
 
 /** Who the stored token belongs to (its `sub`), without asking the server. */
@@ -25,46 +51,165 @@ export function tokenSubject(): string | null {
   }
 }
 
+/** The service worker's stores of photos (THUMB_CACHE, PHOTO_CACHE in public/sw.js),
+ *  kept by address without the photo pass. */
+export const PHOTO_CACHES = ['gamesense-thumbs-v1', 'gamesense-photos-v1']
+
 /** Sit reports waiting for signal. Written by sits.ts; named here so sign-out can clear it. */
 export const SIT_QUEUE_KEY = 'gs_sit_queue'
 
+/** The saved answers that are one person's: their sits, and their harvest card and
+ *  book ("You shot at Puente last night" is the hunter's, not the phone's). */
+const PERSONAL = ['/sits', '/harvests']
+/** What a harvest form holds until it is saved (Harvest.tsx), in sessionStorage. */
+export const HARVEST_DRAFT_KEY = 'gs.harvest.draft.'
+const personal = (path: string) => PERSONAL.some((p) => path === p || path.startsWith(p + '/') || path.startsWith(p + '?'))
+
 /**
- * Sign out, and take this person's unsent sit reports and saved sits with them.
+ * Sign out, and take this person's unsent sit reports, saved sits, harvest card and
+ * alerts with them.
  *
  * A phone gets passed round a hunting party. Left behind, the next person to sign
- * in would find the last one's sits on screen, and an admin's login would be
- * allowed to send the last one's reports as their own. An expired sign-in (a 401)
- * keeps them: that is the same hunter signing in again.
+ * in would find the last one's sits on screen (and "You shot at Puente last night"
+ * with its buttons, R6BE-3), and an admin's login would be allowed to send the last
+ * one's reports as their own, and the phone would keep buzzing with the last one's
+ * sightings. An expired sign-in (a 401) keeps them: that is the same hunter signing
+ * in again.
  */
 export function signOut(): void {
+  // Before the token goes: the server's copy of this phone's subscription is
+  // removed in that person's name (push.ts).
+  forgetThisDevice(getToken())
+  // What this person asked for and hasn't had yet never lands: a slow answer to an
+  // admin's request arriving after the next person signed in would put the admin's
+  // lists, and photo pass, back on the phone.
+  session.abort()
+  session = new AbortController()
   setToken(null)
   meCache = null
   meKnown = null
-  for (const path of [...memory.keys()]) if (path.startsWith('/sits')) memory.delete(path)
+  // The phone keeps its language (gs_lang); a choice not yet sent was this person's.
+  markPending(null)
+  spoken = null
+  // This session's answers were this person's, whatever they were: an admin's
+  // People & vehicles list must not be the next person's copy with no signal.
+  memory.clear()
+  readOn.clear()
   try {
     localStorage.removeItem(SIT_QUEUE_KEY)
-    for (const key of Object.keys(localStorage)) if (key.startsWith(SAVED + '/sits')) localStorage.removeItem(key)
+    for (const key of Object.keys(localStorage)) if (key.startsWith(SAVED) && personal(key.slice(SAVED.length))) localStorage.removeItem(key)
+    for (const key of Object.keys(sessionStorage)) if (key.startsWith(HARVEST_DRAFT_KEY)) sessionStorage.removeItem(key)
   } catch {
     // Blocked storage: nothing was saved there either.
   }
   if ('caches' in window) {
     caches.open(WORKER_API_CACHE)
-      .then(async (c) => Promise.all((await c.keys()).filter((r) => new URL(r.url).pathname.startsWith('/api/sits')).map((r) => c.delete(r))))
+      .then(async (c) => Promise.all((await c.keys()).filter((r) => personal(new URL(r.url).pathname.slice(4))).map((r) => c.delete(r))))
       .catch(() => {})
+    // The photos this phone kept open without a pass; the next person signs in for theirs.
+    PHOTO_CACHES.forEach((name) => { caches.delete(name).catch(() => {}) })
   }
 }
 
-/** Authenticated URL for a photo.
+/**
+ * The photo pass: what a photo's address carries so an <img> can open it.
  *
- * `/api/images/{id}/file` used to be open to anyone holding the UUID. Trail cameras
- * photograph people as well as animals, so it now requires a token — and an <img>
- * tag cannot send an Authorization header, so the token rides in the query string.
- * Every photo `src` in the app must go through here or it renders as a broken image.
+ * An <img> tag can't send the sign-in header, so the address has to hold something.
+ * It used to hold the 30-day sign-in itself, which then sat in server logs and in
+ * any copied photo link as a working login to the whole app (audit C-19, D-08,
+ * H-13). The pass opens photos and nothing else, for hours. The server sends it on
+ * every answer (X-Image-Token) and with the sign-in, the same text all through a
+ * 6-hour window so photo addresses, and what the phone keeps of them, hold still.
+ */
+let pass: string | null = null
+try { pass = localStorage.getItem(PASS_KEY) } catch { /* private mode: kept in memory */ }
+
+export function setImagePass(next: string | null): void {
+  if (next === pass) return
+  pass = next
+  try {
+    if (next) localStorage.setItem(PASS_KEY, next)
+    else localStorage.removeItem(PASS_KEY)
+  } catch {
+    // Storage blocked: it lives in memory for this session.
+  }
+}
+
+/** When a token stops working (its `exp`), in ms; 0 when it can't be read. */
+function expiresAt(token: string | null): number {
+  try {
+    const part = token?.split('.')[1]
+    const exp = part ? (JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as { exp?: unknown }).exp : null
+    return typeof exp === 'number' ? exp * 1000 : 0
+  } catch {
+    return 0
+  }
+}
+
+/** The pass the phone has, if it has a few minutes left in it. */
+function livePass(): string | null {
+  return pass && expiresAt(pass) > Date.now() + 5 * 60_000 ? pass : null
+}
+
+let passAsked: Promise<string | null> | null = null
+
+/** Ask for a new pass (once, however many photos want one), or null with no answer. */
+export function freshPass(): Promise<string | null> {
+  if (!getToken()) return Promise.resolve(null)
+  if (!passAsked) {
+    passAsked = api<{ image_token: string }>('/auth/image-token', { timeoutMs: 15_000 })
+      .then((r) => { setImagePass(r.image_token); return r.image_token })
+      .catch(() => null)
+      .finally(() => { window.setTimeout(() => { passAsked = null }, 10_000) })
+  }
+  return passAsked
+}
+
+/** A photo's address, with the photo pass on it.
+ *
+ * Every photo `src` in the app goes through here (and thumbUrl). With no pass yet,
+ * or one about to run out, a new one is asked for and the address goes without:
+ * the photo that fails for it is loaded again once the pass comes
+ * (installPhotoRetry). Never the sign-in itself.
  */
 export function imageUrl(path: string): string {
-  const token = getToken()
-  if (!token) return path
-  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+  const p = livePass()
+  if (!p) {
+    if (getToken()) void freshPass()
+    return path
+  }
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(p)}`
+}
+
+const PHOTO_PATH = /^\/api\/images\/[^/]+\/(thumb|file)$/
+
+/**
+ * A photo that didn't load for want of a pass (none yet, or it ran out while the
+ * app sat in a pocket) is loaded again with a new one, once. Its page never sees
+ * that first failure. A photo that fails with a good pass (gone from the server,
+ * no signal) fails as before, and the page says so.
+ */
+export function installPhotoRetry(): void {
+  document.addEventListener('error', (e) => {
+    const img = e.target
+    if (!(img instanceof HTMLImageElement) || !getToken()) return
+    let url: URL
+    try { url = new URL(img.currentSrc || img.src, location.href) } catch { return }
+    if (url.origin !== location.origin || !PHOTO_PATH.test(url.pathname)) return
+    const tried = url.searchParams.get('token')
+    const have = livePass()
+    if ((tried && tried === have) || img.dataset.gsRetried === url.pathname) return
+    img.dataset.gsRetried = url.pathname
+    e.stopPropagation()
+    void (have ? Promise.resolve(have) : freshPass()).then((next) => {
+      if (next && next !== tried) {
+        url.searchParams.set('token', next)
+        img.src = url.pathname + url.search
+      } else {
+        img.dispatchEvent(new Event('error'))
+      }
+    })
+  }, true)
 }
 
 /** A photo's small copy, for every grid, strip and the map.
@@ -78,15 +223,16 @@ export function thumbUrl(imageId: string): string {
 }
 
 /** What a hunter reads instead of the browser's own "Failed to fetch" or "Load failed". */
-export const NO_SIGNAL = 'No signal. Try again when you have a connection.'
-export const NO_ANSWER = 'No answer from the server.'
-export const SERVER_DOWN = 'The server isn’t answering. Try again in a minute.'
+const noSignal = () => t('api.noSignal')
+const noAnswerYet = () => t('api.noAnswer')
 
 /** How long a page waits for a GET before it goes with what the phone has saved. */
 export const GET_TIMEOUT_MS = 15_000
 
 type Options = RequestInit & { timeoutMs?: number }
-export type Failure = Error & { status?: number; offline?: boolean; timeout?: boolean }
+/** `code`: the server's own name for a refusal, when it gives one: the words in the
+ *  message are in the hunter's language, so a page never tells refusals apart by them. */
+export type Failure = Error & { status?: number; offline?: boolean; timeout?: boolean; signedOut?: boolean; code?: string }
 
 /**
  * `timeoutMs` gives up on a request that never answers, which on a valley
@@ -95,56 +241,85 @@ export type Failure = Error & { status?: number; offline?: boolean; timeout?: bo
  * the network carries `offline: true`, and one the server refused carries `status`.
  * An abort from the caller's own `signal` is passed through untouched.
  */
+/** The requests of whoever is signed in: signOut aborts them all and starts afresh. */
+let session = new AbortController()
+
 async function request<T>(path: string, options: Options = {}): Promise<{ data: T; headers: Headers }> {
   const { timeoutMs, ...init } = options
   const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
-  const token = getToken()
+  // The server answers in the language on screen: its reasons, the plan's lines.
+  headers.set('Accept-Language', lang())
+  // Signing in never carries the old sign-in: a wrong password there is a wrong
+  // password, not a session that ran out (audit D-16).
+  const token = path === LOGIN_PATH ? null : getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
   const outer = init.signal
-  const ctl = timeoutMs ? new AbortController() : null
+  const signedIn = session.signal
+  const ctl = new AbortController()
   let timedOut = false
   let timer = 0
-  if (ctl) {
-    if (outer?.aborted) ctl.abort(outer.reason)
-    else outer?.addEventListener('abort', () => ctl.abort(outer.reason), { once: true })
-    timer = window.setTimeout(() => { timedOut = true; ctl.abort() }, timeoutMs)
+  // Joined for this request only: the listeners come off again when it is done, or
+  // the session's signal would collect one per request all day.
+  const joined: [AbortSignal, () => void][] = []
+  for (const s of [outer, signedIn]) {
+    if (!s) continue
+    if (s.aborted) { ctl.abort(s.reason); continue }
+    const stop = () => ctl.abort(s.reason)
+    s.addEventListener('abort', stop, { once: true })
+    joined.push([s, stop])
   }
+  if (timeoutMs) timer = window.setTimeout(() => { timedOut = true; ctl.abort() }, timeoutMs)
   // The body is read inside the same guard: a connection can stall halfway through it.
   const guard = async <R,>(work: () => Promise<R>): Promise<R> => {
     try { return await work() } catch (e) {
-      if (timedOut) throw Object.assign(new Error(NO_ANSWER), { timeout: true })
-      if ((e as Error).name === 'AbortError' || outer?.aborted) throw e
+      if (timedOut) throw Object.assign(new Error(noAnswerYet()), { timeout: true })
+      if ((e as Error).name === 'AbortError' || outer?.aborted || signedIn.aborted) throw e
       // fetch reports a dropped connection as a bare TypeError; anything else is real.
-      if (e instanceof TypeError) throw Object.assign(new Error(NO_SIGNAL), { offline: true })
+      if (e instanceof TypeError) throw Object.assign(new Error(noSignal()), { offline: true })
       // A 200 that isn't JSON is a page from something in the way (a hotspot's
       // sign-in page, an old app shell), not an answer.
-      if (e instanceof SyntaxError) throw new Error('The server’s answer didn’t make sense. Reload the app.')
+      if (e instanceof SyntaxError) throw new Error(t('api.nonsense'))
       throw e
     }
   }
 
   try {
-    const resp = await guard(() => fetch(`/api${path}`, { ...init, headers, signal: ctl?.signal ?? outer }))
+    const resp = await guard(() => fetch(`/api${path}`, { ...init, headers, signal: ctl.signal }))
+    // The photo pass and a renewed sign-in ride on every answer (backend deps.py),
+    // taken only while the one who asked is still the one signed in.
+    if (token && resp.ok && getToken() === token) {
+      const img = resp.headers.get('X-Image-Token')
+      if (img) setImagePass(img)
+      const renewed = resp.headers.get('X-Session-Token')
+      if (renewed) renewToken(renewed)
+      // The server answers again: a language chosen with no signal can go now. Not
+      // a saved copy the service worker handed back, which is no answer at all.
+      if (path !== '/auth/me' && !resp.headers.get('X-GameSense-Stale')) retryLanguage()
+    }
 
     // An expired or revoked session is not a data-loading failure — showing it as one
     // leaves the user staring at a red error with no way forward. Clear the dead token
     // and send them to sign in. Only when we actually sent a token: a 401 without one is
     // a failed login attempt, which the login form reports itself.
     if (resp.status === 401 && token) {
+      // A late refusal of someone who already signed out is no news for whoever is in now.
+      if (getToken() !== token) throw Object.assign(new Error(t('api.signedOut')), { signedOut: true })
       setToken(null)
       if (!window.location.pathname.startsWith('/login')) {
-        window.location.assign('/login?expired=1')
+        // Back to this page after signing in again: the photo an alert opened, not Tonight (D-10).
+        window.location.assign(loginPath(window.location.pathname + window.location.search, true))
       }
-      throw new Error('You were signed out. Sign in again.')
+      throw Object.assign(new Error(t('api.signedOut')), { signedOut: true })
     }
 
     if (!resp.ok) {
       const body = await guard(() => resp.json()).catch(() => ({}))
       // The service worker's "nothing saved for this yet" is no signal, not a server fault.
-      if (body?.offline) throw Object.assign(new Error(NO_SIGNAL), { offline: true, status: resp.status })
-      throw Object.assign(new Error(detailText(body?.detail, resp.status)), { status: resp.status })
+      if (body?.offline) throw Object.assign(new Error(noSignal()), { offline: true, status: resp.status })
+      const code = typeof body?.code === 'string' ? body.code : typeof body?.detail?.code === 'string' ? body.detail.code : undefined
+      throw Object.assign(new Error(detailText(body?.detail?.message ?? body?.detail, resp.status)), { status: resp.status, code })
     }
     // DELETEs answer 204 with no body — resp.json() on that rejects and the caller
     // never gets to refresh, which reads as "the button did nothing".
@@ -152,6 +327,7 @@ async function request<T>(path: string, options: Options = {}): Promise<{ data: 
     return { data: await guard(() => resp.json() as Promise<T>), headers: resp.headers }
   } finally {
     window.clearTimeout(timer)
+    joined.forEach(([s, stop]) => s.removeEventListener('abort', stop))
   }
 }
 
@@ -161,11 +337,13 @@ function detailText(detail: unknown, status: number): string {
   if (typeof detail === 'string' && detail) return detail
   if (Array.isArray(detail)) {
     const first = detail.find((d) => d && typeof d.msg === 'string')
-    if (first) return `That wasn’t accepted: ${String(first.msg).replace(/^Value error, /, '')}`
+    if (first) return t('api.notAccepted', { why: String(first.msg).replace(/^Value error, /, '') })
   }
-  if (status >= 500) return SERVER_DOWN
+  if (status >= 500) return t('api.serverDown')
+  if (status === 403) return t('api.adminOnly')
+  if (status === 404) return t('api.gone')
   // The status rides along so a caller can say something specific about a 409.
-  return `Something went wrong (${status})`
+  return t('api.wentWrong', { status })
 }
 
 export async function api<T>(path: string, options: Options = {}): Promise<T> {
@@ -187,7 +365,7 @@ export function noAnswer(e: unknown): StaleWhy | null {
 
 /** The first words of a line about a saved copy: "No signal." */
 export function noAnswerWords(why: StaleWhy | null | undefined): string {
-  return why === 'server' ? 'Can’t reach the server.' : why === 'timeout' ? 'No answer from the server.' : 'No signal.'
+  return why === 'server' ? t('api.cantReach') : why === 'timeout' ? t('api.noAnswer') : t('api.noSignalShort')
 }
 
 /**
@@ -241,6 +419,9 @@ const newer = <T,>(a: Got<T> | null, b: Got<T> | null) =>
 
 /** The service worker's store of API answers (API_CACHE in public/sw.js). */
 const WORKER_API_CACHE = 'gamesense-api-v2'
+/** What "Download the estate" saved (src/map/offline.ts, ESTATE_CACHE in public/sw.js):
+ *  the camera sheets, the likely paths and the estate's box among the rest. */
+export const ESTATE_CACHE = 'gamesense-estate-v1'
 
 /** Which saved answers each page read, so a page that breaks drops only its own. */
 const readOn = new Map<string, Set<string>>()
@@ -269,9 +450,11 @@ export function forgetSaved(page: string = location.pathname): void {
     // Storage blocked: nothing was saved there either.
   }
   if ('caches' in window) {
-    caches.open(WORKER_API_CACHE)
-      .then((c) => Promise.all(paths.map((p) => c.delete(`/api${p}`))))
-      .catch(() => {})
+    for (const name of [WORKER_API_CACHE, ESTATE_CACHE]) {
+      caches.open(name)
+        .then((c) => Promise.all(paths.map((p) => c.delete(`/api${p}`))))
+        .catch(() => {})
+    }
   }
 }
 
@@ -283,20 +466,35 @@ export function peek<T>(path: string): Got<T> | null {
 }
 
 /**
- * The service worker's own copy, read by the page. The worker only answers from
- * it when the network fails outright; on a link that hangs, the page gives up
- * first (its timeout) and the worker never gets the chance (audit J-06). A page
- * with nothing saved of its own then still has something to show.
+ * The service worker's own copies, read by the page: its store of answers and the
+ * estate saved on the phone. The worker only answers from them when the network
+ * fails outright; on a link that hangs, the page gives up first (its timeout) and
+ * the worker never gets the chance (audit J-06, review R4FE-4). A page with nothing
+ * saved of its own then still has something to show.
  */
 async function workerCopy<T>(path: string): Promise<Got<T> | null> {
-  try {
-    if (!('caches' in window)) return null
-    const hit = await caches.match(`/api${path}`, { cacheName: WORKER_API_CACHE })
-    const at = hit?.headers.get('X-GameSense-Cached-At')
-    return hit && at ? { data: (await hit.json()) as T, at, stale: true } : null
-  } catch {
-    return null
+  let best: Got<T> | null = null
+  if (!('caches' in window)) return best
+  for (const cacheName of [WORKER_API_CACHE, ESTATE_CACHE]) {
+    try {
+      const hit = await caches.match(`/api${path}`, { cacheName })
+      const at = hit?.headers.get('X-GameSense-Cached-At')
+      if (hit && at) best = newer(best, { data: (await hit.json()) as T, at, stale: true })
+    } catch {
+      // A copy that won't read is no copy.
+    }
   }
+  return best
+}
+
+/**
+ * The newest copy the phone has for `path`, wherever it keeps one (this session,
+ * its own store, the service worker's, the estate saved on it), for a sheet to paint
+ * at once while it asks again. Null when there is none.
+ */
+export async function savedCopy<T>(path: string): Promise<Got<T> | null> {
+  const got = newer(peek<T>(path), await workerCopy<T>(path))
+  return got && { ...got, stale: true }
 }
 
 /**
@@ -338,13 +536,9 @@ export async function getFresh<T>(
 
 export { fromEarlierNight, nightBefore, nightOf } from './night'
 
+/** "just now", "5 min ago", "3 h ago", "2 d ago", in the language on screen. */
 export function ageLabel(iso: string): string {
-  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000))
-  if (mins < 2) return 'just now'
-  if (mins < 60) return `${mins} min ago`
-  const hrs = Math.round(mins / 60)
-  if (hrs < 24) return `${hrs} h ago`
-  return `${Math.round(hrs / 24)} d ago`
+  return ago(iso)
 }
 
 /** A server's reason without its technical detail: "The animal detector could not
@@ -359,17 +553,18 @@ export function plainWords(text: string): string {
   return t.replace(/\s+([.,;:])/g, '$1').trim()
 }
 
-/** "21:40" today, "Tue 21:40" this week, "4 Sep 21:40" before that. */
+/** "21:40" today, "Tue 21:40" this week, "4 Sept 21:40" before that. */
 export function whenLabel(iso: string): string {
   const d = new Date(iso)
-  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  const time = fmtTime(d)
   const days = (Date.now() - d.getTime()) / 86_400_000
   if (d.toDateString() === new Date().toDateString()) return time
-  if (days < 6) return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
-  return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`
+  if (days < 6) return `${fmtWeekday(d)} ${time}`
+  return `${fmtDate(d, { day: 'numeric', month: 'short' })} ${time}`
 }
 
-export type Me = { id: string; email: string; role: 'admin' | 'member' | 'viewer' }
+/** `language`: what the person chose, on any phone; null before anyone chose. */
+export type Me = { id: string; email: string; role: 'admin' | 'member' | 'viewer'; language?: string | null }
 let meCache: { token: string | null; at: number; p: Promise<Me> } | null = null
 let meKnown: { token: string | null; me: Me } | null = null
 
@@ -383,10 +578,13 @@ export function whoAmI(): Promise<Me> {
   const token = getToken()
   if (meCache && meCache.token === token && Date.now() - meCache.at < 3_600_000) return meCache.p
   const entry = { token, at: Date.now(), p: null as unknown as Promise<Me> }
+  const asked = choices
   entry.p = api<Me>('/auth/me', { timeoutMs: 20_000 }).then(
     (me) => {
       meKnown = { token, me }
       try { localStorage.setItem(ME_KEY, JSON.stringify({ token, me })) } catch { /* private mode */ }
+      // A slow answer asked for before a language was chosen here says the old one.
+      if (asked === choices) followLanguage(me)
       return me
     },
     (e) => {
@@ -417,10 +615,219 @@ function savedMe(token: string | null): Me | null {
   }
 }
 
+/**
+ * Where to go after signing in: a page of this app, never another site. `next` comes
+ * from the address, so anything but a plain path here ("//evil.example", "/\\x",
+ * "https:…") goes to Tonight instead (audit D-10, I-22).
+ */
+export function safeNext(next: string | null | undefined): string {
+  if (!next || !next.startsWith('/') || next.startsWith('//') || next.startsWith('/\\')) return '/'
+  if (next === '/login' || next.startsWith('/login?') || next.startsWith('/login/')) return '/'
+  return next
+}
+
+/** The sign-in page, remembering the page to come back to. */
+export function loginPath(next?: string, expired = false): string {
+  const q = new URLSearchParams()
+  if (expired) q.set('expired', '1')
+  const back = safeNext(next)
+  if (back !== '/') q.set('next', back)
+  const qs = q.toString()
+  return qs ? `/login?${qs}` : '/login'
+}
+
+/** Who signed in last on this phone, to fill the sign-in form (never a guess). */
+export const LAST_EMAIL_KEY = 'gs_last_email'
+
+/** This phone's known-phone mark from its last sign-in. It opens nothing; sent with
+ *  the next sign-in, it keeps a crowd of strangers guessing the same email from
+ *  holding this phone up (backend api/throttle.py). Kept through sign-out: it
+ *  belongs to the phone, not to the sign-in. */
+export const PHONE_KEY = 'gs_phone'
+
 export async function login(email: string, password: string): Promise<void> {
-  const data = await api<{ access_token: string }>('/auth/login', {
+  let phone: string | null = null
+  try { phone = localStorage.getItem(PHONE_KEY) } catch { /* private mode */ }
+  const data = await api<{ access_token: string; image_token?: string | null; known_phone?: string | null }>(LOGIN_PATH, {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, known_phone: phone }),
   })
   setToken(data.access_token)
+  setImagePass(data.image_token ?? null)
+  try {
+    localStorage.setItem(LAST_EMAIL_KEY, email.trim())
+    if (data.known_phone) localStorage.setItem(PHONE_KEY, data.known_phone)
+  } catch { /* private mode */ }
+  // A language picked on the sign-in page is now this person's, and goes to the
+  // server before the first page asks for anything: it answers in the language the
+  // person saved, so the plan asked for first would otherwise come in the old one.
+  // A few seconds at most; a slower answer still lands and the pages ask again.
+  const mine = pendingLanguage()
+  if (mine) {
+    markPending(mine)
+    await Promise.race([sendLanguage(mine), new Promise((r) => window.setTimeout(r, SEND_ON_SIGN_IN_MS))])
+  }
+}
+
+/** How long signing in waits for a language picked on the sign-in page to reach the server. */
+const SEND_ON_SIGN_IN_MS = 4000
+
+/** A password change: this phone gets a new sign-in and pass in the answer; every
+ *  other phone signed in as this person is signed out (backend routes_auth). */
+export async function changePassword(current: string, next: string): Promise<string> {
+  // This phone's alerts stay on; the server drops every other phone's, so a lost
+  // phone stops showing sightings and team notes on its lock screen.
+  const sub = await currentSubscription()
+  const r = await api<{ access_token: string; image_token: string; note: string }>('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ current_password: current, new_password: next, keep_endpoint: sub?.endpoint ?? null }),
+  })
+  renewToken(r.access_token)
+  setImagePass(r.image_token)
+  return r.note
+}
+
+/**
+ * The language, chosen in Settings or on the sign-in page: on screen at once, kept
+ * on this phone, and saved to the person on the server so every phone they sign in
+ * on speaks it (and the server's own words come in it). With no signal, or before
+ * signing in, it waits on the phone and goes as soon as the server answers again.
+ *
+ * The server writes its lines (the plan, reasons, animal names) in the language the
+ * signed-in person saved there (backend app/i18n), not the one a request asks for.
+ * So until a choice reaches it, what it sends is in the old language; once it does,
+ * the pages on screen ask again (onServerLanguage, hooks.ts), and signing in with a
+ * choice from the sign-in page sends it before the first page asks for anything.
+ */
+const LANG_PENDING_KEY = 'gs_lang_pending'
+
+/** A choice waiting to be sent, and whose: `uid` is who was signed in when it was
+ *  made (tokenSubject), null on the sign-in page, where it is for whoever signs in. */
+type PendingLang = { code: Lang; uid: string | null }
+
+function readPending(): PendingLang | null {
+  try {
+    const raw = localStorage.getItem(LANG_PENDING_KEY)
+    if (!raw) return null
+    // An earlier build kept the bare code.
+    if (isLang(raw)) return { code: raw, uid: null }
+    const v = JSON.parse(raw) as Partial<PendingLang> | null
+    return v && isLang(v.code) ? { code: v.code, uid: typeof v.uid === 'string' ? v.uid : null } : null
+  } catch {
+    return null
+  }
+}
+
+/** The language this phone chose for whoever is signed in and the server hasn't
+ *  confirmed yet, if any. Another person's choice is never theirs to send: a phone
+ *  passed round the party would switch the next hunter's phones and pushes. */
+function pendingLanguage(): Lang | null {
+  const p = readPending()
+  if (!p) return null
+  if (p.uid == null || p.uid === tokenSubject()) return p.code
+  if (getToken()) markPending(null)
+  return null
+}
+
+function markPending(code: Lang | null): void {
+  try {
+    if (code) localStorage.setItem(LANG_PENDING_KEY, JSON.stringify({ code, uid: tokenSubject() }))
+    else localStorage.removeItem(LANG_PENDING_KEY)
+  } catch {
+    /* private mode: the choice still shows, it just isn't retried */
+  }
+}
+
+/** A choice on this phone still waiting for the server (Settings offers to send it again). */
+export function languageWaiting(): Lang | null {
+  return pendingLanguage()
+}
+
+/** Bumps with every choice made on this phone. An answer about the person that was
+ *  asked for before the latest choice says what the server had then, not now: it
+ *  must not switch the screen back (R8FE-4). */
+let choices = 0
+
+/** The language the server answers this person in, as far as this phone knows. */
+let spoken: string | null = null
+const serverListeners = new Set<() => void>()
+
+/** Run `f` whenever a choice reaches the server and it starts answering in another
+ *  language, so a page on screen asks again and its server lines follow. */
+export function onServerLanguage(f: () => void): () => void {
+  serverListeners.add(f)
+  return () => { serverListeners.delete(f) }
+}
+
+// One at a time, in the order they were chosen, so the server keeps the last one
+// even when an earlier answer is slow.
+let sending: Promise<unknown> = Promise.resolve()
+/** The code the queue will send last, while any is on its way. */
+let queued: Lang | null = null
+let lastTry = 0
+
+function sendLanguage(code: Lang): Promise<boolean> {
+  if (!getToken()) return Promise.resolve(false)
+  queued = code
+  lastTry = Date.now()
+  const run = sending.then(async () => {
+    try {
+      await api('/auth/me', { method: 'PATCH', body: JSON.stringify({ language: code }), timeoutMs: 15_000 })
+    } catch {
+      return false
+    } finally {
+      if (queued === code) queued = null
+    }
+    // Still the one wanted (a later choice waits its turn behind this one).
+    const later = pendingLanguage()
+    if (later === code) markPending(null)
+    if (meKnown) meKnown = { ...meKnown, me: { ...meKnown.me, language: code } }
+    const before = spoken
+    spoken = code
+    // The pages ask again once, for the last choice, not for each one on the way.
+    if (before !== code && (!later || later === code)) serverListeners.forEach((f) => f())
+    return true
+  })
+  sending = run.catch(() => false)
+  return run
+}
+
+/** A choice still waiting goes again once the server answers anything else: signal
+ *  came back, and nobody should wait for the next app open to see their language. */
+function retryLanguage(): void {
+  if (queued || Date.now() - lastTry < 30_000) return
+  const mine = pendingLanguage()
+  if (mine) void sendLanguage(mine)
+}
+
+/**
+ * A language chosen in Settings or on the sign-in page, put on screen: true once
+ * its words are there and it is kept on this phone, false when a later choice won
+ * while these loaded; throws when they won't load, and then nothing is kept (the
+ * phone stays as it was). saveLanguage() then sends it.
+ */
+export async function chooseLanguage(code: Lang): Promise<boolean> {
+  choices++
+  if (!(await setLanguage(code))) return false
+  markPending(code)
+  return true
+}
+
+/** Send the chosen language to the person on the server: 'saved' when it has it,
+ *  'phone' when only this phone does for now (no signal, or not signed in yet). */
+export async function saveLanguage(code: Lang): Promise<'saved' | 'phone'> {
+  return (await sendLanguage(code)) ? 'saved' : 'phone'
+}
+
+/** Who is signed in said which language they chose: that one, unless this phone has
+ *  a choice of its own still to send, which goes now. */
+function followLanguage(me: Me): void {
+  const mine = pendingLanguage()
+  if (mine) {
+    if (me.language === mine) markPending(null)
+    else if (queued !== mine) void sendLanguage(mine)
+    return
+  }
+  spoken = me.language ?? null
+  if (isLang(me.language) && me.language !== lang()) void setLanguage(me.language).catch(() => {})
 }

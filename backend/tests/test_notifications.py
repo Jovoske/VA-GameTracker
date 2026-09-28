@@ -7,7 +7,7 @@ ever talks to a push service.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -26,7 +26,7 @@ from app.notifications.vapid import _generate_pem, public_key_from_pem
 from .conftest import requires_db
 
 MADRID = ZoneInfo("Europe/Madrid")
-T0 = datetime(2026, 9, 15, 20, 14, tzinfo=timezone.utc)  # 22:14 in Madrid (CEST)
+T0 = datetime(2026, 9, 15, 20, 14, tzinfo=UTC)  # 22:14 in Madrid (CEST)
 
 
 def _rows(*items):
@@ -124,7 +124,7 @@ class _Recorder:
         self.subscriptions = subscriptions
         self.sent = sent
 
-    def __call__(self, db, user_id, payload):
+    def __call__(self, db, user_id, payload, quiet=False):
         self.calls.append((user_id, payload))
         return {"sent": self.sent, "failed": 0, "removed": 0, "subscriptions": self.subscriptions}
 
@@ -176,14 +176,15 @@ def test_first_run_primes_and_announces_nothing_old(db_session, monkeypatch):
     rec = _Recorder()
     monkeypatch.setattr(dispatch.push, "send_to_user", rec)
     cam, _ = _seed(db_session)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     _sighting(db_session, cam, "wild_boar", now - timedelta(minutes=10), now - timedelta(minutes=1))
 
     assert dispatch_new_sightings(db_session, now=now)["status"] == "primed"
     assert db_session.query(Notification).count() == 0
     assert rec.calls == []
     # and the same old detection is not announced on the next run either
-    assert dispatch_new_sightings(db_session, now=now + timedelta(minutes=15))["status"] == "nothing_new"
+    later = now + timedelta(minutes=15)
+    assert dispatch_new_sightings(db_session, now=later)["status"] == "nothing_new"
 
 
 @requires_db
@@ -193,11 +194,12 @@ def test_only_people_who_asked_for_that_animal_are_told(db_session, monkeypatch)
     rec = _Recorder(subscriptions=1, sent=1)
     monkeypatch.setattr(dispatch.push, "send_to_user", rec)
     cam, users = _seed(db_session)
-    t0 = datetime.now(timezone.utc)
+    t0 = datetime.now(UTC)
     dispatch_new_sightings(db_session, now=t0)
 
     t1 = t0 + timedelta(minutes=15)
-    img = _sighting(db_session, cam, "wild_boar", t1 - timedelta(minutes=3), t1 - timedelta(minutes=1))
+    img = _sighting(db_session, cam, "wild_boar", t1 - timedelta(minutes=3),
+                    t1 - timedelta(minutes=1))
     _sighting(db_session, cam, "wild_boar", t1 - timedelta(minutes=8), t1 - timedelta(minutes=1))
     _sighting(db_session, cam, "bird", t1 - timedelta(minutes=2), t1 - timedelta(minutes=1))
 
@@ -215,7 +217,10 @@ def test_only_people_who_asked_for_that_animal_are_told(db_session, monkeypatch)
     assert n.species_id == "wild_boar"
     assert n.image_id == img.id
     assert n.push_status == "sent"
-    assert n.url == f"/photos?species=wild_boar&image={img.id}"
+    # The photo's time rides along, so it opens however many photos came after it.
+    at = img.captured_at.astimezone(UTC).isoformat(timespec="milliseconds")
+    assert n.url == (f"/photos?species=wild_boar&image={img.id}&at="
+                     + at.replace("+00:00", "Z").replace(":", "%3A"))
 
     assert len(rec.calls) == 1
     user_id, payload = rec.calls[0]
@@ -224,7 +229,8 @@ def test_only_people_who_asked_for_that_animal_are_told(db_session, monkeypatch)
     assert payload["title"] == "Wild boar at PL19"
 
     # nothing is announced twice
-    assert dispatch_new_sightings(db_session, now=t1 + timedelta(minutes=15))["status"] == "nothing_new"
+    later = t1 + timedelta(minutes=15)
+    assert dispatch_new_sightings(db_session, now=later)["status"] == "nothing_new"
 
 
 @requires_db
@@ -234,7 +240,7 @@ def test_backfilled_history_advances_the_cursor_silently(db_session, monkeypatch
     rec = _Recorder()
     monkeypatch.setattr(dispatch.push, "send_to_user", rec)
     cam, _ = _seed(db_session)
-    t0 = datetime.now(timezone.utc)
+    t0 = datetime.now(UTC)
     dispatch_new_sightings(db_session, now=t0)
 
     t1 = t0 + timedelta(minutes=15)
@@ -243,7 +249,8 @@ def test_backfilled_history_advances_the_cursor_silently(db_session, monkeypatch
     result = dispatch_new_sightings(db_session, now=t1)
     assert result == {"status": "ok", "species": 0, "notifications": 0, "pushed": 0}
     assert db_session.query(Notification).count() == 0
-    assert dispatch_new_sightings(db_session, now=t1 + timedelta(minutes=15))["status"] == "nothing_new"
+    later = t1 + timedelta(minutes=15)
+    assert dispatch_new_sightings(db_session, now=later)["status"] == "nothing_new"
 
 
 @requires_db
@@ -253,7 +260,7 @@ def test_unsubscribed_users_still_get_the_in_app_record(db_session, monkeypatch)
     rec = _Recorder(subscriptions=0, sent=0)
     monkeypatch.setattr(dispatch.push, "send_to_user", rec)
     cam, users = _seed(db_session)
-    t0 = datetime.now(timezone.utc)
+    t0 = datetime.now(UTC)
     dispatch_new_sightings(db_session, now=t0)
     t1 = t0 + timedelta(minutes=15)
     _sighting(db_session, cam, "red_deer", t1 - timedelta(minutes=3), t1 - timedelta(minutes=1))
@@ -292,7 +299,7 @@ def test_many_species_in_one_run_collapse_to_a_summary(db_session, monkeypatch):
     pref.species_ids = extra
     db_session.commit()
 
-    t0 = datetime.now(timezone.utc)
+    t0 = datetime.now(UTC)
     dispatch_new_sightings(db_session, now=t0)
     t1 = t0 + timedelta(minutes=15)
     for s in extra:

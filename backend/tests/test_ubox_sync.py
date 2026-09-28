@@ -12,11 +12,14 @@ from app.health import camera_health
 from app.ingestion import logins
 from app.ingestion import ubox_sync as sync
 from app.ingestion.ubox import UboxDevice, UboxError, UboxEvent, UboxPageLimitError
+from app.media import resolve
 from app.models import Camera, CameraAccount, Estate, Image, SyncLog, User
 
 from .conftest import requires_db
 
 NOW = datetime(2026, 9, 16, 12, tzinfo=UTC)
+# What the sync module reads as now (the setup fixture's clock): a test moves it on.
+CLOCK = [NOW + timedelta(hours=1)]
 
 
 def test_interval_handles_unordered_and_late_arrivals():
@@ -148,10 +151,12 @@ def setup(db_session, monkeypatch, tmp_path):
     monkeypatch.setattr(sync.settings, "media_root", str(tmp_path / "media"))
     monkeypatch.setattr(sync, "enrich_image", lambda *args: None)
 
+    CLOCK[0] = NOW + timedelta(hours=1)
+
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return (NOW + timedelta(hours=1)).astimezone(tz or UTC)
+            return CLOCK[0].astimezone(tz or UTC)
 
     monkeypatch.setattr(sync, "datetime", Clock)
     estate = Estate(name="UBox test estate", timezone="Europe/Madrid")
@@ -168,7 +173,7 @@ def setup(db_session, monkeypatch, tmp_path):
 def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, setup):
     from app.api.routes_cameras import camera_images
     from app.api.routes_images import image_file
-    from app.core.security import create_access_token
+    from app.core.security import image_token
 
     FakeClient.events = [event("2", 120), event("1")]
     result = sync.sync_ubox_all(db_session)
@@ -179,8 +184,9 @@ def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, 
     assert camera.battery_pct == 82 and camera.photo_limit is None
     assert camera.last_report_at and camera.last_sync_at
     # A real login: the photo endpoints look the person up, as every other one does.
-    user = User(estate_id=setup.estate_id, email="viewer@ubox.local", password_hash="x",
-                role="viewer")
+    # An admin: until the AI has looked at them, fresh photos are theirs alone (R6BE-2).
+    user = User(estate_id=setup.estate_id, email="owner@ubox.local", password_hash="x",
+                role="admin")
     db_session.add(user)
     db_session.commit()
     gallery = camera_images(camera.id, limit=40, include_empty=False, user=user, db=db_session)
@@ -189,7 +195,7 @@ def test_sync_images_are_served_in_gallery_and_repeat_is_idempotent(db_session, 
         assert image.width == 24 and image.height == 12
         assert Path(image.original_path).name.startswith("ubox_")
         assert ":" not in Path(image.original_path).name
-        response = image_file(image.id, token=create_access_token(str(user.id)),
+        response = image_file(image.id, token=image_token(user),
                               download=False, creds=None, db=db_session)
         assert Path(response.path).read_bytes() in (jpeg("red"), jpeg("blue"))
     second = sync.sync_ubox_all(db_session)
@@ -340,7 +346,7 @@ def test_ubox_enters_normal_classification_and_animals_gallery(db_session, setup
     sync.sync_ubox_all(db_session)
     boxes = [{"confidence": 0.95, "bbox": [0.1, 0.1, 0.9, 0.9]}]
     monkeypatch.setattr(checking, "load_models", lambda: None)
-    monkeypatch.setattr(checking, "detect_animals", lambda _: boxes)
+    monkeypatch.setattr(checking, "detect", lambda _: boxes)
     monkeypatch.setattr(species, "classify_crop", lambda *_: ("fox", "Fox", 0.97))
     notified = []
     monkeypatch.setattr(dispatch, "dispatch_new_sightings", lambda db: notified.append(True))
@@ -353,7 +359,9 @@ def test_ubox_enters_normal_classification_and_animals_gallery(db_session, setup
     gallery = species_images("fox", limit=200, label=None, _=user, db=db_session)
     assert len(gallery) == 1 and gallery[0]["file_url"].endswith("/file")
     image = db_session.scalar(select(Image))
-    assert str(image.id) in gallery[0]["file_url"] and Path(image.original_path).is_file()
+    assert str(image.id) in gallery[0]["file_url"] and Path(resolve(image.original_path)).is_file()
+    # Stored under MEDIA_ROOT, not absolute: moving the media folder moves nothing else.
+    assert not Path(image.original_path).is_absolute()
 
 
 @requires_db
@@ -436,7 +444,9 @@ def test_catch_up_stops_at_what_ubox_still_lists(db_session, setup):
 
 @requires_db
 def test_a_dead_snapshot_is_tried_three_times_then_let_go(db_session, setup):
-    """E-08: it holds the camera's place while it may still come, then stops doing so."""
+    """E-08: it holds the camera's place while it may still come, then stops doing so.
+    The tries that count are an hour apart (E-01): fetches every 15 minutes gave up on
+    a photo after half an hour of UBox trouble."""
     FakeClient.events = [event("1", 60), event("bad")]
     FakeClient.payloads = {"https://example.com/bad": UboxError("expired")}
     for attempt in (1, 2, 3):
@@ -448,11 +458,36 @@ def test_a_dead_snapshot_is_tried_three_times_then_let_go(db_session, setup):
         assert result["accounts"][0]["error"] == (
             "1 photo wouldn't download. It is tried again on the next fetch." if attempt < 3
             else "1 photo wouldn't download. It was tried 3 times, so it is left out.")
-    assert camera.last_sync_at == NOW + timedelta(hours=1)  # no longer held back
+        if attempt < 3:
+            # A fetch a quarter of an hour later tries again, and doesn't count it.
+            CLOCK[0] += timedelta(minutes=15)
+            again = sync.sync_ubox_all(db_session)
+            assert again["failed"] == 1 and again["accounts"][0]["error"] == (
+                "1 photo wouldn't download. It is tried again on the next fetch.")
+            assert db_session.scalar(select(Camera)).import_failures["cam-1:bad"][0] == attempt
+            CLOCK[0] += timedelta(minutes=45)
+    assert camera.last_sync_at == CLOCK[0]  # no longer held back
+    # Let go: a fetch that still lists it doesn't try it again.
+    camera.last_sync_at = NOW
+    db_session.commit()
     fourth = sync.sync_ubox_all(db_session)
     assert fourth["failed"] == 0 and fourth["given_up"] == 1 and fourth["status"] == "ok"
-    assert FakeClient.downloads.count("https://example.com/bad") == 3
+    assert FakeClient.downloads.count("https://example.com/bad") == 5
     assert setup.last_error is None
+
+
+@requires_db
+def test_a_snapshot_that_comes_back_after_hours_of_trouble_is_kept(db_session, setup):
+    """Two hours of a dead link, fetched every 15 minutes, then it downloads."""
+    FakeClient.events = [event("1", 60), event("late")]
+    FakeClient.payloads = {"https://example.com/late": UboxError("expired")}
+    for _ in range(8):
+        assert sync.sync_ubox_all(db_session)["failed"] == 1
+        CLOCK[0] += timedelta(minutes=15)
+    FakeClient.payloads = {"https://example.com/late": jpeg("blue")}
+    result = sync.sync_ubox_all(db_session)
+    assert result["failed"] == 0 and result["downloaded"] == 1
+    assert db_session.scalar(select(func.count(Image.id))) == 2
 
 
 @requires_db

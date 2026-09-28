@@ -1,7 +1,8 @@
 import { type ReactNode, Suspense, lazy } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
-import { getToken } from './api'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { getToken, loginPath } from './api'
 import Layout from './components/Layout'
+import { t, useLang } from './i18n'
 import Admin from './pages/Admin'
 import Animals from './pages/Animals'
 import Cameras from './pages/Cameras'
@@ -23,11 +24,16 @@ import Stands from './pages/Stands'
  */
 const MapPage = lazy(() => import('./pages/Map'))
 
+/** Signed out, the page asked for is kept for after signing in: an alert's photo
+ *  opens once the hunter is back, not Tonight (audit D-10, I-22). */
 function RequireAuth({ children }: { children: ReactNode }) {
-  return getToken() ? <>{children}</> : <Navigate to="/login" replace />
+  const loc = useLocation()
+  return getToken() ? <>{children}</> : <Navigate to={loginPath(loc.pathname + loc.search)} replace />
 }
 
 export default function App() {
+  // Every page below re-renders in a newly chosen language, from here down.
+  useLang()
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -56,7 +62,7 @@ export default function App() {
             // Says which thing is loading. A bare spinner here would be
             // indistinguishable from the map failing to come up at all, which on
             // a slow valley connection is the likelier reading.
-            <Suspense fallback={<div style={{ color: 'var(--text-dim)' }}>Loading the map…</div>}>
+            <Suspense fallback={<div style={{ color: 'var(--text-dim)' }}>{t('map.loadingMap')}</div>}>
               <MapPage />
             </Suspense>
           }

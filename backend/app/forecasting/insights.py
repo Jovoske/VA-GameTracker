@@ -5,15 +5,18 @@ consistent comparison for each condition.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.enrichment.astro import moon_phase, solar
-from app.forecasting.exposure import current_night, local_hour, night_key_start
-from app.forecasting.model import _best_window, sentence_case
+from app.enrichment.astro import moon_phase, phase_key, phase_words, solar
+from app.forecasting.exposure import current_night, night_key_start
+from app.forecasting.model import SLOT_MIN, _best_window, join_class_keys
+from app.i18n import clock, species_name, t
 from app.models import Camera
 
 _TZ = settings.estate_timezone
@@ -44,7 +47,8 @@ def _outlook(days: int = 7) -> list[dict]:
         s = solar(settings.estate_lat, settings.estate_lon, night.date())
         out.append({
             "date": night.date().isoformat(),
-            "moon_phase": phase,
+            "moon_phase": phase_words(phase),
+            "moon_phase_key": phase_key(phase),
             "moon_illum": illum,
             "darkness_minutes": s.get("darkness_minutes"),
             "sunset": s.get("sunset"),
@@ -53,15 +57,44 @@ def _outlook(days: int = 7) -> list[dict]:
     return out
 
 
+@lru_cache(maxsize=1024)
+def _sun(day: date) -> tuple[datetime | None, datetime | None]:
+    s = solar(settings.estate_lat, settings.estate_lon, day)
+    return s.get("sunrise"), s.get("sunset")
+
+
+def _on_tonight(night: date, slot: int, tonight: date) -> int:
+    """The hour of tonight's clock a visit in quarter hour `slot` of `night` stands for.
+
+    Sunset in Alatoz moves about three hours between August and late October, the
+    clock change included, so a season of clock hours drifted away from the animals
+    ("busiest between 20:00 and 23:00" for boar now in by 19:00, audit G-05). An
+    afternoon or evening visit is put as long after tonight's sunset as it came
+    after its own day's; one after midnight or in the morning as long from
+    tomorrow's sunrise as it was from its own.
+    """
+    minute = slot * SLOT_MIN + SLOT_MIN // 2
+    day = night if minute >= 6 * 60 else night + timedelta(days=1)
+    at = datetime.combine(day, time(minute // 60, minute % 60), tzinfo=ZoneInfo(_TZ))
+    if minute >= 12 * 60:
+        theirs, ours = _sun(day)[1], _sun(tonight)[1]
+    else:
+        theirs, ours = _sun(day)[0], _sun(tonight + timedelta(days=1))[0]
+    if theirs is None or ours is None:
+        return minute // 60
+    return (ours + (at - theirs)).astimezone(ZoneInfo(_TZ)).hour
+
+
 def _clock(hour: int) -> str:
     """Plain clock time for a sentence: 0 reads as midnight, 21 as 21:00."""
-    return "midnight" if hour == 0 else f"{hour:02d}:00"
+    return t("insights.midnight") if hour == 0 else clock(hour)
 
 
 def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     """The plain-sentence summaries, from visits per (camera, species id, species
-    name, local hour of arrival). Visits, not photos: one boar loitering for thirty
-    frames is one arrival, and a camera that fires often no longer counts for more.
+    name, hour of arrival on tonight's clock, _on_tonight). Visits, not photos: one
+    boar loitering for thirty frames is one arrival, and a camera that fires often
+    no longer counts for more.
 
     The camera is a key `names` turns into its name (the key itself without it): two
     cameras that share a name are still two cameras (audit I-26)."""
@@ -89,8 +122,8 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     w = _best_window(by_hour, sittable_only=False)
     out.append({
         "kind": "time",
-        "statement": f"Your cameras are busiest between {_clock(w['start_hour'])} "
-                     f"and {_clock(w['end_hour'])}.",
+        "statement": t("insights.busiest", start=_clock(w["start_hour"]),
+                       end=_clock(w["end_hour"])),
         "strength": w["share_pct"] / 100, "sample": total,
     })
 
@@ -100,8 +133,8 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
         sw = _best_window(sp["by_hour"], sittable_only=False)
         out.append({
             "kind": "time",
-            "statement": f"The cameras see {sp['name'].lower()} mostly between "
-                         f"{_clock(sw['start_hour'])} and {_clock(sw['end_hour'])}.",
+            "statement": t("insights.species_mostly", species=sp["name"].lower(),
+                           start=_clock(sw["start_hour"]), end=_clock(sw["end_hour"])),
             "strength": sw["share_pct"] / 100, "sample": sp["n"],
         })
 
@@ -113,12 +146,10 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
     if len(cams) >= 2:
         top2 = cams[0][1] + cams[1][1]
         share = round(top2 / total * 100)
-        both = f"{name_of(cams[0][0])} and {name_of(cams[1][0])}"
+        both = t("list.two", a=name_of(cams[0][0]), b=name_of(cams[1][0]))
         concentrated = len(cams) >= 3 and cams[2][1] < cams[1][1] / 2
-        statement = (
-            f"Most of the action is at {both}. The other cameras see far less."
-            if concentrated else f"{both} are your busiest cameras."
-        )
+        statement = (t("insights.concentrated", cameras=both) if concentrated
+                     else t("insights.busiest_cameras", cameras=both))
         out.append({
             "kind": "location",
             "statement": statement,
@@ -130,24 +161,34 @@ def _summaries(rows: list[tuple], names: dict | None = None) -> list[dict]:
 def _correlations(db: Session) -> list[dict]:
     """Summaries of the season's visits at cameras nobody retired, in words.
 
-    Hidden species and photos marked "nothing in it" are not visits (visit_rows)."""
+    Hidden species and photos marked "nothing in it" are not visits (visit_rows), and
+    only the nights (18:00-06:00) count, as on Tonight and in the track record."""
     from app.forecasting.visits import visit_rows
 
-    v = visit_rows(start=_since())
-    hour = local_hour(v.c.first_at).label("h")
+    v = visit_rows(start=_since(), nights=True)
+    local = func.timezone(_TZ, v.c.first_at)
+    slot = cast(
+        func.floor((func.extract("hour", local) * 60 + func.extract("minute", local)) / SLOT_MIN),
+        Integer,
+    ).label("slot")
     # By camera id, named afterwards: two cameras called "SPYPOINT" are two cameras.
+    # By night and quarter hour, so each visit is put on tonight's clock by its own
+    # night's sun (_on_tonight).
     rows = db.execute(
-        select(Camera.id, v.c.species_id, v.c.common_name, hour, func.count())
+        select(Camera.id, v.c.species_id, v.c.common_name, v.c.night, slot, func.count())
         .select_from(v)
         .join(Camera, Camera.id == v.c.camera_id)
         .where(Camera.retired_at.is_(None))
-        .group_by(Camera.id, v.c.species_id, v.c.common_name, hour)
+        .group_by(Camera.id, v.c.species_id, v.c.common_name, v.c.night, slot)
     ).all()
     names = dict(db.execute(select(Camera.id, Camera.name)).all())
-    return _summaries([
-        (cam, sid, sentence_case(name) if name else None, int(h), int(n))
-        for cam, sid, name, h, n in rows
-    ], names)
+    tonight = current_night()
+    by_hour: dict[tuple, int] = {}
+    for cam, sid, name, night, sl, n in rows:
+        key = (cam, sid, species_name(sid, name) if name else None,
+               _on_tonight(night, int(sl), tonight))
+        by_hour[key] = by_hour.get(key, 0) + int(n)
+    return _summaries([(*key, n) for key, n in by_hour.items()], names)
 
 
 def _composition(db: Session) -> list[dict]:
@@ -160,17 +201,20 @@ def _composition(db: Session) -> list[dict]:
     where: dict[str, dict] = {}
     for r in class_visits(db, start=_since()):
         lbl = r["label"]
-        t = totals.setdefault(lbl, {"visits": 0, "photos": 0})
-        t["visits"] += r["visits"]
-        t["photos"] += r["photos"]
+        tot = totals.setdefault(lbl, {"visits": 0, "photos": 0, "keys": set()})
+        tot["visits"] += r["visits"]
+        tot["photos"] += r["photos"]
+        tot["keys"].add(r["key"])
         cams = where.setdefault(lbl, {})
         cams[r["camera_id"]] = cams.get(r["camera_id"], 0) + r["visits"]
     items = []
-    for lbl, t in sorted(totals.items(), key=lambda kv: (-kv[1]["visits"], kv[0])):
+    for lbl, tot in sorted(totals.items(), key=lambda kv: (-kv[1]["visits"], kv[0])):
         cams = where.get(lbl, {})
         top_cam = max(cams.items(), key=lambda kv: kv[1])[0] if cams else None
-        items.append({"label": lbl, "count": t["visits"], "visits": t["visits"],
-                      "photos": t["photos"], "top_camera": names.get(top_cam)})
+        # `key` asks /insights/class for the class the same in every language.
+        items.append({"label": lbl, "key": join_class_keys(tot["keys"]),
+                      "count": tot["visits"], "visits": tot["visits"],
+                      "photos": tot["photos"], "top_camera": names.get(top_cam)})
     return items
 
 

@@ -6,18 +6,19 @@ from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app import jobs
+from app import geo, jobs
 from app.api.deps import get_current_admin, get_current_user
 from app.api.routes_map import seen_mark
 from app.api.routes_photos import _items, after_cursor
-from app.api.visibility import VISIBLE_ANIMAL
+from app.api.visibility import SHOWN_EMPTY, VISIBLE_ANIMAL, team_sees
 from app.core.db import get_db
 from app.health import camera_health
+from app.i18n import localize, t
 from app.ingestion.logins import camera_logins
 from app.models import Camera, CameraView, Image, User
 
@@ -40,19 +41,25 @@ def _pipeline_busy() -> bool:
 
 # What a job that holds the photo fetch up is doing, in words, by its lock's owner.
 BUSY_WITH = {
-    "reid": "looking for repeat visitors",
-    "plan": "writing tonight’s plan",
-    "score": "checking last night’s plan against the cameras",
-    "scan": "checking photos for animals",
+    "reid": "busy.reid",
+    "plan": "busy.plan",
+    "score": "busy.score",
+    "scan": "busy.scan",
+    "deploy": "busy.deploy",
 }
+
+
+def busy_with(owner: str | None) -> str:
+    """"looking for repeat visitors": what the job holding the lock is doing."""
+    return t(BUSY_WITH.get(owner or "", "busy.other"))
 
 
 def _busy_words() -> str:
     """Why a one-off can't start now, in words: what holds the lock."""
     holder = jobs.holder("pipeline")
-    what = "fetching photos" if holder is None or holder.owner in jobs.FETCH_MODES else (
-        BUSY_WITH.get(holder.owner, "busy with another job"))
-    return f"The server is {what}. Try again in a few minutes."
+    what = t("busy.fetch") if holder is None or holder.owner in jobs.FETCH_MODES else (
+        busy_with(holder.owner))
+    return t("busy.try_later", what=what)
 
 
 def _lock_started() -> datetime | None:
@@ -63,7 +70,37 @@ def _lock_started() -> datetime | None:
 def _start(db: Session, mode: str, *args: str) -> None:
     """Start a pipeline job, or say in words that it could not be started."""
     if not jobs.spawn(mode, *args):
-        raise HTTPException(503, "Could not start it on the server. Try again in a minute.")
+        raise HTTPException(503, t("cameras.start_failed"))
+
+
+# How long a camera's photos take to reach the app: the middle one of its last
+# UPLOAD_SAMPLE that say when they were received (FTP and email), with at least
+# UPLOAD_MIN_PHOTOS of them. A clock an hour slow shows as photos an hour late, which
+# the import can't tell from a slow upload; one ahead is put right there (audit H-17).
+UPLOAD_SAMPLE = 50
+UPLOAD_MIN_PHOTOS = 5
+
+
+def _upload_delays(db: Session, camera_ids: list) -> dict:
+    """Minutes from capture to receipt, per camera, the median of its recent photos."""
+    if not camera_ids:
+        return {}
+    lag = func.extract("epoch", Image.received_at - Image.captured_at) / 60
+    recent = (
+        select(Image.camera_id, lag.label("lag"), func.row_number().over(
+            partition_by=Image.camera_id, order_by=Image.received_at.desc()).label("n"))
+        # A photo filed at its receipt time (no camera time to go on) says nothing.
+        .where(Image.camera_id.in_(camera_ids), Image.received_at.is_not(None),
+               Image.received_at != Image.captured_at)
+        .subquery()
+    )
+    rows = db.execute(
+        select(recent.c.camera_id, func.percentile_cont(0.5).within_group(recent.c.lag),
+               func.count())
+        .where(recent.c.n <= UPLOAD_SAMPLE)
+        .group_by(recent.c.camera_id)
+    ).all()
+    return {cam: round(median) for cam, median, n in rows if n >= UPLOAD_MIN_PHOTOS}
 
 
 @router.get("")
@@ -75,7 +112,9 @@ def list_cameras(
     The strip lists `animal_count` + `unchecked_count` photos: the checked ones with
     an animal in them (not only a hidden animal, with a picture), and the ones the AI
     has not checked yet (or couldn't), which are often grass, so they are counted
-    apart. `empty_count` is the "nothing in it" ones "Show empty photos" brings up.
+    apart (for an admin; the team's are only those the detector has looked at for
+    people and the species model hasn't named yet). `empty_count` is the "nothing in
+    it" ones "Show empty photos" brings up.
     They used to be every frame minus the empty ones, so hidden rabbits and frames
     not checked yet counted as animals, and it took four queries a camera; now it is
     one for them all.
@@ -93,13 +132,18 @@ def list_cameras(
             func.count(Image.id).label("count"),
             func.count(Image.id).filter(
                 has_file, Image.is_empty_frame.is_(False), VISIBLE_ANIMAL).label("animals"),
+            # For all but an admin, not a frame the AI hasn't looked at yet: the strip
+            # leaves those out too (visibility.team_sees).
             func.count(Image.id).filter(
-                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL).label("unchecked"),
-            func.count(Image.id).filter(has_file, Image.is_empty_frame.is_(True)).label("empty"),
+                has_file, Image.is_empty_frame.is_(None), VISIBLE_ANIMAL, team_sees(user),
+            ).label("unchecked"),
+            # Not a frame of people or vehicles: those are an admin's, in Photos.
+            func.count(Image.id).filter(has_file, SHOWN_EMPTY).label("empty"),
         )
         .where(Image.camera_id.in_([c.id for c in rows]))
         .group_by(Image.camera_id)
     ).all()}
+    delays = _upload_delays(db, [c.id for c in rows])
     out = []
     for c in rows:
         n = counts.get(c.id)
@@ -124,6 +168,8 @@ def list_cameras(
             "unchecked_count": unchecked,
             "sightings": animals,
             "lat": lat, "lng": lng,
+            # Minutes its photos take to arrive (FTP and email cameras), or None.
+            "upload_delay_min": delays.get(c.id),
             "health": camera_health(c, now, login_states.get(c.id)),
         })
     return out
@@ -139,10 +185,10 @@ class CameraNameBody(BaseModel):
         if value is None:
             return None
         if any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value):
-            raise ValueError("Camera name has hidden characters in it. Retype it.")
+            raise ValueError(t("cameras.name_hidden_chars"))
         value = value.strip()
         if not 1 <= len(value) <= 100:
-            raise ValueError("Camera name must be 1 to 100 characters.")
+            raise ValueError(t("cameras.name_length"))
         return value
 
 
@@ -154,12 +200,12 @@ def rename_camera(
     db: Session = Depends(get_db),
 ) -> dict:
     if user.role not in {"admin", "member"}:
-        raise HTTPException(403, "Only estate admins and members can rename cameras.")
+        raise HTTPException(403, t("cameras.rename_forbidden"))
     camera = db.scalar(select(Camera).where(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ).with_for_update().execution_options(populate_existing=True))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     # Local imports have no vendor label, so retain their initial name as default.
     if not camera.provider_name:
         camera.provider_name = camera.name
@@ -173,11 +219,8 @@ def rename_camera(
     if taken is not None:
         # Going back to the vendor's name too: two SPYPOINTs called "SPYPOINT" are the
         # same trap as two cameras a hunter called "Feeder".
-        raise HTTPException(409, (
-            f"Another camera is already called {name}. Pick another name."
-            if body.name is not None else
-            f"Another camera is already called {name}, so this one keeps its own name."
-        ))
+        raise HTTPException(409, t("cameras.name_taken" if body.name is not None
+                                   else "cameras.name_taken_reset", name=name))
     camera.name = name
     camera.name_is_custom = body.name is not None
     db.commit()
@@ -209,7 +252,7 @@ def retire_camera(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     if body.retired and camera.retired_at is None:
         camera.retired_at = datetime.now(UTC)
     elif not body.retired and camera.retired_at is not None:
@@ -241,7 +284,7 @@ def mark_seen(
         Camera.id == camera_id, Camera.estate_id == user.estate_id,
     ))
     if camera is None:
-        raise HTTPException(404, "Camera not found.")
+        raise HTTPException(404, t("cameras.not_found"))
     stmt = pg_insert(CameraView).values(
         user_id=user.id, camera_id=camera_id, seen_at=seen_mark(camera_id),
     )
@@ -257,18 +300,23 @@ def mark_seen(
 
 @router.post("/sync")
 def trigger_sync(
-    _: Annotated[User, Depends(get_current_admin)], db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)],
 ) -> dict:
+    """"Check for new photos": members and admins (audit C-09, E-09). It is harmless
+    to ask twice: the pipeline lock serves one fetch at a time, and one with nothing
+    new is quick. Viewers wait for the fetch every 15 minutes."""
+    if user.role not in {"admin", "member"}:
+        raise HTTPException(403, t("cameras.check_viewer"))
     # `since` is what the Check button waits for: a fetch summary started after it
     # is this check's result; an older one is somebody else's.
     holder = jobs.holder("pipeline")
     if holder is not None and holder.owner in jobs.FETCH_MODES:
         return {"status": "busy", "since": holder.started,
-                "note": "Already checking. New photos will show shortly."}
+                "note": t("cameras.check_running")}
     if jobs.holder("fetchqueue") is not None:
         asked = jobs.read_note(db, FETCH_REQUEST).get("at")
         return {"status": "queued", "since": asked,
-                "note": "Already asked. New photos come in as soon as the server is free."}
+                "note": t("cameras.check_asked")}
     since = datetime.now(UTC)
     if holder is None:
         _start(db, "sync")
@@ -279,9 +327,8 @@ def trigger_sync(
     # although no fetch had been asked for, and none came.
     _start(db, "sync", "queued")
     jobs.note(db, FETCH_REQUEST, at=since)
-    what = BUSY_WITH.get(holder.owner, "busy with another job")
     return {"status": "queued", "since": since,
-            "note": f"The server is {what}. New photos come in when it finishes."}
+            "note": t("cameras.check_queued", what=busy_with(holder.owner))}
 
 
 @router.post("/backfill")
@@ -334,39 +381,88 @@ def sync_status(_: User = Depends(get_current_user), db: Session = Depends(get_d
             return {
                 "status": "identifying", "result": row.status,
                 "images_downloaded": row.images_downloaded, "started_at": row.started_at,
-                "problems": details.get("problems", []),
+                "problems": _said(details.get("problems")),
             }
         return {"status": "running", "started_at": started}
     if row is None:
         return {"status": "never"}
-    details = row.details or {}
+    details = dict(row.details or {})
+    problems = _said(details.get("problems"))
+    if details.get("ai_error"):
+        details["ai_error"] = localize(details["ai_error"])
     return {
         "status": row.status, "images_downloaded": row.images_downloaded,
-        "started_at": row.started_at, "finished_at": row.finished_at, "error": row.error,
-        "problems": details.get("problems", []),
+        "started_at": row.started_at, "finished_at": row.finished_at,
+        "error": "; ".join(f"{p['label']}: {p['error']}" for p in problems) or row.error,
+        "problems": problems,
         "details": details,
     }
 
 
+def _said(problems: list | None) -> list[dict]:
+    """A run's problems ({"label", "error"}, kept in English) in the reader's language."""
+    return [{**p, "label": localize(p.get("label")), "error": localize(p.get("error"))}
+            for p in problems or []]
+
+
 class LocationBody(BaseModel):
-    lat: float
-    lng: float
+    # Finite and on the planet: one camera at latitude 1000 took the map down for
+    # everyone (audit B-08).
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lng: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
+def _location_out(cam: Camera) -> dict:
+    return {
+        "id": str(cam.id), "lat": cam.lat, "lng": cam.lon,
+        "location_is_custom": cam.location_is_custom,
+        "provider_location": cam.provider_lat is not None and cam.provider_lon is not None,
+    }
+
+
+def _camera_for_update(db: Session, user: User, camera_id: uuid.UUID) -> Camera:
+    cam = db.scalar(select(Camera).where(
+        Camera.id == camera_id, Camera.estate_id == user.estate_id,
+    ).with_for_update().execution_options(populate_existing=True))
+    if cam is None:
+        raise HTTPException(404, t("cameras.not_found"))
+    return cam
 
 
 @router.put("/{camera_id}/location")
 def set_location(
     camera_id: uuid.UUID,
     body: LocationBody,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> dict:
-    cam = db.get(Camera, camera_id)
-    if cam is None:
-        raise HTTPException(404, "Camera not found.")
-    cam.lat = body.lat
-    cam.lon = body.lng
+    """Place the camera by hand, admins only as on the map. It stays there: the
+    provider's GPS no longer moves it at the next sync (audit B-09, E-16), until
+    someone asks for the camera's own position again (DELETE)."""
+    if not geo.plausible_position(body.lat, body.lng):
+        raise HTTPException(422, t("cameras.off_map"))
+    cam = _camera_for_update(db, user, camera_id)
+    cam.lat, cam.lon = body.lat, body.lng
+    cam.location_is_custom = True
     db.commit()
-    return {"id": str(cam.id), "lat": body.lat, "lng": body.lng}
+    return _location_out(cam)
+
+
+@router.delete("/{camera_id}/location")
+def use_provider_location(
+    camera_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Back to the position the camera itself last reported (SPYPOINT's GPS), and
+    follow it from now on, as for a camera nobody placed."""
+    cam = _camera_for_update(db, user, camera_id)
+    if cam.provider_lat is None or cam.provider_lon is None:
+        raise HTTPException(409, t("cameras.no_own_position"))
+    cam.lat, cam.lon = cam.provider_lat, cam.provider_lon
+    cam.location_is_custom = False
+    db.commit()
+    return _location_out(cam)
 
 
 @router.get("/{camera_id}/images")
@@ -388,8 +484,11 @@ def camera_images(
     """
     # A photo with no picture yet (still to download) has nothing to show.
     q = select(Image).where(Image.camera_id == camera_id, Image.original_path.isnot(None))
-    # Photos of nothing but hidden species never show; empties only on request.
-    q = q.where(or_(Image.is_empty_frame.is_(True), VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
+    # Photos of nothing but hidden species never show; empties only on request; and a
+    # frame with a person or a vehicle in it never does (Photos' admin-only filter).
+    q = q.where(or_(SHOWN_EMPTY, VISIBLE_ANIMAL) if include_empty else VISIBLE_ANIMAL)
+    # Nor, for all but an admin, one the AI hasn't looked at yet: it could be one.
+    q = q.where(team_sees(user))
     q = after_cursor(q, before, before_id)
     rows = db.scalars(q.order_by(Image.captured_at.desc(), Image.id.desc()).limit(limit)).all()
     cam_name = db.scalar(select(Camera.name).where(Camera.id == camera_id))

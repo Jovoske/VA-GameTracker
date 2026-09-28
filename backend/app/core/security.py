@@ -1,5 +1,24 @@
-"""Password hashing (Argon2) and JWT access tokens."""
-from datetime import datetime, timedelta, timezone
+"""Password hashing (Argon2), sign-in tokens and photo passes (JWT).
+
+Two kinds of token, told apart by their `scope` claim:
+
+* A sign-in token (no scope): what the app sends as `Authorization: Bearer`. It
+  carries the person's token version (`tv`, users.token_version); one made under an
+  older version is refused, which is how a password change signs every other phone
+  out (audit D-07).
+* A photo pass (scope "img"): the only token a photo address may carry. An <img> tag
+  can't send a header, so the photo's URL has to hold something; it used to hold the
+  30-day sign-in token itself, which then sat in server logs, copied links and the
+  tunnel's logs as a working login to the whole API (audit C-19, D-08, H-13). A pass
+  opens photos and nothing else, for hours, not a month, and dies with the sign-in
+  (same version, same person).
+
+A third, the known-phone mark (scope "phone"), opens nothing at all. The sign-in
+answer gives it to the phone, which sends it with its next sign-in: a phone that has
+signed in with an email before is not held up by a crowd of guessers trying that
+email from elsewhere (app.api.throttle).
+"""
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from argon2 import PasswordHasher
@@ -8,6 +27,18 @@ from argon2.exceptions import Argon2Error
 from app.core.config import settings
 
 _hasher = PasswordHasher()
+
+# A photo pass is the same text for everyone's requests in one window, so a photo's
+# address doesn't change with every answer (it would be fetched again each time, on
+# a weak signal): it lasts until the end of the window after the one it was made in,
+# so between PASS_WINDOW and twice that.
+IMAGE_SCOPE = "img"
+PASS_WINDOW = timedelta(hours=6)
+
+# A sign-in older than this is renewed on its next use (deps.get_current_user), so a
+# hunter using the app daily is never thrown out mid-evening at the 30-day mark
+# (audit D-11). A password change still ends it: the renewal carries the version.
+RENEW_AFTER = timedelta(days=7)
 
 
 def hash_password(password: str) -> str:
@@ -21,16 +52,63 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(subject: str, extra: dict | None = None) -> str:
-    now = datetime.now(timezone.utc)
+def create_access_token(subject: str, extra: dict | None = None, *, version: int = 0) -> str:
+    now = datetime.now(UTC)
     payload: dict = {
         "sub": subject,
         "iat": now,
         "exp": now + timedelta(minutes=settings.access_token_expire_minutes),
+        "tv": version,
     }
     if extra:
         payload.update(extra)
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def session_token(user) -> str:
+    """A sign-in token for `user`, under their current token version."""
+    return create_access_token(str(user.id), {"role": user.role}, version=user.token_version or 0)
+
+
+def pass_expiry(now: datetime | None = None) -> datetime:
+    """When a photo pass made at `now` stops working: the end of the next window."""
+    now = now or datetime.now(UTC)
+    window = PASS_WINDOW.total_seconds()
+    start = int(now.timestamp() // window * window)
+    return datetime.fromtimestamp(start + 2 * window, UTC)
+
+
+def image_token(user, now: datetime | None = None) -> str:
+    """The photo pass for `user` now. The same text all through one window."""
+    return jwt.encode(
+        {"sub": str(user.id), "scope": IMAGE_SCOPE, "tv": user.token_version or 0,
+         "exp": pass_expiry(now)},
+        settings.jwt_secret, algorithm=settings.jwt_algorithm,
+    )
+
+
+PHONE_SCOPE = "phone"
+PHONE_LASTS = timedelta(days=400)
+
+
+def phone_token(user) -> str:
+    """The known-phone mark for `user`'s email on the phone that just signed in."""
+    return jwt.encode(
+        {"sub": str(user.id), "em": (user.email or "").strip().lower(), "scope": PHONE_SCOPE,
+         "exp": datetime.now(UTC) + PHONE_LASTS},
+        settings.jwt_secret, algorithm=settings.jwt_algorithm,
+    )
+
+
+def known_phone(token: str | None, email: str) -> bool:
+    """Whether `token` is this server's known-phone mark for `email`."""
+    if not token:
+        return False
+    try:
+        claims = decode_token(token)
+    except jwt.PyJWTError:
+        return False
+    return claims.get("scope") == PHONE_SCOPE and claims.get("em") == email.strip().lower()
 
 
 def decode_token(token: str) -> dict:

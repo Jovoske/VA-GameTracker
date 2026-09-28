@@ -10,6 +10,12 @@ The row is written as soon as the photos are in, with stage "identifying" while 
 detector looks at them, and finished once the AI pass and the night recount are done.
 So the Check button can say "7 new photos came in" without waiting for the detector,
 and a run killed during the AI pass still leaves a true count behind.
+
+With less than app.ops.FULL_DISK_BYTES free where the photos are kept, nothing is
+downloaded and the run says why (audit H-18): that disk is the database's too, and a
+full one stops Postgres and every import at once. The photos wait on the cameras'
+clouds and come in on the first fetch after room is made. The one-off imports (a new
+login's first, the history pull; pipeline.py) ask the same (room_to_fetch).
 """
 from __future__ import annotations
 
@@ -19,11 +25,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
+from app.i18n import stored
 from app.models import SyncLog
 
 log = get_logger(__name__)
 
 PROVIDERS = {"spypoint": "SPYPOINT", "ubox": "UBox"}
+# Not a provider: the run stood down because the server's disk is nearly full.
+DISK = "disk"
+# Kept in English in the run's row, like its errors, and said in the reader's language
+# when read (app.i18n.localize).
+LABELS = {**PROVIDERS, DISK: stored("fetch.disk_label")}
 
 
 def summarize(results: dict) -> dict:
@@ -42,12 +54,12 @@ def summarize(results: dict) -> dict:
         accounts = result.get("accounts") or []
         for account in accounts:
             if account.get("error"):
-                problems.append({"label": account.get("label") or PROVIDERS[provider],
+                problems.append({"label": account.get("label") or LABELS[provider],
                                  "error": account["error"]})
         if status == "error" and not any(a.get("error") for a in accounts):
-            problems.append({"label": PROVIDERS[provider],
+            problems.append({"label": LABELS[provider],
                              "error": result.get("reason") or result.get("error")
-                             or "The fetch failed. It tries again on the next one."})
+                             or stored("fetch.failed")})
     if statuses and all(s == "skipped" for s in statuses):
         status = "skipped"
     elif all(s in ("ok", "skipped") for s in statuses):
@@ -59,27 +71,23 @@ def summarize(results: dict) -> dict:
     return {"status": status, "downloaded": downloaded, "problems": problems}
 
 
-def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
-    """Fetch from every provider; returns the summary row (stage "identifying")."""
-    from app import jobs
-    from app.ingestion.sync import sync_all
-    from app.ingestion.ubox_sync import sync_ubox_all
+def disk_full() -> dict | None:
+    """The run's DISK result when the photos' disk is nearly full (nothing may be
+    downloaded), else None. Every run that downloads asks: the routine fetch, a new
+    login's first import and the history pull alike."""
+    from app import ops
 
-    started = datetime.now(UTC)
-    results: dict = {}
-    for provider, run in (("spypoint", sync_all), ("ubox", sync_ubox_all)):
-        if jobs.lock_lost():
-            break  # another run took the lock over and fetches now
-        try:
-            results[provider] = run(db)
-        except Exception as exc:  # one provider's crash must not stop the other
-            db.rollback()
-            log.error("fetch.provider_failed", provider=provider, error=str(exc))
-            results[provider] = {
-                "status": "error", "total": 0,
-                "reason": f"The {PROVIDERS[provider]} fetch failed ({type(exc).__name__}). "
-                          "It tries again on the next one.",
-            }
+    free = ops.disk_free()
+    if free is None or free >= ops.FULL_DISK_BYTES:
+        return None
+    log.error("fetch.disk_full", free_gb=round(free / 1024**3, 1))
+    return {
+        "status": "error", "total": 0,
+        "reason": stored("fetch.disk_full", gb=f"{free / 1024**3:.1f}"),
+    }
+
+
+def _summary(db: Session, started: datetime, results: dict) -> SyncLog:
     summary = summarize(results)
     row = SyncLog(
         status=summary["status"], started_at=started, images_downloaded=summary["downloaded"],
@@ -89,7 +97,46 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
     )
     db.add(row)
     db.commit()
-    return row, results
+    return row
+
+
+def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
+    """Fetch from every provider; returns the summary row (stage "identifying")."""
+    from app import jobs
+    from app.ingestion.sync import sync_all
+    from app.ingestion.ubox_sync import sync_ubox_all
+
+    started = datetime.now(UTC)
+    results: dict = {}
+    full = disk_full()
+    if full is not None:
+        results[DISK] = full
+    runs = () if DISK in results else (("spypoint", sync_all), ("ubox", sync_ubox_all))
+    for provider, run in runs:
+        if jobs.lock_lost():
+            break  # another run took the lock over and fetches now
+        try:
+            results[provider] = run(db)
+        except Exception as exc:  # one provider's crash must not stop the other
+            db.rollback()
+            log.error("fetch.provider_failed", provider=provider, error=str(exc))
+            results[provider] = {
+                "status": "error", "total": 0,
+                "reason": stored("fetch.provider_failed", provider=PROVIDERS[provider],
+                                 error=type(exc).__name__),
+            }
+    return _summary(db, started, results), results
+
+
+def room_to_fetch(db: Session) -> bool:
+    """For a one-off import (a new login's first, the history pull): False when the
+    photos' disk is nearly full, with the reason left where the Check button and
+    Settings read the last fetch, so they say why nothing came in."""
+    full = disk_full()
+    if full is None:
+        return True
+    finish(db, _summary(db, datetime.now(UTC), {DISK: full}))
+    return False
 
 
 def finish(db: Session, row: SyncLog, error: str | None = None) -> None:
@@ -122,7 +169,7 @@ def check_and_recount(db: Session) -> tuple[dict, str | None]:
     except Exception as exc:
         db.rollback()
         log.error("fetch.ai_failed", error=str(exc))
-        error = f"Looking for animals failed ({type(exc).__name__})"
+        error = stored("fetch.ai_failed", error=type(exc).__name__)
     if jobs.lock_lost():
         return results, error  # the run that took the lock over recounts
     try:

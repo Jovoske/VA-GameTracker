@@ -13,6 +13,7 @@ from app.api import (
     routes_client_errors,
     routes_estate,
     routes_forecast,
+    routes_harvests,
     routes_health,
     routes_images,
     routes_insights,
@@ -25,12 +26,23 @@ from app.api import (
     routes_users,
     routes_zones,
 )
+from app.api.refusal import Refusal, refusal_handler
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.i18n import LanguageMiddleware
+from app.version import __version__
 
 configure_logging()
 
-app = FastAPI(title="GameSense API", version="0.1.0")
+# The interactive docs are a map of every endpoint, admin ones included: off on the
+# public address unless ENABLE_API_DOCS is set (audit K-12).
+_docs = settings.enable_api_docs
+app = FastAPI(
+    title="GameSense API", version=__version__,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +51,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# What the server says is in the person's language (app.i18n): the Accept-Language
+# the app sends, until the signed-in person's own takes over.
+app.add_middleware(LanguageMiddleware)
+# A refusal the app acts on carries a code next to its words (api.refusal).
+app.add_exception_handler(Refusal, refusal_handler)
 
 API_PREFIX = "/api"
 app.include_router(routes_health.router, prefix=API_PREFIX)
@@ -62,6 +79,7 @@ app.include_router(routes_photos.router, prefix=API_PREFIX)
 app.include_router(routes_map.router, prefix=API_PREFIX)
 app.include_router(routes_notes.router, prefix=API_PREFIX)
 app.include_router(routes_client_errors.router, prefix=API_PREFIX)
+app.include_router(routes_harvests.router, prefix=API_PREFIX)
 
 import mimetypes
 import os

@@ -24,6 +24,8 @@ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42
 const clock=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 const nightOf=t=>{const p=Object.fromEntries(clock.formatToParts(new Date(t)).map(x=>[x.type,x.value]));return new Date(Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute)-6*3600e3).toISOString().slice(0,10)};
 const ago=m=>new Date(Date.now()-m*60e3).toISOString();
+// Madrid's offset from UTC now, in ms (the wall clock minus the instant).
+const madridOffset=()=>{const p=Object.fromEntries(clock.formatToParts(new Date()).map(x=>[x.type,x.value]));return Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute)-Math.floor(Date.now()/60e3)*60e3};
 
 // ── fixtures ──
 const species=[['wild_boar','Wild Boar'],['red_deer','Red Deer'],['fox','Fox']].map(([id,common_name])=>({id,common_name,huntable:true,hidden:false,is_priority:false,detections:40}));
@@ -36,6 +38,8 @@ const cameras=[{id:'c1',name:'Charca',provider_name:null,name_is_custom:false,ca
 let feed=Array.from({length:200},(_,i)=>({image_id:`p${i}`,file_url:`/api/images/p${i}/file`,captured_at:ago(30+i*7),camera:'Charca',camera_id:'c1',label:'Wild boar',species_id:'wild_boar',group_size:1,notes_count:0}));
 const reports=[];
 // ── the server: dist/ plus fixtures, and the link's condition ──
+// brokenPlan: a plan no server sends (its classes a string), so Tonight throws. No best
+// hours (best_window null) is a real answer now: animals never seen when you can sit.
 const net={mode:'pass',only:null,missing:null,missingOnce:false,swBuild:null,brokenPlan:false,hangMe:false,entryMissing:false};
 const NEW_ENTRY='/assets/index-NEXTBUILD.js';
 const types={'.js':'text/javascript','.css':'text/css','.html':'text/html','.json':'application/json','.webmanifest':'application/manifest+json','.png':'image/png','.woff2':'font/woff2','.svg':'image/svg+xml'};
@@ -45,7 +49,7 @@ function answerApi(req,res,u){
  if(req.method==='POST'&&p==='/client-errors'){let b='';req.on('data',c=>b+=c);req.on('end',()=>{reports.push(JSON.parse(b));json(res,{status:'saved'},202)});return}
  if(/^\/images\/[^/]+\/(thumb|file)$/.test(p)){res.writeHead(200,{'Content-Type':'image/png'});return res.end(png)}
  if(p==='/auth/me')return json(res,{id:'me',email:'owner@estate.local',role:'admin'});
- if(p==='/forecast/tonight'){const sp=u.searchParams.get('species');return json(res,net.brokenPlan?{...plan('Wild Boar'),recommended:{...plan('Wild Boar').recommended,best_window:null}}:plan(sp?species.find(s=>s.id===sp)?.common_name??sp:'Wild Boar'))}
+ if(p==='/forecast/tonight'){const sp=u.searchParams.get('species');return json(res,net.brokenPlan?{...plan('Wild Boar'),recommended:{...plan('Wild Boar').recommended,classes:'broken'}}:plan(sp?species.find(s=>s.id===sp)?.common_name??sp:'Wild Boar'))}
  if(p==='/analytics/overview')return json(res,overview);
  if(p==='/alerts')return json(res,[]);
  if(p==='/species')return json(res,species);
@@ -124,7 +128,8 @@ const server=http.createServer((req,res)=>{
   set({mode:'drop'});
   const later=await open(ctx);await later.clock.install({time:new Date(Date.now()+14*3600e3)});
   await later.goto(base+'/');await later.locator('.tn-verdict').waitFor();
-  await waitFresh(later,/^No signal\. Plan from 14 h ago\./);await later.close();
+  // 14 h on from after 16:00 is past 06:00, when the plan is last night's and says so.
+  await waitFresh(later,/^No signal\. Plan from 14 h ago(\.|, made for last night\.)/);await later.close();
   // One bar: the page gives up on /stands first, so the worker never answers. With
   // nothing saved of its own, the page reads the worker's copy itself (J-06).
   set({});await page.goto(base+'/stands');await page.locator('#stand-s1').waitFor();
@@ -192,7 +197,7 @@ const server=http.createServer((req,res)=>{
   assert.ok(!kept.some(k=>k.startsWith('gs_cache:/forecast/tonight')),'the saved plan that broke Tonight is dropped');
   assert.ok(kept.includes('gs_cache:/stands')&&kept.includes('gs_cache:/sits'),'Stands’ saved copies are not Tonight’s to drop');
   await page.waitForTimeout(500);
-  assert.ok(reports.some(r=>r.kind==='render'&&r.route==='/'&&/start_hour/.test(r.message)&&r.at),'a page that throws is reported, with when');
+  assert.ok(reports.some(r=>r.kind==='render'&&r.route==='/'&&/classes/.test(r.message)&&r.at),'a page that throws is reported, with when');
   set({});await page.getByRole('link',{name:'Go to Tonight'}).click();await page.locator('.tn-verdict').waitFor();
   assert.equal(await page.locator('.crashed').count(),0,'“Go to Tonight” on Tonight tries it again');
   await ctx.close();
@@ -209,12 +214,16 @@ const server=http.createServer((req,res)=>{
   const ctx=await context(),page=await open(ctx);const asked=[];
   page.on('request',r=>{if(r.url().includes('/api/'))asked.push(new URL(r.url()).pathname+new URL(r.url()).search)});
   await page.goto(base+'/');await waitFresh(page,/^Plan from just now\./);
-  await page.evaluate(()=>{const k='gs_cache:/forecast/tonight',v=JSON.parse(localStorage.getItem(k));v.at=new Date(Date.now()-40*60e3).toISOString();localStorage.setItem(k,JSON.stringify(v))});
+  // 40 minutes old, unless that is before this morning's 06:00 (a plan from before it is
+  // last night's, and says so): then as old as it can be and still be tonight's.
+  const sinceCutover=Math.floor((Date.now()-Date.parse(`${nightOf(Date.now())}T06:00:00Z`)+madridOffset())/60e3);
+  const age=sinceCutover>41?40:Math.max(2,sinceCutover-1);
+  await page.evaluate(age=>{const k='gs_cache:/forecast/tonight',v=JSON.parse(localStorage.getItem(k));v.at=new Date(Date.now()-age*60e3).toISOString();localStorage.setItem(k,JSON.stringify(v))},age);
   set({mode:'hang',only:/^\/api\/forecast\/tonight$/});
   const t0=Date.now();await page.reload();await page.locator('.tn-verdict').waitFor({timeout:5000});
   assert.ok(Date.now()-t0<3000,'the saved plan is painted first on a link that never answers');
-  assert.match(await fresh(page),/^Plan from 40 min ago\. Checking for a newer one…/);
-  await waitFresh(page,/^No answer from the server\. Plan from 40 min ago\./);
+  assert.match(await fresh(page),new RegExp(`^Plan from ${age} min ago\\. Checking for a newer one…`));
+  await waitFresh(page,new RegExp(`^No answer from the server\\. Plan from ${age} min ago\\.`));
   set({});await page.reload();await waitFresh(page,/^Plan from just now\./);
   set({mode:'drop',only:/^\/api\/forecast\/tonight$/});
   await page.locator('.tn-chip',{hasText:'Red Deer'}).click();
@@ -282,13 +291,16 @@ const server=http.createServer((req,res)=>{
   const ctx=await context(),page=await open(ctx);await page.clock.install();
   await page.goto(base+'/photos');await page.locator('.photos-tile').nth(59).waitFor();
   for(const n of [60,120]){await page.locator('.photos-more').click();await page.waitForFunction(n=>document.querySelectorAll('.photos-tile').length>n,n)}
-  await page.locator('.photos-tile').nth(150).click();await page.getByText('Photo 151 of 180').first().waitFor();
+  await page.locator('.photos-tile').nth(150).click();
+  // The viewer by its name: at 390px the toolbar's own copy of it is squeezed out
+  // once Wrong? shows for someone who can fix photos.
+  await page.getByRole('dialog',{name:/Photo 151 of 180/}).waitFor();
   // One camera delivers late: a photo taken between the two newest on screen.
   const between=new Date((Date.parse(feed[0].captured_at)+Date.parse(feed[1].captured_at))/2).toISOString();
   feed=[{...feed[0],image_id:'new1',file_url:'/api/images/new1/file',captured_at:new Date().toISOString()},feed[0],{...feed[0],image_id:'late1',file_url:'/api/images/late1/file',camera:'Encinar',captured_at:between},...feed.slice(1)];
   const back=()=>page.evaluate(()=>{document.dispatchEvent(new Event('visibilitychange'));window.dispatchEvent(new Event('focus'))});
   await page.clock.fastForward('03:00');await back();await page.waitForTimeout(800);
-  assert.ok(await page.getByText('Photo 151 of 180').count(),'back with a photo open: no crash, the same photo');
+  assert.ok(await page.getByRole('dialog',{name:/Photo 151 of 180/}).count(),'back with a photo open: no crash, the same photo');
   await page.keyboard.press('Escape');await page.clock.fastForward('03:00');await back();
   await page.waitForFunction(()=>document.querySelectorAll('.photos-tile').length===182);
   assert.equal(await page.locator('.photos-tile').count(),182,'the newer photo on top, the pages already loaded kept');

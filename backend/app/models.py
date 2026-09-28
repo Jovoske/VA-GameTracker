@@ -44,8 +44,22 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False, default="admin")
+    # Every sign-in token carries the version it was made under (app.core.security);
+    # one from an older version is refused. Changing the password moves it on, so the
+    # phone that was lost is signed out everywhere with it (audit D-07).
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # The language the app and the server speak to this person, pushes included
+    # (app.i18n): en, fi, sv, nb or es. English until they pick another.
+    language: Mapped[str] = mapped_column(
+        String, nullable=False, default="en", server_default=text("'en'")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','member','viewer')", name="role_valid"),
+        CheckConstraint("language IN ('en','fi','sv','nb','es')", name="language_valid"),
+    )
 
 
 class CameraAccount(Base):
@@ -57,7 +71,13 @@ class CameraAccount(Base):
     __tablename__ = "camera_accounts"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     estate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("estates.id"), nullable=False)
-    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # Who added it, when that person has since been removed (their email): the login
+    # keeps fetching, the admin who removed them owns it now, and Settings says
+    # "Added by <them>" so the owner can decide later (routes_users.delete_user).
+    former_owner: Mapped[str | None] = mapped_column(String)
     label: Mapped[str | None] = mapped_column(String)
     provider: Mapped[str] = mapped_column(
         String, nullable=False, default="spypoint", server_default="spypoint"
@@ -121,6 +141,14 @@ class Camera(Base):
     )
     lat: Mapped[float | None] = mapped_column(Float)
     lon: Mapped[float | None] = mapped_column(Float)
+    # Someone placed it on the map: the provider's GPS (often a cell-tower guess) no
+    # longer moves it at the next sync. provider_lat/lon keep what the provider last
+    # reported, so the camera's own position is one tap away (like provider_name).
+    location_is_custom: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    provider_lat: Mapped[float | None] = mapped_column(Float)
+    provider_lon: Mapped[float | None] = mapped_column(Float)
     altitude_m: Mapped[float | None] = mapped_column(Float)
     model: Mapped[str | None] = mapped_column(String)
     battery_pct: Mapped[int | None] = mapped_column(Integer)
@@ -144,6 +172,14 @@ class Camera(Base):
     # stay. Its own column, not `active`: a login that still lists a camera in a
     # drawer would switch that straight back on.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Suntek (FTP or email): how far ahead of the server's receipt the camera's clock
+    # ran on its last photo that came in straight away, in minutes, when a whole-hour
+    # error was put right (a camera that missed the clock change); 0 once photos
+    # arrive on time again. NULL until the check has seen a photo.
+    clock_ahead_min: Mapped[int | None] = mapped_column(Integer)
+    # Photos in a row that came in on time since the clock was last found fast: it is
+    # called right again only after a few (ftp_import.ON_TIME_TO_CLEAR).
+    clock_ok_photos: Mapped[int | None] = mapped_column(Integer)
     # SPYPOINT: every photo captured up to here has been listed, so a routine fetch
     # pages back to it (less an overlap) rather than reading only the newest page.
     photos_listed_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -240,7 +276,10 @@ class Zone(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     polygon: Mapped[dict] = mapped_column(JSONB, nullable=False)  # GeoJSON Polygon
     notes: Mapped[str | None] = mapped_column(Text)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Removing the person keeps the area (it is the estate's), with no name on it.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint("kind IN ('bedding','feeding','water','no_go')", name="zone_kind_valid"),
@@ -276,6 +315,10 @@ class Image(Base):
     spypoint_photo_id: Mapped[str | None] = mapped_column(String, unique=True)
     ubox_event_id: Mapped[str | None] = mapped_column(String, unique=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # When the server got it (FTP and email: the receiver's or the mail server's
+    # clock). The Cameras page reads how long photos take to arrive from it, which is
+    # how a camera clock running slow shows (audit H-17). NULL for the other sources.
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     original_path: Mapped[str | None] = mapped_column(String)
     # The small WebP the grids and the map show, made on first request (routes_images).
     thumbnail_path: Mapped[str | None] = mapped_column(String)
@@ -302,6 +345,18 @@ class Image(Base):
     ai_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The box confidence the detector ran at; NULL = an older build, at its 0.25.
     detector_conf: Mapped[float | None] = mapped_column(Float)
+    # MegaDetector's other two classes (app.ai.detector): the surest person box and
+    # the surest vehicle box in the frame, 0 for none; NULL = not looked for yet (an
+    # older build). Kept as confidences, like animal_conf, so the bar can be moved
+    # without looking again: api/visibility.PEOPLE says which frames are people, and
+    # keeps them out of every shared list and every count (feature 25).
+    person_conf: Mapped[float | None] = mapped_column(Float)
+    vehicle_conf: Mapped[float | None] = mapped_column(Float)
+    # An admin looked and nobody is in it (a feeder read as a vehicle): it is an
+    # animal photo like any other again, whatever the detector said.
+    people_cleared: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         Index("ix_images_camera_captured", "camera_id", "captured_at"),
@@ -539,7 +594,11 @@ class Sit(Base):
     __tablename__ = "sits"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
     stand_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stands.id"), nullable=False)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Removing the person keeps their sits and what they reported: the ground truth
+    # is the estate's. Only who sat goes (routes_users.delete_user).
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
     night: Mapped[date] = mapped_column(Date, nullable=False)
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -553,7 +612,13 @@ class Sit(Base):
     # be scored against what actually happened instead of quietly rewritten.
     wind_status: Mapped[str | None] = mapped_column(String)
     wind_text: Mapped[str | None] = mapped_column(Text)
+    # The moment that verdict was judged for: the sit time when it was reserved
+    # (45 min after sunset), or the reservation itself after dark.
+    wind_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
+    # A SHOT that left nothing to log (a miss, or an animal not found): the hunter
+    # said so, and the morning's "Log what you shot" card stops asking (feature 23).
+    no_harvest_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
         CheckConstraint(
             "outcome IN ('unreported','nothing','seen','shootable_no_shot','shot','cancelled')",
@@ -568,6 +633,62 @@ class Sit(Base):
             "uq_sits_stand_night_live", "stand_id", "night",
             unique=True, postgresql_where=text("outcome <> 'cancelled'"),
         ),
+    )
+
+
+class Harvest(Base):
+    """An animal taken on the estate: one line of the owner's harvest book.
+
+    Logged the morning after a SHOT, from the sit it came from, or later by hand (a
+    sit is optional: a driven hunt, or a sit nobody reserved). The season's lines are
+    the annual return, exported as a CSV from Settings (routes_harvests). Nothing on
+    screen counts or ranks them: no tallies and no leaderboards (redesign 03 §11).
+
+    `hunter` is the name the record carries, as written when it was logged: removing
+    the person keeps the line and its name (user_id goes NULL), and an admin can
+    write a guest's name. `seal` is the tag (precinto) number, where one is used.
+    """
+
+    __tablename__ = "harvests"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    sit_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sits.id", ondelete="SET NULL"))
+    stand_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("stands.id", ondelete="SET NULL")
+    )
+    # Who shot it, while they are on the app; `hunter` keeps the name either way.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    hunter: Mapped[str] = mapped_column(String(60), nullable=False)
+    species_id: Mapped[str] = mapped_column(ForeignKey("species.id"), nullable=False)
+    sex: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default=text("'unknown'")
+    )
+    age_class: Mapped[str] = mapped_column(
+        String, nullable=False, default="unknown", server_default=text("'unknown'")
+    )
+    seal: Mapped[str | None] = mapped_column(String(40))
+    weight_kg: Mapped[float | None] = mapped_column(Float)
+    notes: Mapped[str | None] = mapped_column(String(500))
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Who wrote it down (the hunter, or an admin for them).
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint("sex IN ('male','female','unknown')", name="sex_valid"),
+        CheckConstraint(
+            "age_class IN ('juvenile','young_adult','mature_adult','old','unknown')",
+            name="age_valid",
+        ),
+        CheckConstraint("weight_kg IS NULL OR (weight_kg > 0 AND weight_kg < 1000)",
+                        name="weight_valid"),
+        Index("ix_harvests_taken_at", "taken_at"),
+        Index("ix_harvests_sit_id", "sit_id"),
     )
 
 
@@ -606,6 +727,16 @@ class NotificationPref(Base):
     # Every camera is on until muted, so a camera added later is heard by default.
     muted_camera_ids: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Quiet hours on the estate's clock (22:30 to 07:00 runs over midnight); both or
+    # neither. Nothing buzzes inside them: what comes in waits, and arrives as one
+    # message when they end (app.notifications.hold).
+    quiet_start: Mapped[time | None] = mapped_column(Time)
+    quiet_end: Mapped[time | None] = mapped_column(Time)
+    # Opted in to tonight's plan, once a day about two hours before sunset
+    # (app.notifications.plan).
+    plan_push: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -683,8 +814,15 @@ class Notification(Base):
     image_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("images.id", ondelete="SET NULL")
     )
-    # sent / failed / no_subscription — how delivery went, for the settings screen.
+    # How delivery went, for the settings screen: sent, updated (a quiet update of a
+    # banner already on the phone), held (waiting for a sit or quiet hours to end),
+    # in_summary (went out in the one message after them), skipped, failed,
+    # no_subscription.
     push_status: Mapped[str | None] = mapped_column(String)
+    # What a sighting counted ({"visits", "cameras": {name: visits}, "first_at",
+    # "latest_at"}), so a later update or the message after a sit can add them up;
+    # "held" says why it waited, and a plan names its "night".
+    detail: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

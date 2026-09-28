@@ -33,6 +33,19 @@ def _columns(engine, table: str) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
+def _user_keys(engine) -> list[tuple[str, str, str]]:
+    """[(table, key name, on-delete code)] of the keys to users that removing a person
+    must not trip over: sits.user_id, zones.created_by, camera_accounts.owner_user_id."""
+    with engine.connect() as c:
+        return [tuple(r) for r in c.execute(text(
+            "SELECT c.conrelid::regclass::text, c.conname, c.confdeltype::text "
+            "FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid "
+            "AND a.attnum = ANY (c.conkey) WHERE c.contype = 'f' "
+            "AND c.confrelid = 'users'::regclass AND (c.conrelid::regclass::text, a.attname) "
+            "IN (('sits','user_id'),('zones','created_by'),('camera_accounts','owner_user_id')) "
+            "ORDER BY 1")).all()]
+
+
 def _index(engine, table: str, name: str) -> list[str] | None:
     """The columns of index `name` on `table`, or None when there is no such index."""
     for ix in inspect(engine).get_indexes(table):
@@ -80,6 +93,22 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         assert _index(eng, "sits", "uq_sits_stand_night_live") == ["stand_id", "night"]
         assert _columns(eng, "cameras")["retired_at"] == "timestamp with time zone"
         assert {"corrected_at", "corrected_by"} <= set(_columns(eng, "detections"))
+        assert _columns(eng, "sits")["wind_at"] == "timestamp with time zone"
+        assert _columns(eng, "cameras")["clock_ahead_min"] == "integer"
+        assert _columns(eng, "users")["token_version"] == "integer"
+        assert "former_owner" in _columns(eng, "camera_accounts")
+        assert {code for _, _, code in _user_keys(eng)} == {"n"}
+        prefs = _columns(eng, "notification_prefs")
+        assert prefs["quiet_start"] == "time without time zone"
+        assert prefs["plan_push"] == "boolean"
+        assert _columns(eng, "notifications")["detail"] == "jsonb"
+        assert set(_columns(eng, "harvests")) == {
+            "id", "sit_id", "stand_id", "user_id", "hunter", "species_id", "sex", "age_class",
+            "seal", "weight_kg", "notes", "taken_at", "created_by", "created_at", "updated_at",
+        }
+        assert _index(eng, "harvests", "ix_harvests_taken_at") == ["taken_at"]
+        assert {"person_conf", "vehicle_conf", "people_cleared"} <= set(images)
+        assert _columns(eng, "sits")["no_harvest_at"] == "timestamp with time zone"
     finally:
         eng.dispose()
 
@@ -144,6 +173,17 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert _index(eng, "sits", "uq_sits_stand_night_live")
         assert "retired_at" in _columns(eng, "cameras")
         assert "corrected_by" in _columns(eng, "detections")
+        assert "wind_at" in _columns(eng, "sits")
+        assert {"clock_ahead_min", "clock_ok_photos"} <= set(_columns(eng, "cameras"))
+        assert "received_at" in _columns(eng, "images")
+        assert "token_version" in _columns(eng, "users")
+        assert {code for _, _, code in _user_keys(eng)} == {"n"}
+        assert {"quiet_start", "quiet_end", "plan_push"} <= set(_columns(eng, "notification_prefs"))
+        assert "detail" in _columns(eng, "notifications")
+        assert _columns(eng, "harvests")
+        assert "people_cleared" in _columns(eng, "images")
+        assert "no_harvest_at" in _columns(eng, "sits")
+        assert "language" in _columns(eng, "users")
     finally:
         eng.dispose()
 
@@ -403,7 +443,6 @@ def test_camera_views_upgrade_down_and_up_again_keeping_the_photos(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -459,7 +498,6 @@ def test_image_arrivals_index_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -526,7 +564,6 @@ def test_camera_alerts_and_photo_notes_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -633,7 +670,6 @@ def test_camera_login_status_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -695,7 +731,6 @@ def test_client_errors_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -790,7 +825,6 @@ def test_ai_checking_upgrade_puts_old_misreads_right_and_goes_down_and_up_again(
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -833,10 +867,11 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
                 "INSERT INTO users (id,estate_id,email,password_hash,role) "
                 "VALUES (gen_random_uuid(),:e,:m,'h','member') RETURNING id"
             ), {"e": estate_id, "m": m}).scalar_one() for m in ("alice@x.local", "bob@x.local"))
-            ridge, oak, pine = (c.execute(text(
+            ridge, oak, pine, bridge = (c.execute(text(
                 "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,:n) "
                 "RETURNING id"
-            ), {"e": estate_id, "n": n}).scalar_one() for n in ("Ridge", "Oak", "Pine"))
+            ), {"e": estate_id, "n": n}).scalar_one()
+                for n in ("Ridge", "Oak", "Pine", "Bridge"))
 
             def sit(stand, user, night, outcome="unreported", started=False, mins=0, notes=None):
                 return c.execute(text(
@@ -855,12 +890,19 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
             idle = sit(oak, alice, "2026-09-21", mins=30, notes="Bring the chair")
             sat = sit(oak, bob, "2026-09-21", started=True, mins=5)
             alone = sit(pine, alice, "2026-09-20")
+            # Bridge: Alice reported a shot without starting; Bob started and saw. The
+            # shot is the higher report and a report never goes down: it is kept.
+            shot = sit(bridge, alice, "2026-09-22", outcome="shot", mins=60, notes="second")
+            seen = sit(bridge, bob, "2026-09-22", outcome="seen", started=True, mins=5)
 
         command.upgrade(cfg, "head")
         with eng.begin() as c:
             rows = {r[0]: r[1:] for r in c.execute(text(
                 "SELECT id, outcome, notes, reported_at FROM sits")).all()}
-            assert len(rows) == 6
+            assert len(rows) == 8
+            assert rows[shot][:2] == ("shot", "second")
+            assert rows[seen][0] == "cancelled"
+            assert rows[seen][1].endswith("Reported: seen.")
             assert rows[used][:2] == ("seen", None)
             assert rows[sat][:2] == ("unreported", None)
             assert rows[alone][:2] == ("unreported", None)
@@ -884,7 +926,6 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -894,7 +935,7 @@ def test_sit_reports_upgrade_down_and_up_again(fresh_db):
         assert "reported_at" not in _columns(eng, "sits")
         assert _index(eng, "sits", "uq_sits_stand_night_live") is None
         with eng.connect() as c:
-            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 7
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 9
             assert c.execute(text("SELECT outcome FROM sits WHERE id=:s"),
                              {"s": first}).scalar_one() == "cancelled"
 
@@ -944,7 +985,6 @@ def test_camera_retired_upgrade_down_and_up_again(fresh_db):
             assert c.execute(text("SELECT count(*) FROM camera_nights")).scalar_one() == 1
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1028,7 +1068,6 @@ def test_species_fixes_upgrade_down_and_up_again(fresh_db):
         with eng.connect() as c:
             from alembic.autogenerate import compare_metadata
             from alembic.migration import MigrationContext
-
             from app.core.db import Base
 
             diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
@@ -1050,3 +1089,545 @@ def test_species_fixes_upgrade_down_and_up_again(fresh_db):
             assert dict(c.execute(text("SELECT id, common_name FROM species")).all()) == names
     finally:
         eng.dispose()
+
+
+@requires_db
+def test_wind_time_and_camera_clock_upgrade_down_and_up_again(fresh_db):
+    """0026 on a real 0025 database: sits reserved before it keep their verdict and
+    say no time for it, cameras have no clock check yet, photos stored before it have
+    no receipt time, nothing else moves; down drops only the four columns; up again
+    is a no-op."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0025_species_fixes")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0025 shape first.
+            c.execute(text("ALTER TABLE sits DROP COLUMN wind_at"))
+            c.execute(text("ALTER TABLE cameras DROP COLUMN clock_ahead_min"))
+            c.execute(text("ALTER TABLE cameras DROP COLUMN clock_ok_photos"))
+            c.execute(text("ALTER TABLE images DROP COLUMN received_at"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            cam = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,name_is_custom,active,import_failures) "
+                "VALUES (gen_random_uuid(),:e,'Suntek',false,true,'{}') RETURNING id"),
+                {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,download_attempts,reviewed,"
+                "ai_attempts) VALUES (gen_random_uuid(),:c,'2026-09-20 21:00+02',0,false,0)"),
+                {"c": cam})
+            stand = c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,'Puente') "
+                "RETURNING id"), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO sits (id,stand_id,night,outcome,wind_status,wind_text) "
+                "VALUES (gen_random_uuid(),:s,'2026-09-20','seen','clean','Wind S 15 km/h')"),
+                {"s": stand})
+
+        command.upgrade(cfg, "0026_wind_time_and_camera_clock")
+        with eng.connect() as c:
+            sit = c.execute(text("SELECT outcome, wind_status, wind_text, wind_at FROM sits")).one()
+            assert tuple(sit) == ("seen", "clean", "Wind S 15 km/h", None)
+            cam = c.execute(text(
+                "SELECT name, clock_ahead_min, clock_ok_photos FROM cameras")).one()
+            assert tuple(cam) == ("Suntek", None, None)
+            img = c.execute(text("SELECT captured_at IS NOT NULL, received_at FROM images")).one()
+            assert tuple(img) == (True, None)
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        with eng.begin() as c:
+            c.execute(text("UPDATE sits SET wind_at = now()"))
+            c.execute(text("UPDATE cameras SET clock_ahead_min = 60, clock_ok_photos = 1"))
+            c.execute(text("UPDATE images SET received_at = captured_at + interval '2 min'"))
+        command.downgrade(cfg, "0025_species_fixes")
+        assert "wind_at" not in _columns(eng, "sits")
+        assert not {"clock_ahead_min", "clock_ok_photos"} & set(_columns(eng, "cameras"))
+        assert "received_at" not in _columns(eng, "images")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT wind_status FROM sits")).scalar_one() == "clean"
+            assert c.execute(text("SELECT count(*) FROM cameras")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0025_species_fixes")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "wind_at" in _columns(eng, "sits")
+        assert {"clock_ahead_min", "clock_ok_photos"} <= set(_columns(eng, "cameras"))
+        assert "received_at" in _columns(eng, "images")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_camera_location_custom_upgrade_down_and_up_again(fresh_db):
+    """0027 on a real 0026 database: a placed camera with no SPYPOINT id can only have
+    been placed by hand, so it is marked custom; a SPYPOINT camera keeps following
+    its own GPS, as it did; positions stay through down and up again."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0026_wind_time_and_camera_clock")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0026 shape first.
+            for col in ("location_is_custom", "provider_lat", "provider_lon"):
+                c.execute(text(f"ALTER TABLE cameras DROP COLUMN {col}"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            for name, spy, lat, lon in (("UBox charca", None, 39.09, -1.36),
+                                        ("PL19", "sp-19", 39.1, -1.35),
+                                        ("FTP loma", None, None, None)):
+                c.execute(text(
+                    "INSERT INTO cameras (id,estate_id,name,spypoint_id,lat,lon,name_is_custom,"
+                    "active,import_failures) VALUES (gen_random_uuid(),:e,:n,:s,:lat,:lon,"
+                    "false,true,'{}')"), {"e": estate, "n": name, "s": spy, "lat": lat, "lon": lon})
+
+        command.upgrade(cfg, "0027_camera_location_custom")
+        with eng.connect() as c:
+            rows = c.execute(text("SELECT name, lat, lon, location_is_custom, provider_lat "
+                                  "FROM cameras ORDER BY name")).all()
+            assert [tuple(r) for r in rows] == [
+                ("FTP loma", None, None, False, None),
+                ("PL19", 39.1, -1.35, False, None),
+                ("UBox charca", 39.09, -1.36, True, None),
+            ]
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+
+        command.downgrade(cfg, "0026_wind_time_and_camera_clock")
+        assert "location_is_custom" not in _columns(eng, "cameras")
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT lat FROM cameras WHERE name='UBox charca'")).scalar_one() == 39.09
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0026_wind_time_and_camera_clock")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"location_is_custom", "provider_lat", "provider_lon"} <= set(
+            _columns(eng, "cameras"))
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_access_security_upgrade_lets_a_person_go_and_goes_down_and_up_again(fresh_db):
+    """0028 on a real 0027 database, with the keys production has (Postgres' default
+    names from the raw SQL of 0006 and 0010, and no ON DELETE): removing a guest
+    who reserved a stand, drew an area and added a camera login failed; after it the
+    removal works and their sit, area and login stay. Existing sign-ins carry no
+    token version and keep working (version 0)."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0027_camera_location_custom")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0027 shape first.
+            c.execute(text("ALTER TABLE users DROP COLUMN token_version"))
+            c.execute(text("ALTER TABLE camera_accounts DROP COLUMN former_owner"))
+            for table, name, _ in _user_keys(eng):
+                c.execute(text(f'ALTER TABLE {table} DROP CONSTRAINT "{name}"'))
+            c.execute(text("ALTER TABLE camera_accounts ADD CONSTRAINT "
+                           "camera_accounts_owner_user_id_fkey FOREIGN KEY (owner_user_id) "
+                           "REFERENCES users(id)"))
+            c.execute(text("ALTER TABLE zones ADD CONSTRAINT zones_created_by_fkey "
+                           "FOREIGN KEY (created_by) REFERENCES users(id)"))
+            c.execute(text("ALTER TABLE sits ADD CONSTRAINT fk_sits_user_id_users "
+                           "FOREIGN KEY (user_id) REFERENCES users(id)"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            guest = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) VALUES "
+                "(gen_random_uuid(),:e,'guest@e.local','x','member') RETURNING id"),
+                {"e": estate}).scalar_one()
+            stand = c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,'Ridge') "
+                "RETURNING id"), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO sits (id,stand_id,user_id,night,outcome) VALUES "
+                "(gen_random_uuid(),:s,:u,'2026-09-20','seen')"), {"s": stand, "u": guest})
+            c.execute(text(
+                "INSERT INTO zones (id,estate_id,kind,name,polygon,created_by) VALUES "
+                "(gen_random_uuid(),:e,'bedding','Pinar','{}'::jsonb,:u)"),
+                {"e": estate, "u": guest})
+            c.execute(text(
+                "INSERT INTO camera_accounts (id,estate_id,owner_user_id,username,password_enc,"
+                "active,provider,ubox_min_interval_seconds,ubox_max_images_per_day) VALUES "
+                "(gen_random_uuid(),:e,:u,'g@spy.es','x',true,'spypoint',60,500)"),
+                {"e": estate, "u": guest})
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id = :u"), {"u": guest})
+
+        command.upgrade(cfg, "0028_access_security")
+        assert {(t, n, code) for t, n, code in _user_keys(eng)} == {
+            ("camera_accounts", "fk_camera_accounts_owner_user_id_users", "n"),
+            ("sits", "fk_sits_user_id_users", "n"),
+            ("zones", "fk_zones_created_by_users", "n"),
+        }
+        with eng.connect() as c:
+            assert c.execute(text("SELECT token_version FROM users")).scalar_one() == 0
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM users WHERE id = :u"), {"u": guest})
+        with eng.connect() as c:
+            assert c.execute(text("SELECT outcome, user_id FROM sits")).one() == ("seen", None)
+            assert c.execute(text("SELECT name, created_by FROM zones")).one() == ("Pinar", None)
+            assert c.execute(text(
+                "SELECT username, owner_user_id FROM camera_accounts")).one() == ("g@spy.es", None)
+
+        command.downgrade(cfg, "0027_camera_location_custom")
+        assert "token_version" not in _columns(eng, "users")
+        assert "former_owner" not in _columns(eng, "camera_accounts")
+        assert {code for _, _, code in _user_keys(eng)} == {"a"}
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0027_camera_location_custom")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "token_version" in _columns(eng, "users")
+        assert len(_user_keys(eng)) == 3
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_quiet_alerts_and_plan_push_upgrade_down_and_up_again(fresh_db):
+    """0029 on a real 0028 database: everyone's alert choices and past alerts are
+    kept, nobody has quiet hours or the plan push until they turn them on, and the
+    alerts survive going down and up again."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0028_access_security")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0028 shape first.
+            for col in ("quiet_start", "quiet_end", "plan_push"):
+                c.execute(text(f"ALTER TABLE notification_prefs DROP COLUMN {col}"))
+            c.execute(text("ALTER TABLE notifications DROP COLUMN detail"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            user = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) "
+                "VALUES (gen_random_uuid(),:e,'ana@x.local','h','member') RETURNING id"
+            ), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO notification_prefs (user_id,enabled,species_ids,muted_camera_ids) "
+                "VALUES (:u,true,'[\"wild_boar\"]'::jsonb,'[]'::jsonb)"), {"u": user})
+            c.execute(text(
+                "INSERT INTO notifications (id,user_id,kind,title,body,push_status,created_at) "
+                "VALUES (gen_random_uuid(),:u,'sighting','Wild boar at PL19','1 visit at 22:14.',"
+                "'sent',now())"), {"u": user})
+
+        command.upgrade(cfg, "0029_quiet_alerts_and_plan_push")
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT enabled, species_ids, quiet_start, quiet_end, plan_push "
+                "FROM notification_prefs")).one()) == (True, ["wild_boar"], None, None, False)
+            assert tuple(c.execute(text(
+                "SELECT title, push_status, detail FROM notifications")).one()) == (
+                "Wild boar at PL19", "sent", None)
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("UPDATE notification_prefs SET quiet_start='23:00', "
+                           "quiet_end='07:00', plan_push=true"))
+            c.execute(text("UPDATE notifications SET detail='{\"visits\": 1}'::jsonb"))
+
+        command.downgrade(cfg, "0028_access_security")
+        assert "plan_push" not in _columns(eng, "notification_prefs")
+        assert "detail" not in _columns(eng, "notifications")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM notifications")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0028_access_security")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert {"quiet_start", "quiet_end", "plan_push"} <= set(
+            _columns(eng, "notification_prefs"))
+        assert "detail" in _columns(eng, "notifications")
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_harvest_and_people_upgrade_down_and_up_again(fresh_db):
+    """0030 on a real 0029 database: the photos and sits are kept, nobody's photo is
+    one of people until the detector has looked (NULL, not cleared), no sit is marked
+    "nothing to log", and the harvest book starts empty. A line survives removing the
+    hunter; going down takes the book and the new columns, and keeps the rest."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0029_quiet_alerts_and_plan_push")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0029 shape first.
+            c.execute(text("DROP TABLE harvests"))
+            for col in ("person_conf", "vehicle_conf", "people_cleared"):
+                c.execute(text(f"ALTER TABLE images DROP COLUMN {col}"))
+            c.execute(text("ALTER TABLE sits DROP COLUMN no_harvest_at"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            hunter = c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) VALUES "
+                "(gen_random_uuid(),:e,'pedro@e.local','x','member') RETURNING id"),
+                {"e": estate}).scalar_one()
+            stand = c.execute(text(
+                "INSERT INTO stands (id,estate_id,name) VALUES (gen_random_uuid(),:e,'Puente') "
+                "RETURNING id"), {"e": estate}).scalar_one()
+            sit = c.execute(text(
+                "INSERT INTO sits (id,stand_id,user_id,night,outcome) VALUES "
+                "(gen_random_uuid(),:s,:u,'2026-09-20','shot') RETURNING id"),
+                {"s": stand, "u": hunter}).scalar_one()
+            cam = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,name,active) VALUES "
+                "(gen_random_uuid(),:e,'PL19',true) RETURNING id"), {"e": estate}).scalar_one()
+            c.execute(text(
+                "INSERT INTO images (id,camera_id,captured_at,original_path,is_empty_frame,"
+                "animal_conf,reviewed) VALUES (gen_random_uuid(),:c,now(),'a.jpg',true,0.0,"
+                "false)"), {"c": cam})
+            c.execute(text("INSERT INTO species (id,common_name,is_priority) "
+                           "VALUES ('wild_boar','Wild boar',true)"))
+
+        command.upgrade(cfg, "0030_harvest_and_people")
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT is_empty_frame, person_conf, vehicle_conf, people_cleared FROM images"
+            )).one()) == (True, None, None, False)
+            assert tuple(c.execute(text("SELECT outcome, no_harvest_at FROM sits")).one()) == (
+                "shot", None)
+            assert c.execute(text("SELECT count(*) FROM harvests")).scalar_one() == 0
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text(
+                "INSERT INTO harvests (id,sit_id,stand_id,user_id,hunter,species_id,sex,"
+                "taken_at,created_by) VALUES (gen_random_uuid(),:s,:st,:u,'Pedro','wild_boar',"
+                "'male',now(),:u)"), {"s": sit, "st": stand, "u": hunter})
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE harvests SET weight_kg = -3"))
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE harvests SET age_class = 'ancient'"))
+        with eng.begin() as c:
+            c.execute(text("UPDATE sits SET user_id = NULL"))
+            c.execute(text("DELETE FROM users WHERE id = :u"), {"u": hunter})
+        with eng.connect() as c:
+            assert tuple(c.execute(text(
+                "SELECT hunter, user_id, created_by, sit_id IS NOT NULL FROM harvests")).one()) == (
+                "Pedro", None, None, True)
+
+        command.downgrade(cfg, "0029_quiet_alerts_and_plan_push")
+        assert not _columns(eng, "harvests")
+        assert "person_conf" not in _columns(eng, "images")
+        assert "no_harvest_at" not in _columns(eng, "sits")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM images")).scalar_one() == 1
+            assert c.execute(text("SELECT count(*) FROM sits")).scalar_one() == 1
+
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0029_quiet_alerts_and_plan_push")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "people_cleared" in _columns(eng, "images")
+        assert _index(eng, "harvests", "ix_harvests_sit_id") == ["sit_id"]
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_user_language_upgrade_down_and_up_again(fresh_db):
+    """0033 on a real 0030 database: everyone already there reads English, as before;
+    only the five languages the app speaks are accepted; going down takes the column
+    and keeps the people; going up again (or twice) is not an error."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0030_harvest_and_people")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            # 0001 builds today's ORM; restore the 0030 shape first.
+            c.execute(text("ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_language_valid"))
+            c.execute(text("ALTER TABLE users DROP COLUMN language"))
+            estate = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) VALUES (gen_random_uuid(),'E',"
+                "'Europe/Madrid') RETURNING id")).scalar_one()
+            for email, role in (("owner@e.local", "admin"), ("pedro@e.local", "member"),
+                                ("guest@e.local", "viewer")):
+                c.execute(text(
+                    "INSERT INTO users (id,estate_id,email,password_hash,role) VALUES "
+                    "(gen_random_uuid(),:e,:m,'x',:r)"), {"e": estate, "m": email, "r": role})
+        assert "language" not in _columns(eng, "users")
+
+        command.upgrade(cfg, "0033_user_language")
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT email, language FROM users ORDER BY email")).all() == [
+                ("guest@e.local", "en"), ("owner@e.local", "en"), ("pedro@e.local", "en")]
+            from alembic.autogenerate import compare_metadata
+            from alembic.migration import MigrationContext
+
+            from app.core.db import Base
+
+            diff = compare_metadata(MigrationContext.configure(c), Base.metadata)
+            assert [d for d in diff if "alembic_version" not in repr(d)] == []
+        with eng.begin() as c:
+            c.execute(text("UPDATE users SET language = 'fi' WHERE email = 'pedro@e.local'"))
+            c.execute(text(
+                "INSERT INTO users (id,estate_id,email,password_hash,role) SELECT "
+                "gen_random_uuid(),estate_id,'new@e.local','x','member' FROM users LIMIT 1"))
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT language FROM users WHERE email = 'new@e.local'")).scalar_one() == "en"
+        for bad in ("de", "EN", ""):
+            with pytest.raises(IntegrityError), eng.begin() as c:
+                c.execute(text("UPDATE users SET language = :l"), {"l": bad})
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE users SET language = NULL"))
+
+        command.downgrade(cfg, "0030_harvest_and_people")
+        assert "language" not in _columns(eng, "users")
+        with eng.connect() as c:
+            assert c.execute(text("SELECT count(*) FROM users")).scalar_one() == 4
+
+        command.upgrade(cfg, "head")
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT DISTINCT language FROM users")).scalars().all() == ["en"]
+        command.stamp(cfg, "0030_harvest_and_people")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert "language" in _columns(eng, "users")
+        with pytest.raises(IntegrityError), eng.begin() as c:
+            c.execute(text("UPDATE users SET language = 'de'"))
+    finally:
+        eng.dispose()
+
+
+def _foreign_keys(engine) -> set[tuple[str, str]]:
+    """{(table, key name)} of every foreign key in the database."""
+    with engine.connect() as c:
+        return {tuple(r) for r in c.execute(text(
+            "SELECT conrelid::regclass::text, conname FROM pg_constraint "
+            "WHERE contype = 'f' AND connamespace = 'public'::regnamespace")).all()}
+
+
+@requires_db
+def test_an_upgraded_server_names_its_keys_as_a_fresh_install_does(fresh_db):
+    """0025 named detections.corrected_by's key Postgres' way on a server that upgraded
+    through it (detections_corrected_by_fkey), where a fresh install has the models'
+    name, so a later migration dropping it by name would miss it there. Now 0025 names
+    it as the models do, and 0034 renames one an earlier 0025 made."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "head")
+    eng = create_engine(fresh_db)
+    try:
+        fresh = _foreign_keys(eng)
+        assert ("detections", "fk_detections_corrected_by_users") in fresh
+
+        # A real 0024 database upgraded through today's 0025.
+        command.downgrade(cfg, "0024_camera_retired")
+        assert "corrected_by" not in _columns(eng, "detections")
+        command.upgrade(cfg, "head")
+        assert _foreign_keys(eng) == fresh
+
+        # A server that ran the old 0025: Postgres' name, put right by 0034.
+        command.downgrade(cfg, "0033_user_language")
+        with eng.begin() as c:
+            c.execute(text("ALTER TABLE detections DROP CONSTRAINT "
+                           "fk_detections_corrected_by_users"))
+            c.execute(text("ALTER TABLE detections ADD FOREIGN KEY (corrected_by) "
+                           "REFERENCES users(id) ON DELETE SET NULL"))
+        assert ("detections", "detections_corrected_by_fkey") in _foreign_keys(eng)
+        command.upgrade(cfg, "head")
+        assert _foreign_keys(eng) == fresh
+        with eng.connect() as c:
+            assert c.execute(text(
+                "SELECT confdeltype FROM pg_constraint "
+                "WHERE conname = 'fk_detections_corrected_by_users'")).scalar_one() == "n"
+
+        command.downgrade(cfg, "0033_user_language")  # nothing to put back
+        command.stamp(cfg, "0033_user_language")
+        command.upgrade(cfg, "head")  # and again: a no-op, not an error
+        assert _foreign_keys(eng) == fresh
+    finally:
+        eng.dispose()
+
+
+def _drift(dsn: str, metadata=None) -> list:
+    """What autogenerate finds between the database at `dsn` and the models."""
+    import app.models  # noqa: F401
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+    from app.core.db import Base
+
+    eng = create_engine(dsn)
+    try:
+        with eng.connect() as conn:
+            diff = compare_metadata(MigrationContext.configure(conn), metadata or Base.metadata)
+    finally:
+        eng.dispose()
+    return [d for d in diff if "alembic_version" not in repr(d)]
+
+
+@requires_db
+def test_a_database_migrated_long_ago_upgrades_to_exactly_the_models(fresh_db):
+    """The guard the create_all convention lacked (audit H-08): start from the schema a
+    real, migrated database had (tests/fixtures/schema/snapshot.sql), not from
+    create_all(), and upgrade it. A model change that no migration carries is a
+    difference here, as it would be on the server."""
+    from . import schema_snapshot
+
+    schema_snapshot.load(fresh_db)
+    eng = create_engine(fresh_db)
+    try:
+        with eng.connect() as c:
+            at = c.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert at == schema_snapshot.revision()
+    finally:
+        eng.dispose()
+    command.upgrade(alembic_config(fresh_db), "head")
+    assert _drift(fresh_db) == [], "models.py has a change no migration makes"
+
+
+@requires_db
+def test_the_snapshot_guard_catches_a_column_added_with_no_migration(fresh_db):
+    """Proof that the check above can fail: a column on a copy of the models, with no
+    migration, is found, where the fresh-install test cannot see it."""
+    from sqlalchemy import Column, MetaData, String
+
+    from app.core.db import Base
+
+    from . import schema_snapshot
+
+    schema_snapshot.load(fresh_db)
+    command.upgrade(alembic_config(fresh_db), "head")
+    copy = MetaData(naming_convention=Base.metadata.naming_convention)
+    for table in Base.metadata.sorted_tables:
+        table.to_metadata(copy)
+    copy.tables["images"].append_column(Column("forgotten", String))
+    found = _drift(fresh_db, copy)
+    assert [(d[0], d[2], d[3].name) for d in found if isinstance(d, tuple)] == [
+        ("add_column", "images", "forgotten")]

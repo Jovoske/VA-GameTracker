@@ -27,7 +27,16 @@ from app.ingestion.spypoint import (
     SpypointPhoto,
     _capture_time,
 )
-from app.models import AppSetting, Camera, CameraAccount, Estate, Image, SyncLog, User
+from app.models import (
+    AppSetting,
+    Camera,
+    CameraAccount,
+    CameraNight,
+    Estate,
+    Image,
+    SyncLog,
+    User,
+)
 
 from .conftest import requires_db
 
@@ -159,7 +168,9 @@ def test_failed_download_is_retried_on_the_next_fetch(db_session, spypoint):
     db_session.refresh(lost)
     assert second["total"] == 1
     assert lost.original_path and lost.file_hash
-    with open(lost.original_path, "rb") as f:
+    from app.media import resolve
+
+    with open(resolve(lost.original_path), "rb") as f:
         assert f.read() == b"jpeg:https://cdn/sp-1-1.jpg"
     assert db_session.scalar(select(func.count(Image.id))) == 3  # no duplicate rows
 
@@ -225,6 +236,41 @@ def test_a_photo_the_fetch_gave_up_on_is_let_through_at_once(db_session, spypoin
     assert checking.check_photos(db_session)["no_file"] == 2
     assert given_up.processed_at is not None and no_link.processed_at is not None
     assert retrying.processed_at is None  # the fetch is still trying for its file
+
+
+@requires_db
+def test_a_cdn_down_for_hours_loses_no_photo_and_makes_no_empty_night(db_session, spypoint):
+    """Final review E2E-1: five fetches (an hour and a quarter) of a dead CDN used the
+    photo's five tries; SPYPOINT went on listing it with a fresh link, and it was never
+    fetched again. Let through with no file, its night read as watched, nothing in it."""
+    from app.ai import checking
+    from app.forecasting.exposure import night_expr, recompute_camera_nights
+
+    FakeSpypoint.cameras["owner@example.com"] = ["sp-1"]
+    FakeSpypoint.photos["sp-1"] = [SpypointPhoto("only", NOW - timedelta(hours=3),
+                                                 url="https://cdn/only.jpg")]
+    FakeSpypoint.dead_urls = {"https://cdn/only.jpg"}
+    for _ in range(sync.MAX_DOWNLOAD_ATTEMPTS + 3):
+        sync.sync_all(db_session)
+    photo = db_session.scalar(select(Image).where(Image.spypoint_photo_id == "only"))
+    assert photo.original_path is None
+    assert photo.download_attempts > sync.MAX_DOWNLOAD_ATTEMPTS
+
+    # The AI pass stops waiting for it, and its night is not one watched and empty.
+    assert checking.check_photos(db_session)["no_file"] == 1
+    recompute_camera_nights(db_session)
+    night = db_session.scalar(select(night_expr()).where(Image.id == photo.id))
+    state = db_session.scalar(select(CameraNight.exposure_state).where(CameraNight.night == night))
+    assert state == "UNPROCESSED"
+    assert checking.lost_count(db_session) == 1
+
+    # The CDN comes back and the next fetch lists it again: it comes in after all.
+    FakeSpypoint.dead_urls = set()
+    sync.sync_all(db_session)
+    db_session.refresh(photo)
+    assert photo.original_path is not None
+    assert photo.processed_at is None  # sent back to be checked for animals
+    assert checking.lost_count(db_session) == 0
 
 
 # ── E-02: an outage leaves no hole ──────────────────────────────────────────────

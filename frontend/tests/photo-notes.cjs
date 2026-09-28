@@ -71,7 +71,8 @@ const assert=require('node:assert/strict');
  await page.goto(base+'/photos');
  const wal=page.locator('.wal-tile').first();await wal.waitFor();
  assert.equal(await wal.locator('.wal-note').innerText(),'Big boar, third night running');
- assert.match(await wal.locator('.wal-who').innerText(),/^Pedro · \d\d:\d\d$/,'the note’s author and time');
+ // An hour ago is yesterday between midnight and one: the time then carries its day.
+ assert.match(await wal.locator('.wal-who').innerText(),/^Pedro · (\w{3} )?\d\d:\d\d$/,'the note’s author and time');
  assert.equal(await wal.locator('.wal-meta').innerText(),'Charca');
  assert.equal(await wal.locator('.wal-tag').innerText(),'Wild boar');
  const who=await wal.locator('.wal-who').evaluate(el=>el.scrollWidth<=el.clientWidth);

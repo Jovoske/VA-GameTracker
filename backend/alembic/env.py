@@ -17,7 +17,9 @@ _explicit = context.get_x_argument(as_dictionary=True).get("db_url") or (
     config.get_main_option("sqlalchemy.url", None) or ""
 ).strip()
 DB_URL = _explicit or settings.database_url
-config.set_main_option("sqlalchemy.url", DB_URL)
+# A config value takes % as the start of an interpolation, so the %-escapes a URL may
+# carry (a password's %40) are written %%.
+config.set_main_option("sqlalchemy.url", DB_URL.replace("%", "%%"))
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 

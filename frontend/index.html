@@ -18,6 +18,23 @@
   <body>
     <div id="root"></div>
     <script>
+      // In the language this phone chose (its words stamped here by the build from the
+      // app's dictionaries, vite.config.ts), before the app's code has arrived.
+      var GS_BOOT = /*__GS_BOOT__*/null
+      var gsBoot = (function () {
+        var code = 'en'
+        try { code = localStorage.getItem('gs_lang') || 'en' } catch (e) {}
+        var all = GS_BOOT || {}
+        if (!all[code]) code = 'en'
+        document.documentElement.lang = code
+        var words = all[code] || { slow: 'GameSense is taking a long time to open.', why: 'No signal, or the app was just updated.', reload: 'Reload' }
+        // The install description in this language too.
+        if (words.manifest) {
+          var link = document.querySelector('link[rel=manifest]')
+          if (link) link.setAttribute('href', words.manifest)
+        }
+        return words
+      })()
       // If the app's own code never arrives (no signal on a first launch, or an old
       // copy of this page naming files a deploy removed), say so and offer a
       // reload instead of leaving a black screen. React replaces this if the code
@@ -25,12 +42,24 @@
       setTimeout(function () {
         var root = document.getElementById('root')
         if (!root || root.childElementCount) return
-        root.innerHTML =
-          '<div style="font:15px/1.6 system-ui,sans-serif;padding:32px 20px;max-width:420px;margin:0 auto">' +
-          '<p style="font-size:20px;font-weight:700;margin:0 0 8px">GameSense is taking a long time to open.</p>' +
-          '<p style="color:#8A9A92;margin:0 0 16px">No signal, or the app was just updated.</p>' +
-          '<button id="gs-boot-reload" style="width:100%;min-height:56px;border:0;border-radius:8px;background:#3FB950;color:#06210C;font:600 16px system-ui,sans-serif">Reload</button></div>'
-        document.getElementById('gs-boot-reload').onclick = function () { location.reload() }
+        var box = document.createElement('div')
+        box.style.cssText = 'font:15px/1.6 system-ui,sans-serif;padding:32px 20px;max-width:420px;margin:0 auto'
+        var slow = document.createElement('p')
+        slow.style.cssText = 'font-size:20px;font-weight:700;margin:0 0 8px'
+        slow.textContent = gsBoot.slow
+        var why = document.createElement('p')
+        why.style.cssText = 'color:#8A9A92;margin:0 0 16px'
+        why.textContent = gsBoot.why
+        var again = document.createElement('button')
+        again.id = 'gs-boot-reload'
+        again.style.cssText = 'width:100%;min-height:56px;border:0;border-radius:8px;background:#3FB950;color:#06210C;font:600 16px system-ui,sans-serif'
+        again.textContent = gsBoot.reload
+        again.onclick = function () { location.reload() }
+        box.appendChild(slow)
+        box.appendChild(why)
+        box.appendChild(again)
+        root.innerHTML = ''
+        root.appendChild(box)
       }, 12000)
     </script>
     <script type="module" src="/src/main.tsx"></script>

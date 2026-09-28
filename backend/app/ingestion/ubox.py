@@ -23,6 +23,7 @@ from typing import Any
 import httpx
 
 from app.core.logging import get_logger
+from app.i18n import stored
 
 log = get_logger(__name__)
 UBOX_API = "https://portal.ubianet.com"
@@ -181,9 +182,9 @@ def _public_address(host: str) -> str:
         addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         ips = [ipaddress.ip_address(entry[4][0]) for entry in addresses]
     except (OSError, ValueError):
-        raise UboxError("UBox image host could not be resolved") from None
+        raise UboxError(stored("ubox.err.host_unresolved")) from None
     if not ips or any(not address.is_global or address.is_multicast for address in ips):
-        raise UboxError("UBox image URL must use a public HTTPS host")
+        raise UboxError(stored("ubox.err.host_public"))
     return str(ips[0])
 
 
@@ -238,9 +239,9 @@ class UboxClient:
         try:
             payload = response.json()
         except ValueError:
-            raise UboxError("UBox returned an invalid JSON response") from None
+            raise UboxError(stored("ubox.err.bad_json")) from None
         if not isinstance(payload, dict):
-            raise UboxError("UBox returned an unexpected response")
+            raise UboxError(stored("ubox.err.unexpected"))
         return payload
 
     @staticmethod
@@ -248,21 +249,18 @@ class UboxClient:
         if payload.get("code") not in (0, "0"):
             # Vendor text can echo credentials; never include it in errors/logs.
             if str(payload.get("code")) == "20002":
-                raise UboxError(
-                    "UBox did not recognize this account. Check the exact camera app "
-                    "and its signed-in email."
-                )
+                raise UboxError(stored("ubox.err.unknown_account"))
             if str(payload.get("code")) == "20005":
-                raise UboxError("UBox rejected the account or password")
-            raise UboxError("UBox rejected the request; check the account in UBox Pro")
+                raise UboxError(stored("ubox.err.rejected_password"))
+            raise UboxError(stored("ubox.err.rejected_request"))
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise UboxError("UBox response is missing its data object")
+            raise UboxError(stored("ubox.err.no_data"))
         return data
 
     def login(self) -> str:
         if not self._email or not self._password:
-            raise UboxError("UBox email and password are required")
+            raise UboxError(stored("ubox.err.need_login"))
         self._token = None
         try:
             with _private_request():
@@ -273,13 +271,13 @@ class UboxClient:
                     "device_token": device_token(self._email),
                 })
         except httpx.HTTPError:
-            raise UboxError("Unable to reach UBox for login") from None
+            raise UboxError(stored("ubox.err.unreachable_login")) from None
         if response.status_code != 200:
-            raise UboxError(f"UBox login failed (HTTP {response.status_code})")
+            raise UboxError(stored("ubox.err.login_http", status=response.status_code))
         data = self._data(self._payload(response))
         token = data.get("Token")
         if not isinstance(token, str) or not token:
-            raise UboxError("UBox login response is missing the session token")
+            raise UboxError(stored("ubox.err.no_token"))
         self._token = token
         self.token_valid_hours = _integer(data.get("token_valid_hours"))
         return token
@@ -305,27 +303,27 @@ class UboxClient:
                         headers={"x-ubia-auth-usertoken": self._token or ""},
                     )
             except httpx.HTTPError:
-                raise UboxError("Unable to reach UBox") from None
+                raise UboxError(stored("ubox.err.unreachable")) from None
             payload = self._payload(response) if response.status_code == 200 else {}
             if response.status_code == 401 or self._expired(payload):
                 self._token = None
                 if attempt == 0:
                     log.info("ubox.reauth")
                     continue
-                raise UboxError("UBox authentication expired after retry; reconnect the account")
+                raise UboxError(stored("ubox.err.auth_expired"))
             if response.status_code != 200:
-                raise UboxError(f"UBox request failed (HTTP {response.status_code})")
+                raise UboxError(stored("ubox.err.request_http", status=response.status_code))
             return self._data(payload)
-        raise UboxError("UBox authentication failed")
+        raise UboxError(stored("ubox.err.auth_failed"))
 
     def list_devices(self) -> list[UboxDevice]:
         data = self._request("/api/v2/user/device_list")
         if not isinstance(data.get("items"), list) or not isinstance(data.get("infos"), list):
-            raise UboxError("UBox device response is missing items or infos")
+            raise UboxError(stored("ubox.err.no_devices"))
         merged: dict[str, dict[str, Any]] = {}
         for item in [*data["items"], *data["infos"]]:
             if not isinstance(item, dict) or not item.get("device_uid"):
-                raise UboxError("UBox returned a device without an identifier")
+                raise UboxError(stored("ubox.err.device_no_id"))
             uid = str(item["device_uid"])
             merged[uid] = {**merged.get(uid, {}), **item}
         return [self._parse_device(item) for item in merged.values()]
@@ -386,9 +384,9 @@ class UboxClient:
         self, device_uid: str, since: datetime, until: datetime, page_size: int = 100,
     ) -> list[UboxEvent]:
         if since.utcoffset() is None or until.utcoffset() is None:
-            raise UboxError("UBox event query requires timezone-aware dates")
+            raise UboxError(stored("ubox.err.naive_dates"))
         if since >= until or not 1 <= page_size <= 100:
-            raise UboxError("UBox event query has an invalid range or page size")
+            raise UboxError(stored("ubox.err.bad_range"))
         events: dict[str, UboxEvent] = {}
         seen_pages: set[str] = set()
         expected_pages = 0
@@ -400,46 +398,46 @@ class UboxClient:
             data = self._cloud_page(device_uid, since, until, page, page_size)
             items = data.get("list")
             if not isinstance(items, list):
-                raise UboxError("UBox event response is missing its list")
+                raise UboxError(stored("ubox.err.no_events"))
             count = data.get("count")
             count = count if isinstance(count, dict) else {}
             pages = _integer(count.get("pages"))
             expected_pages = max(expected_pages, pages or 0)
             expected_total = max(expected_total, _integer(count.get("total")) or 0)
             if expected_pages > MAX_PAGES:
-                raise UboxPageLimitError("UBox event page limit reached; use a shorter sync period")
+                raise UboxPageLimitError(stored("ubox.err.page_limit"))
             if not items:
                 empty_result = page == 1 and expected_pages <= 1 and expected_total == 0
                 if not empty_result and (page <= expected_pages or received < expected_total):
-                    raise UboxError("UBox returned an incomplete event page; sync will retry later")
+                    raise UboxError(stored("ubox.err.incomplete_page"))
                 break
             if any(not isinstance(item, dict) for item in items):
-                raise UboxError("UBox returned an invalid event")
+                raise UboxError(stored("ubox.err.bad_event"))
             # IDs/timestamps are stable when expiring signed image URLs change.
             signature = repr([(i.get("id"), i.get("uuid"), i.get("event_time")) for i in items])
             if signature in seen_pages:
-                raise UboxError("UBox repeated an event page; sync will retry later")
+                raise UboxError(stored("ubox.err.repeated_page"))
             seen_pages.add(signature)
             received += len(items)
             for item in items:
                 event = self._parse_event(item, device_uid)
                 if event is None:
-                    raise UboxError("UBox event has an invalid timestamp or camera identifier")
+                    raise UboxError(stored("ubox.err.bad_event_fields"))
                 elif since <= event.captured_at <= until:
                     events[event.event_id] = event
             if pages is not None and page >= pages:
                 if received < expected_total:
-                    raise UboxError("UBox returned fewer events than advertised; sync will retry")
+                    raise UboxError(stored("ubox.err.fewer_events"))
                 break
         else:
-            raise UboxPageLimitError("UBox event page limit reached; use a shorter sync period")
+            raise UboxPageLimitError(stored("ubox.err.page_limit"))
         return sorted(events.values(), key=lambda event: (event.captured_at, event.event_id))
 
     def download(self, url: str) -> bytes:
         self.last_download_metadata = {}
         checked = _https_url(url)
         if not checked:
-            raise UboxError("UBox image URL must use HTTPS")
+            raise UboxError(stored("ubox.err.https_only"))
         original = httpx.URL(checked)
         address = _public_address(original.host)
         # Pin the checked IP so a DNS rebind cannot reach the private network.
@@ -456,18 +454,18 @@ class UboxClient:
                     "content_type": response.headers.get("content-type", "").split(";", 1)[0],
                 }
                 if response.status_code != 200:
-                    raise UboxError(f"UBox image download failed (HTTP {response.status_code})")
+                    raise UboxError(stored("ubox.err.download_http", status=response.status_code))
                 length = _integer(response.headers.get("content-length"))
                 if length is not None and length > MAX_IMAGE_BYTES:
-                    raise UboxError("UBox image exceeds the 20 MB download limit")
+                    raise UboxError(stored("ubox.err.too_big"))
                 content = bytearray()
                 for chunk in response.iter_bytes():
                     content.extend(chunk)
                     if len(content) > MAX_IMAGE_BYTES:
-                        raise UboxError("UBox image exceeds the 20 MB download limit")
+                        raise UboxError(stored("ubox.err.too_big"))
                 if not content:
-                    raise UboxError("UBox returned an empty image")
+                    raise UboxError(stored("ubox.err.empty_image"))
                 self.last_download_metadata["file_bytes"] = len(content)
                 return bytes(content)
         except httpx.HTTPError:
-            raise UboxError("Unable to download the UBox image") from None
+            raise UboxError(stored("ubox.err.download_failed")) from None
