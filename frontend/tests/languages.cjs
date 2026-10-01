@@ -119,7 +119,7 @@ const assert=require('node:assert/strict');
    assert.deepEqual(await stored(page),['fi',null]);
    if(real)assert.equal(await serverLang(),'fi');
    state.langs.length=0;
-   await page.locator('.tabbar').getByRole('link',{name:'Passit'}).click();
+   await page.evaluate(()=>{history.pushState({},'','/stands');dispatchEvent(new PopStateEvent('popstate'))});
    await page.locator('h1',{hasText:'Passit'}).waitFor();
    await page.waitForTimeout(800);
    assert.ok(state.langs.length>0&&state.langs.every(l=>l==='fi'),'every request asks for Finnish: '+state.langs.join(','));

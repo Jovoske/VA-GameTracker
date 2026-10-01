@@ -104,7 +104,8 @@ const server=http.createServer((req,res)=>{
  const open=async(ctx)=>{const page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));return page};
  const fresh=page=>page.locator('.tn-fresh').innerText();
  const waitFresh=(page,re)=>page.waitForFunction(re=>new RegExp(re).test(document.querySelector('.tn-fresh')?.textContent||''),re.source,{timeout:25000});
- const tab=(page,name)=>page.locator('nav.tabbar a',{hasText:name}).click();
+ // Stands has no tab: it is reached from the map, so go there inside the app.
+ const tab=(page,name)=>name==='Stands'?page.evaluate(()=>{history.pushState({},'','/stands');dispatchEvent(new PopStateEvent('popstate'))}):page.locator('nav.tabbar a',{hasText:name}).click();
  const set=(o)=>{hanging.forEach(s=>s.destroy());hanging.clear();Object.assign(net,{mode:'pass',only:null,missing:null,missingOnce:false,brokenPlan:false,hangMe:false,entryMissing:false},o)};
  const states=page=>page.locator('.stand-state').allInnerTexts();
  try {

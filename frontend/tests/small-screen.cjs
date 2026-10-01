@@ -88,7 +88,7 @@ const assert=require('node:assert/strict');
  await page.locator('.ww-line').first().waitFor();
  const bar=await page.evaluate(()=>{const t=document.querySelector('.tabbar');return{scroll:t.scrollWidth,client:t.clientWidth,shown:[...t.querySelectorAll(':scope > a, .tab-more-btn')].filter(a=>a.getBoundingClientRect().width>0).map(a=>a.textContent.trim())}});
  assert.equal(bar.scroll,bar.client,'nothing behind a sideways scroll');
- assert.deepEqual(bar.shown,['Tonight','Photos','Stands','Map','More']);
+ assert.deepEqual(bar.shown,['Tonight','Photos','Map','More']);
  await page.getByRole('button',{name:'More'}).click();
  const menu=page.locator('#more-menu');await menu.waitFor();
  assert.deepEqual(await menu.locator('a').allInnerTexts(),['Cameras','Insights','Settings']);

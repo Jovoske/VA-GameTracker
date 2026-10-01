@@ -132,7 +132,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  await page.getByRole('button',{name:'Save here',exact:true}).click();await page.getByText('Saved.',{exact:true}).waitFor();assert.equal(writes[0].body.name,'Test position');assert.equal(typeof writes[0].body.lat,'number');
 
  // B-12/S1-m2: an unsaved outline is guarded against Back as well as the tabs.
- await page.locator('.tabbar').getByRole('link',{name:'Stands'}).click();await page.waitForURL(/\/stands/);
+ await page.locator('.tabbar').getByRole('link',{name:'Photos'}).click();await page.waitForURL(/\/photos/);
  await page.locator('.tabbar').getByRole('link',{name:'Map'}).click();await ready();
  await page.getByRole('button',{name:'Map type, layers and tools',exact:true}).click();await page.getByRole('button',{name:/Draw bedding/}).click();
  const add=page.getByRole('button',{name:'Add corner'}),pan=async(dx,dy)=>{await page.evaluate(([dx,dy])=>window.__gsMap.panBy([dx,dy],{duration:0}),[dx,dy]);await page.waitForTimeout(150)};

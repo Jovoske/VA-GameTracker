@@ -241,7 +241,7 @@ function notSaved(e: unknown): string {
 }
 type CameraName = Pick<Camera, 'id' | 'name' | 'provider_name' | 'name_is_custom' | 'can_rename'>
 
-function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value: CameraName) => void }) {
+function CameraNameEditor({ camera, onSaved, onRemove }: { camera: Camera; onSaved: (value: CameraName) => void; onRemove?: () => void }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(camera.name)
   const [saving, setSaving] = useState(false)
@@ -298,6 +298,16 @@ function CameraNameEditor({ camera, onSaved }: { camera: Camera; onSaved: (value
             onClick={() => { setDraft(camera.name); setError(''); setMessage(''); setEditing(true) }}
           >
             {t('cameras.rename')}
+          </button>
+        )}
+        {onRemove && !editing && (
+          <button
+            className="camera-name-action"
+            type="button"
+            aria-label={t('cameras.removeNamed', { name: camera.name })}
+            onClick={onRemove}
+          >
+            {t('common.remove')}
           </button>
         )}
       </div>
@@ -461,6 +471,27 @@ export default function Cameras() {
   // Only an admin can retire a camera.
   const [admin, setAdmin] = useState(() => peekMe()?.role === 'admin')
   useEffect(() => { whoAmI().then((me) => setAdmin(me.role === 'admin')).catch(() => {}) }, [])
+  // Remove asks first; a removed camera is a retired one, so it can come back.
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  const [retiring, setRetiring] = useState<string | null>(null)
+
+  async function setRetired(c: Camera, next: boolean) {
+    if (retiring) return
+    setRetiring(c.id)
+    setActionErr('')
+    try {
+      const r = await api<{ retired_at: string | null }>(`/cameras/${c.id}/retired`, {
+        method: 'PATCH', body: JSON.stringify({ retired: next }),
+      })
+      setCameras((cs) => cs.map((x) => (x.id === c.id ? { ...x, retired_at: r.retired_at } : x)))
+      setConfirmRemove(null)
+      void loadCameras()
+    } catch (e) {
+      setActionErr(t('cameras.couldntSave', { why: (e as Error).message }))
+    } finally {
+      setRetiring(null)
+    }
+  }
 
   // Leaving the page drops the lists it was still asking for, so the next tab on a
   // thin link isn't queued behind them.
@@ -713,7 +744,26 @@ export default function Cameras() {
       {!loading && !err && cameras.length === 0 && <div className="status-panel"><strong>{t('cameras.noneYet')}</strong><p>{writer ? t('cameras.noneWriter') : t('cameras.noneViewer')}</p><a href="/settings">{t('cameras.openSettings')}</a></div>}
 
       <div className="cam-list">
-        {cameras.map((c) => {
+        {/* Removed cameras last, one line each, and only for an admin, who can bring
+            one back; everyone else no longer sees them. */}
+        {[...cameras].sort((a, b) => Number(!!a.retired_at) - Number(!!b.retired_at)).map((c) => {
+          if (c.retired_at) {
+            if (!admin) return null
+            return (
+              <div key={c.id} className="card cam-card">
+                <div className="cam-card-head">
+                  <span className="camera-name-title">{c.name}</span>
+                  <button className="camera-name-action" type="button" onClick={() => void setRetired(c, false)} disabled={retiring === c.id}>
+                    {t('cameras.bringBack')}
+                  </button>
+                  <span className="cam-health cam-health--warn" style={{ color: 'var(--text-dim)' }}>
+                    <span className="cam-health-dot" style={{ background: 'var(--text-dim)' }} aria-hidden="true" />
+                    {t('cameras.h.retired')}
+                  </span>
+                </div>
+              </div>
+            )
+          }
           const hidden = !!showHidden[c.id]
           const imgs = (images[c.id] || []).filter((im) => im.file_url)
           const health = healthWords(c)
@@ -722,12 +772,25 @@ export default function Cameras() {
           return (
             <div key={c.id} className="card cam-card">
               <div className="cam-card-head">
-                <CameraNameEditor camera={c} onSaved={(updated) => setCameras((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))} />
+                <CameraNameEditor
+                  camera={c}
+                  onSaved={(updated) => setCameras((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))}
+                  onRemove={admin ? () => setConfirmRemove(c.id) : undefined}
+                />
                 <span className={`cam-health${health.ok ? '' : ' cam-health--warn'}`} style={{ color: health.color }}>
                   <span className="cam-health-dot" style={{ background: health.color }} aria-hidden="true" />
                   {health.label}
                 </span>
               </div>
+              {confirmRemove === c.id && (
+                <div className="cam-remove-ask" role="alertdialog" aria-label={t('cameras.removeNamed', { name: c.name })}>
+                  <span>{t('cameras.removeAsk', { name: c.name })}</span>
+                  <button className="btn" type="button" onClick={() => void setRetired(c, true)} disabled={retiring === c.id}>
+                    {retiring === c.id ? t('common.saving') : t('common.remove')}
+                  </button>
+                  <button className="camera-name-action" type="button" onClick={() => setConfirmRemove(null)} disabled={retiring === c.id}>{t('common.cancel')}</button>
+                </div>
+              )}
               <div className="cam-last-seen">{lastSeenLine(c, imgs)}</div>
               <HealthNote c={c} />
               <ClockNote c={c} />
@@ -798,6 +861,8 @@ export default function Cameras() {
                 {imgs.length === 0 && <div className="cam-strip-empty">{images[c.id] == null ? t('photos.loading') : hidden ? t('cameras.noPhotos') : t('photos.none') + (writer ? ` ${t('cameras.tapCheck')}` : '')}</div>}
               </div>
               {olderErr[c.id] && older[c.id] && olderBusy !== c.id && <p className="cam-health-note cam-health-note--warn" role="alert">{olderErr[c.id]}</p>}
+              {/* One row for what used to be three stacked 44 px controls. */}
+              <div className="cam-foot">
               {older[c.id] && imgs.length > 0 && (
                 <button className="cam-empties-toggle" onClick={() => loadOlder(c.id)} disabled={olderBusy === c.id}>
                   {olderBusy === c.id ? t('common.loading') : t('photos.older')}
@@ -826,6 +891,7 @@ export default function Cameras() {
                 </dl>
                 {admin && <RetireCamera camera={c} onSaved={(retiredAt) => { setCameras((cs) => cs.map((x) => (x.id === c.id ? { ...x, retired_at: retiredAt } : x))); void loadCameras() }} />}
               </details>
+              </div>
             </div>
           )
         })}

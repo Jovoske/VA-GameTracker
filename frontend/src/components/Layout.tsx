@@ -1,7 +1,6 @@
 import type { Icon } from '@phosphor-icons/react'
 import { CameraIcon } from '@phosphor-icons/react/dist/csr/Camera'
 import { ChartLineUpIcon } from '@phosphor-icons/react/dist/csr/ChartLineUp'
-import { CrosshairIcon } from '@phosphor-icons/react/dist/csr/Crosshair'
 import { DotsThreeIcon } from '@phosphor-icons/react/dist/csr/DotsThree'
 import { MapTrifoldIcon } from '@phosphor-icons/react/dist/csr/MapTrifold'
 import { MoonStarsIcon } from '@phosphor-icons/react/dist/csr/MoonStars'
@@ -29,7 +28,7 @@ import { PageBoundary } from './ErrorBoundary'
  * say "you are here" without needing the colour to do all the work.
  *
  * Deep imports rather than the barrel: the package carries about nine thousand
- * icons and this app wants eight of them.
+ * icons and this app wants seven of them.
  *
  * `more`: on a screen under 380 px (a small phone, or a large display size) seven
  * tabs don't fit a thumb, and Settings used to sit off the edge behind a sideways
@@ -38,7 +37,6 @@ import { PageBoundary } from './ErrorBoundary'
 const TABS: { to: string; label: Key; Ico: Icon; end?: boolean; more?: boolean }[] = [
   { to: '/', label: 'nav.tonight', Ico: MoonStarsIcon, end: true },
   { to: '/photos', label: 'nav.photos', Ico: ImagesIcon },
-  { to: '/stands', label: 'nav.stands', Ico: CrosshairIcon },
   { to: '/cameras', label: 'nav.cameras', Ico: CameraIcon, more: true },
   { to: '/map', label: 'nav.map', Ico: MapTrifoldIcon },
   { to: '/insights', label: 'nav.insights', Ico: ChartLineUpIcon, more: true },
