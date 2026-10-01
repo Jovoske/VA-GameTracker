@@ -11,6 +11,15 @@ from app.models import Camera, Detection, Estate, Image, Species, Stand
 from .conftest import requires_db
 
 
+def _days_ago(days: int, hour: int) -> datetime:
+    """That many days back, on the hour (UTC). dark_exit reads the last
+    EXIT_HISTORY_NIGHTS nights, so its photos must be recent: dated 1 Oct 2025, the
+    busy camera's early hours fell out of that window on 1 Oct 2026 and its test
+    failed."""
+    day = datetime.now(timezone.utc) - timedelta(days=days)
+    return day.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
 def test_bearing_points_the_right_way():
     # Due north: same longitude, higher latitude.
     assert bearing(39.0, -1.3, 40.0, -1.3) == pytest.approx(0.0, abs=0.5)
@@ -129,7 +138,7 @@ def test_dark_exit_finds_a_quiet_hour(db_session, estate):
     # Heavy activity at 21:00-22:00 Madrid, nothing later.
     for i in range(40):
         img = Image(camera_id=cam.id,
-                    captured_at=datetime(2025, 10, 1, 19, 0, tzinfo=timezone.utc) + timedelta(days=i),
+                    captured_at=_days_ago(60, 19) + timedelta(days=i),
                     is_empty_frame=False, processed_at=datetime.now(timezone.utc), reviewed=False)
         db_session.add(img)
         db_session.flush()
@@ -152,16 +161,19 @@ def test_dark_exit_admits_when_there_is_no_quiet_hour(db_session, estate):
     db_session.add(stand)
     db_session.flush()
 
-    # Evenly spread across every hour: no hour is quiet.
-    for hour in range(24):
-        for _ in range(5):
-            img = Image(camera_id=cam.id,
-                        captured_at=datetime(2025, 10, 1, hour, 0, tzinfo=timezone.utc),
-                        is_empty_frame=False, processed_at=datetime.now(timezone.utc), reviewed=False)
-            db_session.add(img)
-            db_session.flush()
-            db_session.add(Detection(image_id=img.id, species_id="wild_boar", sex="unknown",
-                                     age_class="unknown", group_size=1))
+    # A visit every 40 minutes, day and night, over four recent nights: no hour is
+    # quiet. Each is its own visit (VISIT_GAP is 30 minutes), every hour of every night
+    # holds one, and nights this close to tonight end as late after their sunset as
+    # tonight does, so even the last hour before 06:00 is covered whatever the date.
+    at, end = _days_ago(6, 0), _days_ago(2, 0)
+    while at < end:
+        img = Image(camera_id=cam.id, captured_at=at,
+                    is_empty_frame=False, processed_at=datetime.now(timezone.utc), reviewed=False)
+        db_session.add(img)
+        db_session.flush()
+        db_session.add(Detection(image_id=img.id, species_id="wild_boar", sex="unknown",
+                                 age_class="unknown", group_size=1))
+        at += timedelta(minutes=40)
     db_session.commit()
 
     out = dark_exit(db_session, stand)

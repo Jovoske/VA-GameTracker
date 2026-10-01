@@ -33,10 +33,12 @@ from sqlalchemy.orm import Session
 
 from app import jobs, media
 from app.core.config import settings
+from app.core.db import error_name
 from app.core.logging import get_logger
 from app.enrichment.enrich import enrich_image
 from app.i18n import stored
 from app.ingestion.logins import (
+    bookkeeping,
     disconnect_unlisted,
     keep_session,
     login_error,
@@ -368,6 +370,19 @@ def _sync_camera(
     return result
 
 
+def _camera_failed(db: Session, uid: str, words: str) -> None:
+    """Its login works: say on the camera's card that its photos could not be fetched,
+    and commit it. Should even that fail, the fetch goes on to the next camera (logged;
+    the camera's failure is in the run's summary already)."""
+    try:
+        db.execute(update(Camera).where(Camera.ubox_uid == uid).values(fetch_error=words)
+                   .execution_options(synchronize_session=False))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.error("ubox.camera_note_failed", camera=uid, reason=error_name(exc), error=str(exc))
+
+
 def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = None) -> dict:
     accounts = _ubox_accounts(db, account_id)
     if not accounts:
@@ -424,29 +439,22 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
                         _cleanup_uncommitted(db, created_paths)
                         words = login_error(exc, "ubox")
                         failures.append(words)
-                        # Its login works: say on the camera's card that its photos
-                        # could not be fetched.
-                        db.execute(update(Camera).where(Camera.ubox_uid == device.uid)
-                                   .values(fetch_error=words)
-                                   .execution_options(synchronize_session=False))
-                        db.commit()
+                        _camera_failed(db, device.uid, words)
                         results.append({"account_id": str(account.id), "camera": device.name,
-                                        "error": type(exc).__name__})
+                                        "error": error_name(exc)})
                         log.error("ubox.camera_failed", account=str(account.id),
-                                  error=type(exc).__name__)
+                                  error=error_name(exc))
         except Exception as exc:
             db.rollback()
             words = login_error(exc, "ubox")
             summary.update(status="error", error=words)
-            log.error("ubox.account_failed", account=str(account.id), error=type(exc).__name__)
-            if (row := db.get(CameraAccount, account.id)) is not None:
-                record(db, row, error=words)
-                if account.id not in answered:
-                    keep_session(db, row, None)  # sign in afresh next time
-                db.commit()
+            log.error("ubox.account_failed", account=str(account.id), error=error_name(exc))
+            with bookkeeping(db, summary, event="ubox.login_not_saved", account=str(account.id)):
+                if (row := db.get(CameraAccount, account.id)) is not None:
+                    record(db, row, error=words)
+                    if account.id not in answered:
+                        keep_session(db, row, None)  # sign in afresh next time
             continue
-        if session[0] != kept:
-            keep_session(db, account, session[0], valid_hours=session[1])
         if failures:
             everything = len(failures) == len(devices)
             summary["status"] = "error" if everything else "partial"
@@ -456,13 +464,15 @@ def _run(db: Session, *, hours: int = 24, account_id=None, days: int | None = No
         elif failed_snapshots:
             summary.update(status="partial",
                            error=_snapshot_note(failed_snapshots, retried_snapshots))
-        if not failures:
-            # Every camera was listed: the login's history is in, even if some
-            # snapshots are still being retried (their cameras hold their own place).
-            account.last_sync_at = now
-        record(db, account, cameras=len(devices),
-               error=summary["error"] if summary["status"] == "error" else None)
-        db.commit()
+        with bookkeeping(db, summary, event="ubox.login_not_saved", account=str(account.id)):
+            if session[0] != kept:
+                keep_session(db, account, session[0], valid_hours=session[1])
+            if not failures:
+                # Every camera was listed: the login's history is in, even if some
+                # snapshots are still being retried (their cameras hold their own place).
+                account.last_sync_at = now
+            record(db, account, cameras=len(devices),
+                   error=summary["error"] if summary["status"] == "error" else None)
     if account_id is None and accounts:
         # A camera no login listed is no longer connected, once the login that
         # fetched it has answered (a failing one might still list it).

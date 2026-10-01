@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.db import error_name
 from app.core.logging import get_logger
 from app.i18n import stored
 from app.models import SyncLog
@@ -119,11 +120,16 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
             results[provider] = run(db)
         except Exception as exc:  # one provider's crash must not stop the other
             db.rollback()
-            log.error("fetch.provider_failed", provider=provider, error=str(exc))
+            # The reason names the rule the database refused ("IntegrityError:
+            # pk_app_settings"), and the log where it was raised: "IntegrityError"
+            # alone left a failing fetch unexplained without the server's log.
+            reason = error_name(exc)
+            log.error("fetch.provider_failed", provider=provider, reason=reason,
+                      error=str(exc), exc_info=True)
             results[provider] = {
                 "status": "error", "total": 0,
                 "reason": stored("fetch.provider_failed", provider=PROVIDERS[provider],
-                                 error=type(exc).__name__),
+                                 error=reason),
             }
     return _summary(db, started, results), results
 

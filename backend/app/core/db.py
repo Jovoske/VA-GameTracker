@@ -28,7 +28,37 @@ _connect_args = (
 )
 engine = create_engine(settings.database_url, pool_pre_ping=True, future=True,
                        connect_args=_connect_args)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=Session)
+
+
+def server_sessions(bind) -> sessionmaker:
+    """Sessions as the server makes them. They don't autoflush: an object only
+    db.add()ed is not in the database yet, so a query, or a db.get() by its key, does
+    not find it before the commit. The tests make theirs here too (tests/conftest.py):
+    on an autoflushing test session a fetch passed that failed every time on the
+    server, where a row added twice broke its primary key (28 Sep 2026)."""
+    return sessionmaker(bind=bind, autoflush=False, expire_on_commit=False, class_=Session)
+
+
+SessionLocal = server_sessions(engine)
+
+
+def error_name(exc: BaseException) -> str:
+    """What went wrong, in a few words to keep and show: the exception's class and, when
+    the database refused a write, the rule it broke ("IntegrityError: pk_app_settings",
+    or "IntegrityError: app_settings.value" for a NOT NULL, which has no name of its own).
+
+    A fetch that failed said only "IntegrityError", and without the server's log
+    nobody could tell which of a dozen writes it was, or which rule (28 Sep 2026).
+    """
+    name = type(exc).__name__
+    # SQLAlchemy's errors carry the driver's (psycopg) as .orig, with its diagnostics.
+    diag = getattr(getattr(exc, "orig", None) or exc, "diag", None)
+    if diag is None:
+        return name
+    rule = getattr(diag, "constraint_name", None)
+    if not rule and getattr(diag, "column_name", None):
+        rule = ".".join(p for p in (getattr(diag, "table_name", None), diag.column_name) if p)
+    return f"{name}: {rule}" if rule else name
 
 
 def get_db() -> Generator[Session, None, None]:

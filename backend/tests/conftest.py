@@ -15,7 +15,6 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import sessionmaker
 
 DEFAULT_DSN = "postgresql+psycopg://postgres@/postgres?host=/tmp&port=55432"
 ADMIN_DSN = os.environ.get("GAMESENSE_TEST_DSN", DEFAULT_DSN)
@@ -108,14 +107,19 @@ def fresh_db(admin_engine):
 
 @pytest.fixture
 def db_session(fresh_db):
-    """A session against a fresh database with the current ORM schema created."""
-    from app.core.db import Base
+    """A session against a fresh database with the current ORM schema created.
+
+    Made as the server makes its sessions (app.core.db.server_sessions): no autoflush,
+    nothing expired on commit. On the autoflushing session this used to be, a fetch
+    passed here that failed every time on the server (28 Sep 2026: a row added twice
+    in one transaction, where the second lookup could not see the first).
+    """
+    from app.core.db import Base, server_sessions
     import app.models  # noqa: F401  (populate metadata)
 
     eng = create_engine(fresh_db)
     Base.metadata.create_all(eng)
-    Session = sessionmaker(bind=eng)
-    s = Session()
+    s = server_sessions(eng)()
     try:
         yield s
     finally:

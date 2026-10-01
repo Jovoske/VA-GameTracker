@@ -369,6 +369,10 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "kopian."
     ),
     "sync.some_failed": "{n} av {total} kameror misslyckades. {error}",
+    "sync.login_not_saved": (
+        "Bilderna kom in, men inloggningens status gick inte att spara ({error}). "
+        "Nästa hämtning försöker igen."
+    ),
     "ubox.snap.retry": {
         "one": "{n} bild gick inte att ladda ner. Nästa hämtning försöker igen.",
         "other": "{n} bilder gick inte att ladda ner. Nästa hämtning försöker igen.",

@@ -9,6 +9,7 @@ from sqlalchemy import func, select, text
 
 from app.core.crypto import encrypt
 from app.health import camera_health
+from app.i18n import stored
 from app.ingestion import logins
 from app.ingestion import ubox_sync as sync
 from app.ingestion.ubox import UboxDevice, UboxError, UboxEvent, UboxPageLimitError
@@ -570,3 +571,33 @@ def test_one_ubox_camera_that_cannot_be_read_says_so_on_its_card(db_session, set
     health = camera_health(cams["cam-2"], login=states[cams["cam-2"].id])
     assert health["status"] == "not_syncing" and health["login"]["camera"] is True
     assert camera_health(cams["cam-1"], login=states[cams["cam-1"].id])["status"] != "not_syncing"
+
+
+@requires_db
+def test_a_login_whose_record_cannot_be_saved_keeps_the_runs_photos_and_summary(
+    db_session, setup, monkeypatch,
+):
+    """The bookkeeping after a login's cameras failing (here a limit the database
+    refuses) is that login's problem: its photos and the run's summary are kept, and
+    the summary names the rule. It used to throw the whole UBox run away (28 Sep 2026,
+    the same on SPYPOINT's side)."""
+    real = sync.record
+
+    def refused(db, account, **outcome):
+        account.ubox_max_images_per_day = 0  # ck_camera_accounts_ubox_daily_limit_valid
+        real(db, account, **outcome)
+
+    monkeypatch.setattr(sync, "record", refused)
+    FakeClient.events = [event("2", 120), event("1")]
+    result = sync.sync_ubox_all(db_session)
+    reason = "IntegrityError: ck_camera_accounts_ubox_daily_limit_valid"
+    assert (result["status"], result["total"]) == ("partial", 2)
+    [account] = result["accounts"]
+    assert (account["status"], account["not_saved"]) == ("partial", reason)
+    assert account["error"] == stored("sync.login_not_saved", error=reason)
+    assert db_session.scalar(select(func.count(Image.id))) == 2
+    row = db_session.scalar(select(SyncLog))
+    assert (row.status, row.images_downloaded) == ("partial", 2)
+    assert row.finished_at is not None
+    db_session.refresh(setup)
+    assert setup.ubox_max_images_per_day == 500 and setup.last_ok_at is None

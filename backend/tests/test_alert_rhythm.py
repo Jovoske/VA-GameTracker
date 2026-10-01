@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import sessionmaker
 
 from app.notifications import dispatch, hold, plan, push, words
 from app.notifications.dispatch import SpeciesDigest, compose, dispatch_new_sightings
@@ -426,7 +425,7 @@ def test_nothing_buzzes_in_the_high_seat_and_end_sit_sends_one_message(
     assert rec.calls == []
     assert {r.push_status for r in _alerts(db_session, user)} == {"held"}
 
-    monkeypatch.setattr(core_db, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    monkeypatch.setattr(core_db, "SessionLocal", core_db.server_sessions(db_session.get_bind()))
     app.dependency_overrides[get_db] = lambda: db_session
     try:
         with TestClient(app) as client:

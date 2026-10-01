@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app import i18n
 from app.core import crypto
 from app.core.config import settings
 from app.health import camera_health
@@ -113,8 +114,8 @@ def shots(camera_id, count, newest, step=timedelta(minutes=10), prefix=None):
             for i in range(count)]
 
 
-@pytest.fixture
-def spypoint(db_session, monkeypatch, tmp_path):
+def fake_spypoint(monkeypatch, tmp_path):
+    """SPYPOINT is FakeSpypoint, with nothing listed yet; the main login is owner@."""
     FakeSpypoint.photos, FakeSpypoint.cameras = {}, {"owner@example.com": []}
     FakeSpypoint.login_errors, FakeSpypoint.list_errors = {}, {}
     FakeSpypoint.dead_urls, FakeSpypoint.downloads, FakeSpypoint.pages = set(), [], []
@@ -125,6 +126,11 @@ def spypoint(db_session, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "media_root", str(tmp_path / "media"))
     monkeypatch.setattr(settings, "spypoint_username", "owner@example.com")
     monkeypatch.setattr(settings, "spypoint_password", "secret")
+
+
+@pytest.fixture
+def spypoint(db_session, monkeypatch, tmp_path):
+    fake_spypoint(monkeypatch, tmp_path)
     estate = Estate(name="Piedras Lisas", timezone="Europe/Madrid")
     db_session.add(estate)
     db_session.commit()
@@ -1316,3 +1322,307 @@ def test_a_full_disk_costs_a_photo_its_file_for_now_not_the_camera(
     monkeypatch.setattr(sync, "_store_file", real)
     sync.sync_all(db_session)  # space again: the next fetch fills it in
     assert all(i.original_path for i in images(db_session))
+
+
+# ── 28 Sep 2026: the fetch as the server runs it ────────────────────────────────
+#
+# On the server every SPYPOINT fetch said "The SPYPOINT fetch failed (IntegrityError)"
+# and 0 photos. Its main login had no record yet (app_settings 'spypoint_primary_login');
+# after the cameras, record() added one and keep_session() added a second, as the
+# server's sessions don't autoflush and db.get() doesn't see a row only added. The
+# commit broke pk_app_settings, outside every per-camera try, and nothing ever made the
+# row, so each fetch failed the same way. These tests use a session as the server
+# makes one (app.core.db.server_sessions).
+
+
+class _Said:
+    """A stand-in for a module's log: what it was told, as (level, event, fields)."""
+
+    def __init__(self):
+        self.lines: list[tuple[str, str, dict]] = []
+
+    def __getattr__(self, level):
+        return lambda event, **fields: self.lines.append((level, event, fields))
+
+    def errors(self):
+        return [(event, fields) for level, event, fields in self.lines if level == "error"]
+
+
+def _server_session(bind):
+    from app.core.db import server_sessions
+
+    return server_sessions(bind)()
+
+
+@pytest.fixture
+def server_db(db_session):
+    s = _server_session(db_session.get_bind())
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def _still_running(db) -> int:
+    return db.scalar(select(func.count(SyncLog.id)).where(SyncLog.status == "running"))
+
+
+@requires_db
+def test_the_first_fetch_on_the_servers_session_keeps_the_main_logins_record(
+    db_session, spypoint, server_db,
+):
+    marco = guest(db_session, spypoint)
+    FakeSpypoint.cameras.update({"owner@example.com": ["sp-1", "sp-2"],
+                                 "marco@example.com": ["sp-3"]})
+    for cid in ("sp-2", "sp-3"):
+        FakeSpypoint.photos[cid] = shots(cid, 2, NOW - timedelta(hours=1))
+    assert server_db.get(AppSetting, logins.PRIMARY_KEY) is None  # as on the server
+
+    row, results = fetch.fetch_photos(server_db)
+    assert results["spypoint"]["status"] == "ok", results["spypoint"]
+    assert (row.status, row.images_downloaded, row.error) == ("ok", 4, None)
+    status = logins.primary_status(db_session)
+    assert status["last_error"] is None and status["reported_cameras"] == 2
+    assert status["last_ok_at"] is not None
+    assert logins.saved_session(db_session, None) == "session-owner@example.com-1"
+    db_session.refresh(marco)
+    assert marco.last_ok_at is not None  # the login after the main one was fetched
+    assert _still_running(db_session) == 0
+
+    # The next fetch uses the kept sign-in, and its record is updated, not added again.
+    row, results = fetch.fetch_photos(server_db)
+    assert results["spypoint"]["status"] == "ok" and row.status == "ok"
+    assert FakeSpypoint.signins.count("owner@example.com") == 1
+    assert db_session.scalar(select(func.count()).select_from(AppSetting).where(
+        AppSetting.key == logins.PRIMARY_KEY)) == 1
+
+
+@requires_db
+def test_two_runs_making_the_main_logins_record_at_once_both_keep_it(db_session, spypoint):
+    """Both find no record and both write one (a Check pressed as a stale lock is taken
+    over): the second waits for the first on the key and then updates its row, where
+    it used to fail on pk_app_settings as the first committed."""
+    import threading
+    import time
+
+    first, second = (_server_session(db_session.get_bind()) for _ in range(2))
+    down = i18n.stored("login.spypoint_down")
+    outcome: list = []
+
+    def other_run():
+        try:
+            logins.record(second, None, error=down)
+            second.commit()
+            outcome.append("saved")
+        except Exception as exc:  # what the test is about: it must not happen
+            second.rollback()
+            outcome.append(exc)
+
+    try:
+        logins.record(first, None, cameras=2)  # written, not committed yet
+        run = threading.Thread(target=other_run)
+        run.start()
+        waiting = text("SELECT count(*) FROM pg_stat_activity WHERE datname = "
+                       "current_database() AND wait_event_type = 'Lock'")
+        for _ in range(100):  # the second run's INSERT waits on the first's key
+            seen = db_session.execute(waiting).scalar()
+            db_session.rollback()  # pg_stat_activity is read once per transaction
+            if seen or not run.is_alive():
+                break
+            time.sleep(0.05)
+        first.commit()
+        run.join(timeout=10)
+    finally:
+        first.close()
+        second.close()
+    assert outcome == ["saved"]
+    assert logins.primary_status(db_session)["last_error"] == down
+
+
+@requires_db
+def test_a_login_whose_record_cannot_be_saved_costs_only_that_login(
+    db_session, spypoint, server_db, monkeypatch,
+):
+    """The main login's record written as it was on the server (added, then added
+    again): its bookkeeping fails, and nothing else. Its photos, the guest login after
+    it and the run's summary are kept, and the summary names the rule that broke."""
+
+    def added_twice(db, row, value):  # _save_primary before the fix
+        if row is None:
+            db.add(AppSetting(key=logins.PRIMARY_KEY, value=value))
+        else:
+            row.value = value
+
+    monkeypatch.setattr(logins, "_save_primary", added_twice)
+    said = _Said()
+    monkeypatch.setattr(logins, "log", said)
+    marco = guest(db_session, spypoint)
+    FakeSpypoint.cameras.update({"owner@example.com": ["sp-1"], "marco@example.com": ["sp-2"]})
+    for cid in ("sp-1", "sp-2"):
+        FakeSpypoint.photos[cid] = shots(cid, 2, NOW - timedelta(hours=1))
+
+    row, results = fetch.fetch_photos(server_db)
+    reason = "IntegrityError: pk_app_settings"
+    spy = results["spypoint"]
+    assert (spy["status"], spy["total"]) == ("partial", 4)
+    main, other = spy["accounts"]
+    assert (main["status"], main["not_saved"]) == ("partial", reason)
+    assert main["error"] == i18n.stored("sync.login_not_saved", error=reason)
+    assert (other["status"], other["error"]) == ("ok", None)
+    db_session.refresh(marco)
+    assert marco.last_ok_at is not None
+    assert len(images(db_session)) == 4
+    assert (row.status, row.images_downloaded) == ("partial", 4)
+    assert row.details["problems"] == [{"label": logins.PRIMARY_LABEL, "error": main["error"]}]
+    assert _still_running(db_session) == 0
+    [(event, fields)] = said.errors()
+    assert (event, fields["reason"], fields["account"]) == (
+        "spypoint.login_not_saved", reason, "owner@example.com")
+    assert "pk_app_settings" in fields["error"] and fields["exc_info"] is True
+    for lang in i18n.LANGUAGES:  # read in each language, the rule's name kept
+        assert f"({reason})" in i18n.localize(main["error"], lang)
+
+
+@requires_db
+def test_a_refused_write_is_named_by_the_rule_it_broke(db_session, spypoint, monkeypatch):
+    from app.core.db import error_name
+
+    def refused(sql, **params):
+        try:
+            with db_session.begin_nested():
+                db_session.execute(text(sql), params)
+        except IntegrityError as exc:
+            return error_name(exc)
+        raise AssertionError(f"the database took {sql}")
+
+    twice = "INSERT INTO app_settings (key, value) VALUES ('k', '{}'), ('k', '{}')"
+    assert refused(twice) == "IntegrityError: pk_app_settings"
+    assert refused("INSERT INTO app_settings (key, value) VALUES ('k', NULL)") == (
+        "IntegrityError: app_settings.value")
+    assert refused(
+        "INSERT INTO camera_accounts (id, estate_id, provider, username, password_enc,"
+        " active) VALUES (gen_random_uuid(), :estate, 'ftp', 'x', 'y', true)",
+        estate=spypoint.id) == "IntegrityError: ck_camera_accounts_provider_valid"
+    assert error_name(RuntimeError("database went away")) == "RuntimeError"
+
+    # A provider's run that raises one: the reason kept and shown names the rule, and
+    # the log has it with where it was raised.
+    monkeypatch.setattr(sync, "sync_all", lambda db: db.execute(text(twice)))
+    said = _Said()
+    monkeypatch.setattr(fetch, "log", said)
+    row, results = fetch.fetch_photos(db_session)
+    reason = "IntegrityError: pk_app_settings"
+    assert results["spypoint"]["reason"] == i18n.stored(
+        "fetch.provider_failed", provider="SPYPOINT", error=reason)
+    assert row.error == (
+        "SPYPOINT: The SPYPOINT fetch failed (IntegrityError: pk_app_settings). "
+        "It tries again on the next one.")
+    [(event, fields)] = said.errors()
+    assert (event, fields["provider"], fields["reason"]) == (
+        "fetch.provider_failed", "spypoint", reason)
+    assert "pk_app_settings" in fields["error"] and fields["exc_info"] is True
+    for lang in i18n.LANGUAGES:
+        assert f"({reason})" in i18n.localize(results["spypoint"]["reason"], lang)
+
+
+@requires_db
+def test_a_server_upgraded_to_this_version_fetches_on_its_first_run(
+    fresh_db, monkeypatch, tmp_path,
+):
+    """As on the server: a database migrated long ago (the snapshot of one at 0030),
+    with the rows a server has but no record of the main login yet, upgraded to this
+    version and fetched as the server fetches. Cam1 stopped checking in on Saturday and
+    sent only empty frames; Cam2 has photos whose file never came after 5 tries; a
+    removed person's login is now the admin's; a UBox and a Suntek camera sit beside
+    them."""
+    from alembic import command
+
+    from . import schema_snapshot
+    from .conftest import alembic_config
+
+    fake_spypoint(monkeypatch, tmp_path)
+    schema_snapshot.load(fresh_db)
+    eng = create_engine(fresh_db)
+    ids = {k: uuid.uuid4() for k in ("estate", "admin", "marco", "cam1", "cam2", "cam3")}
+    saturday = NOW - timedelta(days=2)
+    try:
+        with eng.begin() as c:
+            c.execute(text("INSERT INTO estates (id, name, timezone) "
+                           "VALUES (:estate, 'Piedras Lisas', 'Europe/Madrid')"), ids)
+            c.execute(text("INSERT INTO users (id, estate_id, email, password_hash, role) "
+                           "VALUES (:admin, :estate, 'admin@estate.local', 'x', 'admin')"), ids)
+            c.execute(text(
+                "INSERT INTO camera_accounts (id, estate_id, owner_user_id, former_owner,"
+                " label, provider, username, password_enc, active, last_sync_at)"
+                " VALUES (:marco, :estate, :admin, 'Marco', 'Marco''s cameras', 'spypoint',"
+                " 'marco@example.com', :pw, true, :synced)"),
+                {**ids, "pw": crypto.encrypt("guest-secret"),
+                 "synced": NOW - timedelta(days=1)})
+            cameras = [("cam1", "sp-cam1", None, "Cam1", saturday),
+                       ("cam2", "sp-cam2", None, "Cam2", NOW - timedelta(hours=1)),
+                       ("cam3", "sp-cam3", ids["marco"], "Marco's", NOW)]
+            for key, sid, account, name, report in cameras:
+                c.execute(text(
+                    "INSERT INTO cameras (id, estate_id, account_id, spypoint_id, name,"
+                    " provider_name, active, last_report_at, last_sync_at)"
+                    " VALUES (:id, :estate, :account, :sid, :name, :name, true, :report,"
+                    " :report)"), {"id": ids[key], "estate": ids["estate"],
+                                   "account": account, "sid": sid, "name": name,
+                                   "report": report})
+            c.execute(text(
+                "INSERT INTO cameras (id, estate_id, ubox_uid, name, active) VALUES"
+                " (gen_random_uuid(), :estate, 'ub-1', 'UBox orchard', true),"
+                " (gen_random_uuid(), :estate, NULL, 'Suntek gate', true)"), ids)
+            photo = ("INSERT INTO images (id, camera_id, spypoint_photo_id, captured_at,"
+                     " original_path, cdn_url, download_attempts, reviewed, is_empty_frame)"
+                     " VALUES (gen_random_uuid(), :camera, :pid, :at, :path, :url, :tries,"
+                     " false, :empty)")
+            for i in range(69):  # Cam1: empty frames, the newest 8 days ago
+                c.execute(text(photo), {"camera": ids["cam1"], "pid": f"c1-{i}",
+                                        "at": NOW - timedelta(days=8, hours=i),
+                                        "path": f"old/c1-{i}.jpg", "url": None,
+                                        "tries": 0, "empty": True})
+            for i in range(3):  # Cam2: given up on after 5 tries, listed again today
+                c.execute(text(photo), {"camera": ids["cam2"], "pid": f"sp-cam2-{i + 1}",
+                                        "at": NOW - timedelta(days=1, minutes=10 * (i + 1)),
+                                        "path": None, "url": "https://cdn/expired.jpg",
+                                        "tries": 5, "empty": None})
+            c.execute(text("INSERT INTO sync_log (id, status, started_at, finished_at,"
+                           " images_downloaded, details) VALUES (gen_random_uuid(), 'ok',"
+                           " :at, :at, 0, '{\"provider\": \"spypoint\"}')"),
+                      {"at": NOW - timedelta(days=1)})
+        command.upgrade(alembic_config(fresh_db), "head")
+
+        FakeSpypoint.cameras.update({"owner@example.com": ["sp-cam1", "sp-cam2"],
+                                     "marco@example.com": ["sp-cam3"]})
+        FakeSpypoint.photos["sp-cam2"] = [
+            SpypointPhoto("sp-cam2-0", NOW - timedelta(hours=2), url="https://cdn/c2-0.jpg"),
+            *[SpypointPhoto(f"sp-cam2-{i}", NOW - timedelta(days=1, minutes=10 * i),
+                            url=f"https://cdn/c2-{i}.jpg") for i in (1, 2, 3)],
+        ]
+        FakeSpypoint.photos["sp-cam3"] = shots("sp-cam3", 2, NOW - timedelta(hours=3))
+        db = _server_session(eng)
+        try:
+            assert db.get(AppSetting, logins.PRIMARY_KEY) is None
+            row, results = fetch.fetch_photos(db)
+            assert results["spypoint"]["status"] == "ok", results["spypoint"]
+            assert (row.status, row.images_downloaded, row.error) == ("ok", 6, None)
+            assert logins.primary_status(db)["reported_cameras"] == 2
+            assert logins.saved_session(db, None) == "session-owner@example.com-1"
+            marco = db.get(CameraAccount, ids["marco"])
+            db.refresh(marco)
+            assert marco.last_ok_at is not None and marco.last_error is None
+            got = {i.spypoint_photo_id for i in db.scalars(select(Image).where(
+                Image.camera_id == ids["cam2"], Image.original_path.isnot(None)))}
+            assert got == {"sp-cam2-0", "sp-cam2-1", "sp-cam2-2", "sp-cam2-3"}
+            assert _still_running(db) == 0
+            # Cam1's card says what SPYPOINT says: no check-in since Saturday.
+            cam1 = db.get(Camera, ids["cam1"])
+            db.refresh(cam1)
+            assert cam1.active and cam1.fetch_error is None
+            row, results = fetch.fetch_photos(db)  # and the next one
+            assert results["spypoint"]["status"] == "ok" and row.status == "ok"
+        finally:
+            db.close()
+    finally:
+        eng.dispose()

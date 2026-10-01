@@ -377,6 +377,10 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Esta es la cuenta principal de SPYPOINT del coto, que ya se descarga. Quita esta copia."
     ),
     "sync.some_failed": "Fallaron {n} de {total} cámaras. {error}",
+    "sync.login_not_saved": (
+        "Las fotos llegaron, pero no se pudo guardar el estado de la cuenta ({error}). "
+        "Se vuelve a intentar en la próxima descarga."
+    ),
     "ubox.snap.retry": {
         "one": "{n} foto no se pudo descargar. Se vuelve a intentar en la próxima descarga.",
         "other": (
