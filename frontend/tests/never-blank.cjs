@@ -119,7 +119,7 @@ const server=http.createServer((req,res)=>{
   set({mode:'drop'});await page.reload();await page.locator('.tn-verdict').waitFor();
   await waitFresh(page,/^No signal\. Plan from just now\./);
   await tab(page,'Map');await page.locator('.maplibregl-canvas').waitFor({timeout:20000});
-  assert.equal(await page.locator('nav.tabbar a').count(),7,'the map opens with no signal: its code was stored on the first visit');
+  assert.equal(await page.locator('nav.tabbar a').count(),6,'the map opens with no signal: its code was stored on the first visit');
   await tab(page,'Stands');await page.locator('.stand-fresh').waitFor();
   assert.match(await page.locator('.stand-fresh').innerText(),/^No signal\. Stands from just now\./);
   assert.match(await page.locator('#stand-s1').innerText(),/Yours tonight/,'who you are is saved too');
@@ -174,7 +174,7 @@ const server=http.createServer((req,res)=>{
   set({missing:/\/assets\/Map-.*\.js$/});
   await tab(page,'Map');await page.locator('.crashed').waitFor({timeout:30000});
   await page.waitForFunction(()=>/still didn’t load/.test(document.querySelector('.crashed').textContent),null,{timeout:15000});
-  assert.equal(await page.locator('nav.tabbar a').count(),7,'a file that stays missing: a message, the tab bar kept');
+  assert.equal(await page.locator('nav.tabbar a').count(),6,'a file that stays missing: a message, the tab bar kept');
   await tab(page,'Stands');await page.locator('.stand-entry').first().waitFor();
   assert.equal(await page.locator('.crashed').count(),0,'another tab clears it');
   await ctx.close();
@@ -193,7 +193,7 @@ const server=http.createServer((req,res)=>{
   set({});
   set({brokenPlan:true});await page.goto(base+'/');await page.locator('.crashed').waitFor();
   assert.match(await page.locator('.crashed').innerText(),/Something broke\./);
-  assert.equal(await page.locator('nav.tabbar a').count(),7);
+  assert.equal(await page.locator('nav.tabbar a').count(),6);
   const kept=await page.evaluate(()=>Object.keys(localStorage).filter(k=>k.startsWith('gs_cache:')));
   assert.ok(!kept.some(k=>k.startsWith('gs_cache:/forecast/tonight')),'the saved plan that broke Tonight is dropped');
   assert.ok(kept.includes('gs_cache:/stands')&&kept.includes('gs_cache:/sits'),'Stands’ saved copies are not Tonight’s to drop');

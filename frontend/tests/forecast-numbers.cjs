@@ -140,7 +140,7 @@ const assert=require('node:assert/strict');
  await sw.click();
  await page.locator('.cam-health',{hasText:'Retired'}).waitFor();
  assert.deepEqual(patches,[{retired:true}]);
- assert.equal(await sw.getAttribute('aria-checked'),'true');
+ await page.getByRole('button',{name:'Bring back',exact:true}).waitFor();assert.equal(await sw.count(),0,'a removed camera is one line, with Bring back');
  await page.close();
  role='member';camera.retired_at=null;
  page=await newPage();
