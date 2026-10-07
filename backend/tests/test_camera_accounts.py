@@ -67,8 +67,14 @@ def provider_clients(monkeypatch):
         def close(self):
             calls.append(("closed",))
 
+    class Nordic(Ubox):
+        def list_cameras(self):
+            calls.append(("nordic_cameras",))
+            return [object()]
+
     monkeypatch.setattr(accounts, "UboxClient", Ubox)
     monkeypatch.setattr(accounts, "SpypointClient", Spypoint)
+    monkeypatch.setattr(accounts, "NordicClient", Nordic)
     monkeypatch.setattr("app.api.routes_cameras._pipeline_busy", lambda: True)
     return calls
 
@@ -124,7 +130,7 @@ def test_failed_ubox_verification_never_saves_credentials(
     db.commit.assert_not_called()
 
 
-@pytest.mark.parametrize("provider", ["ubox", "spypoint"])
+@pytest.mark.parametrize("provider", ["ubox", "spypoint", "nordic"])
 def test_connection_starts_its_first_import_as_a_pipeline_job(
     monkeypatch, provider_clients, spawned, provider,
 ):
@@ -143,7 +149,9 @@ def test_connection_starts_its_first_import_as_a_pipeline_job(
         db,
     )
     assert result["import_started"]
-    provider_label = "UBox Pro" if provider == "ubox" else "SPYPOINT"
+    provider_label = {
+        "ubox": "UBox Pro", "spypoint": "SPYPOINT", "nordic": "Nordic Gamekeeper",
+    }[provider]
     assert result["note"].startswith(f"Connected — {provider_label} reports ")
     assert result["note"].endswith("Fetching photos now.")
     assert spawned == [("login", str(account_id))]
@@ -186,7 +194,7 @@ def test_verified_account_encrypts_password_and_keeps_limits(
 @requires_db
 def test_same_email_is_allowed_for_different_providers(db_session, provider_clients):
     user = _seed(db_session)
-    for provider in ("spypoint", "ubox"):
+    for provider in ("spypoint", "ubox", "nordic"):
         result = accounts.add_account(
             accounts.AddAccountBody(
                 username="same@example.test", password="secret", provider=provider
@@ -195,7 +203,7 @@ def test_same_email_is_allowed_for_different_providers(db_session, provider_clie
             db_session,
         )
         assert result["provider"] == provider
-    assert len(db_session.scalars(select(CameraAccount)).all()) == 2
+    assert len(db_session.scalars(select(CameraAccount)).all()) == 3
     with pytest.raises(HTTPException, match="") as exc:
         accounts.add_account(
             accounts.AddAccountBody(

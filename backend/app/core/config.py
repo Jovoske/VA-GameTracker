@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # SPYPOINT (Milestone 1)
     spypoint_username: str = ""
     spypoint_password: str = ""
+    # Optional override; otherwise read the public Nordic web app's client setting.
+    nordic_client_secret: str = ""
     sync_interval_minutes: int = 15
 
     # Where the Suntek FTP/email importer keeps its spool (ready/, failed/ ...), for the

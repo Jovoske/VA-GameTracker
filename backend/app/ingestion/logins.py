@@ -46,9 +46,14 @@ UNREADABLE = stored("login.unreadable")
 SPYPOINT_REFUSED = stored("login.spypoint_refused")
 UBOX_REFUSED = stored("login.ubox_refused")
 UBOX_SIGNED_OUT = stored("login.ubox_signed_out")
+NORDIC_REFUSED = stored("login.provider_refused", provider="Nordic Gamekeeper")
 # The problems a new password fixes; for the others (no answer, busy, a copy of
 # the main login) typing the password again would not help.
-PASSWORD_PROBLEMS = frozenset({UNREADABLE, SPYPOINT_REFUSED, UBOX_REFUSED, UBOX_SIGNED_OUT})
+PASSWORD_PROBLEMS = frozenset({
+    UNREADABLE, SPYPOINT_REFUSED, UBOX_REFUSED, UBOX_SIGNED_OUT, NORDIC_REFUSED,
+    "The mailbox refused the login. Re-enter its password or app password.",
+    "The FTP server refused the login. Re-enter its password.",
+})
 
 
 class LoginProblem(Exception):
@@ -60,21 +65,39 @@ def primary_configured() -> bool:
 
 
 def _provider_name(provider: str) -> str:
-    return "UBox" if provider == "ubox" else "SPYPOINT"
+    return {
+        "ubox": "UBox", "spypoint": "SPYPOINT", "nordic": "Nordic Gamekeeper",
+        "suntek_email": "Suntek email", "suntek_ftp": "Suntek FTP",
+    }[provider]
 
 
 def login_error(exc: BaseException, provider: str) -> str:
     """What went wrong with a login, in words that say what to do about it. In
     English, as it is kept on the login's row (app.i18n.localize says it in the
     reader's language)."""
+    from app.ingestion.inbox import InboxError
+    from app.ingestion.nordic import NordicAuthError, NordicError
     from app.ingestion.spypoint import SpypointAuthError, SpypointError
     from app.ingestion.ubox import UboxError
 
     name = _provider_name(provider)
+    if isinstance(exc, InboxError):
+        return str(exc)
     if isinstance(exc, LoginProblem):
         return str(exc)
     if isinstance(exc, InvalidToken):
         return UNREADABLE
+    if isinstance(exc, NordicAuthError):
+        return NORDIC_REFUSED
+    if isinstance(exc, NordicError):
+        status = exc.status or 0
+        if status == 429:
+            return stored("login.provider_throttled", provider=name)
+        if status >= 500:
+            return stored("login.provider_down", provider=name)
+        if status >= 400:
+            return stored("login.provider_refused_request", provider=name)
+        return stored("login.other", text=str(exc).rstrip("."))
     if isinstance(exc, SpypointAuthError):
         return SPYPOINT_REFUSED
     if isinstance(exc, SpypointError):
@@ -348,7 +371,9 @@ def camera_logins(db: Session, cameras, now: datetime | None = None) -> dict:
         primary = primary_entry(db, now)
     out = {}
     for c in cameras:
-        if c.spypoint_id is None and c.ubox_uid is None:
+        if all(value is None for value in (
+            c.spypoint_id, c.ubox_uid, c.nordic_id, c.account_id
+        )):
             continue
         if c.account_id in copies:
             # A copy of the main login (added before copies were refused): the main
@@ -358,7 +383,8 @@ def camera_logins(db: Session, cameras, now: datetime | None = None) -> dict:
         elif c.account_id is not None:
             account = accounts.get(c.account_id)
             out[c.id] = account_entry(account, now) if account is not None else {
-                "label": None, "provider": "ubox" if c.ubox_uid else "spypoint",
+                "label": None,
+                "provider": "nordic" if c.nordic_id else "ubox" if c.ubox_uid else "spypoint",
                 "state": "off", "error": None, "last_ok_at": None, "last_attempt_at": None,
             }
         elif c.spypoint_id and primary is not None:
@@ -424,7 +450,9 @@ def disconnect_unlisted(
     """
     if not listed:
         return 0
-    column = Camera.spypoint_id if provider == "spypoint" else Camera.ubox_uid
+    column = {
+        "spypoint": Camera.spypoint_id, "ubox": Camera.ubox_uid, "nordic": Camera.nordic_id,
+    }[provider]
     rows = db.scalars(select(Camera).where(
         Camera.estate_id == estate_id, Camera.active.is_(True),
         column.isnot(None), column.not_in(sorted(listed)),

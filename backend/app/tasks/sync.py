@@ -1,6 +1,8 @@
 """SPYPOINT sync + backfill Celery tasks."""
 from app.core.db import SessionLocal
 from app.core.logging import get_logger
+from app.ingestion.inbox_sync import sync_inbox_all
+from app.ingestion.nordic_sync import sync_nordic_all
 from app.ingestion.sync import backfill_all, sync_all
 from app.ingestion.ubox_sync import sync_ubox_all
 from app.tasks.celery_app import celery
@@ -13,6 +15,8 @@ def spypoint_sync() -> dict:
     with SessionLocal() as db:
         result = sync_all(db)
         result["ubox"] = sync_ubox_all(db)
+        result["nordic"] = sync_nordic_all(db)
+        result["suntek"] = sync_inbox_all(db)
     log.info("spypoint_sync.done", status=result.get("status"), total=result.get("total"))
     return result
 

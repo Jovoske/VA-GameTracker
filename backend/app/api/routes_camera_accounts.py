@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -28,6 +28,10 @@ from app.core.crypto import encrypt
 from app.core.db import get_db
 from app.i18n import localize, t
 from app.ingestion import logins
+from app.ingestion.inbox import PROVIDERS as INBOX_PROVIDERS
+from app.ingestion.inbox import InboxConfig, InboxError
+from app.ingestion.inbox import verify as verify_inbox
+from app.ingestion.nordic import NordicAuthError, NordicClient, NordicError
 from app.ingestion.spypoint import SpypointAuthError, SpypointClient, SpypointError
 from app.ingestion.ubox import UboxClient, UboxError
 from app.models import Camera, CameraAccount, SyncLog, User
@@ -179,7 +183,21 @@ class AddAccountBody(BaseModel):
     username: str
     password: str
     label: str | None = None
-    provider: Literal["spypoint", "ubox"] = "spypoint"
+    provider: Literal["spypoint", "ubox", "nordic", "suntek_email", "suntek_ftp"] = "spypoint"
+    connection: InboxConfig | None = None
+
+    @model_validator(mode="after")
+    def connection_matches_provider(self):
+        if self.provider in INBOX_PROVIDERS:
+            if self.connection is None or not (self.label or "").strip():
+                raise ValueError("Camera name and inbox connection details are required")
+            self.connection.for_provider(self.provider).key()
+            if any(c in self.username + self.password for c in "\r\n\x00"):
+                raise ValueError("Login must not contain control characters")
+        elif self.connection is not None:
+            raise ValueError("Inbox settings do not apply to a cloud login")
+        return self
+
     ubox_min_interval_seconds: int = Field(default=60, ge=10, le=3600, strict=True)
     ubox_max_images_per_day: int = Field(default=500, ge=1, le=5000, strict=True)
 
@@ -197,8 +215,14 @@ def add_account(
 ) -> dict:
     if user.role == "viewer":
         raise HTTPException(403, t("accounts.viewer"))
+    if body.provider in INBOX_PROVIDERS and user.role != "admin":
+        raise HTTPException(403, "An admin must configure a camera email or FTP inbox")
+    connection_key = body.connection.key() if body.connection else ""
     username = body.username.strip()
-    provider_label = "UBox Pro" if body.provider == "ubox" else "SPYPOINT"
+    provider_label = {
+        "spypoint": "SPYPOINT", "ubox": "UBox Pro", "nordic": "Nordic Gamekeeper",
+        "suntek_email": "Suntek email", "suntek_ftp": "Suntek FTP",
+    }[body.provider]
     if not username or not body.password:
         raise HTTPException(400, t("accounts.enter_login", provider=provider_label))
     if user.estate_id is None:
@@ -213,13 +237,15 @@ def add_account(
         select(CameraAccount).where(
             func.lower(CameraAccount.username) == username.lower(),
             CameraAccount.provider == body.provider,
+            CameraAccount.connection_key == connection_key,
         )
     ):
         raise HTTPException(400, t("accounts.already_added", provider=provider_label))
 
     # Verify before saving — a typo'd login should fail loudly now,
     # not silently every 15 minutes in the sync log.
-    n_cams = _verify(body.provider, username, body.password)
+    n_cams = (_verify_inbox(body.provider, username, body.password, body.connection)
+              if body.connection else _verify(body.provider, username, body.password))
 
     acct = CameraAccount(
         estate_id=user.estate_id,
@@ -228,12 +254,18 @@ def add_account(
         username=username,
         provider=body.provider,
         password_enc=encrypt(body.password),
+        connection_key=connection_key,
+        connection_config=body.connection.model_dump() if body.connection else {},
         ubox_min_interval_seconds=body.ubox_min_interval_seconds,
         ubox_max_images_per_day=body.ubox_max_images_per_day,
         reported_cameras=n_cams,
     )
     db.add(acct)
     try:
+        if body.provider in INBOX_PROVIDERS:
+            db.flush()
+            db.add(Camera(estate_id=user.estate_id, account_id=acct.id,
+                          name=acct.label, provider_name=acct.label, model="Suntek"))
         db.commit()
     except IntegrityError as e:
         db.rollback()
@@ -263,6 +295,14 @@ def add_account(
     }
 
 
+def _verify_inbox(provider, username, password, config):
+    try:
+        verify_inbox(provider, username, password, config)
+    except InboxError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return 1
+
+
 def _unreachable(name: str) -> HTTPException:
     return HTTPException(503, t("accounts.unreachable", provider=name))
 
@@ -270,6 +310,22 @@ def _unreachable(name: str) -> HTTPException:
 def _verify(provider: str, username: str, password: str) -> int:
     """Sign in with the provider and count its cameras; a 400 in words if it won't,
     a 503 in words if the provider can't be reached (the password may be fine)."""
+    if provider == "nordic":
+        try:
+            with NordicClient(username, password) as client:
+                client.login()
+                return len(client.list_cameras())
+        except NordicAuthError as e:
+            raise HTTPException(
+                400, t("login.provider_refused", provider="Nordic Gamekeeper"),
+            ) from e
+        except NordicError as e:
+            if e.status is not None and (e.status == 429 or e.status >= 500):
+                raise _unreachable("Nordic Gamekeeper") from e
+            raise HTTPException(400, t("accounts.provider_failed", provider="Nordic Gamekeeper",
+                                       error=localize(str(e)))) from e
+        except (httpx.HTTPError, OSError) as e:
+            raise _unreachable("Nordic Gamekeeper") from e
     if provider == "ubox":
         try:
             with UboxClient(username, password) as client:
@@ -321,7 +377,10 @@ def replace_password(
         raise HTTPException(403, t("accounts.password_forbidden"))
     if not body.password:
         raise HTTPException(400, t("accounts.enter_password"))
-    n_cams = _verify(acct.provider, acct.username, body.password)
+    n_cams = (_verify_inbox(acct.provider, acct.username, body.password,
+                            InboxConfig.model_validate(acct.connection_config))
+              if acct.provider in INBOX_PROVIDERS
+              else _verify(acct.provider, acct.username, body.password))
     acct.password_enc = encrypt(body.password)
     logins.keep_session(db, acct, None)  # the next fetch signs in with the new one
     logins.record(db, acct, cameras=n_cams)

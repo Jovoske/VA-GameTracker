@@ -925,7 +925,7 @@ def test_a_camera_quiet_for_days_says_the_day_not_hours():
 
     now = datetime(2026, 9, 28, 9, 0, tzinfo=UTC)  # a Monday
     cam = SimpleNamespace(
-        last_report_at=now - timedelta(hours=80), spypoint_id="sp", ubox_uid=None,
+        last_report_at=now - timedelta(hours=80), spypoint_id="sp", ubox_uid=None, nordic_id=None,
         photo_limit=None, photo_count=None, battery_pct=80, fetch_error=None,
         retired_at=None, active=True)
     with use("en"):

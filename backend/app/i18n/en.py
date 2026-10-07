@@ -291,6 +291,12 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- camera logins (kept in English, said in the reader's language) ------
     "login.unreadable": "The saved password can't be read. Re-enter it.",
     "login.spypoint_refused": "SPYPOINT refused the password. Re-enter it.",
+    "login.provider_refused": "{provider} refused the password. Re-enter it.",
+    "login.provider_throttled": "{provider} is busy. It tries again on the next fetch.",
+    "login.provider_down": "{provider} isn't answering. It tries again on the next fetch.",
+    "login.provider_refused_request": (
+        "{provider} refused the request. It tries again on the next fetch."
+    ),
     "login.ubox_refused": "UBox refused the password. Re-enter it.",
     "login.ubox_signed_out": "UBox signed this login out. Re-enter the password.",
     "login.spypoint_throttled": (
@@ -458,6 +464,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Couldn't reach {provider} to check the password. Try again in a few minutes."
     ),
     "accounts.ubox_failed": "Could not connect to UBox Pro: {error}",
+    "accounts.provider_failed": "Could not connect to {provider}: {error}",
     "accounts.spypoint_refused": (
         "SPYPOINT refused that email and password. Check them in the SPYPOINT app."
     ),
@@ -963,6 +970,10 @@ STORED: tuple[str, ...] = (
     "ubox.snap.some",
     "login.unreadable",
     "login.spypoint_refused",
+    "login.provider_refused",
+    "login.provider_throttled",
+    "login.provider_down",
+    "login.provider_refused_request",
     "login.ubox_refused",
     "login.ubox_signed_out",
     "login.spypoint_throttled",

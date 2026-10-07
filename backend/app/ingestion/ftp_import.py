@@ -365,7 +365,7 @@ def _persist_photo(db, camera_id: uuid.UUID, photo: Photo, media_root: Path, *, 
     camera = db.get(Camera, camera_id)
     if camera is None:
         raise ValueError(f"Camera {camera_id} does not exist; register it first")
-    if camera.spypoint_id is not None:
+    if any(value is not None for value in (camera.spypoint_id, camera.ubox_uid, camera.nordic_id)):
         raise ValueError("Use a dedicated FTP camera registered with the register command")
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"),
                {"key": advisory_lock_key(camera_id, photo.sha256)})
@@ -653,7 +653,8 @@ def main(argv=None) -> int:
                 "estates": [{"id": str(e.id), "name": e.name, "timezone": e.timezone}
                             for e in db.scalars(select(Estate).order_by(Estate.name))],
                 "cameras": [{"id": str(c.id), "estate_id": str(c.estate_id), "name": c.name,
-                             "ftp_eligible": c.spypoint_id is None}
+                             "ftp_eligible": all(value is None for value in (
+                                 c.spypoint_id, c.ubox_uid, c.nordic_id))}
                             for c in db.scalars(select(Camera).order_by(Camera.name))],
             }, indent=2))
         return 0

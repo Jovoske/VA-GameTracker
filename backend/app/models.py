@@ -84,6 +84,15 @@ class CameraAccount(Base):
     )
     username: Mapped[str] = mapped_column(String, nullable=False)
     password_enc: Mapped[str] = mapped_column(String, nullable=False)
+    connection_key: Mapped[str] = mapped_column(
+        String, nullable=False, default="", server_default=""
+    )
+    connection_config: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    input_cursor: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # Limits apply separately to every UBox camera on this account, before download/AI.
     ubox_min_interval_seconds: Mapped[int] = mapped_column(
@@ -108,7 +117,10 @@ class CameraAccount(Base):
     session_enc: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
-        CheckConstraint("provider IN ('spypoint','ubox')", name="provider_valid"),
+        CheckConstraint(
+            "provider IN ('spypoint','ubox','nordic','suntek_email','suntek_ftp')",
+            name="provider_valid",
+        ),
         CheckConstraint(
             "ubox_min_interval_seconds BETWEEN 10 AND 3600", name="ubox_interval_valid"
         ),
@@ -116,10 +128,13 @@ class CameraAccount(Base):
             "ubox_max_images_per_day BETWEEN 1 AND 5000", name="ubox_daily_limit_valid"
         ),
         # Device identifiers are global: one provider account belongs to one estate.
-        UniqueConstraint("provider", "username", name="uq_camera_accounts_provider_username"),
+        UniqueConstraint(
+            "provider", "username", "connection_key", name="uq_camera_accounts_provider_username"
+        ),
         # Emails are case-blind: Julle@ and julle@ are one login, fetched once.
         Index(
-            "uq_camera_accounts_provider_login", "provider", text("lower(username)"),
+            "uq_camera_accounts_provider_login", "provider",
+            text("lower(username)"), "connection_key",
             unique=True, postgresql_where=text("active"),
         ),
     )
@@ -133,6 +148,7 @@ class Camera(Base):
     account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("camera_accounts.id"))
     spypoint_id: Mapped[str | None] = mapped_column(String, unique=True)
     ubox_uid: Mapped[str | None] = mapped_column(String, unique=True)
+    nordic_id: Mapped[str | None] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     # Keep the imported/default label available while an estate uses its own name.
     provider_name: Mapped[str | None] = mapped_column(String)
@@ -200,7 +216,9 @@ class Camera(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
         CheckConstraint(
-            "spypoint_id IS NULL OR ubox_uid IS NULL", name="provider_exclusive"
+            "(spypoint_id IS NULL OR ubox_uid IS NULL) AND "
+            "(spypoint_id IS NULL OR nordic_id IS NULL) AND "
+            "(ubox_uid IS NULL OR nordic_id IS NULL)", name="provider_exclusive"
         ),
     )
 
@@ -314,6 +332,7 @@ class Image(Base):
     camera_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cameras.id"), nullable=False)
     spypoint_photo_id: Mapped[str | None] = mapped_column(String, unique=True)
     ubox_event_id: Mapped[str | None] = mapped_column(String, unique=True)
+    nordic_photo_id: Mapped[str | None] = mapped_column(String, unique=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # When the server got it (FTP and email: the receiver's or the mail server's
     # clock). The Cameras page reads how long photos take to arrive from it, which is

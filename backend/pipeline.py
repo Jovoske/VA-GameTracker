@@ -180,6 +180,14 @@ def _run(mode: str, args: list[str], db) -> int:
             # Its history waits: the routine fetch imports a login never imported yet,
             # once there is room.
             log.warning("pipeline.login_waits_for_room", account=args[0])
+        elif account.provider in {"suntek_email", "suntek_ftp"}:
+            from app.ingestion.inbox_sync import sync_inbox_all
+
+            log.info("pipeline.login", result=sync_inbox_all(db, account.id))
+        elif account.provider == "nordic":
+            from app.ingestion.nordic_sync import backfill_nordic_account
+
+            log.info("pipeline.login", result=backfill_nordic_account(db, args[0]))
         elif account.provider == "ubox":
             from app.ingestion.ubox_sync import backfill_ubox_account
 

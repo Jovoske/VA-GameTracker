@@ -31,7 +31,10 @@ from app.models import SyncLog
 
 log = get_logger(__name__)
 
-PROVIDERS = {"spypoint": "SPYPOINT", "ubox": "UBox"}
+PROVIDERS = {
+    "spypoint": "SPYPOINT", "ubox": "UBox",
+    "nordic": "Nordic Gamekeeper", "suntek": "Suntek inboxes",
+}
 # Not a provider: the run stood down because the server's disk is nearly full.
 DISK = "disk"
 # Kept in English in the run's row, like its errors, and said in the reader's language
@@ -104,6 +107,8 @@ def _summary(db: Session, started: datetime, results: dict) -> SyncLog:
 def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
     """Fetch from every provider; returns the summary row (stage "identifying")."""
     from app import jobs
+    from app.ingestion.inbox_sync import sync_inbox_all
+    from app.ingestion.nordic_sync import sync_nordic_all
     from app.ingestion.sync import sync_all
     from app.ingestion.ubox_sync import sync_ubox_all
 
@@ -112,7 +117,10 @@ def fetch_photos(db: Session) -> tuple[SyncLog, dict]:
     full = disk_full()
     if full is not None:
         results[DISK] = full
-    runs = () if DISK in results else (("spypoint", sync_all), ("ubox", sync_ubox_all))
+    runs = () if DISK in results else (
+        ("spypoint", sync_all), ("ubox", sync_ubox_all),
+        ("nordic", sync_nordic_all), ("suntek", sync_inbox_all),
+    )
     for provider, run in runs:
         if jobs.lock_lost():
             break  # another run took the lock over and fetches now

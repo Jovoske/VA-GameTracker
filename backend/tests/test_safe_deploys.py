@@ -393,11 +393,13 @@ def test_the_ubox_cleanup_knows_a_file_by_either_kind_of_path(db_session, estate
 
 @requires_db
 def test_a_nearly_full_disk_stops_the_download_and_says_why(db_session, monkeypatch):
-    from app.ingestion import fetch, sync, ubox_sync
+    from app.ingestion import fetch, inbox_sync, nordic_sync, sync, ubox_sync
 
     called = []
     monkeypatch.setattr(sync, "sync_all", lambda db: called.append("spypoint") or {})
     monkeypatch.setattr(ubox_sync, "sync_ubox_all", lambda db: called.append("ubox") or {})
+    monkeypatch.setattr(nordic_sync, "sync_nordic_all", lambda db: called.append("nordic") or {})
+    monkeypatch.setattr(inbox_sync, "sync_inbox_all", lambda db: called.append("suntek") or {})
     monkeypatch.setattr(ops, "disk_free", lambda path=None: 3 * 1024**3)
     row, results = fetch.fetch_photos(db_session)
     assert called == []
@@ -411,12 +413,16 @@ def test_a_nearly_full_disk_stops_the_download_and_says_why(db_session, monkeypa
                         or {"status": "ok", "total": 0})
     monkeypatch.setattr(ubox_sync, "sync_ubox_all", lambda db: called.append("ubox")
                         or {"status": "skipped", "total": 0})
+    monkeypatch.setattr(nordic_sync, "sync_nordic_all", lambda db: called.append("nordic")
+                        or {"status": "skipped", "total": 0})
+    monkeypatch.setattr(inbox_sync, "sync_inbox_all", lambda db: called.append("suntek")
+                        or {"status": "skipped", "total": 0})
     row, _ = fetch.fetch_photos(db_session)
-    assert called == ["spypoint", "ubox"] and row.status == "ok"
+    assert called == ["spypoint", "ubox", "nordic", "suntek"] and row.status == "ok"
 
 
 @requires_db
-@pytest.mark.parametrize("provider", ["spypoint", "ubox"])
+@pytest.mark.parametrize("provider", ["spypoint", "ubox", "nordic"])
 def test_a_new_login_and_the_history_pull_wait_for_room_too(
     db_session, estate, monkeypatch, provider,
 ):
@@ -424,12 +430,13 @@ def test_a_new_login_and_the_history_pull_wait_for_room_too(
     all: on a nearly full disk they download nothing either, and the Check button and
     Settings say why (R7BE-5). The photos already in are still checked."""
     import pipeline
-    from app.ingestion import fetch, sync, ubox_sync
+    from app.ingestion import fetch, inbox_sync, nordic_sync, sync, ubox_sync
     from app.models import CameraAccount
 
     pulled, checked = [], []
     for module, name in ((sync, "backfill_all"), (sync, "backfill_account"),
-                         (ubox_sync, "backfill_ubox_account")):
+                         (ubox_sync, "backfill_ubox_account"),
+                         (nordic_sync, "backfill_nordic_account")):
         monkeypatch.setattr(module, name, lambda *a, _n=name, **kw: pulled.append(_n) or {})
     monkeypatch.setattr(fetch, "check_and_recount",
                         lambda db: checked.append(True) or ({"ai": {}}, None))

@@ -55,7 +55,7 @@ def camera_health(cam: Camera, now: datetime | None = None, login: dict | None =
     now = now or datetime.now(UTC)
     last = cam.last_report_at
     hours = (now - last).total_seconds() / 3600 if last is not None else None
-    heartbeat = cam.spypoint_id is not None or cam.ubox_uid is not None
+    heartbeat = any(value is not None for value in (cam.spypoint_id, cam.ubox_uid, cam.nordic_id))
     offline = last is None or (hours is not None and hours > OFFLINE_HOURS)
     quiet = last is None or (hours is not None and hours > QUIET_DAYS * 24)
 

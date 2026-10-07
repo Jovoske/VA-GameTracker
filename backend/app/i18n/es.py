@@ -340,6 +340,12 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- camera logins (kept in English, said in the reader's language) ------
     "login.unreadable": "No se puede leer la contraseña guardada. Vuelve a escribirla.",
     "login.spypoint_refused": "SPYPOINT rechazó la contraseña. Vuelve a escribirla.",
+    "login.provider_refused": "{provider} rechazó la contraseña. Vuelve a escribirla.",
+    "login.provider_throttled": "{provider} está ocupado. Se reintentará en la próxima descarga.",
+    "login.provider_down": "{provider} no responde. Se reintentará en la próxima descarga.",
+    "login.provider_refused_request": (
+        "{provider} rechazó la solicitud. Se reintentará en la próxima descarga."
+    ),
     "login.ubox_refused": "UBox rechazó la contraseña. Vuelve a escribirla.",
     "login.ubox_signed_out": (
         "UBox cerró la sesión de esta cuenta. Vuelve a escribir la contraseña."
@@ -541,6 +547,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "unos minutos."
     ),
     "accounts.ubox_failed": "No se pudo conectar con UBox Pro: {error}",
+    "accounts.provider_failed": "No se pudo conectar con {provider}: {error}",
     "accounts.spypoint_refused": (
         "SPYPOINT rechazó ese correo y contraseña. Compruébalos en la app de SPYPOINT."
     ),

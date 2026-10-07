@@ -339,6 +339,12 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- camera logins (kept in English, said in the reader's language) ------
     "login.unreadable": "Tallennettua salasanaa ei voi lukea. Syötä se uudelleen.",
     "login.spypoint_refused": "SPYPOINT ei hyväksynyt salasanaa. Syötä se uudelleen.",
+    "login.provider_refused": "{provider} ei hyväksynyt salasanaa. Syötä se uudelleen.",
+    "login.provider_throttled": "{provider} on ruuhkautunut. Seuraava haku yrittää uudelleen.",
+    "login.provider_down": "{provider} ei vastaa. Seuraava haku yrittää uudelleen.",
+    "login.provider_refused_request": (
+        "{provider} hylkäsi pyynnön. Seuraava haku yrittää uudelleen."
+    ),
     "login.ubox_refused": "UBox ei hyväksynyt salasanaa. Syötä se uudelleen.",
     "login.ubox_signed_out": "UBox kirjasi tämän tunnuksen ulos. Syötä salasana uudelleen.",
     "login.spypoint_throttled": (
@@ -516,6 +522,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "päästä uudelleen."
     ),
     "accounts.ubox_failed": "Yhteys UBox Prohon epäonnistui: {error}",
+    "accounts.provider_failed": "Yhteys palveluun {provider} epäonnistui: {error}",
     "accounts.spypoint_refused": (
         "SPYPOINT ei hyväksynyt sähköpostia ja salasanaa. Tarkista ne SPYPOINT-sovelluksesta."
     ),

@@ -71,7 +71,7 @@ type Species = {
 }
 type Me = { id: string; email: string; role: string }
 type UserRow = { id: string; email: string; role: string; is_you: boolean }
-type CameraProvider = 'spypoint' | 'ubox'
+type CameraProvider = 'spypoint' | 'ubox' | 'nordic' | 'suntek_email' | 'suntek_ftp'
 type ImportLimits = { interval: string; daily: string }
 /** Whether a login still works, as the last fetch found it (app.ingestion.logins). */
 type LoginStatus = {
@@ -128,7 +128,20 @@ function aiSummary(ai: AiStatus): { text: string; warn: boolean } {
   if (ai.waiting > 0) return { text: t('admin.ai.waitingN', { n: ai.waiting }), warn: false }
   return { text: t('admin.ai.allChecked'), warn: false }
 }
-const providerName = (provider: CameraProvider) => provider === 'ubox' ? 'UBox Pro' : 'SPYPOINT'
+const providerNames: Record<CameraProvider, string> = {
+  spypoint: 'SPYPOINT',
+  ubox: 'UBox Pro',
+  nordic: 'Nordic Gamekeeper',
+  suntek_email: 'Suntek · Email',
+  suntek_ftp: 'Suntek · FTP / FTPS',
+}
+const providerName = (provider: CameraProvider | '') => provider ? providerNames[provider] : ''
+const emptyCamera = (provider: CameraProvider | '' = '') => ({
+  username: '', password: '', label: '', provider, interval: '60', daily: '500',
+  host: '', port: provider === 'suntek_email' ? '993' : '21',
+  folder: provider === 'suntek_email' ? 'INBOX' : '/', sender: '',
+  transport: provider === 'suntek_email' ? 'imap_tls' : 'ftps', timezone: 'Europe/Helsinki',
+})
 const needsLook = (a: CamAccount) => a.active
   && (a.status.state === 'failing' || a.status.state === 'stale' || a.status.cameras_failing > 0)
 /** "3 h", "2 d": how long. */
@@ -307,10 +320,9 @@ export default function Admin() {
   // and the second answer said it had failed (audit D-24).
   const [userBusy, setUserBusy] = useState(false)
   const [accounts, setAccounts] = useState<CamAccount[]>([])
-  const [newAcct, setNewAcct] = useState({
-    username: '', password: '', label: '', provider: 'spypoint' as CameraProvider,
-    interval: '60', daily: '500',
-  })
+  const [newAcct, setNewAcct] = useState(emptyCamera)
+  const acctSubmitting = useRef(false)
+  const inbox = newAcct.provider === 'suntek_email' || newAcct.provider === 'suntek_ftp'
   const [acctMsg, setAcctMsg] = useState('')
   const [acctBusy, setAcctBusy] = useState(false)
   const [editingLimits, setEditingLimits] = useState<(ImportLimits & { id: string }) | null>(null)
@@ -477,6 +489,8 @@ export default function Admin() {
   }
 
   async function addAccount() {
+    if (acctSubmitting.current || !newAcct.provider) return
+    acctSubmitting.current = true
     setAcctMsg('')
     setAcctBusy(true)
     try {
@@ -487,17 +501,28 @@ export default function Admin() {
           password: newAcct.password,
           label: newAcct.label || null,
           provider: newAcct.provider,
-          ubox_min_interval_seconds: Number(newAcct.interval),
-          ubox_max_images_per_day: Number(newAcct.daily),
+          ...(newAcct.provider === 'ubox' ? {
+            ubox_min_interval_seconds: Number(newAcct.interval),
+            ubox_max_images_per_day: Number(newAcct.daily),
+          } : {}),
+          ...(inbox ? { connection: {
+            host: newAcct.host.trim(), port: Number(newAcct.port), folder: newAcct.folder.trim(),
+            transport: newAcct.transport, sender: newAcct.sender.trim(), timezone: newAcct.timezone.trim(),
+          } } : {}),
         }),
       })
-      setNewAcct({ ...newAcct, username: '', password: '', label: '' })
-      setAccounts(await api<CamAccount[]>('/camera-accounts'))
+      setNewAcct(emptyCamera())
       setAcctMsg(r.note || t('admin.addedShort'))
+      try {
+        setAccounts(await api<CamAccount[]>('/camera-accounts'))
+      } catch {
+        setAcctMsg(`${r.note || t('admin.addedShort')} ${t('cameraSetup.refreshPending')}`)
+      }
       followImport()
     } catch (e) {
       setAcctMsg((e as Error).message)
     }
+    acctSubmitting.current = false
     setAcctBusy(false)
   }
 
@@ -798,32 +823,73 @@ export default function Admin() {
         {viewer ? (
           <p className="settings-hint" style={{ marginTop: 10 }}>{t('admin.membersAdd')}</p>
         ) : (
-        <form onSubmit={(e) => { e.preventDefault(); void addAccount() }}
+        <form aria-label={t('cameraSetup.add')} onSubmit={(e) => { e.preventDefault(); void addAccount() }}
           style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+          <h3 style={{ margin: '8px 0 0', fontSize: 16 }}>{t('cameraSetup.add')}</h3>
+          <p className="settings-hint" style={{ margin: 0 }}>{t('cameraSetup.chooseHint')}</p>
           <label htmlFor="camera-provider" style={{ fontSize: 13 }}>
-            {t('admin.brand')}
+            {t('cameraSetup.brand')}
             <select id="camera-provider" className="input" value={newAcct.provider} disabled={acctBusy}
               style={{ marginTop: 5 }}
-              onChange={(e) => setNewAcct({ ...newAcct, provider: e.target.value as CameraProvider })}>
+              onChange={(e) => { setNewAcct(emptyCamera(e.target.value as CameraProvider | '')); setAcctMsg('') }}>
+              <option value="">{t('cameraSetup.choose')}</option>
               <option value="spypoint">SPYPOINT</option>
               <option value="ubox">UBox Pro</option>
+              <option value="nordic">{t('cameraSetup.nordicLabel')}</option>
+              {admin && <option value="suntek_email">{t('cameraSetup.emailOption')}</option>}
+              {admin && <option value="suntek_ftp">{t('cameraSetup.ftpOption')}</option>}
             </select>
           </label>
+          {!admin && <p className="settings-hint" style={{ margin: 0 }}>{t('cameraSetup.adminInbox')}</p>}
+          {newAcct.provider && <>
+          {inbox && <>
+            <p className="settings-hint" style={{ margin: 0 }}>{t(newAcct.provider === 'suntek_email' ? 'cameraSetup.emailHint' : 'cameraSetup.ftpHint')}</p>
+            {newAcct.provider === 'suntek_ftp' && <label htmlFor="camera-transport" style={{ fontSize: 13 }}>
+              {t('cameraSetup.transport')}
+              <select id="camera-transport" className="input" disabled={acctBusy} value={newAcct.transport}
+                style={{ marginTop: 5 }} onChange={e => setNewAcct({ ...newAcct, transport: e.target.value })}>
+                <option value="ftps">{t('cameraSetup.ftpsLabel')}</option>
+                <option value="ftp">{t('cameraSetup.ftpLabel')}</option>
+              </select>
+            </label>}
+            {newAcct.transport === 'ftp' && <p className="settings-hint" style={{ margin: 0 }}>{t('cameraSetup.plainFtp')}</p>}
+            <label htmlFor="camera-host" style={{ fontSize: 13 }}>{t('cameraSetup.host')}
+              <input id="camera-host" className="input" required disabled={acctBusy} value={newAcct.host}
+                placeholder={t(newAcct.provider === 'suntek_email' ? 'cameraSetup.mailHost' : 'cameraSetup.ftpHost')}
+                autoCapitalize="none" spellCheck={false} style={{ marginTop: 5 }} onChange={e => setNewAcct({ ...newAcct, host: e.target.value })} />
+            </label>
+            <label htmlFor="camera-port" style={{ fontSize: 13 }}>{t('cameraSetup.port')}
+              <input id="camera-port" className="input" type="number" min="1" max="65535" required disabled={acctBusy}
+                value={newAcct.port} style={{ marginTop: 5 }} onChange={e => setNewAcct({ ...newAcct, port: e.target.value })} />
+            </label>
+            <label htmlFor="camera-folder" style={{ fontSize: 13 }}>{t('cameraSetup.folder')}
+              <input id="camera-folder" className="input" required disabled={acctBusy} value={newAcct.folder}
+                style={{ marginTop: 5 }} onChange={e => setNewAcct({ ...newAcct, folder: e.target.value })} />
+            </label>
+            {newAcct.provider === 'suntek_email' && <label htmlFor="camera-sender" style={{ fontSize: 13 }}>{t('cameraSetup.sender')}
+              <input id="camera-sender" className="input" type="email" disabled={acctBusy} value={newAcct.sender}
+                style={{ marginTop: 5 }} onChange={e => setNewAcct({ ...newAcct, sender: e.target.value })} />
+            </label>}
+            <label htmlFor="camera-timezone" style={{ fontSize: 13 }}>{t('cameraSetup.timezone')}
+              <input id="camera-timezone" className="input" required disabled={acctBusy} value={newAcct.timezone}
+                placeholder={t('cameraSetup.timezoneExample')} style={{ marginTop: 5 }} onChange={e => setNewAcct({ ...newAcct, timezone: e.target.value })} />
+            </label>
+          </>}
           <label htmlFor="camera-email" style={{ fontSize: 13 }}>
-            {t('admin.providerEmail', { provider: providerName(newAcct.provider) })}
-            <input id="camera-email" className="input" type="email" required value={newAcct.username}
+            {inbox ? t('cameraSetup.username') : t('admin.providerEmail', { provider: providerName(newAcct.provider) })}
+            <input id="camera-email" className="input" type={inbox ? 'text' : 'email'} required value={newAcct.username}
               disabled={acctBusy} style={{ marginTop: 5 }}
               onChange={(e) => setNewAcct({ ...newAcct, username: e.target.value })} autoComplete="off" />
           </label>
           <label htmlFor="camera-password" style={{ fontSize: 13 }}>
-            {t('admin.providerPassword', { provider: providerName(newAcct.provider) })}
+            {inbox ? t('cameraSetup.password') : t('admin.providerPassword', { provider: providerName(newAcct.provider) })}
             <input id="camera-password" className="input" type="password" required value={newAcct.password}
               disabled={acctBusy} style={{ marginTop: 5 }}
               onChange={(e) => setNewAcct({ ...newAcct, password: e.target.value })} autoComplete="new-password" />
           </label>
           <label htmlFor="camera-label" style={{ fontSize: 13 }}>
-            {t('admin.nameOptional')}
-            <input id="camera-label" className="input" placeholder={t('admin.namePlaceholder')} value={newAcct.label}
+            {inbox ? t('cameraSetup.cameraName') : t('admin.nameOptional')}
+            <input required={inbox} id="camera-label" className="input" placeholder={t('admin.namePlaceholder')} value={newAcct.label}
               disabled={acctBusy} style={{ marginTop: 5 }}
               onChange={(e) => setNewAcct({ ...newAcct, label: e.target.value })} />
           </label>
@@ -833,8 +899,9 @@ export default function Admin() {
           )}
           <button className="btn" type="submit" style={goBtn}
             disabled={acctBusy || !newAcct.username.trim() || !newAcct.password}>
-            {acctBusy ? t('admin.checkingWith', { provider: providerName(newAcct.provider) }) : t('admin.addLogin')}
+            {acctBusy ? t('admin.checkingWith', { provider: providerName(newAcct.provider) }) : t('cameraSetup.connect')}
           </button>
+          </>}
         </form>
         )}
         {acctMsg && <div role="status" style={{ marginTop: 10, fontSize: 13, color: 'var(--text-dim)' }}>{acctMsg}</div>}

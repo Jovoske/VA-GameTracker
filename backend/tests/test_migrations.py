@@ -65,6 +65,10 @@ def test_fresh_upgrade_head_succeeds(fresh_db):
         images = _columns(eng, "images")
         assert "animal_conf" in images and "reviewed" in images
         assert "ubox_event_id" in images
+        assert "nordic_photo_id" in images
+        account_columns = _columns(eng, "camera_accounts")
+        assert {"connection_key", "connection_config", "input_cursor"} <= account_columns.keys()
+        assert "nordic_id" in _columns(eng, "cameras")
         assert "ubox_uid" in _columns(eng, "cameras")
         assert {"provider_name", "name_is_custom"} <= _columns(eng, "cameras").keys()
         assert {
@@ -158,6 +162,8 @@ def test_new_revisions_are_idempotent(fresh_db):
         assert _columns(eng, "push_subscriptions")
         assert "ubox_uid" in _columns(eng, "cameras")
         assert "ubox_event_id" in _columns(eng, "images")
+        assert "nordic_photo_id" in _columns(eng, "images")
+        assert "nordic_id" in _columns(eng, "cameras")
         assert "details" in _columns(eng, "sync_log")
         assert _columns(eng, "camera_views")
         assert "thumbnail_path" in _columns(eng, "images")
@@ -1572,6 +1578,70 @@ def test_an_upgraded_server_names_its_keys_as_a_fresh_install_does(fresh_db):
         command.stamp(cfg, "0033_user_language")
         command.upgrade(cfg, "head")  # and again: a no-op, not an error
         assert _foreign_keys(eng) == fresh
+    finally:
+        eng.dispose()
+
+
+@requires_db
+def test_nordic_upgrade_preserves_existing_provider_history(fresh_db):
+    """Exercise the actual pre-Nordic schema, not just create_all's current shape."""
+    cfg = alembic_config(fresh_db)
+    command.upgrade(cfg, "0034_constraint_names")
+    eng = create_engine(fresh_db)
+    try:
+        with eng.begin() as c:
+            c.execute(text("ALTER TABLE images DROP COLUMN nordic_photo_id"))
+            c.execute(text("ALTER TABLE cameras DROP COLUMN nordic_id"))
+            c.execute(text("ALTER TABLE cameras ADD CONSTRAINT ck_cameras_provider_exclusive "
+                           "CHECK (spypoint_id IS NULL OR ubox_uid IS NULL)"))
+            c.execute(text("ALTER TABLE camera_accounts "
+                           "DROP CONSTRAINT ck_camera_accounts_provider_valid"))
+            c.execute(text("ALTER TABLE camera_accounts "
+                           "ADD CONSTRAINT ck_camera_accounts_provider_valid "
+                           "CHECK (provider IN ('spypoint','ubox'))"))
+            estate_id = c.execute(text(
+                "INSERT INTO estates (id,name,timezone) "
+                "VALUES (gen_random_uuid(),'Existing estate','Europe/Helsinki') RETURNING id"
+            )).scalar_one()
+            account_id = c.execute(text(
+                "INSERT INTO camera_accounts "
+                "(id,estate_id,provider,username,password_enc,session_enc,active) "
+                "VALUES (gen_random_uuid(),:estate,'ubox','old@example.test',"
+                "'encrypted-password','encrypted-session',true) RETURNING id"
+            ), {"estate": estate_id}).scalar_one()
+            camera_id = c.execute(text(
+                "INSERT INTO cameras (id,estate_id,account_id,ubox_uid,name,active) "
+                "VALUES (gen_random_uuid(),:estate,:account,'old-device','Old camera',true) "
+                "RETURNING id"
+            ), {"estate": estate_id, "account": account_id}).scalar_one()
+            image_id = c.execute(text(
+                "INSERT INTO images "
+                "(id,camera_id,ubox_event_id,captured_at,original_path,reviewed) "
+                "VALUES (gen_random_uuid(),:camera,'old-event',now(),'old.jpg',false) "
+                "RETURNING id"
+            ), {"camera": camera_id}).scalar_one()
+        command.upgrade(cfg, "head")
+        command.stamp(cfg, "0034_constraint_names")
+        command.upgrade(cfg, "head")
+        with eng.connect() as c:
+            account = c.execute(text("SELECT * FROM camera_accounts WHERE id=:id"),
+                                {"id": account_id}).one()
+            assert (account.provider, account.password_enc, account.session_enc) == (
+                "ubox", "encrypted-password", "encrypted-session")
+            camera = c.execute(text("SELECT * FROM cameras WHERE id=:id"),
+                               {"id": camera_id}).one()
+            assert camera.ubox_uid == "old-device" and camera.nordic_id is None
+            image = c.execute(text("SELECT * FROM images WHERE id=:id"),
+                              {"id": image_id}).one()
+            assert image.ubox_event_id == "old-event" and image.nordic_photo_id is None
+            assert image.original_path == "old.jpg"
+        with eng.begin() as c:
+            c.execute(text(
+                "INSERT INTO camera_accounts (id,estate_id,provider,username,password_enc,active) "
+                "VALUES (gen_random_uuid(),:estate,'nordic','old@example.test',"
+                "'nordic-secret',true)"
+            ), {"estate": estate_id})
+        assert _drift(fresh_db) == []
     finally:
         eng.dispose()
 

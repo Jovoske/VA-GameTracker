@@ -327,6 +327,12 @@ MESSAGES: dict[str, str | dict[str, str]] = {
     # ---- camera logins (kept in English, said in the reader's language) ------
     "login.unreadable": "Det lagrede passordet kan ikke leses. Skriv det inn på nytt.",
     "login.spypoint_refused": "SPYPOINT godtok ikke passordet. Skriv det inn på nytt.",
+    "login.provider_refused": "{provider} godtok ikke passordet. Skriv det inn på nytt.",
+    "login.provider_throttled": "{provider} er opptatt. Neste henting prøver igjen.",
+    "login.provider_down": "{provider} svarer ikke. Neste henting prøver igjen.",
+    "login.provider_refused_request": (
+        "{provider} avviste forespørselen. Neste henting prøver igjen."
+    ),
     "login.ubox_refused": "UBox godtok ikke passordet. Skriv det inn på nytt.",
     "login.ubox_signed_out": "UBox logget ut denne innloggingen. Skriv inn passordet på nytt.",
     "login.spypoint_throttled": (
@@ -497,6 +503,7 @@ MESSAGES: dict[str, str | dict[str, str]] = {
         "Fikk ikke kontakt med {provider} for å sjekke passordet. Prøv igjen om noen minutter."
     ),
     "accounts.ubox_failed": "Kunne ikke koble til UBox Pro: {error}",
+    "accounts.provider_failed": "Kunne ikke koble til {provider}: {error}",
     "accounts.spypoint_refused": (
         "SPYPOINT godtok ikke e-posten og passordet. Sjekk dem i SPYPOINT-appen."
     ),
