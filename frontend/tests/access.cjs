@@ -89,7 +89,12 @@ const assert=require('node:assert/strict');
   const settings=await page.textContent('main')||await page.textContent('body');
   const s={version:/App version/.test(settings),checking:/Photo checking/.test(settings),people:/Who can sign in/.test(settings),
    hide:await page.locator('button[aria-label^="Hide "]').count(),switches:await page.locator('#advice [role=switch], [data-section=advice] [role=switch]').count(),
-   readonly:await page.locator('[data-readonly=advice]').count(),addLogin:await page.locator('#camera-email').count()};
+   readonly:await page.locator('[data-readonly=advice]').count(),addLogin:await page.locator('#camera-provider').count()};
+  assert.equal(await page.locator('#camera-email').count(),0,'credentials wait for a camera brand');
+  if(s.addLogin){
+   await page.locator('#camera-provider').selectOption('spypoint');
+   assert.equal(await page.locator('#camera-email').count(),1,'choosing SPYPOINT shows its login fields');
+  }
   await visit(page,...pages.cameras);
   const c={check:await page.locator('.cam-sync-btn').count(),viewerNote:(await page.locator('[data-viewer-sync]').allTextContents()).join(''),retire:await page.getByText('Retire camera').count()};
   await visit(page,...pages.animals);await page.click('summary:has-text("Named animals")');await page.waitForTimeout(500);
