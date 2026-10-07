@@ -20,7 +20,9 @@ depends_on = None
 
 def _ensure_unique(table: str, columns: list[str], name: str) -> None:
     constraints = sa.inspect(op.get_bind()).get_unique_constraints(table)
-    if not any(c["column_names"] == columns for c in constraints):
+    # 0001 creates today's schema: a later migration may have extended this named
+    # constraint (0036 adds the inbox connection key). Do not recreate its old shape.
+    if not any(c["column_names"] == columns or c["name"] == name for c in constraints):
         op.create_unique_constraint(op.f(name), table, columns)
 
 
