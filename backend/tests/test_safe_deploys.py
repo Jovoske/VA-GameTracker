@@ -422,7 +422,7 @@ def test_a_nearly_full_disk_stops_the_download_and_says_why(db_session, monkeypa
 
 
 @requires_db
-@pytest.mark.parametrize("provider", ["spypoint", "ubox", "nordic"])
+@pytest.mark.parametrize("provider", ["spypoint", "ubox", "nordic", "suntek_email", "suntek_ftp"])
 def test_a_new_login_and_the_history_pull_wait_for_room_too(
     db_session, estate, monkeypatch, provider,
 ):
@@ -436,7 +436,8 @@ def test_a_new_login_and_the_history_pull_wait_for_room_too(
     pulled, checked = [], []
     for module, name in ((sync, "backfill_all"), (sync, "backfill_account"),
                          (ubox_sync, "backfill_ubox_account"),
-                         (nordic_sync, "backfill_nordic_account")):
+                         (nordic_sync, "backfill_nordic_account"),
+                         (inbox_sync, "sync_inbox_all")):
         monkeypatch.setattr(module, name, lambda *a, _n=name, **kw: pulled.append(_n) or {})
     monkeypatch.setattr(fetch, "check_and_recount",
                         lambda db: checked.append(True) or ({"ai": {}}, None))
@@ -460,7 +461,11 @@ def test_a_new_login_and_the_history_pull_wait_for_room_too(
     monkeypatch.setattr(ops, "disk_free", lambda path=None: 50 * 1024**3)
     pipeline._run("backfill", ["13"], db_session)
     pipeline._run("login", [str(login.id)], db_session)
-    first = "backfill_ubox_account" if provider == "ubox" else "backfill_account"
+    first = {
+        "spypoint": "backfill_account", "ubox": "backfill_ubox_account",
+        "nordic": "backfill_nordic_account",
+        "suntek_email": "sync_inbox_all", "suntek_ftp": "sync_inbox_all",
+    }[provider]
     assert pulled == ["backfill_all", first]
 
 
