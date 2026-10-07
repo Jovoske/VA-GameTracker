@@ -410,9 +410,9 @@ export default function Tonight() {
       {/* How old the plan on screen really is. A saved copy says why it is on
           screen ("No signal."), and one from an earlier night says so. */}
       <p className="tn-fresh" data-stale={old || plan!.stale} role={plan!.stale ? 'status' : undefined}>
-        {plan!.stale && <>{noAnswerWords(plan!.why)} </>}
-        {old ? t('tonight.planFromOld', { ago: ageLabel(plan!.at), night: oldWords }) : t('tonight.planFrom', { ago: ageLabel(plan!.at) })}
-        {checking && !plan!.stale && minutesSince(plan!.at) >= 2 && ` ${t('tonight.checkingNewer')}`}
+        {plan!.stale && <span>{noAnswerWords(plan!.why)} </span>}
+        <span>{old ? t('tonight.planFromOld', { ago: ageLabel(plan!.at), night: oldWords }) : t('tonight.planFrom', { ago: ageLabel(plan!.at) })}</span>
+        {checking && !plan!.stale && minutesSince(plan!.at) >= 2 && <span> {t('tonight.checkingNewer')}</span>}
         {plan!.stale && !checking && <button className="tn-fresh-retry" onClick={() => load()}>{t('common.tryAgain')}</button>}
       </p>
       <PhotoFreshness freshness={f.freshness} />
@@ -523,8 +523,10 @@ export default function Tonight() {
         )}
 
         <div className="tn-foot">
-          {f.nights_of_data > 0 ? t('tonight.fromNights', { count: f.nights_of_data }) : t('tonight.noNights')}
-          {f.exposure?.note && <> {f.exposure.note}</>}
+          {/* Translators can replace text nodes. Remove an owned element on refresh,
+              so React never tries to remove a text node the browser has moved. */}
+          <span>{f.nights_of_data > 0 ? t('tonight.fromNights', { count: f.nights_of_data }) : t('tonight.noNights')}</span>
+          {f.exposure?.note && <span> {f.exposure.note}</span>}
         </div>
       </section>
 
