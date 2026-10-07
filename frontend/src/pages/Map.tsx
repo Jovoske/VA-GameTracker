@@ -246,15 +246,16 @@ export default function MapPage() {
     const start = data && roomy ? estateBounds(data, cameras) : null
     const opening = start ? { bounds: start, fitBoundsOptions: { padding: 72, maxZoom: 16 } } : { center: ESTATE_CENTER, zoom: 14 }
     try {
-      instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), ...opening, maxZoom: 20, maxPitch: 0, attributionControl: false, locale: mapWords() })
+      instance = new maplibregl.Map({ container: mapEl.current, style: mapStyle(prefs), ...opening, maxZoom: 20, maxPitch: 0, bearingSnap: 12, attributionControl: false, locale: mapWords() })
     } catch { setFatal(t('mapPage.fatal')); return }
     map.current = instance
     // Browser checks read the live map in development builds only.
     if (import.meta.env.DEV) (window as unknown as { __gsMap?: maplibregl.Map }).__gsMap = instance
     instance.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right')
     instance.on('rotate', () => setBearing(instance.getBearing()))
-    // A pinch that twists a few degrees shouldn't leave the estate skewed (B-23).
-    instance.on('rotateend', () => { const b = instance.getBearing(); if (b !== 0 && Math.abs(b) < 12) instance.easeTo({ bearing: 0, duration: 200 }); declutterSoon() })
+    // bearingSnap lets MapLibre coordinate north snapping with gesture inertia.
+    // Starting another easeTo here can leave two animation callbacks queued.
+    instance.on('rotateend', declutterSoon)
     instance.on('zoomend', () => { setZoom(Math.round(instance.getZoom() * 10) / 10); declutterSoon() })
     instance.on('style.load', () => { addLayers(instance); setReady(true); setMapObj(instance) })
 
