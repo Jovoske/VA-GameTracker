@@ -284,7 +284,7 @@ def test_ubox_upgrades_the_actual_prior_schema_without_losing_data(fresh_db, leg
                 "VALUES (gen_random_uuid(),:estate,'ubox','camera@example.com','duplicate',true)"
             ), {"estate": estate_id})
         uniques = inspect(eng).get_unique_constraints("camera_accounts")
-        assert [u["column_names"] for u in uniques] == [["provider", "username"]]
+        assert [u["column_names"] for u in uniques] == [["provider", "username", "connection_key"]]
     finally:
         eng.dispose()
 
