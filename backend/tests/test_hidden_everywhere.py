@@ -405,13 +405,15 @@ def test_hidden_and_marked_photos_make_no_likely_path(db_session, estate_with_fo
 
 
 @requires_db
-def test_hidden_and_marked_photos_move_no_stand_hint(db_session, estate_with_fox):
+def test_hidden_and_marked_photos_move_no_stand_hint(db_session, estate_with_fox, monkeypatch):
     """The approach line a stand is offered and its dark exit hour are read from the
     sightings. Hidden foxes walking Loma to Charca made an approach line out of
     nothing, and foxes and a bush at 23:00-01:00 made the quiet hours look busy."""
-    from app.forecasting.inference import dark_exit, suggest_approach_arcs
+    from app.forecasting import exposure
+    from app.forecasting.inference import SIT_ENDS_AFTER_SUNSET, dark_exit, suggest_approach_arcs
     from app.models import Stand
 
+    monkeypatch.setattr(exposure, "current_night", lambda: TONIGHT)
     charca = Camera(estate_id=estate_with_fox.id, name="Charca", lat=39.090, lon=-1.360)
     loma = Camera(estate_id=estate_with_fox.id, name="Loma", lat=39.095, lon=-1.360)
     db_session.add_all([charca, loma])
@@ -420,9 +422,10 @@ def test_hidden_and_marked_photos_move_no_stand_hint(db_session, estate_with_fox
     db_session.add(stand)
     for n in range(1, 8):
         night = ago(n)
-        # Real boar at Charca in the evening only.
-        _sighting(db_session, charca, "wild_boar", at(night, 20))
-        _sighting(db_session, charca, "wild_boar", at(night, 21))
+        # Real boar arrive before the sit ends in every season.
+        sunset = model._sunset(night)
+        _sighting(db_session, charca, "wild_boar", sunset + timedelta(minutes=30))
+        _sighting(db_session, charca, "wild_boar", sunset + timedelta(minutes=90))
         # Hidden foxes: Loma then Charca 20 minutes later, and on late into the night.
         _sighting(db_session, loma, "fox", at(night, 22))
         _sighting(db_session, charca, "fox", at(night, 22, 20))
@@ -437,10 +440,7 @@ def test_hidden_and_marked_photos_move_no_stand_hint(db_session, estate_with_fox
     exit_ = dark_exit(db_session, stand)
     # The first hour after a normal sit (3 h after tonight's sunset) is empty of boar;
     # the foxes that walked it are hidden.
-    from app.forecasting.inference import SIT_ENDS_AFTER_SUNSET
-    from app.forecasting.model import _sunset
-
-    first = _sunset(current_night()) + SIT_ENDS_AFTER_SUNSET
+    first = model._sunset(TONIGHT) + SIT_ENDS_AFTER_SUNSET
     quarter = datetime.fromtimestamp(round(first.timestamp() / 900) * 900, tz=UTC)
     assert exit_["share_pct"] == 0.0
     assert exit_["time"] == quarter.astimezone(ZoneInfo("Europe/Madrid")).strftime("%H:%M")

@@ -60,6 +60,12 @@ def find_user(db: Session, email: str) -> User | None:
     )
 
 
+def pending_password_hash(db: Session, email: str) -> str | None:
+    return db.scalar(select(AccessRequest.password_hash).where(
+        AccessRequest.email == email, AccessRequest.status == "pending"
+    ))
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
     email = body.email.strip().lower()
@@ -68,11 +74,7 @@ def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
     # like the same ones one after another (app.api.throttle).
     with throttle.attempt(client_ip(request), email, known=known) as attempt:
         user = find_user(db, email)
-        password_hash = user.password_hash if user else db.scalar(
-            select(AccessRequest.password_hash).where(
-                AccessRequest.email == email, AccessRequest.status == "pending"
-            )
-        )
+        password_hash = user.password_hash if user else pending_password_hash(db, email)
         if not check_password(body.password, password_hash):
             attempt.failed()
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.wrong_password"))

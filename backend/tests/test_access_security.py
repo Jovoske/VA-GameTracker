@@ -687,6 +687,7 @@ def _fake_login(monkeypatch, users: dict[str, str], delay: float = 0.0):
         return hashed == f"hash:{password}"
 
     monkeypatch.setattr(routes_auth, "find_user", find_user)
+    monkeypatch.setattr(routes_auth, "pending_password_hash", lambda db, email: None)
     monkeypatch.setattr(routes_auth, "verify_password", verify)
     monkeypatch.setattr(routes_auth, "_no_such_hash", lambda: "hash:nobody")
     return seen

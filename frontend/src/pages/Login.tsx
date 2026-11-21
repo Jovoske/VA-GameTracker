@@ -117,7 +117,7 @@ export default function Login() {
 
         {error && <div role="alert" style={{ color: 'var(--skip)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
-        <button className="btn btn--main" disabled={busy}>
+        <button className="btn btn--main" type="submit" disabled={busy}>
           {requesting ? t('signup.submit') : busy ? t('login.signingIn') : t('nav.signIn')}
         </button>
         <button className="btn" type="button" onClick={switchMode} disabled={busy} style={{ marginTop: 8 }}>

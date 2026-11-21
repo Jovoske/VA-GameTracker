@@ -260,7 +260,7 @@ const call=async(tok,p,o={})=>{const r=await fetch(API+'/api'+p,{...o,headers:{'
   await mpage.goto(base+'/map');await mpage.locator('.map-pin').first().waitFor({timeout:20000});
   await sheet(mpage);
   assert.equal(await mpage.locator('.msheet-box').count(),0,'a member downloads, and doesn’t set the box');
-  assert.ok(await mpage.getByRole('button',{name:'Download the estate for offline'}).isEnabled());
+  await mpage.getByRole('button',{name:'Download the estate for offline',disabled:false}).waitFor();
   await mctx.close();
  }
  await call(admin,'/estate/box',{method:'DELETE'});
