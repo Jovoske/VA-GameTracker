@@ -4,7 +4,7 @@ import importlib.util
 import io
 import sys
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -21,8 +21,12 @@ from app.ingestion.ftp_import import read_package  # noqa: E402
 
 @pytest.mark.parametrize("transfer_type", ["I", "A"])
 def test_camera_upload_preserves_pixels_exif_and_filename(tmp_path, transfer_type):
+    # The importer accepts recent capture times and discards stale camera clocks.
+    captured_at = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
+    camera_time = captured_at.astimezone(timezone(timedelta(hours=2)))
+    filename = camera_time.strftime("PICT_%Y%m%d_%H%M.jpg")
     exif = Image.Exif()
-    exif[36867] = "2026:09:13 10:15:00"
+    exif[36867] = camera_time.strftime("%Y:%m:%d %H:%M:%S")
     exif[36881] = "+02:00"
     # JPEG comment explicitly exercises CRLF preservation under TYPE A.
     buffer = io.BytesIO()
@@ -43,7 +47,7 @@ def test_camera_upload_preserves_pixels_exif_and_filename(tmp_path, transfer_typ
             ftp.login("camera-test", "test-only-long-password")
             ftp.cwd("/")
             ftp.voidcmd(f"TYPE {transfer_type}")
-            with ftp.transfercmd("STOR PICT_20260913_1015.jpg") as channel:
+            with ftp.transfercmd(f"STOR {filename}") as channel:
                 channel.sendall(payload)
             assert ftp.voidresp().startswith("226")
         packages = list((tmp_path / "ready").iterdir())
@@ -51,8 +55,8 @@ def test_camera_upload_preserves_pixels_exif_and_filename(tmp_path, transfer_typ
         photo = read_package(packages[0], "Europe/Madrid")
         assert photo.data == payload
         assert (photo.width, photo.height) == (16, 16)
-        assert photo.original_filename == "PICT_20260913_1015.jpg"
-        assert photo.captured_at == datetime(2026, 9, 13, 8, 15, tzinfo=UTC)
+        assert photo.original_filename == filename
+        assert photo.captured_at == captured_at
         assert photo.timestamp_source == "exif_with_offset"
     finally:
         server.close_all()
