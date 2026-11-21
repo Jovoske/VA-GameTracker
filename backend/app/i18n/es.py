@@ -6,6 +6,8 @@ torreta, aguardo.
 """
 
 MESSAGES: dict[str, str | dict[str, str]] = {
+    "auth.signup_pending": "Tu solicitud de acceso está pendiente de aprobación.",
+    "users.request_closed": "Esta solicitud de acceso ya no está pendiente.",
     # ---- lists and the calendar ----------------------------------------------
     "list.two": "{a} y {b}",
     "list.three": "{a}, {b} y {c}",

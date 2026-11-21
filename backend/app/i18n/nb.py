@@ -6,6 +6,8 @@ post, tårn.
 """
 
 MESSAGES: dict[str, str | dict[str, str]] = {
+    "auth.signup_pending": "Tilgangsforespørselen din venter på godkjenning.",
+    "users.request_closed": "Denne tilgangsforespørselen er allerede behandlet.",
     # ---- lists and the calendar ----------------------------------------------
     "list.two": "{a} og {b}",
     "list.three": "{a}, {b} og {c}",

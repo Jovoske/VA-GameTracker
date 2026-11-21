@@ -5,6 +5,20 @@ import type { Dict } from './core'
  * Every English key, the same {placeholders} (tests/i18n-keys.cjs checks).
  */
 const fi: Dict = {
+  'signup.request': "Pyydä käyttöoikeutta",
+  'signup.hint': "Valitse 8–128 merkin salasana. Ylläpitäjä käsittelee uudet käyttöoikeuspyynnöt.",
+  'signup.submit': "Lähetä pyyntö",
+  'signup.back': "Takaisin kirjautumiseen",
+  'signup.sent': "Jos pyyntö on uusi, ylläpitäjä voi käsitellä sen asetuksissa. Kirjaudu sisään, kun pyyntö on hyväksytty.",
+  'signup.queue': "Käyttöoikeuspyynnöt",
+  'signup.verifyPerson': "Hakija ilmoittaa sähköpostiosoitteensa itse. Varmista pyytäjän henkilöllisyys ennen käyttöoikeuden myöntämistä.",
+  'signup.empty': "Ei avoimia pyyntöjä.",
+  'signup.approve': "Hyväksy",
+  'signup.decline': "Hylkää",
+  'signup.refresh': "Päivitä pyynnöt",
+  'signup.confirmDecline': "Hylätäänkö osoitteesta {email} tullut pyyntö?",
+  'signup.approved': "Osoitteen {email} pyyntö hyväksyttiin.",
+  'signup.declined': "Osoitteen {email} pyyntö hylättiin.",
   "cameraSetup.nordicLabel": "Nordic Gamekeeper",
   "cameraSetup.ftpOption": "Suntek · FTP / FTPS",
   "cameraSetup.ftpsLabel": "FTPS (TLS)",

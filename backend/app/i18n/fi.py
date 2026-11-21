@@ -6,6 +6,8 @@ ruokintapaikka, passi, torni.
 """
 
 MESSAGES: dict[str, str | dict[str, str]] = {
+    "auth.signup_pending": "Käyttöoikeuspyyntösi odottaa ylläpitäjän hyväksyntää.",
+    "users.request_closed": "Tämä käyttöoikeuspyyntö on jo käsitelty.",
     # ---- lists and the calendar ----------------------------------------------
     "list.two": "{a} ja {b}",
     "list.three": "{a}, {b} ja {c}",

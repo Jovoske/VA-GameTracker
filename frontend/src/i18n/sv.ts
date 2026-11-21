@@ -5,6 +5,20 @@ import type { Dict } from './core'
  * Every English key, the same {placeholders} (tests/i18n-keys.cjs checks).
  */
 const sv: Dict = {
+  'signup.request': "Begär åtkomst",
+  'signup.hint': "Välj ett lösenord med 8–128 tecken. En administratör granskar nya förfrågningar.",
+  'signup.submit': "Skicka förfrågan",
+  'signup.back': "Tillbaka till inloggningen",
+  'signup.sent': "Om förfrågan är ny kan en administratör granska den i Inställningar. Logga in när den har godkänts.",
+  'signup.queue': "Åtkomstförfrågningar",
+  'signup.verifyPerson': "Sökande anger själva sin e-postadress. Bekräfta vem som skickade förfrågan innan du ger personen medlemsåtkomst.",
+  'signup.empty': "Inga väntande förfrågningar.",
+  'signup.approve': "Godkänn",
+  'signup.decline': "Avslå",
+  'signup.refresh': "Uppdatera förfrågningar",
+  'signup.confirmDecline': "Avslå förfrågan från {email}?",
+  'signup.approved': "Förfrågan från {email} godkändes.",
+  'signup.declined': "Förfrågan från {email} avslogs.",
   "cameraSetup.nordicLabel": "Nordic Gamekeeper",
   "cameraSetup.ftpOption": "Suntek · FTP / FTPS",
   "cameraSetup.ftpsLabel": "FTPS (TLS)",

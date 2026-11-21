@@ -3,12 +3,14 @@ from functools import lru_cache
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.api.deps import IMAGE_TOKEN_HEADER, get_current_user
-from app.api.throttle import HASH_WAIT_S, HASHING, client_ip, from_outside, throttle
+from app.api.throttle import HASH_WAIT_S, HASHING, LoginThrottle, client_ip, from_outside, throttle
+from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import (
     hash_password,
@@ -21,10 +23,11 @@ from app.core.security import (
 )
 from app.core.startup import PUBLISHED_PASSWORDS, development
 from app.i18n import LANGUAGES, set_current, t
-from app.models import PushSubscription, User
+from app.models import AccessRequest, PushSubscription, User
 from app.schemas import LoginRequest, TokenResponse, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+signup_throttle = LoginThrottle()
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 DB = Annotated[Session, Depends(get_db)]
@@ -65,9 +68,17 @@ def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
     # like the same ones one after another (app.api.throttle).
     with throttle.attempt(client_ip(request), email, known=known) as attempt:
         user = find_user(db, email)
-        if not check_password(body.password, user.password_hash if user else None):
+        password_hash = user.password_hash if user else db.scalar(
+            select(AccessRequest.password_hash).where(
+                AccessRequest.email == email, AccessRequest.status == "pending"
+            )
+        )
+        if not check_password(body.password, password_hash):
             attempt.failed()
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, t("auth.wrong_password"))
+        if user is None:
+            attempt.succeeded()
+            raise HTTPException(status.HTTP_403_FORBIDDEN, t("auth.signup_pending"))
         # An admin on the password published with this repository is the first thing
         # anyone would try on the public address: from the internet it doesn't sign
         # in; on the server's own network it does, so the owner can change it there
@@ -79,6 +90,33 @@ def login(body: LoginRequest, request: Request, db: DB) -> TokenResponse:
         attempt.succeeded()
     return TokenResponse(access_token=session_token(user), image_token=image_token(user),
                          known_phone=phone_token(user))
+
+
+class AccessRequestBody(BaseModel):
+    email: str = Field(max_length=254, pattern=r"^\s*[^\s@]+@[^\s@.]+(?:\.[^\s@.]+)+\s*$")
+    password: SecretStr = Field(min_length=8, max_length=128)
+
+
+@router.post("/access-request", status_code=status.HTTP_204_NO_CONTENT)
+def request_access(body: AccessRequestBody, request: Request, db: DB) -> None:
+    email = body.email.strip().lower()
+    with signup_throttle.attempt(client_ip(request), email) as attempt:
+        if email == settings.admin_email.strip().lower() or find_user(db, email) is not None:
+            return
+        if db.scalar(select(AccessRequest.id).where(AccessRequest.email == email)) is not None:
+            return
+        if not HASHING.acquire(timeout=HASH_WAIT_S):
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, t("auth.busy"))
+        try:
+            password_hash = hash_password(body.password.get_secret_value())
+        finally:
+            HASHING.release()
+        db.execute(insert(AccessRequest).values(
+            email=email, password_hash=password_hash
+        ).on_conflict_do_nothing(index_elements=[AccessRequest.email]))
+        db.commit()
+        # Count new submissions against the signup quota without affecting sign-in.
+        attempt.failed()
 
 
 @router.get("/me", response_model=UserOut)

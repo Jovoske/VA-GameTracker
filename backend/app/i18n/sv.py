@@ -6,6 +6,8 @@ torn.
 """
 
 MESSAGES: dict[str, str | dict[str, str]] = {
+    "auth.signup_pending": "Din åtkomstförfrågan väntar på godkännande.",
+    "users.request_closed": "Den här åtkomstförfrågan har redan behandlats.",
     # ---- lists and the calendar ----------------------------------------------
     "list.two": "{a} och {b}",
     "list.three": "{a}, {b} och {c}",

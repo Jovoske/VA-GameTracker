@@ -62,6 +62,25 @@ class User(Base):
     )
 
 
+class AccessRequest(Base):
+    __tablename__ = "access_requests"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), **_PK)
+    email: Mapped[str] = mapped_column(String(254), nullable=False, unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'denied')", name="status_valid"),
+        CheckConstraint(
+            "(status = 'pending') = (password_hash IS NOT NULL)", name="pending_password"
+        ),
+    )
+
+
 class CameraAccount(Base):
     """A provider login whose cameras feed this estate (guests' own accounts).
 

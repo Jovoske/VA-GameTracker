@@ -6,6 +6,20 @@ import type { Entry } from './core'
  * with forms ({ one, other }) changes with {count}.
  */
 const en = {
+  'signup.request': "Request access",
+  'signup.hint': "Choose a password of 8 to 128 characters. An administrator reviews new access requests.",
+  'signup.submit': "Submit request",
+  'signup.back': "Back to sign in",
+  'signup.sent': "If this is a new request, it will appear in Settings for an administrator to review. Try signing in once they approve it.",
+  'signup.queue': "Access requests",
+  'signup.verifyPerson': "Applicants enter their own email address. Confirm who sent each request before granting member access.",
+  'signup.empty': "No pending requests.",
+  'signup.approve': "Approve",
+  'signup.decline': "Decline",
+  'signup.refresh': "Refresh requests",
+  'signup.confirmDecline': "Decline the request from {email}?",
+  'signup.approved': "Approved {email}.",
+  'signup.declined': "Declined {email}.",
   "cameraSetup.nordicLabel": "Nordic Gamekeeper",
   "cameraSetup.ftpOption": "Suntek · FTP / FTPS",
   "cameraSetup.ftpsLabel": "FTPS (TLS)",

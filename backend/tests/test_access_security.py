@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api import throttle as throttle_mod
 from app.api.deps import IMAGE_TOKEN_HEADER, SESSION_TOKEN_HEADER
+from app.api.routes_auth import signup_throttle
 from app.api.routes_stands import tonight
 from app.core.config import settings
 from app.core.security import (
@@ -36,6 +37,7 @@ from app.core.security import (
     pass_expiry,
 )
 from app.models import (
+    AccessRequest,
     Camera,
     CameraAccount,
     Estate,
@@ -57,8 +59,10 @@ PASSWORD = "a-good-long-password"
 @pytest.fixture(autouse=True)
 def _fresh_throttle():
     throttle_mod.throttle.reset()
+    signup_throttle.reset()
     yield
     throttle_mod.throttle.reset()
+    signup_throttle.reset()
 
 
 @pytest.fixture
@@ -99,6 +103,59 @@ def _user(db, estate, role="member", email=None, password=None):
 
 def _auth(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_password_signup_requires_admin_approval(client, db_session, estate):
+    _, admin = _user(db_session, estate, role="admin")
+    _, member = _user(db_session, estate)
+    email = "New.Member@example.com"
+    credentials = {"email": email, "password": PASSWORD}
+    signup = "/api/auth/access-request"
+    sign_in = "/api/auth/login"
+    queue = "/api/users/access-requests"
+
+    assert client.post(signup, json=credentials).status_code == 204
+    retry = client.post(signup, json={**credentials, "password": "different-pass"})
+    assert retry.status_code == 204
+    assert client.post(sign_in, json=credentials).status_code == 403
+    assert db_session.scalar(select(User.id).where(User.email == email.lower())) is None
+
+    assert client.get(queue, headers=member).status_code == 403
+    request, = client.get(queue, headers=admin).json()
+    assert request["email"] == email.lower()
+    assert set(request) == {"id", "email", "created_at"}
+    review = f"{queue}/{request['id']}/decision"
+    approve = {"decision": "approve"}
+    assert client.post(review, headers=member, json=approve).status_code == 403
+    assert client.post(review, headers=admin, json=approve).json() == {"status": "approved"}
+    assert client.post(review, headers=admin, json=approve).status_code == 409
+    assert client.get(queue, headers=admin).json() == []
+
+    login = client.post(sign_in, json=credentials)
+    assert login.status_code == 200
+    me = client.get("/api/auth/me", headers=_auth(login.json()["access_token"])).json()
+    assert (me["role"], me["email"]) == ("member", email.lower())
+    pending_hash = db_session.scalar(select(AccessRequest.password_hash).where(
+        AccessRequest.email == email.lower()
+    ))
+    assert pending_hash is None
+
+
+def test_declined_signup_clears_hash_and_keeps_account_closed(client, db_session, estate):
+    _, admin = _user(db_session, estate, role="admin")
+    credentials = {"email": "declined@example.com", "password": PASSWORD}
+    assert client.post("/api/auth/access-request", json=credentials).status_code == 204
+    queue = "/api/users/access-requests"
+    request, = client.get(queue, headers=admin).json()
+    decision = client.post(f"{queue}/{request['id']}/decision", headers=admin, json={
+        "decision": "decline",
+    })
+    assert decision.json() == {"status": "denied"}
+    assert client.post("/api/auth/login", json=credentials).status_code == 401
+    record = db_session.scalar(
+        select(AccessRequest).where(AccessRequest.email == credentials["email"])
+    )
+    assert record is not None and record.password_hash is None
 
 
 def _photo(db, estate, tmp_path):

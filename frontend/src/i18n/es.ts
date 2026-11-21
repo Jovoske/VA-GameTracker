@@ -5,6 +5,20 @@ import type { Dict } from './core'
  * Every English key, the same {placeholders} (tests/i18n-keys.cjs checks).
  */
 const es: Dict = {
+  'signup.request': "Solicitar acceso",
+  'signup.hint': "Elige una contraseña de 8 a 128 caracteres. Un administrador revisa las solicitudes de acceso.",
+  'signup.submit': "Enviar solicitud",
+  'signup.back': "Volver al inicio de sesión",
+  'signup.sent': "Si es una solicitud nueva, un administrador podrá revisarla en Ajustes. Inicia sesión cuando la apruebe.",
+  'signup.queue': "Solicitudes de acceso",
+  'signup.verifyPerson': "Cada solicitante indica su dirección de correo. Confirma quién envió la solicitud antes de conceder acceso como miembro.",
+  'signup.empty': "No hay solicitudes pendientes.",
+  'signup.approve': "Aprobar",
+  'signup.decline': "Rechazar",
+  'signup.refresh': "Actualizar solicitudes",
+  'signup.confirmDecline': "¿Rechazar la solicitud de {email}?",
+  'signup.approved': "Solicitud de {email} aprobada.",
+  'signup.declined': "Solicitud de {email} rechazada.",
   "cameraSetup.nordicLabel": "Nordic Gamekeeper",
   "cameraSetup.ftpOption": "Suntek · FTP / FTPS",
   "cameraSetup.ftpsLabel": "FTPS (TLS)",

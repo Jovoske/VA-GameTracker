@@ -1,10 +1,10 @@
-"""User management — admin creates/removes guest logins (no open self-registration:
-the app is internet-reachable, so accounts are handed out, never self-served)."""
+"""Admins manage accounts and review access requests."""
 import uuid
 from datetime import UTC, datetime
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,10 +15,61 @@ from app.core.db import get_db
 from app.core.logging import get_logger
 from app.core.security import hash_password
 from app.i18n import LANGUAGES, t
-from app.models import CameraAccount, Harvest, Sit, User, Zone
+from app.models import AccessRequest, CameraAccount, Harvest, Sit, User, Zone
 
 router = APIRouter(prefix="/users", tags=["users"])
 log = get_logger(__name__)
+Admin = Annotated[User, Depends(get_current_admin)]
+DB = Annotated[Session, Depends(get_db)]
+
+
+class AccessRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    email: str
+    created_at: datetime
+
+
+@router.get("/access-requests", response_model=list[AccessRequestOut])
+def list_access_requests(admin: Admin, db: DB) -> list[AccessRequest]:
+    return list(db.scalars(select(AccessRequest).where(
+        AccessRequest.status == "pending"
+    ).order_by(AccessRequest.created_at, AccessRequest.id)))
+
+
+class AccessDecisionBody(BaseModel):
+    decision: Literal["approve", "decline"]
+
+
+@router.post("/access-requests/{request_id}/decision")
+def review_access_request(
+    request_id: uuid.UUID, body: AccessDecisionBody, admin: Admin, db: DB,
+) -> dict[str, str]:
+    request = db.scalar(
+        select(AccessRequest).where(AccessRequest.id == request_id).with_for_update()
+    )
+    if request is None or request.status != "pending" or request.password_hash is None:
+        raise HTTPException(409, t("users.request_closed"))
+
+    if body.decision == "approve":
+        if db.scalar(select(User.id).where(func.lower(User.email) == request.email).limit(1)):
+            raise HTTPException(409, t("users.email_taken"))
+        db.add(User(
+            email=request.email, estate_id=admin.estate_id,
+            password_hash=request.password_hash, role="member",
+        ))
+        request.status = "approved"
+    else:
+        request.status = "denied"
+    request.password_hash = None
+    request.reviewed_at = datetime.now(UTC)
+    request.reviewed_by_id = admin.id
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, t("users.email_taken")) from None
+    return {"status": request.status}
 
 
 @router.get("")

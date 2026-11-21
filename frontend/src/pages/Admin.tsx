@@ -6,6 +6,7 @@ import { useOnServerLanguage } from '../hooks'
 import LanguagePicker from '../components/LanguagePicker'
 import { type Key, LANGS, fmtDate, fmtList, lasted, t, tOr, tn, useLang } from '../i18n'
 import HarvestBook from '../components/HarvestBook'
+import AccessRequests from '../components/AccessRequests'
 import NotificationSettings from '../components/NotificationSettings'
 import { resetChoices } from '../components/PhotoFix'
 import PhoneProblems from '../components/PhoneProblems'
@@ -908,6 +909,10 @@ export default function Admin() {
       </SettingsSection>
 
       {me && !viewer && <HarvestBook admin={admin} />}
+
+      {admin && <AccessRequests onApproved={() => {
+        api<UserRow[]>('/users').then(setUsers).catch(() => {})
+      }} />}
 
       {admin && (
         <SettingsSection id="people" title={t('admin.people')}

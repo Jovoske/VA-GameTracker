@@ -5,6 +5,8 @@ A value is a str.format template, or {"one", "other"} chosen by the parameter `n
 """
 
 MESSAGES: dict[str, str | dict[str, str]] = {
+    "auth.signup_pending": "Your access request is awaiting administrator approval.",
+    "users.request_closed": "This access request is no longer pending.",
     # ---- lists and the calendar ------------------------------------------------------
     "list.two": "{a} and {b}",
     "list.three": "{a}, {b} and {c}",
